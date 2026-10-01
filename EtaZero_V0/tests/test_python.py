@@ -2,24 +2,26 @@ from collections import Counter
 import copy
 import json
 import math
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import numpy as np
 import pytest
 import torch
 from etazero.config import ROOT, load_config, validate
 from etazero.data import read_raw, training_view, validate_raw, Catalog
-from etazero.export import example_observation
-from etazero.network import MaskedBatchNorm, make_network, losses
+from etazero.export import example_inputs
+from etazero.network import MaskedBatchNorm, make_network, losses, inference_network
 from etazero.reader import BatchReader
-from etazero.schema import CONTRACT_ID, RAW_DTYPES
-from etazero.shuffle import build_snapshot, desired_window
-from etazero.storage import save_npz, sha256
+from etazero.schema import CONTRACT_ID, RAW_DTYPES, pack_observations, unpack_observations
+from etazero.shuffle import build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
+from etazero.storage import save_npz, save_json, sha256
 
 
 @pytest.fixture
 def config():
-    return load_config(ROOT/"configs"/"minimal_test")
+    return load_config(ROOT/"configs"/"smoke_test")
 
 
 def winning_record(rule=0):
@@ -27,8 +29,17 @@ def winning_record(rule=0):
     actions=[0,6,1,7,2,8,3,9,4]
     t=len(actions)
     a={k:np.zeros(0,dtype=dtype) for k,dtype in RAW_DTYPES.items()}
-    a["observations"]=np.stack([example_observation(canvas,size,("freestyle","standard","renju")[rule],actions[:i])
-                                 for i in range(t+1)]).astype(np.uint8)
+    observations=[]; globals=[]
+    board=np.zeros((canvas,canvas),np.int8)
+    for i in range(t+1):
+        player=1 if i%2==0 else -1
+        obs=np.zeros((5,canvas,canvas),np.uint8);obs[0,:size,:size]=1
+        obs[1]=board==player;obs[2]=board==-player
+        # This two-row five-in-a-row fixture has no forbidden points.
+        observations.append(obs);globals.append([rule==1,rule==2,-player if rule==2 else 0,rule==2])
+        if i<t: board.flat[actions[i]]=player
+    a["observations"]=pack_observations(np.stack(observations))
+    a["globals"]=np.array(globals,np.float32)
     a["players"]=np.array([1,-1]*5,np.int8)
     a["actions"]=np.array(actions,np.int32)
     a["visits"]=np.zeros((t,canvas*canvas),np.int64);a["visits"][np.arange(t),actions]=1
@@ -38,25 +49,83 @@ def winning_record(rule=0):
     a["game_offsets"]=np.array([0,t],np.int64);a["observation_offsets"]=np.array([0,t+1],np.int64)
     for key,value in (("game_ids",0),("seeds",7),("sizes",size),("rules",rule),("winners",1),("reasons",1)):
         a[key]=np.array([value],dtype=RAW_DTYPES[key])
-    m={"contract":CONTRACT_ID,"canvas":canvas,"rows":t,"games":1,"run_id":"test","attempt_id":str(rule),
-       "worker_id":0,"cycle_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
+    a["train_mask"]=np.ones(t,np.uint8)
+    a['row_repeats']=np.ones(t,np.int32);a['target_weights']=np.ones(t,np.float32)
+    for key in ('policy_surprises','value_surprises'):
+        a[key]=np.zeros(t,np.float32)
+    a['cheap_search']=np.zeros(t,np.uint8)
+    for key in ('network_wdl','search_wdl'):
+        a[key]=np.tile(np.array([0.5,0,0.5],np.float32),(t,1))
+    for key in ("opening_moves","balanced_moves","policy_moves","opening_attempts","opening_status","start_values"):
+        a[key]=np.zeros(1,dtype=RAW_DTYPES[key])
+    m={"contract":CONTRACT_ID,"canvas":canvas,"rows":t,"plies":t,"games":1,"opening_failures":[""],"run_id":"test","attempt_id":str(rule),
+       "worker_id":0,"iteration_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
     a["metadata"]=np.frombuffer(json.dumps(m).encode(),np.uint8)
     return a,m
 
 
 def test_configuration_inheritance_and_fail_fast(tmp_path,config):
-    assert config["network"]["canvas"]==6 and config["optimizer"]["momentum"]==0.9
+    assert config['network']['canvas']==6 and config['optimizer']['kind']=='sgd'
+    assert config['training']['d4_augmentation']
     shutil.copytree(ROOT/"configs",tmp_path/"configs")
-    current=tmp_path/"configs"/"minimal_test"
+    current=tmp_path/"configs"/"smoke_test"
     (current/"train.cfg.local").write_text("[training]\ntrain_steps=7\n")
     assert load_config(current)["training"]["train_steps"]==7
     (current/"net.cfg.local").write_text("[training]\ntrain_steps=7\n")
     with pytest.raises(ValueError,match="ownership"):
         load_config(current)
     (current/"net.cfg.local").unlink()
-    (tmp_path/"configs"/"baseline"/"run.cfg").write_text("[run]\nextends=minimal_test\n")
+    (tmp_path/"configs"/"baseline"/"run.cfg").write_text("[run]\nextends=smoke_test\n")
     with pytest.raises(ValueError,match="cycle"):
         load_config(current)
+
+
+def test_script_config_environment_and_explicit_override(tmp_path):
+    env={**os.environ,"CONFIG_DIR":"configs/smoke_test"}
+    command=["bash",str(ROOT/"scripts"/"run.sh"),"check-config"]
+    result=subprocess.run(command,cwd=tmp_path,env=env,text=True,capture_output=True,check=True)
+    selected=json.loads(result.stdout)["config"]
+    assert selected["network"]["canvas"]==6
+    assert selected["run"]["run_dir"]=="data/smoke_test"
+    result=subprocess.run(command+["--config-dir","configs/baseline"],cwd=tmp_path,
+                          env=env,text=True,capture_output=True,check=True)
+    selected=json.loads(result.stdout)["config"]
+    assert selected["network"]["canvas"]==15
+    assert selected["run"]["run_dir"]=="data/baseline"
+    assert selected["run"]["max_iteration"]==0
+
+
+def test_auto_resume_rejects_unknown_data_and_weights(tmp_path,config):
+    from etazero.runtime import run_training
+    unrelated=tmp_path/"game.npz";unrelated.write_bytes(b"preserve existing data")
+    with pytest.raises(ValueError,match="empty output directory"):
+        run_training(tmp_path,config,tmp_path/"missing_binary")
+    assert unrelated.read_bytes()==b"preserve existing data"
+    with pytest.raises(ValueError,match="existing run.json"):
+        run_training(tmp_path,config,tmp_path/"missing_binary",resume=True)
+    save_json(tmp_path/".internal/run.json",{})
+    with pytest.raises(ValueError,match="Weights initialization and resume"):
+        run_training(tmp_path,config,tmp_path/"missing_binary",weights=tmp_path/"weights.pt")
+    assert unrelated.read_bytes()==b"preserve existing data"
+
+
+def test_source_identity_excludes_sibling_run_data(tmp_path,monkeypatch):
+    from etazero import runtime
+    source=tmp_path/"version";source.mkdir()
+    (source/"code.py").write_text('print("source")\n')
+    for name in ("AGENTS.md","RULES.md"):
+        (tmp_path/name).write_text("rules\n")
+    sibling=source/"data"/"other_run";sibling.mkdir(parents=True)
+    output=source/"data"/"current_run";output.mkdir()
+    artifact=sibling/"checkpoint.pt";artifact.write_bytes(b"old checkpoint")
+    monkeypatch.setattr(runtime,"ROOT",source)
+    identity=runtime.source_snapshot(output)
+    artifact.write_bytes(b"new checkpoint")
+    assert runtime.source_snapshot(output)==identity
+    manifest=json.loads((output/".internal/source"/(identity+".tar.json")).read_text())
+    assert set(manifest["files"])=={"version/code.py","AGENTS.md","RULES.md"}
+    (source/"code.py").write_text('print("changed source")\n')
+    assert runtime.source_snapshot(output)!=identity
 
 
 @pytest.mark.parametrize("algorithm,root,nonroot,message",[
@@ -79,34 +148,37 @@ def test_masked_statistics_and_training_policy_domain(config):
     torch.testing.assert_close(result[0,0,0],torch.tensor([-1.,1.]),rtol=1e-5,atol=1e-5)
     assert result[0,0,1].eq(0).all()
     torch.testing.assert_close(bn.running_mean,torch.tensor([0.2]))
-    obs=torch.from_numpy(example_observation(6,5,"standard",(0,))).unsqueeze(0)
+    obs=torch.from_numpy(example_inputs(6,5,"standard",(0,))[0]).unsqueeze(0)
     policy=torch.zeros(1,36);policy[0,1]=1
     model=make_network(config)
-    loss,pl,vl,reg=losses(torch.zeros(1,36),torch.zeros(1),obs,policy,torch.ones(1),model,0)
+    loss,pl,vl=losses(torch.zeros(1,36),torch.zeros(1,3),obs,policy,torch.tensor([[1.,0.,0.]]))
     assert float(pl)==pytest.approx(math.log(25),abs=1e-6) # includes the occupied point, excludes padding
-    assert float(vl.detach())==1 and float(reg.detach())==0
-    assert float(loss.detach())==pytest.approx(math.log(25)+1,abs=1e-6)
+    assert float(vl.detach())==pytest.approx(math.log(3),abs=1e-6)
+    assert float(loss.detach())==pytest.approx(math.log(25)+math.log(3),abs=1e-6)
 
 
 def test_full_trajectory_targets_and_corruption(tmp_path):
     a,_=winning_record()
     path=tmp_path/"game.npz";save_npz(path,a)
     loaded=read_raw(path);view=training_view(loaded)
-    np.testing.assert_array_equal(view["value"],[1,-1,1,-1,1,-1,1,-1,1])
+    np.testing.assert_array_equal(view["value"].argmax(1),[0,2,0,2,0,2,0,2,0])
     assert len(loaded["observations"])==len(view["obs"])+1
     bad=copy.deepcopy(a);bad["policies"][0]=0
-    with pytest.raises(ValueError,match="completed visits"):
+    with pytest.raises(ValueError,match="policy target"):
         validate_raw(bad)
-    bad=copy.deepcopy(a);bad["observations"][1,0,0,0]=1
+    bad=copy.deepcopy(a);obs=unpack_observations(bad["observations"],6);obs[1,1,0,0]=1
+    bad["observations"]=pack_observations(obs)
     with pytest.raises(ValueError,match="transition mismatch"):
         validate_raw(bad)
 
 
-def test_shuffle_conservation_and_reader_restoration(tmp_path,config):
-    config["replay"].update(window_mode="fixed",window_rows=100,shuffle_bucket_rows=2,training_shard_rows=2)
+@pytest.mark.parametrize("waves",[1,3])
+def test_shuffle_conservation_and_reader_restoration(tmp_path,config,waves):
+    config["replay"].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows='all')
+    config["shuffle"].update(bucket_rows=2,training_shard_rows=2,waves=waves,temp_dir=str(tmp_path/"scratch"))
     entries=[];expected=Counter()
     for rule in range(3):
-        a,m=winning_record(rule);path=tmp_path/"data"/f"{rule}.npz";save_npz(path,a)
+        a,m=winning_record(rule);path=tmp_path/"selfplay"/f"{rule}.npz";save_npz(path,a)
         entries.append({"path":str(path.relative_to(tmp_path)),"sha256":sha256(path),"metadata":m})
         view=training_view(a)
         expected.update((obs.tobytes(),p.tobytes(),v.tobytes()) for obs,p,v in zip(view["obs"],view["policy"],view["value"]))
@@ -117,6 +189,8 @@ def test_shuffle_conservation_and_reader_restoration(tmp_path,config):
         with np.load(snapshot/"data"/item["path"]) as a:
             actual.update((obs.tobytes(),p.tobytes(),v.tobytes()) for obs,p,v in zip(a["obs"],a["policy"],a["value"]))
     assert expected==actual and manifest["rows"]==27
+    assert manifest["resource_plan"]["waves"]==waves
+    assert not list((tmp_path/"scratch").iterdir())
     first=BatchReader(snapshot,17,2,1);first.next();state=first.state()
     second=BatchReader(snapshot,17,2,999,state)
     try:
@@ -129,23 +203,409 @@ def test_shuffle_conservation_and_reader_restoration(tmp_path,config):
         first.close();second.close()
 
 
+def test_bit_order_and_non_byte_aligned_planes():
+    obs=np.zeros((1,5,5,5),np.uint8)
+    obs[0,0].flat[[0,7,8,24]]=1
+    packed=pack_observations(obs)
+    np.testing.assert_array_equal(packed[0,0],[129,128,0,128]) # independent MSB-first byte values
+    np.testing.assert_array_equal(unpack_observations(packed,5),obs)
+    a,_=winning_record();a["observations"][0,0,-1]|=1
+    with pytest.raises(ValueError,match="tail bits"):
+        validate_raw(a)
+
+
+def test_shuffle_resource_limits_and_failure_cleanup(tmp_path,config):
+    a,m=winning_record();path=tmp_path/"selfplay"/"a.npz";save_npz(path,a)
+    entries=[{"path":str(path.relative_to(tmp_path)),"sha256":sha256(path),"metadata":m}]
+    config["replay"]["min_rows"]=9
+    config["shuffle"].update(memory_mb=1,workers=4,training_shard_rows=4096)
+    with pytest.raises(ValueError,match="memory"):
+        resource_plan(10000,5000,3,config)
+    config["shuffle"].update(memory_mb=2048,training_shard_rows=2,waves=3,temp_dir=str(tmp_path/"scratch"))
+    entries[0]["sha256"]="bad checksum"
+    with pytest.raises(ValueError,match="source changed"):
+        build_snapshot(tmp_path,1,entries,config)
+    assert not list((tmp_path/"scratch").iterdir())
+    assert not list((tmp_path/"snapshots").iterdir())
+
+
 def test_katago_window_hand_values(config):
     replay=config["replay"]
-    replay.update(window_min_rows=100,taper_scale=100,taper_exponent=0.5,expand_per_row=1,window_max_rows=1000)
+    replay.update(min_rows=100,taper_exponent=0.5,expand_per_row=1)
     assert desired_window(100,replay)==100
     assert desired_window(400,replay)==300 # sqrt(400)-sqrt(100), divided by 0.5/sqrt(100), plus 100
-    assert desired_window(100000,replay)==1000
+    validate(config)
+    assert desired_window(10000,replay)==1900 # No cap: 100 + (sqrt(10000)-10)/0.05.
+    assert desired_window(0,replay)==100
+    replay['keep_target_rows']=0
+    with pytest.raises(ValueError,match='positive'):
+        validate(config)
+    replay['keep_target_rows']=-1
+    with pytest.raises(ValueError,match='nonnegative'):
+        validate(config)
+
+
+def test_replay_configuration_has_four_policy_fields(tmp_path):
+    baseline=load_config(ROOT/'configs'/'baseline')
+    assert set(baseline['replay'])=={'min_rows','taper_exponent','expand_per_row','keep_target_rows'}
+    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    selected=tmp_path/'configs'/'smoke_test'
+    local=selected/'train.cfg.local'
+    local.write_text('[replay]\nkeep_target_rows=all\n')
+    assert load_config(selected)['replay']['keep_target_rows']=='all'
+    local.write_text('[replay]\ntaper_scale=32\n')
+    with pytest.raises(ValueError,match='Unknown key'):
+        load_config(selected)
+
+
+@pytest.mark.parametrize('files,target,group_rows,expected_rows',[(3,12,128,12),(11,5,52,4)])
+def test_katago_sampled_snapshot_waves_and_rebuild(tmp_path,config,files,target,group_rows,expected_rows):
+    config['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=target)
+    config['shuffle'].update(group_rows=group_rows,bucket_rows=2,training_shard_rows=2)
+    config['selfplay']['shard_rows']=16
+    validate(config)
+    entries=[];original=Counter()
+    for i in range(files):
+        a,m=winning_record(i%3);m.update(attempt_id=str(i),shard_id=str(i))
+        a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+        path=tmp_path/'selfplay'/f'{i}.npz';save_npz(path,a)
+        entries.append({'path':str(path.relative_to(tmp_path)),'sha256':sha256(path),'metadata':m})
+        view=training_view(a)
+        original.update((o.tobytes(),p.tobytes(),v.tobytes()) for o,p,v in zip(view['obs'],view['policy'],view['value']))
+    def contents(snapshot,manifest):
+        result=Counter()
+        for item in manifest['files']:
+            with np.load(snapshot/'data'/item['path']) as a:
+                result.update((o.tobytes(),p.tobytes(),v.tobytes()) for o,p,v in zip(a['obs'],a['policy'],a['value']))
+        return result
+    sampled=[]
+    for waves in (1,3):
+        config['shuffle']['waves']=waves
+        identity=build_snapshot(tmp_path,1,entries,config)
+        snapshot=tmp_path/'snapshots'/identity;manifest=json.loads((snapshot/'manifest.json').read_text())
+        assert manifest['window_rows']==files*9 and manifest['rows']==expected_rows
+        assert manifest['keep_prob']==pytest.approx(target/(files*9))
+        actual=contents(snapshot,manifest)
+        assert sum(actual.values())==expected_rows and not (actual-original)
+        sampled.append(actual)
+        prune_derived(tmp_path,[identity],set())
+        restore_snapshot(snapshot)
+        assert contents(snapshot,manifest)==actual
+    assert sampled[0]==sampled[1] # Wave assignment must not apply sampling again.
+    assert all(sha256(tmp_path/e['path'])==e['sha256'] for e in entries)
+    if files==11:
+        config['replay']['keep_target_rows']=1
+        with pytest.raises(ValueError,match='empty sample'):
+            build_snapshot(tmp_path,2,entries,config)
+    config['replay']['min_rows']=files*9+1
+    with pytest.raises(ValueError,match='min_rows'):
+        build_snapshot(tmp_path,2,entries,config)
 
 
 def test_unique_catalog_is_idempotent(tmp_path):
-    a,_=winning_record();save_npz(tmp_path/"data"/"a.npz",a)
+    a,_=winning_record();save_npz(tmp_path/"selfplay"/"a.npz",a)
     catalog=Catalog(tmp_path,"test","config")
     try:
         catalog.scan({1:"model"});catalog.scan({1:"model"})
         assert catalog.counts(10)==(9,1,9.)
-        save_npz(tmp_path/"data"/"duplicate.npz",a)
+        save_npz(tmp_path/"selfplay"/"duplicate.npz",a)
         with pytest.raises(Exception):
             catalog.scan({1:"model"})
         assert catalog.counts(10)==(9,1,9.)
     finally:
         catalog.close()
+
+
+def test_partition_distribution_and_conservation():
+    rng=np.random.default_rng(12)
+    pairs=Counter()
+    for _ in range(12000):
+        order,offsets=partition_rows(2,3,rng)
+        labels=np.empty(2,np.int64)
+        for bucket in range(3):
+            labels[order[offsets[bucket]:offsets[bucket+1]]]=bucket
+        pairs[tuple(labels)]+=1
+    # Independent labels have nine equally likely outcomes, including collisions.
+    assert len(pairs)==9 and all(abs(n/12000-1/9)<0.015 for n in pairs.values())
+    order,offsets=partition_rows(10000,256,rng)
+    np.testing.assert_array_equal(np.sort(order),np.arange(10000))
+    assert offsets[0]==0 and offsets[-1]==10000 and (np.diff(offsets)>=0).all()
+
+
+def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
+    import etazero.shuffle as shuffle
+    a,m=winning_record();path=tmp_path/'selfplay'/'a.npz';save_npz(path,a)
+    entries=[{'path':str(path.relative_to(tmp_path)),'sha256':sha256(path),'metadata':m}]
+    config['replay']['min_rows']=9
+    identity=build_snapshot(tmp_path,1,entries,config)
+    snapshot=tmp_path/'snapshots'/identity
+    manifest_before=(snapshot/'manifest.json').read_bytes()
+    hashes={p.name:sha256(p) for p in (snapshot/'data').glob('*.npz')}
+    # Cache hits must not invoke trajectory decoding/validation again.
+    with monkeypatch.context() as patch:
+        patch.setattr(shuffle,'read_raw',lambda *a:(_ for _ in ()).throw(AssertionError('revalidated')))
+        view=shuffle._source_view(path,entries[0]['sha256'],tmp_path/'.internal/training_views')
+        assert len(view['value'])==9
+    prune_derived(tmp_path,[identity],set())
+    assert path.exists() and (snapshot/'manifest.json').read_bytes()==manifest_before
+    assert not (snapshot/'data').exists() and not list((tmp_path/'.internal/training_views').glob('*'))
+    restore_snapshot(snapshot)
+    assert hashes=={p.name:sha256(p) for p in (snapshot/'data').glob('*.npz')}
+    assert (snapshot/'manifest.json').read_bytes()==manifest_before
+    cache=tmp_path/'.internal/training_views'/(entries[0]['sha256']+'.npz')
+    cache.write_bytes(b'corrupt cache')
+    with pytest.raises(ValueError,match='view checksum'):
+        shuffle._source_view(path,entries[0]['sha256'],tmp_path/'.internal/training_views')
+
+
+def test_catalog_indexed_window_and_incremental_scan(tmp_path):
+    catalog=Catalog(tmp_path,'test','config')
+    try:
+        for iteration in range(1,5):
+            a,m=winning_record();m.update(iteration_id=iteration,attempt_id=str(iteration),shard_id=str(iteration),created_ns=iteration)
+            a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+            directory=tmp_path/'selfplay'/f'iteration_{iteration:06d}';save_npz(directory/'a.npz',a)
+            catalog.scan({iteration:'model'},[directory])
+        assert catalog.counts(2)==(36,4,9.)
+        assert [e['metadata']['iteration_id'] for e in catalog.entries(10)]==[3,4]
+        # Live scans need not revisit committed historical directories; recovery does.
+        (tmp_path/'selfplay'/'iteration_000001'/'a.npz').unlink()
+        catalog.scan({4:'model'},[tmp_path/'selfplay'/'iteration_000004'])
+        with pytest.raises(ValueError,match='missing'):
+            catalog.scan({i:'model' for i in range(1,5)})
+    finally:
+        catalog.close()
+
+
+def test_journal_barrier_and_failure(tmp_path,monkeypatch):
+    from etazero.runtime import Journal
+    journal=Journal(tmp_path)
+    for step in range(100):
+        journal('update',step=step)
+    journal.flush()
+    records=[json.loads(line) for line in (tmp_path/'logs/events.jsonl').read_text().splitlines()]
+    assert [e['step'] for e in records if e['event']=='update']==list(range(100))
+    journal.close()
+    with (tmp_path/'logs/events.jsonl').open('ab') as file:
+        file.write(b'{"truncated":')
+    recovered=Journal(tmp_path);recovered('after_recovery');recovered.close()
+    assert json.loads((tmp_path/'logs/events.jsonl').read_text().splitlines()[-2])['event']=='after_recovery'
+    broken_dir=tmp_path/'broken';broken_dir.mkdir()
+    broken=Journal(broken_dir)
+    with monkeypatch.context() as patch:
+        patch.setattr('etazero.runtime.os.fsync',lambda *a:(_ for _ in ()).throw(OSError('disk failure')))
+        broken('update')
+        with pytest.raises(RuntimeError,match='writer failed'):
+            broken.flush()
+        with pytest.raises(RuntimeError,match='writer failed'):
+            broken.close()
+
+
+def test_inference_normalization_keeps_mask_and_model_state(config):
+    model=make_network(config)
+    probes=[example_inputs(6,size,rule,(0,6,1)) for size in (5,6) for rule in ('freestyle','standard','renju')]
+    obs=tuple(torch.from_numpy(np.stack(x)) for x in zip(*probes))
+    for _ in range(3):
+        model(*obs)
+    model.eval();original={k:v.clone() for k,v in model.state_dict().items()}
+    folded=inference_network(model)
+    with torch.inference_mode():
+        for a,b in zip(model(*obs),folded(*obs)):
+            torch.testing.assert_close(a,b,rtol=2e-4,atol=2e-5)
+    for key,value in model.state_dict().items():
+        torch.testing.assert_close(value,original[key],rtol=0,atol=0)
+    assert not any(isinstance(layer,MaskedBatchNorm) for layer in folded.modules())
+
+
+def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
+    a,m=winning_record()
+    prefix=4
+    a['opening_moves'][0]=prefix;a['balanced_moves'][0]=prefix
+    a['opening_status'][0]=1;a['opening_attempts'][0]=1
+    a['train_mask'][:prefix]=0;a['row_repeats'][:prefix]=0;a['target_weights'][:prefix]=0
+    for key in ('policies','visits','simulations','temperatures'):
+        a[key][:prefix]=0
+    m['rows']=5;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    validate_raw(a)
+    view=training_view(a)
+    assert len(view['value'])==5
+    np.testing.assert_array_equal(view['value'].argmax(1),[0,2,0,2,0])
+    np.testing.assert_array_equal(view['policy'],a['policies'][4:])
+    np.testing.assert_array_equal(view['obs'][0],a['observations'][4])
+    path=tmp_path/'selfplay'/'game.npz';save_npz(path,a)
+    catalog=Catalog(tmp_path,'test','config')
+    try:
+        catalog.scan({1:'model'})
+        assert catalog.counts(10)==(5,1,5.)
+        assert catalog.statistics(1)['avg_game_length']==9
+        config['replay'].update(min_rows=5,keep_target_rows='all')
+        snapshot=build_snapshot(tmp_path,1,catalog.entries(),config)
+        assert json.loads((tmp_path/'snapshots'/snapshot/'manifest.json').read_text())['rows']==5
+    finally:
+        catalog.close()
+    corrupt=copy.deepcopy(a);corrupt['train_mask'][1]=1;corrupt['row_repeats'][1]=1;corrupt['target_weights'][1]=1
+    m['rows']=6;corrupt['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    with pytest.raises(ValueError,match='temperature/budget|prefix mask|completed visits'):
+        validate_raw(corrupt)
+    # Policy init may end a game before search: retained evidence, zero training rows.
+    a['train_mask'][:]=0;a['row_repeats'][:]=0;a['target_weights'][:]=0;a['opening_moves'][0]=9;a['policy_moves'][0]=5
+    for key in ('policies','visits','simulations','temperatures'):
+        a[key][:]=0
+    m['rows']=0;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    validate_raw(a)
+    assert len(training_view(a)['value'])==0
+
+
+def test_cold_start_quota_hand_values(config):
+    from etazero.runtime import iteration_plan
+    config['training'].update(train_steps=1000,batch_size=128,replay_ratio=8)
+    config['replay']['min_rows']=10000
+    state={'iteration':0,'model':None,'checkpoint':{'id':'initial'},'target_rows':0,'replay_origin_rows':None}
+    assert iteration_plan(state,config)['train_steps']==0
+    assert iteration_plan(state,config)['input_model']['evaluator']=='random'
+    state['iteration']=1
+    assert iteration_plan(state,config)['target_rows']==10000
+    # 90000 excess bootstrap rows cannot pay for the next 16000 steady-state rows.
+    state.update(iteration=2,model={'id':'trained'},target_rows=100000,replay_origin_rows=100000)
+    plan=iteration_plan(state,config)
+    assert plan['target_rows']==116000
+    assert math.ceil((plan['target_rows']-100000)/80)==200
+    assert state['target_rows']==100000 # planning does not mutate committed state
+    assert iteration_plan(state,config)==plan
+
+
+@pytest.mark.parametrize('key,value',[('probability',1.1),('max_tries',0),('policy_temperature',0.01)])
+def test_opening_config_validation(config,key,value):
+    config['opening'][key]=value
+    with pytest.raises(ValueError):
+        validate(config)
+
+
+def test_iteration_one_backfills_actual_shortfall(config):
+    from etazero.runtime import Controller
+    config['replay']['min_rows']=50
+    class VariableLengthCatalog:
+        rows=10;games=1
+        def counts(self,recent):
+            return self.rows,self.games,self.rows/self.games
+    controller=object.__new__(Controller)
+    controller.config=config;controller.catalog=VariableLengthCatalog()
+    controller.stop=False;controller.services={}
+    controller.stopping=lambda:False
+    controller.journal=lambda *a,**k:None
+    controller.scan=lambda:None
+    quotas=[]
+    def launch(plan,games):
+        quotas.append(games)
+        # The bootstrap game had ten effective rows; subsequent games only three.
+        controller.catalog.rows+=games*3;controller.catalog.games+=games
+    controller.launch=launch
+    controller.produce({'iteration':1,'target_rows':50})
+    assert quotas==[4,7,2,1]
+    assert controller.catalog.rows==52
+
+
+def test_adamw_decoupled_decay_and_config(config):
+    from etazero.training import optimizer_for
+    c=copy.deepcopy(config);c['optimizer']['kind']='adamw'
+    model=make_network(c)
+    with torch.no_grad(): model.stem.weight.fill_(2.)
+    optimizer=optimizer_for(model,c)
+    assert isinstance(optimizer,torch.optim.AdamW)
+    group=next(g for g in optimizer.param_groups if g['group_name']=='input')
+    model.stem.weight.grad=torch.zeros_like(model.stem.weight)
+    optimizer.step()
+    torch.testing.assert_close(model.stem.weight,torch.full_like(model.stem.weight,2*(1-group['lr']*group['weight_decay'])))
+    c=copy.deepcopy(config);c['environment'].update(rules='renju,freestyle,standard,',rule_weights='1,0,0')
+    validate(c)
+    for weights in ('0,0,0','1,-1,0','1,nan,0'):
+        c['environment']['rule_weights']=weights
+        with pytest.raises(ValueError,match='weights'): validate(c)
+    for probability in (-.1,1.1):
+        c=copy.deepcopy(config);c['selfplay']['forbidden_feature_dropout_prob']=probability
+        with pytest.raises(ValueError): validate(c)
+
+
+def test_global_feature_corruption():
+    a,_=winning_record(2)
+    validate_raw(a)
+    a['globals'][0,2]=1
+    with pytest.raises(ValueError,match='rule/color'): validate_raw(a)
+    a,_=winning_record(2)
+    obs=unpack_observations(a['observations'],6);obs[2,3,2,2]=1
+    a['observations']=pack_observations(obs);a['globals'][2,3]=0
+    with pytest.raises(ValueError,match='dropped forbidden'): validate_raw(a)
+
+
+def test_wdl_loss_distinguishes_draw_from_equal_win_loss():
+    obs=torch.ones(2,5,5,5);policy=torch.zeros(2,25);policy[:,0]=1
+    logits=torch.zeros(2,25)
+    wdl_logits=torch.tensor([[0.,4.,0.],[0.,4.,0.]],requires_grad=True)
+    target=torch.tensor([[0.,1.,0.],[.5,0.,.5]])
+    _,_,vl=losses(logits,wdl_logits,obs,policy,target)
+    # Same scalar Q=0 for both distributions, but the second target must penalize draw confidence.
+    assert float(vl.detach())>2
+    vl.backward()
+    assert wdl_logits.grad[0,1]<0 and wdl_logits.grad[1,1]>0
+
+
+def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
+    a,m=winning_record()
+    repeats=np.array([2,0,3,0,1,0,1,0,2],np.int32)
+    a['row_repeats']=repeats;a['target_weights']=repeats.astype(np.float32)
+    # Targets may differ from normalized visits after pruning/LCB.
+    a['visits'][0,1]=4;a['policies'][0,0]=.8;a['policies'][0,1]=.2
+    m['rows']=int(repeats.sum());a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    validate_raw(a);view=training_view(a)
+    np.testing.assert_array_equal(view['value'],np.tile([1,0,0],(m['rows'],1)))
+    assert np.array_equal(view['obs'][0],view['obs'][1])
+    path=tmp_path/'selfplay/game.npz';save_npz(path,a)
+    catalog=Catalog(tmp_path,'test','config')
+    try:
+        catalog.scan({1:'model'});assert catalog.counts(10)==(9,1,9.)
+        config['replay'].update(min_rows=9,keep_target_rows='all')
+        identity=build_snapshot(tmp_path,1,catalog.entries(),config)
+        reader=BatchReader(tmp_path/'snapshots'/identity,9,1,1)
+        try:
+            batch=reader.next();np.testing.assert_array_equal(batch['value'],view['value'])
+            assert sorted(map(bytes,batch['policy']))==sorted(map(bytes,view['policy']))
+        finally:reader.close()
+    finally:catalog.close()
+    a['row_repeats'][0]=6;m['rows']+=4;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    with pytest.raises(ValueError,match='rounding'):validate_raw(a)
+
+
+@pytest.mark.parametrize('section,key,value',[
+    ('search','cheap_search_visits',1000),('search','cheap_search_probability',1),
+    ('search','min_visit_prop_for_lcb',1.1),('search','fpu_parent_weight_by_visited_policy_pow',0),
+    ('selfplay','policy_surprise_data_weight',1),('exploration','dirichlet_total_concentration',0),
+    ('search','root_num_symmetries_to_sample',0),('search','root_num_symmetries_to_sample',9),
+    ('search','nn_policy_temperature',0),('search','root_policy_temperature',0),
+    ('search','root_policy_temperature_early',0),('search','temperature_halflife',0),
+    ('search','temperature_only_below_prob',1.1),('search','value_weight_exponent',-0.1),
+    ('search','fpu_loss_prop',1.1),('search','c_puct_stdev_scale',1.1),
+    ('search','reduce_visits_threshold',1),('search','reduce_visits_threshold',-0.1),
+    ('search','reduce_visits_threshold_lookback',0),('search','reduce_visits_threshold_lookback',1001),
+    ('search','reduced_visits_min',1),('search','reduced_visits_min',10),
+    ('search','reduced_visits_weight',1.1)])
+def test_search_enhancement_validation(config,section,key,value):
+    config[section][key]=value
+    with pytest.raises(ValueError):validate(config)
+
+
+def test_reduce_visits_config_inheritance_and_independent_pcr(config):
+    baseline=load_config(ROOT/'configs/baseline')
+    assert baseline['search']['reduce_visits']
+    assert baseline['search']['reduce_visits_threshold']==0.9
+    assert baseline['search']['reduce_visits_threshold_lookback']==3
+    assert baseline['search']['reduced_visits_min']==20
+    assert baseline['search']['reduced_visits_weight']==0.1
+    assert load_config(ROOT/'configs/minimal_test')['search']['reduced_visits_min']==20
+    assert config['search']['reduced_visits_min']==2
+    # These cases are valid; the two cap paths are alternatives, not stacked limits.
+    config['search'].update(reduced_visits_min=8,cheap_search_visits=4,
+                           reduce_visits_threshold=0,reduced_visits_weight=0)
+    validate(config)
+    from etazero.eval_config import load_evaluation_config
+    assert 'reduce_visits' not in load_evaluation_config(ROOT/'configs/smoke_test')['evaluation']
+    assert 'reduce_visits' not in load_evaluation_config(ROOT/'configs/smoke_test',True)['match']

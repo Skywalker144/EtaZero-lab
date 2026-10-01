@@ -55,3 +55,38 @@ def save_npz(path, arrays):
         with p.open("wb") as file:
             np.savez_compressed(file, **arrays)
     atomic_write(path, write, immutable=True)
+
+
+# Context-manager form used by the standalone arena and Elo writer.
+from contextlib import contextmanager
+import fcntl
+
+
+@contextmanager
+def atomic_path(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name+'.tmp.'+uuid.uuid4().hex)
+    try:
+        yield temporary
+        with temporary.open('rb') as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def run_lock(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError('Another process owns this output directory') from error
+        yield
+
+
+write_json = save_json

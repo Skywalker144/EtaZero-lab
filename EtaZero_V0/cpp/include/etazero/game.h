@@ -24,17 +24,26 @@ public:
         return !finished_ && a >= 0 && a < actions() && a / canvas_ < size() && a % canvas_ < size() &&
                board_.cells[a / canvas_ * size() + a % canvas_] == 0;
     }
-    std::vector<float> observation() const {
-        std::vector<float> out(INPUT_PLANES * actions(), 0);
+    std::vector<float> observation() const { return observation(player_); }
+    // Counterfactual side-to-move input used by balanced opening root rejection.
+    std::vector<float> observation(int perspective, bool forbidden_feature = true) const {
+        if (perspective != 1 && perspective != -1) throw std::runtime_error("Invalid observation perspective");
+        const int spatial = INPUT_PLANES * actions();
+        std::vector<float> out(spatial + GLOBAL_FEATURES, 0);
+        RenjuAnalyzer analyzer;
+        const bool enabled = rule_ == Rule::RENJU && forbidden_feature;
         for (int y = 0; y < size(); ++y) for (int x = 0; x < size(); ++x) {
-            int a = y * canvas_ + x, cell = board_.cells[y * size() + x];
-            out[a] = cell == player_;
-            out[actions() + a] = cell == -player_;
-            out[2 * actions() + a] = player_ == 1;
-            out[3 * actions() + a] = 1;
-            out[4 * actions() + a] = rule_ == Rule::STANDARD;
-            out[5 * actions() + a] = rule_ == Rule::RENJU;
+            int a = y * canvas_ + x, local = y * size() + x, cell = board_.cells[local];
+            out[a] = 1;
+            out[actions() + a] = cell == perspective;
+            out[2 * actions() + a] = cell == -perspective;
+            if (enabled && !cell && analyzer.forbidden(board_, local))
+                out[(perspective == 1 ? 3 : 4) * actions() + a] = 1;
         }
+        out[spatial] = rule_ == Rule::STANDARD;
+        out[spatial + 1] = rule_ == Rule::RENJU;
+        out[spatial + 2] = rule_ == Rule::RENJU ? -perspective : 0;
+        out[spatial + 3] = enabled;
         return out;
     }
     double terminal_value() const {

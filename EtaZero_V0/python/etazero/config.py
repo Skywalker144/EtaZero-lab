@@ -14,36 +14,73 @@ def boolean(value):
     return value.lower() == "true"
 
 
+def row_target(value):
+    return "all" if value.lower() == "all" else int(value)
+
+
 # Each section belongs to exactly one file; baseline supplies every required key.
+SEARCH_PARAMETERS = dict(value_weight_exponent=float, chosen_move_subtract=float, chosen_move_prune=float,
+                         fpu_loss_prop=float, root_fpu_loss_prop=float, c_puct_log=float, c_puct_base=float,
+                         c_puct_stdev_prior=float, c_puct_stdev_prior_weight=float, c_puct_stdev_scale=float,
+                         root_num_symmetries_to_sample=int, nn_policy_temperature=float,
+                         root_policy_temperature_early=float, root_policy_temperature=float,
+                         temperature_halflife=float, temperature_only_below_prob=float)
+
+
+def validate_search_parameters(c):
+    if not 1 <= c['root_num_symmetries_to_sample'] <= 8:
+        raise ValueError('Root symmetry count must be in [1,8]')
+    if any(c[k] > 1 for k in ('fpu_loss_prop','root_fpu_loss_prop','c_puct_stdev_scale','temperature_only_below_prob')):
+        raise ValueError('Search proportions must be <= 1')
+    if any(c[k] <= 0 for k in ('c_puct_base','c_puct_stdev_prior','nn_policy_temperature',
+                              'root_policy_temperature','root_policy_temperature_early','temperature_halflife')):
+        raise ValueError('Policy temperatures, halflife and PUCT scales must be positive')
+
 FIELDS = {
-    "run": ("run", {"run_dir": str, "seed": int, "max_cycles": int,
+    "run": ("run", {"run_dir": str, "seed": int, "max_iteration": int,
                     "max_seconds": float, "cpu_threads": int}),
     "agent": ("run", {"algorithm": str, "root_search_algo": str, "nonroot_search_algo": str}),
     "devices": ("run", {"train": str, "selfplay": str}),
     "environment": ("env", {"sizes": str, "size_weights": str, "rules": str, "rule_weights": str}),
     "network": ("net", {"canvas": int, "channels": int, "blocks": int, "value_hidden": int}),
     "selfplay": ("selfplay", {"game_threads": int, "search_threads": int, "max_batch": int,
+                              "server_threads": int, "cache_entries": int, "inference_precision": str,
                               "batch_wait_us": int, "queue_capacity": int, "writer_queue": int,
-                              "shard_rows": int, "flush_seconds": float, "probe_games": int,
-                              "recent_games": int}),
+                              "shard_rows": int, "flush_seconds": float, "bootstrap_games": int,
+                              "recent_games": int, "forbidden_feature_dropout_prob": float,
+                              "policy_surprise_data_weight": float, "value_surprise_data_weight": float}),
+    "opening": ("selfplay", {"probability": float, "avg_dist_factor": float, "balance_exponent": float,
+                              "rejection_probability": float, "rejection_probability_fallback": float,
+                              "max_tries": int, "policy_init": boolean, "policy_after": boolean,
+                              "policy_on_failure": boolean, "policy_init_mean": float, "policy_temperature": float}),
     "search": ("selfplay", {"simulations": int, "c_puct": float, "virtual_loss": float,
-                            "reuse_tree": boolean}),
-    "exploration": ("selfplay", {"dirichlet_alpha": float, "noise_fraction": float,
-                                 "temperature": float, "temperature_moves": int,
+                            "reuse_tree": boolean, "use_fpu": boolean, "fpu_reduction_max": float, "root_fpu_reduction_max": float,
+                            "fpu_parent_weight_by_visited_policy_pow": float, "use_lcb": boolean,
+                            "lcb_stdevs": float, "min_visit_prop_for_lcb": float,
+                            "root_desired_per_child_visits_coeff": float, "policy_target_pruning": boolean,
+                            "clear_before_search": boolean, "cheap_search_probability": float,
+                            "cheap_search_visits": int, "cheap_search_target_weight": float,
+                            "reduce_visits": boolean, "reduce_visits_threshold": float,
+                            "reduce_visits_threshold_lookback": int, "reduced_visits_min": int,
+                            "reduced_visits_weight": float, **SEARCH_PARAMETERS}),
+    "exploration": ("selfplay", {"dirichlet_total_concentration": float, "shaped_dirichlet_noise": boolean, "noise_fraction": float,
+                                 "temperature": float,
                                  "final_temperature": float}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
-                           "checkpoint_every": int, "amp": str, "gradient_clip": float}),
-    "optimizer": ("train", {"type": str, "learning_rate": float, "momentum": float}),
-    "loss": ("train", {"l2": float}),
-    "replay": ("train", {"replay_ratio": float, "min_rows": int, "window_mode": str,
-                         "window_rows": int, "window_min_rows": int, "window_max_rows": int,
-                         "taper_exponent": float, "expand_per_row": float, "taper_scale": float,
-                         "shuffle_workers": int, "shuffle_group_rows": int,
-                         "shuffle_bucket_rows": int, "training_shard_rows": int}),
-    "evaluation": ("eval", {"simulations": int, "search_threads": int, "max_batch": int}),
-    "match": ("match", {"games": int, "game_threads": int, "simulations": int,
-                        "search_threads": int, "max_batch": int, "temperature": float,
-                        "temperature_moves": int}),
+                           'cuda_prefetch':boolean,'compile':boolean,
+                           "checkpoint_every": int, "amp": str, "gradient_clip": float,
+                           "replay_ratio": float, "d4_augmentation": boolean}),
+    "optimizer": ("train", {"kind": str, "lr_scale": float, "lr_warmup": boolean,
+                             "head_lr_factor": float, "noreg_lr_factor": float,
+                             "input_wd_factor": float, "normal_wd_factor": float,
+                             "norm_interval": int, "lookahead_k": int, "lookahead_alpha": float,
+                             "swa_period_samples": int, "swa_scale": float}),
+    "replay": ("train", {"min_rows": int, "taper_exponent": float,
+                         "expand_per_row": float, "keep_target_rows": row_target}),
+    "shuffle": ("train", {"workers": int, "group_rows": int, "bucket_rows": int,
+                          "training_shard_rows": int, "waves": int, "memory_mb": int,
+                          "temp_dir": str, "snapshot_keep": int}),
+
 }
 FILES = tuple(dict.fromkeys(v[0] for v in FIELDS.values()))
 
@@ -86,7 +123,10 @@ def load_config(directory):
         if parent:
             if Path(parent).name != parent or parent in (".", ".."):
                 raise ValueError("extends must name a directory under configs/")
-            result.update(inherit(configs_root / parent, ancestors + [current]))
+            parent_dir = configs_root / parent
+            if not (parent_dir / "run.cfg").is_file():
+                parent_dir = ROOT / "configs" / parent
+            result.update(inherit(parent_dir, ancestors + [current]))
         result.update(values)
         # Machine overrides are deliberately applied only at the selected directory.
         return result
@@ -128,9 +168,17 @@ def validate(c):
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if not math.isfinite(value) or value < 0:
                     raise ValueError(f"{section}.{key} must be nonnegative and finite")
-                zero_allowed = {"seed", "max_cycles", "max_seconds", "blocks", "batch_wait_us",
-                                "virtual_loss", "noise_fraction", "temperature", "temperature_moves",
-                                "final_temperature", "gradient_clip", "momentum", "l2", "expand_per_row"}
+                zero_allowed = {"seed", "max_iteration", "max_seconds", "blocks", "batch_wait_us",
+                                "virtual_loss", "noise_fraction", "temperature", "temperature_early",
+                                "final_temperature", "gradient_clip", "swa_period_samples", "input_wd_factor", "normal_wd_factor", "forbidden_feature_dropout_prob", "expand_per_row", "cache_entries",
+                                "policy_surprise_data_weight", "value_surprise_data_weight", "cheap_search_probability",
+                                "cheap_search_target_weight", "fpu_reduction_max", "root_fpu_reduction_max",
+                                "reduce_visits_threshold", "reduced_visits_weight",
+                                "min_visit_prop_for_lcb", "root_desired_per_child_visits_coeff", "value_weight_exponent",
+                                "chosen_move_subtract", "chosen_move_prune", "fpu_loss_prop", "root_fpu_loss_prop", "c_puct_log",
+                                "c_puct_stdev_prior_weight", "c_puct_stdev_scale", "temperature_only_below_prob",
+                                "probability", "avg_dist_factor", "balance_exponent", "rejection_probability",
+                                "rejection_probability_fallback", "policy_init_mean"}
                 if key not in zero_allowed and value == 0:
                     raise ValueError(f"{section}.{key} must be positive")
     env, net = c["environment"], c["network"]
@@ -142,20 +190,50 @@ def validate(c):
         raise ValueError("Invalid rule distribution")
     for label, entries in (("size", sizes), ("rule", rules)):
         weights = csv(env[label + "_weights"], float)
-        if len(weights) != len(entries) or any(not math.isfinite(x) or x <= 0 for x in weights):
+        if len(weights) != len(entries) or any(not math.isfinite(x) or x < 0 for x in weights) or not any(x > 0 for x in weights):
             raise ValueError(f"Invalid {label} weights")
-    if c["exploration"]["noise_fraction"] > 1 or c["optimizer"]["momentum"] >= 1:
-        raise ValueError("Noise fraction must be <= 1 and momentum < 1")
-    if c["optimizer"]["type"] not in ("sgd", "adam") or c["training"]["amp"] not in ("off", "float16", "bfloat16"):
+    if c["exploration"]["noise_fraction"] > 1 or c["selfplay"]["forbidden_feature_dropout_prob"] > 1:
+        raise ValueError("Noise fraction and feature dropout must be <= 1")
+    search = c['search']
+    validate_search_parameters(search)
+    if (search['cheap_search_probability'] > 1 or not 2 <= search['cheap_search_visits'] <= search['simulations']+1
+            or search['cheap_search_target_weight'] > 1 or search['min_visit_prop_for_lcb'] > 1):
+        raise ValueError('Invalid cheap search cap/probability/weight or LCB visit proportion')
+    if search['cheap_search_probability'] == 1 and search['cheap_search_target_weight'] == 0:
+        raise ValueError('All-cheap zero-weight searches produce no training rows')
+    if (search['reduce_visits_threshold'] > 0.999999 or
+            not 1 <= search['reduce_visits_threshold_lookback'] <= 1000 or
+            not 2 <= search['reduced_visits_min'] <= search['simulations']+1 or
+            search['reduced_visits_weight'] > 1):
+        raise ValueError('Invalid Reduce Visits threshold/lookback/minimum/weight')
+    if c['selfplay']['policy_surprise_data_weight'] + c['selfplay']['value_surprise_data_weight'] > 1:
+        raise ValueError('Surprise weight fractions must sum to <= 1')
+    if c["training"]["amp"] not in ("off", "float16", "bfloat16"):
         raise ValueError("Invalid optimizer or AMP mode")
-    r = c["replay"]
-    if r["window_mode"] not in ("fixed", "katago") or not 0 < r["taper_exponent"] <= 1:
-        raise ValueError("Invalid replay window mode/exponent")
-    if r["window_max_rows"] < r["window_min_rows"] or r["taper_scale"] < r["window_min_rows"]:
-        raise ValueError("Window maximum/scale must be >= window minimum")
-    if c["selfplay"]["shard_rows"] + net["canvas"] ** 2 > r["shuffle_group_rows"]:
-        raise ValueError("shuffle_group_rows must hold one raw shard including its final whole game")
-    if r["training_shard_rows"] > r["shuffle_bucket_rows"]:
+    o = c['optimizer']
+    if o['kind'] not in ('sgd', 'adamw'):
+        raise ValueError('Optimizer kind must be sgd or adamw')
+    if not 0 < o['lookahead_alpha'] <= 1 or o['swa_scale'] < 1:
+        raise ValueError('lookahead_alpha must be in (0,1] and swa_scale must be >= 1')
+    if c["selfplay"]["inference_precision"] not in ("float32", "float16"):
+        raise ValueError("Invalid inference precision")
+    if c["selfplay"]["inference_precision"] == "float16" and "cpu" in csv(c["devices"]["selfplay"]):
+        raise ValueError("FP16 inference requires CUDA selfplay devices")
+    opening = c["opening"]
+    if any(opening[k] > 1 for k in ("probability", "rejection_probability", "rejection_probability_fallback")):
+        raise ValueError("Opening probabilities must be in [0,1]")
+    if (opening["max_tries"] > 1000 or any(opening[k] > 100 for k in
+            ("avg_dist_factor", "balance_exponent", "policy_init_mean")) or
+            not 0.1 <= opening["policy_temperature"] <= 5):
+        raise ValueError("Invalid opening configuration")
+    r, s = c["replay"], c["shuffle"]
+    if not 0 < r["taper_exponent"] <= 1:
+        raise ValueError("Invalid replay window exponent")
+    if r["keep_target_rows"] != "all" and not isinstance(r["keep_target_rows"],int):
+        raise ValueError("keep_target_rows must be a positive integer or all")
+    if c["selfplay"]["shard_rows"] + net["canvas"] ** 2 > s["group_rows"]:
+        raise ValueError("shuffle.group_rows must hold one raw shard including its final whole game")
+    if s["training_shard_rows"] > s["bucket_rows"]:
         raise ValueError("Training shard rows must be <= shuffle bucket rows")
     devices = csv(c["devices"]["selfplay"]) + [c["devices"]["train"]]
     if not devices or any(x != "cpu" and not (x.startswith("cuda:") and x[5:].isdigit()) for x in devices):

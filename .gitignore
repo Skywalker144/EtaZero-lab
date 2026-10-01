@@ -2,4 +2,5 @@
 **/.pytest_cache/
 EtaZero_V0/build/
 EtaZero_V0/runs/
+EtaZero_V0/data/
 *.cfg.local

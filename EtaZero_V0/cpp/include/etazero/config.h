@@ -26,16 +26,18 @@ public:
             auto key = section + "." + trim(line.substr(0, pos));
             if (!fields_.emplace(key, trim(line.substr(pos+1))).second) throw std::runtime_error("Duplicate native key");
         }
-        if (text("agent.algorithm") != "alphazero" || text("agent.root_search_algo") != "puct" || text("agent.nonroot_search_algo") != "puct")
-            throw std::runtime_error("Native executable only supports AlphaZero/PUCT/PUCT");
     }
-    std::string text(const std::string& k) const { return fields_.at(k); }
+    std::string text(const std::string& k) const {
+        auto it=fields_.find(k);
+        if(it==fields_.end())throw std::runtime_error("Missing native configuration field: "+k);
+        return it->second;
+    }
     int integer(const std::string& k) const { return std::stoi(text(k)); }
     double number(const std::string& k) const { return std::stod(text(k)); }
     bool boolean(const std::string& k) const { return text(k) == "true"; }
     std::vector<std::string> list(const std::string& k) const {
         std::istringstream s(text(k)); std::string item; std::vector<std::string> result;
-        while (std::getline(s, item, ',')) result.push_back(trim(item));
+        while (std::getline(s, item, ',')) { item=trim(item); if (!item.empty()) result.push_back(item); }
         return result;
     }
 };
