@@ -1,0 +1,28 @@
+{
+  "KataGo": {
+    "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "root": "/home/sky/RL/SkyZero/KataGo",
+    "sha256": {
+      "SelfplayTraining.md": "600d0a328e663ba1a20bbbd5412e3d8b8cbcac91c990730f67e9cf2bc8e13d14",
+      "cpp/command/selfplay.cpp": "af36f0a675c57c89237fa8088a39fae50166c578af084472f28f00d9ed694605",
+      "cpp/core/threadsafequeue.h": "eeee51255e874bc39eb2c3f9fc337d6f47bb485fc91458fbfda67ccaf67a3a29",
+      "cpp/dataio/trainingwrite.cpp": "3627b85c1d3ff120eb93fa7f40b051e10e9cb56ba02196573ae32e18e18fadc0",
+      "cpp/neuralnet/nneval.cpp": "2efe3ef52cf791abdd578eb7e8d4187f8ad14c912859b07c9f603cc684f275e5",
+      "cpp/neuralnet/nneval.h": "86e794bd5ebcce6cab522c76a3dd7f9ebaec1b29b2d7c30e3421dce04437604c",
+      "cpp/program/selfplaymanager.cpp": "d7b1f52489caf89a139bc5669c2bdecac1f3657171587f17b06c7017d8fb5e53",
+      "python/katago/train/data_processing_pytorch.py": "374df65b15c11f2c83c033a259527e61fa4ca96cb70247d936dbb459bd297c9d",
+      "python/shuffle.py": "e8dc0c8ae84ebd595066c5befe11cf366cfaddfb993cc843bc2400681f2fbb2b"
+    }
+  },
+  "MuZero_V2": {
+    "root": "/home/sky/RL/MuZero/MuZero_V2",
+    "sha256": {
+      "cpp/include/muzero/game.h": "c51f652a0df9a45f18fc0a95ce820004cc00da19099a9f629df5c192c1fbcec9",
+      "cpp/include/muzero/rules.h": "5a49db87949324ef5c0f3936c1da7ba8372f3e1d2a5fdb4ae69699c3835b81ad",
+      "cpp/src/batcher.cpp": "211532e522133e033bc424212a01132d8f7572458ef0533069cc4906560632a3",
+      "cpp/src/record.cpp": "b3e735089a9e83fb0f51046cc2eb7e78cbc246866a2c7764ef93bd6efa13fa84",
+      "cpp/src/rules.cpp": "1ca76138eb12cca13acd16a59277a3d7c4b3baf96500380b9489b1591a52f522",
+      "cpp/src/torch_backend.cpp": "aeff2235e9fe50f32e82d9535c85d796b5147eeeeaa8c19e0848be512ff47f77"
+    }
+  }
+}
