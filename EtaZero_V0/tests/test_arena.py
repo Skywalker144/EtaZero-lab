@@ -24,11 +24,11 @@ def test_eval_profiles_are_independent(tmp_path):
     # Changing training search/inference does not alter either evaluator.
     evaluation=load_evaluation_config(selected,environ={})
     match=load_evaluation_config(selected,True,environ={})
-    (selected/'selfplay.cfg.local').write_text('[search]\nc_puct=7\n[selfplay]\ninference_precision=float16\n')
+    (selected/'selfplay.cfg.local').write_text('[puct]\nc_puct=7\n[inference]\ninference_precision=float16\n')
     assert load_evaluation_config(selected,environ={})==evaluation
     assert load_evaluation_config(selected,True,environ={})==match
     (selected/'eval.cfg.local').write_text('[evaluation]\nvisits=oops\n')
-    assert load_config(selected)['search']['c_puct']==7
+    assert load_config(selected)['puct']['c_puct']==7
     with pytest.raises(ValueError):load_evaluation_config(selected,environ={})
     for field,value in [('VISITS','1'),('VISITS','0'),('BOARD_SIZE','4'),('RULE','oops'),('OPENING_PROBABILITY','0'),
                         ('ROOT_NUM_SYMMETRIES_TO_SAMPLE','9'),('NN_POLICY_TEMPERATURE','0'),
