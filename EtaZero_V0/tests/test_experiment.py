@@ -75,7 +75,8 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     stats = {'event': 'selfplay_statistics', 'iteration': 1, 'games': 4, 'rows': 40, 'plies': 48,
              'avg_game_length': 12, 'avg_rows_per_game': 10, 'black_wins': 2, 'white_wins': 1, 'draws': 1}
     update = {'event': 'update', 'iteration': 1, 'total_steps': 1, 'update_id': 'kept',
-              'loss': 3, 'policy_loss': 2, 'value_loss': 1, 'grad_norm': 5}
+              'loss': 6, 'policy_loss': 2, 'opponent_policy_loss': .5,
+              'soft_policy_loss': 2, 'soft_opponent_policy_loss': .5, 'value_loss': 1, 'grad_norm': 5}
     infer = {'event': 'inference', 'evaluator': 'network', 'iteration': 1, 'attempt': 'a', 'worker_id': 0,
              'requests': 8, 'batches': 2, 'queue_wait_us': 24, 'submitted': 10, 'cache_hits': 2}
     path = journal(tmp_path, [stats, stats, {'event': 'iteration_complete', 'iteration': 1, 'unique_rows': 40},
@@ -87,14 +88,17 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     with path.open('a') as file:
         file.write('{"event":')
     rows = run_history(tmp_path)
-    assert len(rows) == 1 and rows[0]['steps'] == 1 and rows[0]['loss'] == 3
+    assert len(rows) == 1 and rows[0]['steps'] == 1 and rows[0]['loss'] == 6
     assert rows[0]['games'] == 4 and rows[0]['requests'] == 8 and rows[0]['phases']['selfplay'] == 5
     figure = training_figure(rows)
     assert len(figure.axes) == 6
     assert list(figure.axes[0].lines[0].get_ydata()) == [.5]
     assert list(figure.axes[1].lines[0].get_ydata()) == [12]
     assert list(figure.axes[4].lines[0].get_ydata()) == [10]
-    assert list(figure.axes[2].lines[0].get_ydata()) == [3]
+    assert list(figure.axes[2].lines[0].get_ydata()) == [6]
+    assert [line.get_label() for line in figure.axes[3].lines] == [
+        'Policy', 'Opponent policy', 'Soft policy', 'Soft opponent policy', 'Value']
+    assert sum(line.get_ydata()[0] for line in figure.axes[3].lines) == 6
     performance = performance_figure(rows, 8)
     assert list(performance.axes[1].lines[0].get_ydata()) == [8]
     assert list(performance.axes[3].lines[0].get_ydata()) == [4]
