@@ -22,7 +22,7 @@ CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iter
 CONFIG_DIR=configs/baseline bash scripts/run.sh
 ```
 
-配置中的相对 `run.run_dir` 以本版本目录为基准，baseline、minimal_test、smoke_test 分别保存到 `data/baseline/`、`data/minimal_test/`、`data/smoke_test/`，包含自对弈数据、checkpoint、模型、日志与运行证据。`--run-dir` 可指定其他目录，相对路径以调用时的工作目录为基准。
+省略或留空 `run.run_dir` 时，输出目录按配置相对于本版本 `configs/` 的完整路径映射到 `data/`：`configs/baseline` → `data/baseline/`，`configs/az_pcr/100v` → `data/az_pcr/100v/`。输出位置不继承父配置，优先级为 `--run-dir` > 当前目录 `run.cfg.local` > 当前目录 `run.cfg` > 自动映射；本机覆盖中的空值可恢复自动映射。配置中的相对路径以本版本目录为基准，命令行中的相对路径以调用时的工作目录为基准。`configs/` 外的配置须显式指定输出目录。`check-config` 显示最终绝对路径，也支持 `--run-dir` 检查覆盖结果；运行保存同一解析结果，目录包含自对弈数据、checkpoint、模型、日志与运行证据。
 
 iteration 0 用 random evaluator 完成 `selfplay.bootstrap_games` 局，只测量并保存实际采样行数／局。iteration 1 继续使用随机评估，补足 `replay.min_rows` 后执行首轮训练与模型发布，并以此时实际累计有效行数固定 replay 记账起点。iteration 2 起，一次 `iteration` 是完整的自对弈 → shuffle → 训练 → 模型导出与发布，自对弈使用本次迭代开始时的已发布模型，按固定训练量和 replay ratio 规划产样；shuffle 从历史数据窗口生成训练快照；learner 消费配置的 `training.train_steps` 个 batch；新模型导出发布后，下一次迭代使用它生成数据。各阶段顺序执行，阶段内部并行。
 
@@ -31,6 +31,12 @@ iteration 0 用 random evaluator 完成 `selfplay.bootstrap_games` 局，只测�
 bootstrap 编号为 0，训练迭代从 1 编号，初始化 checkpoint 使用 0；`step` 是本次迭代内消费的 batch 数，`total_steps` 是整个运行累计消费 batch 数；`total_samples` 包含 AMP 跳步消费，`optimizer_steps` 单独记录成功优化器更新数。`.internal/state.json` 的 `iteration` 表示下一次待处理的迭代，中断时仍指向尚未完成的当前迭代，恢复从上一完整轮的 checkpoint 重跑中断轮；该轮原始产物归档到 `.internal/discarded/`，不进入回放或指标。baseline 的 `run.max_iteration = 0`、`run.max_seconds = 0`，默认持续运行，直到手动停止或发生错误。
 
 `baseline` 是完整配置的起点。`minimal_test` 继承 baseline，网络参数由 [net.cfg](configs/minimal_test/net.cfg) 指定，使用 11×11 棋盘、`replay.min_rows = 100000` 和 `training.train_steps = 500`，并使用独立输出目录；评估和比赛棋盘同步为 11×11。搜索预算及 reduced 最低访问数由 [selfplay.cfg](configs/minimal_test/selfplay.cfg) 明确覆盖；其他设置继承 baseline，包括编译、batch、规则权重和并行度。`smoke_test` 是自动化快速验收配置，使用 5/6 混合尺寸、三种规则及很小的数据和训练预算。baseline 与 minimal_test 开启 `training.compile`，首次使用某个 shape / 精度时会有编译耗时；smoke_test 关闭它。构建默认 CUDA 架构为 RTX 5090 的 12.0，其他目标可通过 `TORCH_CUDA_ARCH_LIST` 指定。设备由配置明确指定，不自动回退到 CPU；在隐藏 GPU 的托管沙箱中，CUDA 命令须在宿主设备可访问的执行环境运行。
+
+`muzero_minimal_test` 继承 [configs/muzero](configs/muzero/)，棋盘与画布、回放起点、每轮训练量和自对弈访问预算对齐 `minimal_test`；保留 MuZero 的三段 NBT、5 步展开、64 局并行及搜索限制，默认输出到 `data/muzero_minimal_test/`。评估和比赛棋盘均为 11×11，其他设置继承 MuZero 配置。启动方式：
+
+```bash
+CONFIG_DIR=configs/muzero_minimal_test bash scripts/run.sh
+```
 
 ## 实验目录与开局
 
@@ -73,7 +79,7 @@ CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh
 ```
 
-`autoexp.sh` 从实验伞目录的 `exp.cfg` 读取统一预算和 GPU 槽位，发现包含 `run.cfg` 的直接子目录作为实验臂。每臂配置继承、产物和恢复仍遵循普通训练规则。已达预算的臂跳过，其他臂排队恢复；失败停止排队并通知其他 controller 安全保存退出。`shared_init` 按网络结构与种子共享初始权重，各臂独立生成 bootstrap 数据。调度用法、环境覆盖与恢复边界见 [自动实验](docs/implementation.md#自动实验)。
+`autoexp.sh` 从实验伞目录的 `exp.cfg` 读取统一预算和 GPU 槽位，发现包含 `run.cfg` 的直接子目录作为实验臂。每臂配置继承、输出目录解析、产物和恢复遵循普通训练规则；运行 `configs/az_pcr` 时，各臂默认保存到 `data/az_pcr/100v/`、`data/az_pcr/200v/` 等目录，`--dry-run` 列出最终路径。调度产物另存于 `work_dir`。已达预算的臂跳过，其他臂排队恢复；失败停止排队并通知其他 controller 安全保存退出。`shared_init` 按网络结构与种子共享初始权重，各臂独立生成 bootstrap 数据。调度用法、环境覆盖与恢复边界见 [自动实验](docs/implementation.md#自动实验)。
 
 ## 续训与评估
 
