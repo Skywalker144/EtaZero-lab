@@ -19,6 +19,7 @@ def row_target(value):
 
 
 # Each section belongs to exactly one file; baseline supplies every required key.
+# run_dir is optional and belongs only to the selected configuration directory.
 SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncertainty_exponent=float, uncertainty_max_weight=float, policy_optimism=float, root_policy_optimism=float, use_noise_pruning=boolean, noise_prune_utility_scale=float, noise_pruning_cap=float, use_graph_search=boolean, graph_search_catch_up_leak_prob=float, max_playouts=int, max_time=float, nn_randomize=boolean, nn_symmetry=int,
                          fpu_parent_weight_by_visited_policy=boolean, fpu_parent_weight=float, value_weight_exponent=float, chosen_move_subtract=float, chosen_move_prune=float,
                          fpu_loss_prop=float, root_fpu_loss_prop=float, c_puct_log=float, c_puct_base=float,
@@ -165,7 +166,7 @@ def _read(directory, local=False):
     return values
 
 
-def load_config(directory):
+def load_config(directory, run_dir=None):
     directory = Path(directory).resolve()
     configs_root = directory.parent
 
@@ -184,6 +185,8 @@ def load_config(directory):
             if not (parent_dir / "run.cfg").is_file():
                 parent_dir = ROOT / "configs" / parent
             result.update(inherit(parent_dir, ancestors + [current]))
+            # Output locations belong to the selected config, not its parent.
+            result.pop(("run", "run_dir"), None)
         result.update(values)
         # Machine overrides are deliberately applied only at the selected directory.
         return result
@@ -203,7 +206,7 @@ def load_config(directory):
             if section=="reanalysis" and key!="use_reanalyze" and (section,key) not in values and not config[section]["use_reanalyze"]:
                 continue
             if (section, key) not in values:
-                defaults = {("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
+                defaults = {("run", "run_dir"): "", ("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
                             ("policy_init", "policy_after"): "true", ("policy_init", "policy_on_failure"): "true"}
                 if (section,key) not in defaults:
                     raise ValueError(f"Missing required key: {section}.{key}")
@@ -219,6 +222,19 @@ def load_config(directory):
         if not path.is_file():raise ValueError('Missing hint positions file')
         hints['positions_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
     validate(config)
+    if run_dir is not None:
+        if not str(run_dir).strip():
+            raise ValueError("--run-dir must not be empty")
+        destination = Path(run_dir)
+    elif config['run']['run_dir']:
+        destination = ROOT/config['run']['run_dir']
+    else:
+        try:
+            relative = directory.relative_to((ROOT/'configs').resolve())
+        except ValueError as error:
+            raise ValueError(f"Configuration outside {ROOT/'configs'} requires an explicit run_dir or --run-dir: {directory}") from error
+        destination = ROOT/'data'/relative
+    config['run']['run_dir'] = str(destination.resolve())
     return config
 
 
