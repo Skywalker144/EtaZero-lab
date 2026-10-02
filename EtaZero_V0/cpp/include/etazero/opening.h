@@ -22,7 +22,13 @@ struct OpeningResult {
     double start_value = 0;
     std::string failure;
     std::vector<int> actions;
+    // 0=reference Black bot, 1=reference White bot; same bot throughout each balance attempt.
+    std::vector<int> balance_evaluators, policy_evaluators;
+    int initial_position_moves=0, initial_position_kind=0, hint_action=-1;
 };
+
+OpeningResult initialize_opening(Game& game, const OpeningConfig& config, Evaluator& black, Evaluator& white,
+                                 std::mt19937_64& random, const std::function<bool()>& cancelled = {});
 
 OpeningResult initialize_opening(Game& game, const OpeningConfig& config, Evaluator& evaluator,
                                  std::mt19937_64& random, const std::function<bool()>& cancelled = {});

@@ -11,10 +11,12 @@ OpeningConfig::OpeningConfig(const Config& c, const std::string& policy_section)
       balance_exponent(c.number("opening.balance_exponent")),
       rejection_probability(c.number("opening.rejection_probability")),
       rejection_probability_fallback(c.number("opening.rejection_probability_fallback")),
-      max_tries(c.integer("opening.max_tries")), policy_init(c.boolean(policy_section+".policy_init")),
-      policy_after(c.boolean(policy_section+".policy_after")),
-      policy_on_failure(c.boolean(policy_section+".policy_on_failure")),
-      policy_init_mean(c.number(policy_section+".policy_init_mean")), policy_temperature(c.number(policy_section+".policy_temperature")) {
+      max_tries(c.integer("opening.max_tries")), policy_init(c.contains(policy_section+".policy_init") || policy_section=="policy_init"
+          ? c.boolean(policy_section+".policy_init") : false),
+      policy_after(c.contains(policy_section+".policy_after")?c.boolean(policy_section+".policy_after"):true),
+      policy_on_failure(c.contains(policy_section+".policy_on_failure")?c.boolean(policy_section+".policy_on_failure"):true),
+      policy_init_mean(c.contains(policy_section+".policy_init_mean") || (policy_section!="policy_init" && policy_init)
+          ? c.number(policy_section+".policy_init_mean") : (policy_section=="policy_init"?12.0:0.0)), policy_temperature(c.contains(policy_section+".policy_temperature")?c.number(policy_section+".policy_temperature"):1.0) {
     for (double p : {probability, rejection_probability, rejection_probability_fallback})
         if (p < 0 || p > 1) throw std::runtime_error("Invalid opening probability");
     if (max_tries < 1 || max_tries > 1000 || avg_dist_factor < 0 || avg_dist_factor > 100 ||
@@ -71,7 +73,9 @@ struct Cancelled {};
 
 class Initializer {
     const OpeningConfig& config_;
-    Evaluator& evaluator_;
+    Evaluator& black_;
+    Evaluator& white_;
+    Evaluator* balance_evaluator_ = nullptr;
     OpeningRandom random_;
     const std::function<bool()>& cancelled_;
     OpeningResult result_;
@@ -81,7 +85,7 @@ class Initializer {
     }
     double value(const Game& game, int player) {
         check_cancelled();
-        return evaluator_.evaluate(game.observation(player)).value();
+        return balance_evaluator_->evaluate(game.observation(player)).value();
     }
     int nearby_move(const Game& game, double avg_dist) {
         int size = game.size();
@@ -189,7 +193,9 @@ class Initializer {
                 actions.push_back(action);
             }
             if (valid) {
-                random_.coin(0.5);
+                int index=random_.coin(0.5)?0:1;
+                balance_evaluator_=index==0?&black_:&white_;
+                result_.balance_evaluators.push_back(index);
                 int action = balance_move(candidate, rejection);
                 if (!result_.failure.empty()) return;
                 if (action >= 0) {
@@ -215,7 +221,9 @@ class Initializer {
         int count = std::max(0, static_cast<int>(std::floor(random_.exponential() * config_.policy_init_mean - 2.0 * game.turn())));
         for (int i = 0; i < count; ++i) {
             check_cancelled();
-            auto evaluation = evaluator_.evaluate(game.observation());
+            auto& evaluator=game.player()==1?black_:white_;
+            result_.policy_evaluators.push_back(game.player()==1?0:1);
+            auto evaluation = evaluator.evaluate(game.observation());
             if (evaluation.logits.size() != static_cast<size_t>(game.actions()))
                 throw std::runtime_error("Invalid opening policy shape");
             for (int a = 0; a < game.actions(); ++a) {
@@ -243,9 +251,9 @@ class Initializer {
         }
     }
 public:
-    Initializer(const OpeningConfig& config, Evaluator& evaluator, std::mt19937_64& random,
+    Initializer(const OpeningConfig& config, Evaluator& black, Evaluator& white, std::mt19937_64& random,
                 const std::function<bool()>& cancelled)
-        : config_(config), evaluator_(evaluator), random_(random), cancelled_(cancelled) {}
+        : config_(config), black_(black), white_(white), random_(random), cancelled_(cancelled) {}
     OpeningResult run(Game& game) {
         try {
             check_cancelled();
@@ -261,9 +269,14 @@ public:
 };
 }
 
+OpeningResult initialize_opening(Game& game, const OpeningConfig& config, Evaluator& black, Evaluator& white,
+                                 std::mt19937_64& random, const std::function<bool()>& cancelled) {
+    return Initializer(config,black,white,random,cancelled).run(game);
+}
+
 OpeningResult initialize_opening(Game& game, const OpeningConfig& config, Evaluator& evaluator,
                                  std::mt19937_64& random, const std::function<bool()>& cancelled) {
-    return Initializer(config, evaluator, random, cancelled).run(game);
+    return initialize_opening(game,config,evaluator,evaluator,random,cancelled);
 }
 
 }
