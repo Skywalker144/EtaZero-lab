@@ -4,10 +4,13 @@
 #include "etazero/random_evaluator.h"
 #include "etazero/search_limits.h"
 #include <csignal>
+#include <charconv>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <set>
 #include <torch/torch.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -38,46 +41,49 @@ uint64_t mix(uint64_t n) {
 SearchSettings settings(const Config& c, const std::string& mode) {
     bool selfplay = mode == "selfplay";
     std::string section = selfplay ? "search" : mode == "match" ? "match" : "evaluation";
-    SearchSettings s{selfplay?c.integer("search.simulations"):c.integer(section+".visits")-1,
-                     c.integer((selfplay?"selfplay":section)+".search_threads"),
-                     c.number(section+".c_puct"),c.number(section+".virtual_loss"),
-                     selfplay?c.number("exploration.noise_fraction"):0,
-                     selfplay?c.number("exploration.dirichlet_total_concentration"):1,c.boolean(section+".reuse_tree"),
+    auto key = [&](const std::string& group, const std::string& name) {
+        return (selfplay ? group : section) + "." + name;
+    };
+    SearchSettings s{selfplay?c.integer("search.full_search_visits")-1:c.integer(section+".visits")-1,
+                     c.integer(key("parallelism","search_threads")),
+                     c.number(key("puct","c_puct")),c.number(key("puct","virtual_loss")),
+                     selfplay?c.number("dirichlet_noise.noise_fraction"):0,
+                     selfplay?c.number("dirichlet_noise.dirichlet_total_concentration"):1,c.boolean(key("search","reuse_tree")),
                      selfplay?0:c.integer(section+".visits")};
-    s.use_fpu=c.boolean(section+".use_fpu");s.fpu_reduction_max=c.number(section+".fpu_reduction_max");
-    s.root_fpu_reduction_max=c.number(section+".root_fpu_reduction_max");
-    s.fpu_parent_power=c.number(section+".fpu_parent_weight_by_visited_policy_pow");
-    s.use_lcb=c.boolean(section+".use_lcb");s.lcb_stdevs=c.number(section+".lcb_stdevs");
-    s.min_lcb_visit_prop=c.number(section+".min_visit_prop_for_lcb");
-    s.policy_target_pruning=c.boolean(section+".policy_target_pruning");
-    s.value_weight_exponent=c.number(section+".value_weight_exponent");
-    s.chosen_move_subtract=c.number(section+".chosen_move_subtract");s.chosen_move_prune=c.number(section+".chosen_move_prune");
-    s.fpu_loss_prop=c.number(section+".fpu_loss_prop");s.root_fpu_loss_prop=c.number(section+".root_fpu_loss_prop");
-    s.c_puct_log=c.number(section+".c_puct_log");s.c_puct_base=c.number(section+".c_puct_base");
-    s.c_puct_stdev_prior=c.number(section+".c_puct_stdev_prior");s.c_puct_stdev_prior_weight=c.number(section+".c_puct_stdev_prior_weight");
-    s.c_puct_stdev_scale=c.number(section+".c_puct_stdev_scale");
-    s.root_symmetries=c.integer(section+".root_num_symmetries_to_sample");
-    s.nn_policy_temperature=c.number(section+".nn_policy_temperature");
-    s.root_policy_temperature=c.number(section+".root_policy_temperature");
-    s.root_policy_temperature_early=c.number(section+".root_policy_temperature_early");
-    s.temperature_halflife=c.number(section+".temperature_halflife");
-    s.chosen_move_temperature_only_below_prob=c.number(section+".temperature_only_below_prob");
-    if(selfplay){s.shaped_noise=c.boolean("exploration.shaped_dirichlet_noise");s.forced_playouts=c.number("search.root_desired_per_child_visits_coeff");}
+    s.use_fpu=c.boolean(key("fpu","use_fpu"));s.fpu_reduction_max=c.number(key("fpu","fpu_reduction_max"));
+    s.root_fpu_reduction_max=c.number(key("fpu","root_fpu_reduction_max"));
+    s.fpu_parent_power=c.number(key("fpu","fpu_parent_weight_by_visited_policy_pow"));
+    s.use_lcb=c.boolean(key("lcb","use_lcb"));s.lcb_stdevs=c.number(key("lcb","lcb_stdevs"));
+    s.min_lcb_visit_prop=c.number(key("lcb","min_visit_prop_for_lcb"));
+    s.policy_target_pruning=c.boolean(key("policy_target","policy_target_pruning"));
+    s.value_weight_exponent=c.number(key("value_weighting","value_weight_exponent"));
+    s.chosen_move_subtract=c.number(key("policy_target","chosen_move_subtract"));s.chosen_move_prune=c.number(key("policy_target","chosen_move_prune"));
+    s.fpu_loss_prop=c.number(key("fpu","fpu_loss_prop"));s.root_fpu_loss_prop=c.number(key("fpu","root_fpu_loss_prop"));
+    s.c_puct_log=c.number(key("puct","c_puct_log"));s.c_puct_base=c.number(key("puct","c_puct_base"));
+    s.c_puct_stdev_prior=c.number(key("puct","c_puct_stdev_prior"));s.c_puct_stdev_prior_weight=c.number(key("puct","c_puct_stdev_prior_weight"));
+    s.c_puct_stdev_scale=c.number(key("puct","c_puct_stdev_scale"));
+    s.root_symmetries=c.integer(key("symmetry","root_num_symmetries_to_sample"));
+    s.nn_policy_temperature=c.number(key("temperature","nn_policy_temperature"));
+    s.root_policy_temperature=c.number(key("temperature","root_policy_temperature"));
+    s.root_policy_temperature_early=c.number(key("temperature","root_policy_temperature_early"));
+    s.temperature_halflife=c.number(key("temperature","temperature_halflife"));
+    s.chosen_move_temperature_only_below_prob=c.number(key("temperature","temperature_only_below_prob"));
+    if(selfplay){s.shaped_noise=c.boolean("dirichlet_noise.shaped_dirichlet_noise");s.forced_playouts=c.number("forced_playouts.root_desired_per_child_visits_coeff");}
     return s;
 }
 double move_temperature(const Config& c,const std::string& mode,const Game& game) {
     bool selfplay=mode=="selfplay";
-    std::string section=selfplay?"exploration":mode=="match"?"match":"evaluation";
+    std::string section=selfplay?"temperature":mode=="match"?"match":"evaluation";
     return temperature_at_turn(c.number(section+(selfplay?".temperature":".temperature_early")),
         c.number(section+(selfplay?".final_temperature":".temperature")),
-        c.number((selfplay?"search":section)+".temperature_halflife"),game.turn(),game.size()*game.size());
+        c.number(section+".temperature_halflife"),game.turn(),game.size()*game.size());
 }
 template<class T> void array(std::ostream& out, const std::vector<T>& values) {
     out << '['; bool first = true;
     for (auto x : values) { if (!first) out << ','; out << x; first = false; } out << ']';
 }
 std::unique_ptr<BatchEvaluator> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false) {
-    std::string prefix = mode == "infer" ? "selfplay" : mode == "evaluate" ? "evaluation" : mode;
+    std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "evaluate" ? "evaluation" : mode;
     int batch = c.integer(prefix+".max_batch"), canvas = c.integer("network.canvas");
     std::vector<std::unique_ptr<Backend>> backends;
     std::string kind=a.get("evaluator","network");
@@ -108,10 +114,10 @@ int selfplay(const Args& a,const Config& c,BatchEvaluator& service) {
     int count = a.integer("games"), canvas = c.integer("network.canvas");
     if (count < 1) throw std::runtime_error("Selfplay requires positive game count");
     auto* eval=&service;eval->reset_stats();
-    OpeningConfig opening(c); auto search_config=selfplay_search_config(c);
+    OpeningConfig opening(c,"policy_init"); auto search_config=selfplay_search_config(c);
     bool random=a.get("evaluator","network")=="random";
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
-    RecordWriter writer(a.get("output"),source,c.integer("selfplay.shard_rows"),c.integer("selfplay.writer_queue"),c.number("selfplay.flush_seconds"));
+    RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),c.number("writer.flush_seconds"));
     std::vector<int> sizes; std::vector<Rule> rules; std::vector<double> sw, rw;
     for (auto x : c.list("environment.sizes")) sizes.push_back(std::stoi(x));
     for (auto x : c.list("environment.rules")) rules.push_back(parse_rule(x));
@@ -127,7 +133,7 @@ int selfplay(const Args& a,const Config& c,BatchEvaluator& service) {
                 int id = next.fetch_add(1); if (id >= count) break;
                 uint64_t game_seed = mix(seed+id); std::mt19937_64 rng(game_seed);
                 std::mt19937_64 feature_rng(game_seed ^ 0xD1B54A32D192ED03ULL);
-                std::bernoulli_distribution drop_feature(c.number("selfplay.forbidden_feature_dropout_prob"));
+                std::bernoulli_distribution drop_feature(c.number("environment.forbidden_feature_dropout_prob"));
                 int size = sizes[std::discrete_distribution<size_t>(sw.begin(),sw.end())(rng)];
                 Rule rule = rules[std::discrete_distribution<size_t>(rw.begin(),rw.end())(rng)];
                 Game game(size,canvas,rule);search.reset(rng());
@@ -159,14 +165,14 @@ int selfplay(const Args& a,const Config& c,BatchEvaluator& service) {
                 }
                 if (!game.finished()) break; // Interrupted trajectories never receive fabricated targets.
                 record.winner=game.winner(); record.reason=game.reason(); record.final_player=game.player(); record.final_observation=game.observation();
-                apply_training_weights(record,c.number("selfplay.policy_surprise_data_weight"),c.number("selfplay.value_surprise_data_weight"),rng);
+                apply_training_weights(record,c.number("surprise_weighting.policy_surprise_data_weight"),c.number("surprise_weighting.value_surprise_data_weight"),rng);
                 writer.enqueue(std::move(record)); finished.fetch_add(1);
             }
         } catch (...) { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error=std::current_exception(); failure=true; }
     };
     std::vector<std::thread> threads;
     try {
-        for (int i=0;i<std::min(count,c.integer("selfplay.game_threads"));++i) threads.emplace_back(loop);
+        for (int i=0;i<std::min(count,c.integer("parallelism.game_threads"));++i) threads.emplace_back(loop);
     } catch (...) { failure=true;for(auto& t:threads)t.join();throw; }
     for (auto& t:threads) t.join();
     writer.finish();eval->drain();if(error)std::rethrow_exception(error);stats(*eval);
@@ -225,6 +231,95 @@ int evaluate(const Args& a, const Config& c, bool raw) {
     }
     eval->finish();
     std::cout << ",\"nn_requests\":" << eval->requests << ",\"cache_hits\":" << eval->cache_hits << "}\n"; return 0;
+}
+// Interactive actions use the actual board width, unlike search's canvas indices.
+int web_integer(const std::string& text) {
+    int value;
+    auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
+    if(parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size())
+        throw std::runtime_error("Expected integer argument");
+    return value;
+}
+void web_state(const Game& game,const std::vector<int>& moves) {
+    std::cout<<"{\"board_size\":"<<game.size()<<",\"canvas_size\":"<<game.canvas()
+             <<",\"player\":"<<game.player()<<",\"turn\":"<<game.turn()
+             <<",\"finished\":"<<(game.finished()?"true":"false")<<",\"winner\":"<<game.winner()
+             <<",\"reason\":"<<game.reason()<<",\"board\":";
+    array(std::cout,game.board().cells);std::cout<<",\"moves\":";array(std::cout,moves);std::cout<<'}';
+}
+void web_analysis(const SearchResult& result,const Game& game,double seconds,uint64_t requests,uint64_t batches) {
+    std::vector<int> candidates;
+    int64_t total=0;
+    for(int a=0;a<game.actions();++a)if(game.legal(a)){candidates.push_back(a);total+=result.visits[a];}
+    std::stable_sort(candidates.begin(),candidates.end(),[&](int a,int b){return result.move_policy[a]>result.move_policy[b];});
+    std::cout<<"{\"action\":"<<result.action/game.canvas()*game.size()+result.action%game.canvas()
+             <<",\"board_size\":"<<game.size()<<",\"canvas_size\":"<<game.canvas()
+             <<",\"turn\":"<<game.turn()<<",\"player\":"<<game.player()<<",\"root_value\":"<<result.value
+             <<",\"completed_visits\":"<<result.root_visits<<",\"seconds\":"<<seconds
+             <<",\"requests\":"<<requests<<",\"batches\":"<<batches<<",\"wdl\":";
+    array(std::cout,std::vector<double>(result.search_wdl.begin(),result.search_wdl.end()));
+    std::cout<<",\"network_wdl\":";
+    array(std::cout,std::vector<double>(result.network_wdl.begin(),result.network_wdl.end()));
+    std::cout<<",\"board\":";array(std::cout,game.board().cells);std::cout<<",\"candidates\":[";
+    for(size_t i=0;i<candidates.size();++i) {
+        int a=candidates[i];if(i)std::cout<<',';
+        std::cout<<"{\"action\":"<<a/game.canvas()*game.size()+a%game.canvas()<<",\"visits\":"<<result.visits[a]
+                 <<",\"network_prior\":"<<result.network_policy[a]<<",\"visit_policy\":"<<double(result.visits[a])/total
+                 <<",\"selection_weight\":"<<result.move_policy[a]<<'}';
+    }
+    std::cout<<"]}";
+}
+int serve(const Args& a,const Config& c) {
+    auto eval=evaluator(a,c,"evaluate");
+    Search search(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));
+    std::optional<Game> game;
+    std::vector<int> played;
+    const int canvas=c.integer("network.canvas");
+    std::cout<<std::setprecision(17)<<"{\"ok\":true,\"canvas_size\":"<<canvas<<"}\n"<<std::flush;
+    std::string line;
+    while(!stop_requested && std::getline(std::cin,line)) {
+        try {
+            std::istringstream input(line);std::vector<std::string> words;
+            for(std::string word;input>>word;)words.push_back(word);
+            if(words.empty())throw std::runtime_error("Empty command");
+            if(words[0]=="quit" && words.size()==1)break;
+            if(words[0]=="new" && words.size()==3) {
+                Game replacement(web_integer(words[1]),canvas,parse_rule(words[2]));
+                game=std::move(replacement);played.clear();search.reset(std::stoull(a.get("seed","0")));
+            } else if(!game)throw std::runtime_error("Start a new game first");
+            else if(words[0]=="play" && words.size()==2) {
+                int local=web_integer(words[1]);
+                if(local<0 || local>=game->size()*game->size())throw std::runtime_error("Move outside board");
+                game->play(local/game->size()*canvas+local%game->size());played.push_back(local);
+            } else if(words[0]=="undo" && words.size()==2) {
+                int count=web_integer(words[1]);
+                if(count<1 || count>static_cast<int>(played.size()))throw std::runtime_error("Invalid undo count");
+                Game replacement(game->size(),canvas,game->rule());
+                auto retained=played;retained.resize(retained.size()-count);
+                for(int local:retained)replacement.play(local/replacement.size()*canvas+local%replacement.size());
+                game=std::move(replacement);played=std::move(retained);
+            } else if((words[0]=="genmove" || words[0]=="analyze") && words.size()==2) {
+                int visits=web_integer(words[1]);
+                if(visits<2 || visits>100000)throw std::runtime_error("Visits must be in [2, 100000]");
+                Game before=*game;
+                SearchRun options;options.max_visits=visits;options.clear_before_search=true;
+                auto requests=eval->requests.load(),batches=eval->batches.load();
+                auto start=std::chrono::steady_clock::now();
+                auto result=search.run(before,move_temperature(c,"evaluate",before),options);
+                double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+                if(words[0]=="genmove") {
+                    game->play(result.action);played.push_back(result.action/canvas*game->size()+result.action%canvas);
+                }
+                std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played);std::cout<<",\"analysis\":";
+                web_analysis(result,before,seconds,eval->requests.load()-requests,eval->batches.load()-batches);
+                std::cout<<"}\n"<<std::flush;continue;
+            } else if(!(words[0]=="state" && words.size()==1))throw std::runtime_error("Unknown command or arguments");
+            std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played);std::cout<<"}\n"<<std::flush;
+        } catch(const std::exception& error) {
+            std::cout<<"{\"ok\":false,\"error\":"<<quote(error.what())<<"}\n"<<std::flush;
+        }
+    }
+    eval->finish();return 0;
 }
 int match(const Args& a,const Config& c) {
     auto ea=evaluator(a,c,"match"),eb=evaluator(a,c,"match",true);
@@ -308,16 +403,17 @@ int match(const Args& a,const Config& c) {
 }
 int main(int argc,char** argv) {
     try {
-        if(argc<2)throw std::runtime_error("Expected selfplay, worker, evaluate, infer or match");
+        if(argc<2)throw std::runtime_error("Expected selfplay, worker, evaluate, infer, match or serve");
         std::string mode=argv[1]; Args args(argc,argv); Config config(args.get("config"));
         if(mode=="selfplay" || mode=="worker" || mode=="infer")
             if(config.text("agent.algorithm")!="alphazero" || config.text("agent.root_search_algo")!="puct" || config.text("agent.nonroot_search_algo")!="puct")
                 throw std::runtime_error("Native executable only supports AlphaZero/PUCT/PUCT");
-        torch::set_num_threads(config.integer(mode=="evaluate"?"evaluation.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
+        torch::set_num_threads(config.integer((mode=="evaluate" || mode=="serve")?"evaluation.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
         if(mode=="selfplay") {auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service);service->finish();return code;}
         if(mode=="worker")return worker(args,config);
         if(mode=="evaluate"||mode=="infer")return evaluate(args,config,mode=="infer");
+        if(mode=="serve")return serve(args,config);
         if(mode=="match")return match(args,config);
         throw std::runtime_error("Unknown native command: "+mode);
     } catch(const std::exception& error) {std::cerr<<"EtaZero: "<<error.what()<<'\n';return 1;}

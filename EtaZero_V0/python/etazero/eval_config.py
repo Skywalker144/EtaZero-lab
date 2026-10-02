@@ -23,7 +23,7 @@ def load_evaluation_config(directory, match=False, environ=None):
     section = 'match' if match else 'evaluation'
     fields = {section: dict(SEARCH, **({'games': int, 'game_threads': int} if match else {}))}
     if match:
-        fields['opening'] = FIELDS['opening'][1]
+        fields['opening'] = {**FIELDS['opening'][1], **FIELDS['policy_init'][1]}
     values = {}
 
     def read(current, local=False):

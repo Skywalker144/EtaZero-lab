@@ -6,9 +6,11 @@ PLANES = ("on_board", "own", "opponent", "black_forbidden_black_to_move", "black
 GLOBALS = ("standard", "renju", "renju_color", "forbidden_feature_enabled")
 RULES = ("freestyle", "standard", "renju")
 REASONS = ("draw", "five", "forbidden")
+POLICY_HEADS = ("policy", "opponent_policy", "soft_policy", "soft_opponent_policy")
 RAW_DTYPES = {
     "observations": "uint8", "globals": "float32", "players": "int8", "actions": "int32",
-    "policies": "float32", "visits": "int64", "simulations": "int32",
+    "policies": "float32", "opponent_policies": "float32", "opponent_policy_weights": "float32",
+    "visits": "int64", "simulations": "int32",
     "temperatures": "float32", "rewards": "float32", "game_offsets": "int64",
     "observation_offsets": "int64", "game_ids": "uint64", "seeds": "uint64",
     "sizes": "int16", "rules": "int8", "winners": "int8", "reasons": "int8",
@@ -17,15 +19,19 @@ RAW_DTYPES = {
     "network_wdl": "float32", "search_wdl": "float32", "cheap_search": "uint8", "opening_moves": "int16",
     "balanced_moves": "int16", "policy_moves": "int16", "opening_attempts": "int32",
     "opening_status": "int8", "start_values": "float32",
+    "sample_indices": "int64",
 }
 CONTRACT = {"planes": PLANES, "globals": GLOBALS,
             "global_layout": "float32[N,4]; standard,renju,Renju Black=-1 White=+1,forbidden enabled",
             "feature_dropout": "independent per training row, forbidden planes and enabled flag zero together", "rules": RULES, "reasons": REASONS,
             "observations": "uint8[N,planes,ceil(canvas*canvas/8)], MSB first, zero tail bits",
             "raw_dtypes": RAW_DTYPES, "rows": "sum(row_repeats); train_mask marks searched suffix; plies counts all actions",
-            "opening": "leading train_mask=0 prefix, zero policy/visits/budget, full trajectory retained", "actions": "canvas-row-major",
+            "opening": "leading train_mask=0 prefix, zero budget, full packed trajectory retained", "actions": "canvas-row-major",
+            "search_storage": "policy and visits stored once for sample_indices=flatnonzero(row_repeats); packed trajectory and lightweight WDL/weight diagnostics retain all steps",
             "value": "side-to-move W/D/L one-hot terminal target",
             "model_outputs": ["logits[N,C*C]", "wdl_logits[N,3]"],
+            "training_policy_heads": POLICY_HEADS,
+            "opponent_policy": "next actual turn search, independent of its row repeat; final turn uniform placeholder and weight zero",
             "sampling": "KataGo surprise weights stochastically rounded once per game; repeat rows in training view"}
 CONTRACT_ID = hashlib.sha256(json.dumps(CONTRACT, sort_keys=True).encode()).hexdigest()
 

@@ -57,6 +57,21 @@ def save_npz(path, arrays):
     atomic_write(path, write, immutable=True)
 
 
+def write_npz(path, arrays, compressed=True):
+    """Stream compact arrays with fast DEFLATE; callers choose publication durability."""
+    import numpy as np
+    import zipfile
+    mode = zipfile.ZIP_DEFLATED if compressed else zipfile.ZIP_STORED
+    with zipfile.ZipFile(path, 'w', compression=mode, compresslevel=1 if compressed else None) as archive:
+        for key, array in arrays.items():
+            # Fixed timestamps make derived cache bytes independent of wall clock.
+            info = zipfile.ZipInfo(key+'.npy', date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = mode
+            info._compresslevel = 1 if compressed else None
+            with archive.open(info, 'w', force_zip64=True) as stream:
+                np.lib.format.write_array(stream, np.asarray(array), allow_pickle=False)
+
+
 # Context-manager form used by the standalone arena and Elo writer.
 from contextlib import contextmanager
 import fcntl

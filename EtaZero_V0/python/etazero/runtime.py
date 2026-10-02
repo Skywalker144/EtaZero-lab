@@ -21,7 +21,7 @@ from .native import NativeWorker
 from .export import export_model
 from .shuffle import build_snapshot, desired_window, prune_derived
 from .storage import atomic_write, load_json, save_json, sha256, sync_directory
-from .training import initialize, train_iteration
+from .training import initialize, train_iteration, prune_checkpoints
 
 
 class Journal:
@@ -275,6 +275,7 @@ class Controller:
             if origin and sha256(origin["path"])!=origin["sha256"]:
                 raise ValueError("Weights initialization source changed")
             state["checkpoint"]=initialize(root,c,origin["path"] if origin else None);self.state(state)
+        self.prune_checkpoints()
         self.catalog=Catalog(root,info["id"],self.config_id)
         plotted=False
         while not self.stopping() and (not self.max_iteration or state["iteration"]<=self.max_iteration) and (not self.limit or state["elapsed_seconds"] < self.limit):
@@ -354,12 +355,19 @@ class Controller:
             state=next_state
             if state['model']:
                 self.publish(state['model'],state['elapsed_seconds'])
+            self.prune_checkpoints()
             plotted=True
             print(f'iteration={iteration} complete rows={rows} trained_samples={state["checkpoint"]["total_samples"]}',flush=True)
         if not plotted or self.stop:
             self.plot()
         self.journal("run_stopped" if self.stop else "run_complete",completed_iterations=state["iteration"]-1)
         return state
+
+    def prune_checkpoints(self):
+        removed = prune_checkpoints(self.root, self.config['training']['checkpoint_keep'])
+        if removed:
+            self.journal('checkpoints_pruned', paths=removed,
+                         keep=self.config['training']['checkpoint_keep'])
 
     def plot(self,state=None):
         from .plotting import plot_run

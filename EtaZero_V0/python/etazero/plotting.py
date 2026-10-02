@@ -13,7 +13,8 @@ THEME = {
     'grid.color': '#3b4250', 'legend.labelcolor': '#abb2bf', 'legend.frameon': False,
     'font.size': 10, 'axes.titlesize': 12, 'axes.titleweight': 'bold', 'grid.linewidth': .7,
 }
-METRICS = ('loss', 'policy_loss', 'value_loss', 'grad_norm')
+METRICS = ('loss', 'policy_loss', 'opponent_policy_loss', 'soft_policy_loss',
+           'soft_opponent_policy_loss', 'value_loss', 'grad_norm')
 
 
 def journal_events(path):
@@ -127,7 +128,7 @@ def training_figure(history):
              'Effective training rows per game', 'Gradient norm'),
             [('Cumulative effective self-play rows', 'Share of games'),
              ('Cumulative effective self-play rows', 'Moves per game'),
-             ('Iteration (1-based)', 'Mean loss'), ('Iteration (1-based)', 'Mean loss'),
+             ('Iteration (1-based)', 'Mean loss'), ('Iteration (1-based)', 'Mean weighted loss'),
              ('Cumulative effective self-play rows', 'Effective rows per game'),
              ('Iteration (1-based)', 'Mean L2 grad norm (before clipping)')],
             'EtaZero AlphaZero training progress')
@@ -147,7 +148,10 @@ def training_figure(history):
         x = [r['iteration'] for r in trained]
         _series(axes[2], [('Total', ORANGE, x, [r['loss'] for r in trained])], True)
         _series(axes[3], [(label, color, x, [r[key] for r in trained]) for key, label, color in
-                          (('policy_loss', 'Policy', BLUE), ('value_loss', 'Value', GREEN))], True)
+                          (('policy_loss', 'Policy', BLUE), ('opponent_policy_loss', 'Opponent policy', RED),
+                           ('soft_policy_loss', 'Soft policy', ORANGE),
+                           ('soft_opponent_policy_loss', 'Soft opponent policy', '#c678dd'),
+                           ('value_loss', 'Value', GREEN))], True)
         _series(axes[5], [('Network', ORANGE, x, [r['grad_norm'] for r in trained])], True)
         for axis in (axes[2], axes[3], axes[5]):
             axis.set_xlim(0, max(1.25, max(x, default=1)*1.025))

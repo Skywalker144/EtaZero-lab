@@ -6,15 +6,15 @@
 
 namespace etazero {
 
-OpeningConfig::OpeningConfig(const Config& c)
+OpeningConfig::OpeningConfig(const Config& c, const std::string& policy_section)
     : probability(c.number("opening.probability")), avg_dist_factor(c.number("opening.avg_dist_factor")),
       balance_exponent(c.number("opening.balance_exponent")),
       rejection_probability(c.number("opening.rejection_probability")),
       rejection_probability_fallback(c.number("opening.rejection_probability_fallback")),
-      max_tries(c.integer("opening.max_tries")), policy_init(c.boolean("opening.policy_init")),
-      policy_after(c.boolean("opening.policy_after")),
-      policy_on_failure(c.boolean("opening.policy_on_failure")),
-      policy_init_mean(c.number("opening.policy_init_mean")), policy_temperature(c.number("opening.policy_temperature")) {
+      max_tries(c.integer("opening.max_tries")), policy_init(c.boolean(policy_section+".policy_init")),
+      policy_after(c.boolean(policy_section+".policy_after")),
+      policy_on_failure(c.boolean(policy_section+".policy_on_failure")),
+      policy_init_mean(c.number(policy_section+".policy_init_mean")), policy_temperature(c.number(policy_section+".policy_temperature")) {
     for (double p : {probability, rejection_probability, rejection_probability_fallback})
         if (p < 0 || p > 1) throw std::runtime_error("Invalid opening probability");
     if (max_tries < 1 || max_tries > 1000 || avg_dist_factor < 0 || avg_dist_factor > 100 ||

@@ -49,12 +49,14 @@ class BatchReader:
             raise ValueError(f"Snapshot file checksum mismatch: {path}")
         with np.load(path, allow_pickle=False) as file:
             arrays = {key: file[key] for key in file.files}
-        if set(arrays) != {"obs", "globals", "policy", "value"} or len(arrays["value"]) != info["rows"]:
+        if set(arrays) != {"obs", "globals", "policy", "opponent_policy", "opponent_policy_weight", "value"} or len(arrays["value"]) != info["rows"]:
             raise ValueError(f"Invalid training view: {path}")
         canvas = self.manifest["canvas"]
         expected = {"obs": ((info["rows"],len(PLANES),(canvas*canvas+7)//8),np.uint8),
                     "globals": ((info["rows"],len(GLOBALS)),np.float32),
-                    "policy": ((info["rows"],canvas*canvas),np.float32),"value": ((info["rows"],3),np.float32)}
+                    "policy": ((info["rows"],canvas*canvas),np.float32),
+                    "opponent_policy": ((info["rows"],canvas*canvas),np.float32),
+                    "opponent_policy_weight": ((info["rows"],),np.float32),"value": ((info["rows"],3),np.float32)}
         for key,(shape,dtype) in expected.items():
             if arrays[key].shape != shape or arrays[key].dtype != dtype:
                 raise ValueError(f"Invalid training {key} layout: {path}")

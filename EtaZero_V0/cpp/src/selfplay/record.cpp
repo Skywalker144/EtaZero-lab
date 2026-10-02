@@ -172,15 +172,16 @@ struct RecordWriter::Buffers {
     std::vector<float> start_values, globals;
     std::vector<std::string> opening_failures;
     std::vector<uint64_t> ids,seeds;
-    std::vector<int64_t> game_offsets,obs_offsets,visits;
+    std::vector<int64_t> game_offsets,obs_offsets,visits,sample_indices;
     std::vector<int32_t> actions,simulations;
-    std::vector<float> policies,temperatures,rewards;
+    std::vector<float> policies,opponent_policies,opponent_policy_weights,temperatures,rewards;
     Buffers(int c,size_t rows) : canvas(c),actions_count(c*c),packed_area((c*c+7)/8),row_capacity(rows+c*c) {
         // At most one final whole game beyond the row threshold; T+1 observations
         // are retained for every trajectory. Allocations are reused after flushes.
         observations.reserve(2*row_capacity*INPUT_PLANES*packed_area);players.reserve(2*row_capacity);
         globals.reserve(2*row_capacity*GLOBAL_FEATURES);
         visits.reserve(row_capacity*actions_count);policies.reserve(row_capacity*actions_count);
+        opponent_policies.reserve(row_capacity*actions_count);opponent_policy_weights.reserve(row_capacity);
         actions.reserve(row_capacity);simulations.reserve(row_capacity);temperatures.reserve(row_capacity);rewards.reserve(row_capacity);
         ids.reserve(row_capacity);seeds.reserve(row_capacity);sizes.reserve(row_capacity);
         rules.reserve(row_capacity);winners.reserve(row_capacity);reasons.reserve(row_capacity);
@@ -189,9 +190,10 @@ struct RecordWriter::Buffers {
     void reset() {
         observations.clear();globals.clear();players.clear();rules.clear();winners.clear();reasons.clear();sizes.clear();ids.clear();seeds.clear();
         visits.clear();actions.clear();simulations.clear();policies.clear();temperatures.clear();rewards.clear();
+        opponent_policies.clear();opponent_policy_weights.clear();
         opening_moves.clear();balanced_moves.clear();policy_moves.clear();opening_attempts.clear();
         row_repeats.clear();target_weights.clear();policy_surprises.clear();value_surprises.clear();
-        network_wdl.clear();search_wdl.clear();cheap_search.clear();
+        network_wdl.clear();search_wdl.clear();cheap_search.clear();sample_indices.clear();
         opening_status.clear();train_mask.clear();start_values.clear();opening_failures.clear();
         game_offsets.clear();obs_offsets.clear();game_offsets.push_back(0);obs_offsets.push_back(0);
     }
@@ -219,7 +221,8 @@ void RecordWriter::append(const FinishedGame& g) {
     b.policy_moves.push_back(g.opening.policy_moves);b.opening_attempts.push_back(g.opening.attempts);
     b.opening_status.push_back(static_cast<int8_t>(g.opening.status));b.start_values.push_back(g.opening.start_value);
     b.opening_failures.push_back(g.opening.failure);
-    for(auto& s:g.steps) {
+    for(size_t turn=0;turn<g.steps.size();++turn) {
+        const auto& s=g.steps[turn];
         b.train_mask.push_back(s.trainable);b.cheap_search.push_back(s.cheap_search);
         b.row_repeats.push_back(s.trainable?s.row_repeats:0);b.target_weights.push_back(s.trainable?s.target_weight:0);
         b.policy_surprises.push_back(s.policy_surprise);b.value_surprises.push_back(s.value_surprise);
@@ -227,9 +230,28 @@ void RecordWriter::append(const FinishedGame& g) {
         b.search_wdl.insert(b.search_wdl.end(),s.search_wdl.begin(),s.search_wdl.end());
         if(s.policy.size()!=static_cast<size_t>(b.actions_count) || s.visits.size()!=s.policy.size())
             throw std::runtime_error("Writer policy/visit shape mismatch");
+        // Full packed trajectories share one atomic shard with sampled search rows.
+        // Resolve surprise weights before this filter: cheap positions may regain weight.
+        if(s.trainable && s.row_repeats>0) {
+            b.sample_indices.push_back(b.actions.size());
+            b.policies.insert(b.policies.end(),s.policy.begin(),s.policy.end());
+            b.visits.insert(b.visits.end(),s.visits.begin(),s.visits.end());
+            // KataGo trainingwrite.cpp uses the actual next turn's search target,
+            // even if that turn has zero sampling weight (e.g. a cheap search).
+            bool has_next=turn+1<g.steps.size();
+            b.opponent_policy_weights.push_back(has_next?1.0f:0.0f);
+            if(has_next) {
+                const auto& next=g.steps[turn+1];
+                if(!next.trainable || next.policy.size()!=s.policy.size())
+                    throw std::runtime_error("Missing next-turn opponent policy");
+                b.opponent_policies.insert(b.opponent_policies.end(),next.policy.begin(),next.policy.end());
+            } else {
+                // Normalizable placeholder only; both opponent losses have zero weight.
+                b.opponent_policies.insert(b.opponent_policies.end(),b.actions_count,1.0f/b.actions_count);
+            }
+        }
         b.observation(s.observation,s.player);b.actions.push_back(s.action);b.simulations.push_back(s.simulations);
         b.temperatures.push_back(s.temperature);b.rewards.push_back(s.reward);
-        b.policies.insert(b.policies.end(),s.policy.begin(),s.policy.end());b.visits.insert(b.visits.end(),s.visits.begin(),s.visits.end());
     }
     b.observation(g.final_observation,g.final_player);b.game_offsets.push_back(b.actions.size());b.obs_offsets.push_back(b.players.size());
 }
@@ -259,7 +281,7 @@ void RecordWriter::loop() {
 void RecordWriter::publish() {
     auto& b=*buffers_;
     const int canvas=b.canvas,actions_count=b.actions_count;
-    const size_t n=b.ids.size(),t=b.actions.size(),o=b.players.size();
+    const size_t n=b.ids.size(),t=b.actions.size(),o=b.players.size(),s=b.sample_indices.size();
     std::string shard = "shard_" + std::to_string(next_shard_++) + ".npz";
     auto created = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     size_t rows=0;for(auto repeats:b.row_repeats)rows+=repeats;
@@ -278,8 +300,11 @@ void RecordWriter::publish() {
     zip.array("observations", b.observations, "|u1", {o, INPUT_PLANES, static_cast<size_t>(b.packed_area)});
     zip.array("globals", b.globals, "<f4", {o, GLOBAL_FEATURES});
     zip.array("players", b.players, "|i1", {o}); zip.array("actions", b.actions, "<i4", {t});
-    zip.array("policies", b.policies, "<f4", {t, static_cast<size_t>(actions_count)});
-    zip.array("visits", b.visits, "<i8", {t, static_cast<size_t>(actions_count)}); zip.array("simulations", b.simulations, "<i4", {t});
+    zip.array("sample_indices",b.sample_indices,"<i8",{s});
+    zip.array("policies", b.policies, "<f4", {s, static_cast<size_t>(actions_count)});
+    zip.array("opponent_policies", b.opponent_policies, "<f4", {s, static_cast<size_t>(actions_count)});
+    zip.array("opponent_policy_weights", b.opponent_policy_weights, "<f4", {s});
+    zip.array("visits", b.visits, "<i8", {s, static_cast<size_t>(actions_count)}); zip.array("simulations", b.simulations, "<i4", {t});
     zip.array("temperatures", b.temperatures, "<f4", {t}); zip.array("rewards", b.rewards, "<f4", {t});
     zip.array("game_offsets", b.game_offsets, "<i8", {n+1}); zip.array("observation_offsets", b.obs_offsets, "<i8", {n+1});
     zip.array("game_ids", b.ids, "<u8", {n}); zip.array("seeds", b.seeds, "<u8", {n}); zip.array("sizes", b.sizes, "<i2", {n});

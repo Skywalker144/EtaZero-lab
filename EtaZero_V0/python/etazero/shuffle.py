@@ -15,7 +15,7 @@ import fcntl
 import numpy as np
 from .data import read_raw, training_view
 from .schema import CONTRACT_ID
-from .storage import atomic_write, load_json, save_json, save_npz, sha256, sync_directory
+from .storage import atomic_write, load_json, save_json, save_npz, sha256, sync_directory, write_npz
 
 
 def desired_window(rows, replay):
@@ -38,12 +38,11 @@ def _load_view(path):
         return {k: a[k] for k in a.files}
 
 
-def _temporary(path, arrays):
-    # Scratch is private to an unpublished attempt: no compression, hashing or fsync.
+def _temporary(path, arrays, compressed=True):
+    # Private scratch uses fast compression and skips hashing/fsync.
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as file:
-        np.savez(file, **arrays)
+    write_npz(path, arrays, compressed=compressed)
 
 
 def partition_rows(rows, buckets, rng):
@@ -84,7 +83,7 @@ def _source_view(path, expected_hash, cache):
 
 
 def _scatter(task):
-    index, sources, raw, root, buckets, seed, cache, keep_prob = task
+    index, sources, raw, root, buckets, seed, cache, keep_prob, compressed = task
     rng = np.random.default_rng(np.random.SeedSequence([seed, index]))
     views = []
     for path, expected_hash in sources:
@@ -105,13 +104,13 @@ def _scatter(task):
         select = order[offsets[bucket]:offsets[bucket+1]]
         if len(select):
             path = Path(root) / f"bucket_{bucket}" / f"group_{index}.npz"
-            _temporary(path, {k: v[select] for k, v in arrays.items()})
+            _temporary(path, {k: v[select] for k, v in arrays.items()}, compressed)
             counts.append((bucket, str(path), len(select)))
     return counts
 
 
 def _merge_bucket(task):
-    paths, total, scratch, output, limit, shard_rows, seed, label = task
+    paths, total, scratch, output, limit, shard_rows, seed, label, compressed = task
     rng = np.random.default_rng(seed)
     if total > limit:
         # Unusually large random buckets are re-scattered, with no row loss.
@@ -126,7 +125,7 @@ def _merge_bucket(task):
                     take = order[offsets[b]:offsets[b+1]]
                     if len(take):
                         dest = Path(scratch) / f"{label}_{i}_{start}_{b}.npz"
-                        _temporary(dest, {k: a[take] for k, a in part.items()})
+                        _temporary(dest, {k: a[take] for k, a in part.items()}, compressed)
                         children[b].append(str(dest)); counts[b] += len(take)
             del arrays, part
             Path(path).unlink()
@@ -134,7 +133,7 @@ def _merge_bucket(task):
         for b, child in enumerate(children):
             if child:
                 result.extend(_merge_bucket((child, counts[b], scratch, output, limit, shard_rows,
-                                              int(rng.integers(2**63)), f"{label}_{b}")))
+                                              int(rng.integers(2**63)), f"{label}_{b}", compressed)))
         return result
     if not total:
         return []
@@ -159,8 +158,12 @@ def _merge_bucket(task):
         raise ValueError("Intermediate shuffle count mismatch")
     permutation = rng.permutation(total)
     result = []
-    for start in range(0, total, shard_rows):
-        selection = permutation[start:start+shard_rows]
+    # Equal slices avoid a one-row tail file just above a shard-size boundary.
+    # The same shuffled rows are consumed once; every shard stays within its cap.
+    file_count = math.ceil(total/shard_rows)
+    for index in range(file_count):
+        start, stop = index*total//file_count, (index+1)*total//file_count
+        selection = permutation[start:stop]
         path = Path(output) / f"train_{label}_{start}.npz"
         save_npz(path, {k: a[selection] for k, a in arrays.items()})
         result.append({"path": path.name, "rows": len(selection), "sha256": sha256(path)})
@@ -170,9 +173,9 @@ def _merge_bucket(task):
 def resource_plan(rows, max_raw_rows, groups, config):
     """Conservative array estimates, excluding interpreter/allocator and OS overhead."""
     s, canvas = config["shuffle"], config["network"]["canvas"]
-    train_bytes = 4*4 + 5*((canvas*canvas+7)//8) + 4*canvas*canvas + 12
+    train_bytes = 4*4 + 5*((canvas*canvas+7)//8) + 8*canvas*canvas + 4 + 12
     # Raw includes int64 visits and at most twice as many observations as moves.
-    raw_bytes = 12*canvas*canvas + 10*((canvas*canvas+7)//8) + 160
+    raw_bytes = 16*canvas*canvas + 10*((canvas*canvas+7)//8) + 164
     budget = s["memory_mb"]*1024**2
     per_worker = budget//s["workers"]
     group_rows = min(s["group_rows"], per_worker//(3*raw_bytes))
@@ -193,6 +196,7 @@ def resource_plan(rows, max_raw_rows, groups, config):
             "output_rows_estimate":output_rows,"keep_prob":keep_prob,
             "training_view_cache_bytes_estimate":rows*train_bytes*2,
             "group_rows": group_rows, "bucket_rows": bucket_rows, "waves": waves,
+            "compress_temp": s['compress_temp'],
             "buckets_per_wave": buckets, "array_memory_budget_bytes": budget,
             "scatter_array_bytes_estimate": group_rows*3*raw_bytes*s["workers"],
             "merge_array_bytes_estimate": bucket_rows*(4*train_bytes+16)*s["workers"],
@@ -220,13 +224,13 @@ def _source_groups(root, chosen, limit, seed):
 
 def _two_phase(pool, groups, raw, rows, scratch, output, plan, shard_rows, seed, label, cache, keep_prob=1.0):
     buckets = max(1, math.ceil(rows/plan["bucket_rows"]))
-    assignments = pool.map(_scatter, [(i,g,raw,str(scratch),buckets,seed,str(cache),keep_prob) for i,g in enumerate(groups)])
+    assignments = pool.map(_scatter, [(i,g,raw,str(scratch),buckets,seed,str(cache),keep_prob,plan['compress_temp']) for i,g in enumerate(groups)])
     files, counts = [[] for _ in range(buckets)], [0]*buckets
     for group_output in assignments:
         for bucket, path, n in group_output:
             files[bucket].append(path); counts[bucket] += n
     tasks = [(files[b],counts[b],str(scratch),str(output),plan["bucket_rows"],shard_rows,
-              seed+b+1,f"{label}_{b}") for b in range(buckets)]
+              seed+b+1,f"{label}_{b}",plan['compress_temp']) for b in range(buckets)]
     return [e for group in pool.map(_merge_bucket,tasks) for e in group]
 
 
@@ -250,7 +254,7 @@ def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None):
                                  seed,'0',cache,keep_prob)
         else:
             waves = [[] for _ in range(plan['waves'])]
-            scatter = workers.map(_scatter,[(i,g,True,str(scratch/'waves'),plan['waves'],seed,str(cache),keep_prob)
+            scatter = workers.map(_scatter,[(i,g,True,str(scratch/'waves'),plan['waves'],seed,str(cache),keep_prob,plan['compress_temp'])
                                              for i,g in enumerate(groups)])
             for assignments in scatter:
                 for wave,path,n in assignments:

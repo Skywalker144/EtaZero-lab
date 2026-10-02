@@ -54,7 +54,8 @@ def export_model(run_dir, config, checkpoint, binary):
     probes = [example_inputs(canvas,s,r,(0,canvas)) for s in sizes for r in rules]
     tensor_inputs = tuple(torch.from_numpy(np.stack(x)).to(device) for x in zip(*probes))
     with torch.inference_mode():
-        eager = model(*tensor_inputs)
+        eager_policy,eager_value = model(*tensor_inputs)
+        eager = eager_policy[:,0],eager_value
         # Validate both initial execution and the graph optimized after profiling.
         for _ in range(3):
             jit = scripted(*tensor_inputs)
@@ -67,13 +68,13 @@ def export_model(run_dir, config, checkpoint, binary):
                "--rule",rules[0],"--moves",f"0,{canvas}"]
     output = subprocess.run(command,text=True,capture_output=True,check=True)
     native = json.loads(output.stdout)
-    precision=config["selfplay"]["inference_precision"]
+    precision=config['inference']['inference_precision']
     rtol,atol=(3e-3,3e-3) if precision=="float16" else (2e-4,2e-5)
     # Native infer evaluates one position. TF32 convolution kernels can differ
     # with batch size, so use the same shape for its eager reference.
     with torch.inference_mode():
         native_reference=model(*(x[:1] for x in tensor_inputs))
-    np.testing.assert_allclose(native["raw_logits"],native_reference[0][0].cpu().numpy(),rtol=rtol,atol=atol)
+    np.testing.assert_allclose(native["raw_logits"],native_reference[0][0,0].cpu().numpy(),rtol=rtol,atol=atol)
     wdl=torch.softmax(native_reference[1][0].float(),dim=0).cpu().numpy()
     np.testing.assert_allclose(native["raw_wdl"],wdl,rtol=rtol,atol=atol)
     np.testing.assert_allclose(native["raw_value"],wdl[0]-wdl[2],rtol=rtol,atol=atol)

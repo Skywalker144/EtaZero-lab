@@ -26,4 +26,6 @@ def augment_batch(batch, symmetry):
     return {**batch,
             'obs': apply_symmetry(batch['obs'], symmetry).contiguous(),
             'policy': apply_symmetry(batch['policy'].reshape(-1, canvas, canvas), symmetry)
+                      .reshape(-1, canvas * canvas).contiguous(),
+            'opponent_policy': apply_symmetry(batch['opponent_policy'].reshape(-1, canvas, canvas), symmetry)
                       .reshape(-1, canvas * canvas).contiguous()}

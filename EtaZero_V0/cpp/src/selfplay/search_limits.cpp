@@ -1,7 +1,6 @@
 #include "etazero/search_limits.h"
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 namespace etazero {
 namespace {
@@ -16,14 +15,11 @@ void validate(const SelfplaySearchConfig& c) {
 }
 }
 SelfplaySearchConfig selfplay_search_config(const Config& c) {
-    int simulations=c.integer("search.simulations");
-    if(simulations<1 || simulations==std::numeric_limits<int>::max())
-        throw std::runtime_error("Invalid full selfplay search budget");
-    SelfplaySearchConfig result{simulations+1,c.integer("search.cheap_search_visits"),
-        c.number("search.cheap_search_probability"),c.number("search.cheap_search_target_weight"),
-        c.boolean("search.clear_before_search"),c.boolean("search.reduce_visits"),
-        c.number("search.reduce_visits_threshold"),c.integer("search.reduce_visits_threshold_lookback"),
-        c.integer("search.reduced_visits_min"),c.number("search.reduced_visits_weight")};
+    SelfplaySearchConfig result{c.integer("search.full_search_visits"),c.integer("search.cheap_search_visits"),
+        c.number("search.cheap_search_probs"),c.number("search.cheap_search_target_weight"),
+        c.boolean("search.clear_before_search"),c.boolean("reduce_visits.reduce_visits"),
+        c.number("reduce_visits.reduce_visits_threshold"),c.integer("reduce_visits.reduce_visits_threshold_lookback"),
+        c.integer("reduce_visits.reduced_visits_min"),c.number("reduce_visits.reduced_visits_weight")};
     validate(result);return result;
 }
 SelfplaySearchLimits selfplay_search_limits(const SelfplaySearchConfig& c,

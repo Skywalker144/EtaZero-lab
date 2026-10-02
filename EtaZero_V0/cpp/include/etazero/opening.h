@@ -11,7 +11,7 @@ struct OpeningConfig {
     int max_tries;
     bool policy_init, policy_after, policy_on_failure;
     double policy_init_mean, policy_temperature;
-    explicit OpeningConfig(const Config& c);
+    explicit OpeningConfig(const Config& c, const std::string& policy_section = "opening");
 };
 
 enum class OpeningStatus { NotAttempted, Success, Failed, Interrupted };

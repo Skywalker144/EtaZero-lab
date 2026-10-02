@@ -12,7 +12,7 @@ from .network import make_network, TrainingForward
 from .optimization import Optimization, optimizer_for
 from .reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
 from .schema import CONTRACT_ID
-from .storage import atomic_write, load_json, save_json, sha256
+from .storage import atomic_write, load_json, save_json, sha256, sync_directory
 from .symmetry import augment_batch
 
 MAX_AMP_RETRIES = 32
@@ -70,6 +70,53 @@ def commit_checkpoint(run_dir, config, model, optimizer, scaler, iteration, step
     return reference
 
 
+def prune_checkpoints(run_dir, keep):
+    """Prune committed payloads only; JSON lineage and inference models stay intact."""
+    if keep < 1:
+        raise ValueError("checkpoint_keep must be positive")
+    root = Path(run_dir)
+    # Read the durable authority rather than accepting a candidate round state.
+    state = load_json(root/".internal/state.json")
+    if state["iteration"] == 0 or state["checkpoint"] is None:
+        return []
+    reference = state["checkpoint"]
+    seen, rounds, retained, payloads = set(), set(), set(), []
+    previous_iteration = state["iteration"]
+    while reference:
+        relative = Path(reference["path"])
+        iteration = reference["iteration"]
+        if relative.parent != Path("checkpoints") or relative.suffix != ".pt":
+            raise ValueError(f"Invalid checkpoint path: {relative}")
+        if reference["id"] in seen:
+            raise ValueError("Checkpoint lineage contains a cycle")
+        if not 0 <= iteration <= previous_iteration or iteration >= state["iteration"]:
+            raise ValueError("Checkpoint lineage contains an uncommitted or unordered round")
+        seen.add(reference["id"])
+        previous_iteration = iteration
+        path = root/relative
+        sidecar = load_json(path.with_suffix(".json"))
+        if any(sidecar.get(key) != value for key, value in reference.items()):
+            raise ValueError(f"Checkpoint metadata differs from its reference: {relative}")
+        # The first checkpoint encountered for each round is its final one.
+        if iteration not in rounds:
+            rounds.add(iteration)
+            if len(rounds) <= keep:
+                if not path.is_file():
+                    raise FileNotFoundError(f"Retained checkpoint is missing: {path}")
+                retained.add(path)
+        payloads.append(path)
+        reference = sidecar["parent"]
+    # Validate the whole chain before deleting; interrupted deletion is retryable.
+    removed = []
+    for path in payloads:
+        if path not in retained and path.exists():
+            path.unlink()
+            removed.append(str(path.relative_to(root)))
+    if removed:
+        sync_directory(root/"checkpoints")
+    return removed
+
+
 def initialize(run_dir, config, weights=None):
     seed = config["run"]["seed"]
     random.seed(seed); np.random.seed(seed % 2**32); torch.manual_seed(seed)
@@ -101,12 +148,14 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     if progress and (checkpoint["iteration"] != iteration or checkpoint["step"] > plan["train_steps"]):
         raise ValueError("Learner checkpoint belongs to a different iteration or exceeds its budget")
     model = make_network(config).to(device); model.load_state_dict(checkpoint["model"],strict=True); model.train()
-    forward=TrainingForward(model)
+    forward=TrainingForward(model,config['training']['soft_policy_weight_scale'])
     if config['training']['compile']:
         from torch._inductor import config as compiler_config
         compiler_config.compile_threads=config['run']['cpu_threads']
         torch._dynamo.config.fail_on_recompile_limit_hit=True
-        forward=torch.compile(forward,fullgraph=True)
+        # Learner batches have a fixed canvas and batch size. Keep separate
+        # graphs for different network/precision runs instead of auto-generalizing.
+        forward=torch.compile(forward,fullgraph=True,dynamic=False)
     optimizer = optimizer_for(model,config); optimizer.load_state_dict(checkpoint["optimizer"])
     optimization = Optimization(model, config, optimizer, checkpoint['optimization'])
     scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
@@ -123,7 +172,13 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     prepared=BatchPrefetcher(reader,config['training']['prefetch_depth'])
     prefetch = None
     parameters=list(model.parameters())
+    compiler_settings=contextlib.ExitStack()
     try:
+        if config['training']['compile'] and scaler.is_enabled():
+            from torch._functorch import config as autograd_config
+            # FP16 retries reuse one graph. AOT buffer donation can consume its
+            # saved intermediates, so disable it for this learner invocation.
+            compiler_settings.enter_context(autograd_config.patch(donated_buffer=False))
         if device.type=='cuda' and config['training']['cuda_prefetch']:
             prefetch=CudaBatchPrefetcher(prepared,device)
         while step < plan["train_steps"] and not stopping():
@@ -142,7 +197,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             optimization.configure(total)
             context = torch.autocast("cuda",dtype=torch.float16 if amp=="float16" else torch.bfloat16) if amp!="off" else contextlib.nullcontext()
             with context:
-                loss,pl,vl=forward(tensors['obs'],tensors['globals'],tensors['policy'],tensors['value'])
+                loss,pl,opl,spl,sopl,vl=forward(tensors['obs'],tensors['globals'],tensors['policy'],
+                                             tensors['opponent_policy'],tensors['opponent_policy_weight'],tensors['value'])
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nonfinite loss at iteration {iteration}, step {step+1}")
             for retry in range(MAX_AMP_RETRIES+1):
@@ -177,13 +233,15 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             if step == plan['train_steps']:
                 optimization.finish_round()
             update = uuid.uuid4().hex; updates.append(update)
-            values=torch.stack([loss.detach(),pl.detach(),vl.detach(),grad_norm / plan['batch_size']]).tolist()
+            values=torch.stack([loss.detach(),pl.detach(),opl.detach(),spl.detach(),sopl.detach(),
+                                vl.detach(),grad_norm / plan['batch_size']]).tolist()
             log('update',iteration=iteration,step=step,total_steps=total,update_id=update,
-                **dict(zip(('loss','policy_loss','value_loss','grad_norm'),values)),amp_retries=retry,
+                **dict(zip(('loss','policy_loss','opponent_policy_loss','soft_policy_loss',
+                            'soft_opponent_policy_loss','value_loss','grad_norm'),values)),amp_retries=retry,
                 symmetry=symmetry, learning_rates={g['group_name']:g['lr'] for g in optimizer.param_groups},
                 weight_decays={g['group_name']:g['weight_decay'] for g in optimizer.param_groups},
                 lookahead_counter=optimization.counter,swa_samples=int(optimization.swa.n_averaged.item()))
-            del loss,pl,vl,tensors
+            del loss,pl,opl,spl,sopl,vl,tensors
             if step % config["training"]["checkpoint_every"] == 0 or step == plan["train_steps"] or stopping():
                 reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,reference,updates,optimization)
                 log("checkpoint",iteration=iteration,checkpoint=reference,committed_updates=updates)
@@ -200,6 +258,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
         return reference, step == plan["train_steps"]
     finally:
+        compiler_settings.close()
         try:
             if prefetch:
                 prefetch.close()

@@ -34,8 +34,13 @@ def validate_raw(a, source="record"):
     require(a["game_offsets"][0] == a["observation_offsets"][0] == 0 and
             a["game_offsets"][-1] == t and a["observation_offsets"][-1] == t+n and
             (lengths > 0).all() and (np.diff(a["observation_offsets"]) == lengths+1).all(), "invalid offsets")
+    samples = np.flatnonzero(a['row_repeats'] > 0)
+    require(np.array_equal(a['sample_indices'], samples), "sample indices must match positive row repeats")
+    s = len(samples)
     expected = {"observations": (t+n, len(PLANES), (canvas*canvas+7)//8), "players": (t+n,), "globals": (t+n,len(GLOBALS)),
-                "policies": (t, canvas*canvas), "visits": (t, canvas*canvas), "network_wdl": (t,3), "search_wdl": (t,3)}
+                "sample_indices": (s,), "policies": (s, canvas*canvas), "visits": (s, canvas*canvas),
+                "opponent_policies": (s, canvas*canvas), "opponent_policy_weights": (s,),
+                "network_wdl": (t,3), "search_wdl": (t,3)}
     for key in ("game_ids", "seeds", "sizes", "rules", "winners", "reasons", "opening_moves", "balanced_moves", "policy_moves",
                 "opening_attempts", "opening_status", "start_values"):
         expected[key] = (n,)
@@ -50,7 +55,7 @@ def validate_raw(a, source="record"):
             np.isin(a["reasons"], [0, 1, 2]).all(), "invalid rule/result")
     if canvas*canvas % 8:
         require((a["observations"][:, :, -1] & ((1 << (8-canvas*canvas % 8))-1) == 0).all(), "nonzero packed tail bits")
-    for key in ("policies", "temperatures", "rewards", "globals", "target_weights", "policy_surprises", "value_surprises", "network_wdl", "search_wdl"):
+    for key in ("policies", "opponent_policies", "opponent_policy_weights", "temperatures", "rewards", "globals", "target_weights", "policy_surprises", "value_surprises", "network_wdl", "search_wdl"):
         require(np.isfinite(a[key]).all(), f"nonfinite {key}")
     require(np.isin(a["train_mask"], [0, 1]).all() and int(a["row_repeats"].sum()) == m["rows"], "effective row count/mask")
     require((a["opening_moves"] >= 0).all() and (a["opening_moves"] <= lengths).all() and
@@ -63,13 +68,15 @@ def validate_raw(a, source="record"):
     require(len(m["opening_failures"]) == n and all(isinstance(x, str) for x in m["opening_failures"]), "opening failures")
     train = a["train_mask"].astype(bool)
     require((a["temperatures"] >= 0).all() and (a["simulations"][train] >= 0).all(), "invalid temperature/budget")
-    require((a["simulations"][~train] == 0).all() and (a["temperatures"][~train] == 0).all() and
-            (a["visits"][~train] == 0).all() and (a["policies"][~train] == 0).all(), "opening prefix has search supervision")
-    totals = a["visits"][train].sum(1)
-    require((a["visits"][train] >= 0).all() and (totals >= a["simulations"][train]).all(), "invalid completed visits")
+    require((a["simulations"][~train] == 0).all() and (a["temperatures"][~train] == 0).all(), "opening prefix has search supervision")
+    totals = a["visits"].sum(1)
+    require((a["visits"] >= 0).all() and (totals >= a["simulations"][samples]).all(), "invalid completed visits")
     require((totals > 0).all(), "search has no completed visits")
-    require((a['policies'] >= 0).all() and np.allclose(a['policies'][train].sum(1), 1, atol=1e-6), "invalid policy target")
+    require((a['policies'] >= 0).all() and np.allclose(a['policies'].sum(1), 1, atol=1e-6), "invalid policy target")
     require(((a['policies'] > 0) <= (a['visits'] > 0)).all(), "policy target on unvisited action")
+    require((a['opponent_policies'] >= 0).all() and np.allclose(a['opponent_policies'].sum(1), 1, atol=1e-6),
+            "invalid opponent policy target")
+    require(np.isin(a['opponent_policy_weights'], [0, 1]).all(), "invalid opponent policy weight")
     for key in ('network_wdl','search_wdl'):
         require((a[key] >= -1e-6).all() and (a[key] <= 1+1e-6).all() and
                 np.allclose(a[key].sum(1),1,atol=1e-5), f"invalid {key}")
@@ -80,6 +87,7 @@ def validate_raw(a, source="record"):
             (a['target_weights'][~train] == 0).all(), "invalid row repeats/prefix weights")
     # Stored float32 weights can round across an integer boundary.
     require((np.abs(a['row_repeats']-a['target_weights']) <= 1.00001).all(), "row repeats differ from randomized weight rounding")
+    sample_lookup = {int(index): row for row, index in enumerate(samples)}
     for i, size in enumerate(a["sizes"]):
         lo, hi = a["game_offsets"][i:i+2]
         ol, oh = a["observation_offsets"][i:i+2]
@@ -111,8 +119,23 @@ def validate_raw(a, source="record"):
             require((obs[j, 1] == (board == players[j])).all() and
                     (obs[j, 2] == (board == -players[j])).all(), "observation/transition mismatch")
             legal = (mask & (board == 0)).flatten()
-            require((a["visits"][lo+j][~legal.astype(bool)] == 0).all(), "search visited masked action")
+            if lo+j in sample_lookup:
+                require((a["visits"][sample_lookup[lo+j]][~legal.astype(bool)] == 0).all(), "search visited masked action")
             board[y, x] = players[j]
+            if lo+j in sample_lookup:
+                row = sample_lookup[lo+j]
+                has_next = lo+j+1 < hi
+                require(a['opponent_policy_weights'][row] == has_next, "opponent policy terminal weight")
+                opponent = a['opponent_policies'][row]
+                if has_next:
+                    next_legal = (mask & (board == 0)).flatten().astype(bool)
+                    require((opponent[~next_legal] == 0).all(), "opponent policy on occupied/padded successor action")
+                    if lo+j+1 in sample_lookup:
+                        require(np.array_equal(opponent, a['policies'][sample_lookup[lo+j+1]]),
+                                "opponent policy differs from next turn search")
+                else:
+                    require(np.allclose(opponent, 1/(canvas*canvas), rtol=0, atol=1e-7),
+                            "opponent policy terminal placeholder")
         require((obs[-1, 1] == (board == players[-1])).all() and (obs[-1, 2] == (board == -players[-1])).all(), "final observation")
         winner = a["winners"][i]
         require((a["rewards"][lo:hi-1] == 0).all() and a["rewards"][hi-1] == winner*players[-2], "terminal reward")
@@ -124,16 +147,18 @@ def validate_raw(a, source="record"):
 
 
 def training_view(a):
-    observations, plies, targets = [], [], []
-    for i, (lo, hi) in enumerate(zip(a["game_offsets"][:-1], a["game_offsets"][1:])):
-        ix = np.repeat(np.arange(lo, hi), a['row_repeats'][lo:hi])
-        obs_ix = a['observation_offsets'][i] + ix-lo
-        result = a['winners'][i] * a['players'][obs_ix]
-        observations.append(obs_ix);plies.append(ix)
-        targets.append(np.stack((result==1,result==0,result==-1),axis=1))
-    obs_ix, ix = np.concatenate(observations), np.concatenate(plies)
+    # Each sampled position is stored once; multiplicity is resolved only here.
+    samples = a['sample_indices']
+    rows = np.repeat(np.arange(len(samples)), a['row_repeats'][samples])
+    ix = samples[rows]
+    games = np.searchsorted(a['game_offsets'][1:], ix, side='right')
+    obs_ix = a['observation_offsets'][games] + ix-a['game_offsets'][games]
+    result = a['winners'][games] * a['players'][obs_ix]
     return {"obs": a['observations'][obs_ix], "globals": a['globals'][obs_ix],
-            "policy": a['policies'][ix], "value": np.concatenate(targets).astype(np.float32)}
+            "policy": a['policies'][rows],
+            "opponent_policy": a['opponent_policies'][rows],
+            "opponent_policy_weight": a['opponent_policy_weights'][rows],
+            "value": np.stack((result==1,result==0,result==-1),axis=1).astype(np.float32)}
 
 
 class Catalog:

@@ -1,27 +1,31 @@
-"""KataGo BN optimizer policy, adapted to EtaZero's residual policy/value net."""
+"""KataGo optimizer policy and NBT/fson parameter roles."""
 import math
 import torch
 from torch.optim.swa_utils import AveragedModel
+from .network import FixedScaleMask, BiasMask
 
 
 def parameter_groups(model):
     groups = {name: [] for name in ('input', 'normal', 'normal_gamma', 'noreg', 'output', 'output_noreg')}
     groups['input'] += [model.stem.weight, model.linear_global.weight]
-    groups['normal_gamma'].append(model.stem_bn.weight)
-    groups['noreg'].append(model.stem_bn.bias)
     for block in model.blocks:
-        groups['normal'] += [block.conv1.weight, block.conv2.weight]
-        groups['normal_gamma'] += [block.bn1.weight, block.bn2.weight]
-        groups['noreg'] += [block.bn1.bias, block.bn2.bias]
-    for name in ('policy_conv', 'policy_out', 'value_conv', 'value_hidden', 'value_out'):
-        layer = getattr(model, name)
-        groups['output'].append(layer.weight)
-        if layer.bias is not None:
-            groups['output_noreg'].append(layer.bias)
-    for name in ('policy_bn', 'value_bn'):
-        norm = getattr(model, name)
-        groups['output'].append(norm.weight)
-        groups['output_noreg'].append(norm.bias)
+        for layer in block.modules():
+            if isinstance(layer, (torch.nn.Conv2d, torch.nn.Linear)):
+                groups['normal'].append(layer.weight)
+            elif isinstance(layer, FixedScaleMask):
+                groups['normal_gamma'].append(layer.weight)
+                groups['noreg'].append(layer.bias)
+    # Final fson BN belongs to the output groups in KataGo, like the heads.
+    groups['output'].append(model.trunk_norm.weight)
+    groups['output_noreg'].append(model.trunk_norm.bias)
+    for head in (model.policy_head, model.value_head):
+        for layer in head.modules():
+            if isinstance(layer, (torch.nn.Conv2d, torch.nn.Linear)):
+                groups['output'].append(layer.weight)
+                if layer.bias is not None:
+                    groups['output_noreg'].append(layer.bias)
+            elif isinstance(layer, BiasMask):
+                groups['output_noreg'].append(layer.bias)
     registered = [id(p) for params in groups.values() for p in params]
     if len(registered) != len(set(registered)) or set(registered) != {id(p) for p in model.parameters()}:
         raise ValueError('Optimizer groups must contain every model parameter exactly once')
