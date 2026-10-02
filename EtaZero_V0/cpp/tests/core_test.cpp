@@ -28,6 +28,12 @@ struct GatedBackend : IdentityBackend {
     explicit GatedBackend(std::atomic<bool>& gate):ready(gate) {}
     void initialize() override {while(!ready.load())std::this_thread::yield();}
 };
+struct NonemptyBackend : IdentityBackend {
+    std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
+        check(!inputs.empty(), "Inference server received an empty batch");
+        return IdentityBackend::evaluate(inputs);
+    }
+};
 struct ConcurrentBackend : IdentityBackend {
     std::atomic<int>& entered;
     explicit ConcurrentBackend(std::atomic<int>& count) : entered(count) {}
@@ -245,6 +251,14 @@ int main() {
         for(int i=0;i<2;++i)service_callers.emplace_back([&]{services.evaluate(empty.observation());++serviced;});
         for(auto& t:service_callers)t.join();services.finish();
         check(serviced==2 && services.rows_by_server[0]==1 && services.rows_by_server[1]==1,"Each service owns a concurrent backend");
+        // All servers can enter the timed fill wait for a single request.
+        // Once one takes it, the other waiters must return to waiting for work.
+        std::vector<std::unique_ptr<Backend>> waiting_backends;
+        for(int i=0;i<4;++i)waiting_backends.push_back(std::make_unique<NonemptyBackend>());
+        BatchEvaluator waiting(std::move(waiting_backends),"waiting",5,8,1,5000,0);
+        for(int i=0;i<32;++i)check(waiting.evaluate(empty.observation()).value()==1,"Timed multi-server request output");
+        waiting.drain();waiting.finish();
+        check(waiting.requests==32 && waiting.batches==32,"Timed services must dispatch exactly the submitted requests");
         // Keep the server unavailable while callers enqueue. forcePush must
         // permit a batch larger than the nominal capacity, even at capacity=1.
         std::atomic<bool> queue_ready{false};std::vector<std::unique_ptr<Backend>> gated;
