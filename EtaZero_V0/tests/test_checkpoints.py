@@ -28,7 +28,9 @@ def checkpoint_run(tmp_path):
                 events.append({'event': 'update', 'update_id': update, 'iteration': iteration,
                                'loss': 2, 'policy_loss': 1.5, 'opponent_policy_loss': 0,
                                'soft_policy_loss': 0, 'soft_opponent_policy_loss': 0,
-                               'value_loss': .5, 'grad_norm': 3})
+                               'value_loss': .5, 'grad_norm': 3, 'td_value_long_loss':0, 'td_value_mid_loss':0,
+                               'td_value_short_loss':0, 'long_optimistic_policy_loss':0,
+                               'short_optimistic_policy_loss':0, 'shortterm_value_error_loss':0})
             references[iteration, step] = reference
             parent = reference
         if iteration:
