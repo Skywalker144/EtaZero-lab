@@ -63,7 +63,8 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
                     raise ValueError('请求必须是对象')
-                operations = {'/api/new': 'new', '/api/play': 'play', '/api/undo': 'undo', '/api/retry': 'retry'}
+                operations = {f'/api/{name}': name for name in
+                              ('new', 'play', 'undo', 'retry', 'analyze', 'step', 'branch', 'configure', 'refresh')}
                 if self.path not in operations:
                     return self.json(404, dict(error='未知接口'))
                 self.json(202, app.submit(operations[self.path], payload))
@@ -75,8 +76,33 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), Handler)
 
 
+def discover_models(models_dir: Path, model: Path | None = None) -> dict[str, Path]:
+    # Publication stages use .tmp_* directories; offer only committed exports.
+    paths = sorted(models_dir.glob('**/models/iteration_*/model.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
+    models = {str(Path(models_dir.name) / path.relative_to(models_dir)): path.resolve() for path in paths}
+    current = models_dir / 'models/current.json'
+    if current.is_file():
+        preferred = (models_dir / load_json(current)['model']['path']).resolve()
+        key = next((key for key, path in models.items() if path == preferred), None)
+        if key is not None:
+            models = {key: models[key], **{k: p for k, p in models.items() if k != key}}
+    if model:
+        selected = model.resolve()
+        if not selected.is_file():
+            raise ValueError('指定的模型文件不存在')
+        key = next((key for key, path in models.items() if path == selected), str(selected))
+        models = {key: selected, **{key: path for key, path in models.items() if path != selected}}
+    if not models:
+        raise ValueError('未找到导出的模型，请用 --model 指定 TorchScript 模型')
+    for path in models.values():
+        info = load_json(path.parent / 'manifest.json')
+        if info['contract'] != CONTRACT_ID or type(info['canvas']) is not int or not 5 <= info['canvas'] <= 25:
+            raise ValueError(f'模型输入契约或棋盘尺寸不匹配：{path}')
+    return models
+
+
 def main():
-    parser = argparse.ArgumentParser(description='EtaZero 本地对弈')
+    parser = argparse.ArgumentParser(description='EtaZero 开发工作台')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--config-dir', default=str(ROOT / 'configs/minimal_test'))
@@ -84,35 +110,16 @@ def main():
     parser.add_argument('--model', type=Path)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/etazero')
     args = parser.parse_args()
-    # Publication stages use .tmp_* directories; offer only committed exports.
-    paths = sorted(args.models_dir.glob('**/models/iteration_*/model.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
-    models = {str(Path(args.models_dir.name) / path.relative_to(args.models_dir)): path.resolve() for path in paths}
-    current = args.models_dir / 'models/current.json'
-    if current.is_file():
-        preferred = (args.models_dir / load_json(current)['model']['path']).resolve()
-        key = next((key for key, path in models.items() if path == preferred), None)
-        if key is not None:
-            models = {key: models[key], **{k: p for k, p in models.items() if k != key}}
-    if args.model:
-        selected = args.model.resolve()
-        if not selected.is_file():
-            parser.error('指定的模型文件不存在')
-        key = next((key for key, path in models.items() if path == selected), str(selected))
-        models = {key: selected, **{key: path for key, path in models.items() if path != selected}}
-    if not models:
-        parser.error('未找到导出的模型，请用 --model 指定 TorchScript 模型')
     if not args.binary.is_file():
         parser.error('缺少 etazero，请先运行 web/webui.sh 构建')
     try:
         verify_build(args.binary)
-        for path in models.values():
-            info = load_json(path.parent / 'manifest.json')
-            if info['contract'] != CONTRACT_ID or type(info['canvas']) is not int or not 5 <= info['canvas'] <= 25:
-                raise ValueError(f'模型输入契约或棋盘尺寸不匹配：{path}')
+        models = discover_models(args.models_dir, args.model)
         config = load_evaluation_config(args.config_dir)
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
-    app = App(args.binary, models, config, config['evaluation']['board_size'])
+    app = App(args.binary, models, config, config['evaluation']['board_size'],
+              discover_models=lambda: discover_models(args.models_dir, args.model))
     server = make_server(app, args.host, args.port)
     print(f'EtaZero Web: http://{args.host}:{server.server_port}', flush=True)
     try:
