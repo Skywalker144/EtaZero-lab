@@ -6,7 +6,7 @@
 
 [evaluation 配置](../configs/baseline/eval.cfg) 和 [比赛配置](../configs/baseline/match.cfg) 只沿 `run.cfg` 的 extends 继承链读取自身文件与叶子目录的 `.local`。训练文件、训练环境变量和另一个评估文件不会覆盖它们，修改评估条件不改变训练配置身份。可使用 `EVAL_VISITS=100`、`MATCH_VISITS=100` 等前缀环境覆盖；开局字段使用 `MATCH_OPENING_` 前缀。字段校验集中在 [eval_config.py](../python/etazero/eval_config.py)。
 
-默认搜索预算为 100v：根的一次初始评估和后续完成的边访问合计 100。默认不复用树，因此每手新增 99 次模拟；单局面输出 `root_visits=100`、`simulations=99` 和总和为 99 的动作访问数组。若明确启用树复用，已有访问计入上限，不再额外新增 100 次模拟。此预算参考 KataGo `maxVisits` 包含复用访问的语义，训练 full cap 为 `search.simulations+1`，同样计入复用量；也不同于 MuZero_V2 将根评估外的边模拟数命名为 visits 的计数方式。网络缓存命中、终局节点和开局评估使 NN 请求数不等于 visits。
+默认搜索预算为 100v：根的一次初始评估和后续完成的边访问合计 100。默认不复用树，因此每手新增 99 次模拟；单局面输出 `root_visits=100`、`simulations=99` 和总和为 99 的动作访问数组。若明确启用树复用，已有访问计入上限，不再额外新增 100 次模拟。此预算参考 KataGo `maxVisits` 包含复用访问的语义，训练 full cap 为 `search.full_search_visits`，同样计入复用量；也不同于 MuZero_V2 将根评估外的边模拟数命名为 visits 的计数方式。网络缓存命中、终局节点和开局评估使 NN 请求数不等于 visits。
 
 评估和比赛均无训练根噪声，默认零落子温度、单搜索线程；并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用 EtaZero LibTorch 后端，不宣称复制 KataGo 的全部比赛功能或数值行为。
 
