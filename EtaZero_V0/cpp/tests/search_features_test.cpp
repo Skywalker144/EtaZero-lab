@@ -58,6 +58,17 @@ struct CoordinateEvaluator : Evaluator {
         return {logits,{0.2,0.3,0.5}};
     }
 };
+struct CoordinateBackend : Backend {
+    std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
+        std::vector<Evaluation> result;
+        for(const auto* input:inputs) {
+            std::vector<double> logits((input->size()-GLOBAL_FEATURES)/INPUT_PLANES);
+            std::iota(logits.begin(),logits.end(),0.0);
+            result.push_back({std::move(logits),{0.2,0.3,0.5}});
+        }
+        return result;
+    }
+};
 struct DeepTemperatureState : SearchState {
     int depth=0;std::vector<int>* chosen;
     explicit DeepTemperatureState(std::vector<int>& c):chosen(&c){}
@@ -142,6 +153,16 @@ int main(){
         math.forced_playouts=2;
         check(child_selection_score(0.5,0,1,0,9,parent,math,true)==1e20,"Forced playout catches deficient completed weight");
         check(child_selection_score(0.5,0,1,1,9,parent,math,true)<1e20,"Virtual-loss weight participates in forced quota");
+        SearchSettings variance{8,1,1,1,0,1,false};variance.c_puct_log=0.45;
+        variance.c_puct_stdev_prior=0.4;variance.c_puct_stdev_prior_weight=2;variance.c_puct_stdev_scale=0.85;
+        near(explore_scaling(100,{1,0,0,1,1,1},variance),(1+0.45*std::log(1.2))*std::sqrt(100.01),
+             "Low-weight parent uses the exact prior stdev, leaving scale factor one");
+        // Constant Q=1/2, nine samples: ((.25+.16)*2+.25*9)/10-.25 = .057.
+        near(explore_scaling(100,{9,0.5,0.25,0,9,9},variance),
+             (1+0.45*std::log(1.2))*std::sqrt(100.01)*(0.15+0.85*std::sqrt(0.057)/0.4),
+             "Match variance uses prior weight two and the weight-minus-one denominator");
+        near(explore_scaling(100,{9,0.5,0.20,0,9,9},variance),explore_scaling(100,{9,0.5,0.25,0,9,9},variance),
+             "Inconsistent concurrent second moment clamps to mean square");
         // This boundary previously pruned to 3; source's +0.01 must retain 4.
         math.policy_target_pruning=true;
         double old_scale=1.5*std::sqrt(20.0),q1=0.5+old_scale*0.5/11-old_scale*0.5/(4-1e-5);
@@ -188,6 +209,108 @@ int main(){
         near(fpu_value(0.6,-0.2,0.25,2,0.2),0.45,"FPU visited-policy interpolation and reduction");
         near(fpu_value(0.6,-0.2,0,2,0.2),0.6,"FPU starts at network value");
         near(fpu_value(0.6,-0.2,1,2,0.2),-0.4,"FPU ends at parent minus reduction");
+        near(fpu_value(0.6,-0.2,0.25,2,0.2,false,0),-0.3,"Alternative FPU starts at parent, including reduction");
+        near(fpu_value(0.6,-0.2,0.25,2,0.2,false,0.75),0.3,"Source fpuParentWeight is the NN coefficient");
+        near(fpu_value(0.6,-0.2,0,0,0),-0.2,"Zero policy power selects parent even at zero visited mass");
+        // Explicit orientations restore coordinates; a cache hit reuses the first
+        // canonical output, and ensemble requests neither read nor replace it.
+        std::vector<std::unique_ptr<Backend>> backends;backends.push_back(std::make_unique<CoordinateBackend>());
+        BatchEvaluator cached(std::move(backends),"coordinate",6,8,32,0,1024);
+        auto canonical=padded.observation();
+        auto first=cached.evaluate_symmetry(canonical,5);
+        auto hit=cached.evaluate_symmetry(canonical,1);
+        near(first.logits[0],5,"Cache miss inverse-maps horizontal reflection");
+        check(hit.logits==first.logits && cached.requests==1 && cached.cache_hits==1,"Orientation does not split canonical cache keys");
+        auto bypass=cached.evaluate_symmetry(canonical,1,true);
+        near(bypass.logits[0],30,"Bypass evaluates requested rotation independently");
+        check(cached.evaluate_symmetry(canonical,2).logits==first.logits && cached.requests==2,"Bypass leaves the first cached orientation intact");
+        cached.evaluate_symmetry(canonical,1,false,2);
+        check(cached.requests==3,"NN policy temperature is an input condition in the cache key");
+        auto changed_globals=canonical;changed_globals.back()+=1;
+        cached.evaluate_symmetry(changed_globals,1);
+        check(cached.requests==4,"Rule/PDA globals split cache input conditions");
+        SearchSettings ensemble_cache{1,1,1,1,0,1,true};ensemble_cache.root_symmetries=8;
+        Search cached_search(cached,ensemble_cache,1);SearchRun root_only;root_only.max_visits=1;
+        auto cache_ensemble=cached_search.run(padded,0,root_only);
+        check(cache_ensemble.root_visits==1 && cache_ensemble.new_playouts==1 && cached.requests==12,"Eight root NN rows consume one fresh-root playout");
+        auto ensemble_refresh=cached_search.run(padded,0,root_only);
+        check(ensemble_refresh.initial_visits==1 && ensemble_refresh.new_playouts==0 && cached.requests==20,"Reused root ensemble consumes NN rows but no playouts");
+        check(cached.evaluate_symmetry(canonical,3).logits==first.logits && cached.requests==20,"Root ensemble never overwrites single-output cache");
+        cached.finish();
+        std::vector<std::unique_ptr<Backend>> r1,r2;
+        r1.push_back(std::make_unique<CoordinateBackend>());r2.push_back(std::make_unique<CoordinateBackend>());
+        BatchEvaluator random_cached(std::move(r1),"random",6,8,32,0,1024,true,0,47);
+        BatchEvaluator random_control(std::move(r2),"random",6,8,32,0,1024,true,0,47);
+        auto random_first=random_cached.evaluate(canonical);
+        check(random_first.logits==random_control.evaluate(canonical).logits,"NN RNG is reproducible with fixed request order");
+        for(int i=0;i<10;++i)check(random_cached.evaluate(canonical).logits==random_first.logits,"Random cache hits reuse original output");
+        check(random_cached.evaluate(changed_globals).logits==random_control.evaluate(changed_globals).logits,
+              "Cache hits do not consume the NN orientation random stream");
+        auto specified_output=random_cached.evaluate_symmetry(canonical,5,true);
+        near(specified_output.logits[0],5,"Explicit orientation overrides evaluator randomization");
+        random_cached.finish();random_control.finish();
+        seen.clear();SearchSettings reset_priors{1,1,1,1,0,1,true};
+        reset_priors.root_policy_temperature_early=2;reset_priors.root_policy_temperature=1;
+        Search prior_reset(reset_priors,1);auto early_root=prior_reset.run(sym_state,0,root_only);
+        near(early_root.search_policy[0],0.75,"Early root temperature applies to raw 9:1 policy");
+        root_only.turn=19;root_only.board_area=361;
+        auto later_root=prior_reset.run(sym_state,0,root_only);
+        near(later_root.network_policy[0],0.9,"Reused root preserves original NN prior");
+        near(later_root.search_policy[0],std::pow(9,2.0/3)/(std::pow(9,2.0/3)+1),
+             "Root temperature restarts from raw prior rather than compounding prior exploration");
+        // Random single orientations reach both cheap roots and non-root leaves.
+        orientations.clear();sym_calls=0;SymmetryLineState random_line(sym_calls,orientations);
+        SearchSettings randomized{6,1,1,1,0,1,false};randomized.nn_randomize=true;randomized.root_symmetries=4;
+        Search random_search(randomized,42);random_search.run(random_line,0,{7,true,true,true});
+        check(orientations.size()==7 && orientations.front().first==0,"Cheap root samples one orientation, leaves also sample one");
+        check(std::any_of(orientations.begin()+1,orientations.end(),[](auto x){return x.second!=0;}),"Leaf randomization is active");
+        std::vector<int> sampled_roots;
+        for(uint64_t seed=0;seed<64;++seed) {
+            random_search.reset(seed);orientations.clear();SearchRun one;one.max_visits=1;one.remove_root_noise=true;
+            random_search.run(random_line,0,one);sampled_roots.push_back(orientations.front().second);
+        }
+        std::sort(sampled_roots.begin(),sampled_roots.end());
+        check(std::unique(sampled_roots.begin(),sampled_roots.end())-sampled_roots.begin()==8,"Random cheap roots cover all eight D4 orientations");
+        randomized.nn_randomize=false;randomized.nn_symmetry=6;randomized.root_symmetries=1;
+        Search specified(randomized,42);orientations.clear();specified.run(random_line,0,{7,true,true,true});
+        check(std::all_of(orientations.begin(),orientations.end(),[](auto x){return x.second==6;}),"Explicit symmetry applies to root and leaves");
+        // Independent visit and playout caps, including root initialization.
+        int budget_calls=0;LineState budget_line(budget_calls);SearchSettings limits{100,1,1,1,0,1,true};
+        Search budget_search(limits,1);SearchRun limited;limited.max_playouts=3;
+        auto fresh_budget=budget_search.run(budget_line,0,limited);
+        check(fresh_budget.initial_visits==0 && fresh_budget.root_visits==3 && fresh_budget.simulations==2 && fresh_budget.new_playouts==3,
+              "Fresh root initialization counts against maxPlayouts");
+        limited.max_playouts=2;auto reused_budget=budget_search.run(budget_line,0,limited);
+        check(reused_budget.initial_visits==3 && reused_budget.root_visits==5 && reused_budget.new_playouts==2,"Reused root playout cap only limits new visits");
+        limited.max_visits=6;limited.max_playouts=8;
+        check(budget_search.run(budget_line,0,limited).new_playouts==1,"Visit cap includes retained visits and dominates larger playout cap");
+        limited.max_visits=2;
+        check(budget_search.run(budget_line,0,limited).new_playouts==0,"Already exceeded visit cap adds no visits");
+        budget_search.reset(1);limited={};limited.max_playouts=0;budget_calls=0;
+        auto no_search=budget_search.run(budget_line,0,limited);
+        check(no_search.action==-1 && no_search.root_visits==0 && budget_calls==0,"Zero new-playout cap does not evaluate a fresh root");
+        limited.max_playouts=1;auto prior_only=budget_search.run(budget_line,0,limited);
+        check(prior_only.action==0 && prior_only.new_playouts==1 && prior_only.simulations==0,"Root-only search selects from NN prior without LCB");
+        budget_search.reset(1);limited={};limited.max_time=0;
+        auto fresh_time=budget_search.run(budget_line,0,limited);
+        check(fresh_time.new_playouts==2 && fresh_time.root_visits==2 && fresh_time.stopped_early,"Fresh time limit allows two total playouts");
+        auto reused_time=budget_search.run(budget_line,0,limited);
+        check(reused_time.new_playouts==2 && reused_time.initial_visits==2,"Reused time limit allows two additional playouts");
+        budget_search.reset(1);limited={};limited.should_stop=[] {return true;};budget_calls=0;
+        auto interrupted=budget_search.run(budget_line,0,limited);
+        check(interrupted.new_playouts==0 && interrupted.action==-1 && budget_calls==0,"Explicit stop can prevent all search");
+        limits.threads=4;Search concurrent_stop(limits,1);TwoMoveState terminal_edges;
+        std::atomic<int> checks{0};limited={};limited.should_stop=[&]{return checks.fetch_add(1)>=8;};
+        auto parallel_stop=concurrent_stop.run(terminal_edges,0,limited);
+        check(parallel_stop.stopped_early && parallel_stop.new_playouts<100 && concurrent_stop.pending()==0,
+              "Explicit parallel stop completes in-flight paths and releases virtual loss");
+        terminal_edges.move(1);budget_calls=0;
+        auto terminal_root=budget_search.run(terminal_edges,0);
+        check(terminal_root.action==-1 && terminal_root.root_visits==0 && terminal_root.new_playouts==0 && terminal_root.value==-1,"Finished Gomoku root returns exact terminal value without NN requests");
+        CoordinateEvaluator replacement;CoordinateEvaluator original;
+        Search model_change(original,ensemble_cache,1);model_change.run(padded,0,root_only);
+        model_change.set_evaluator(replacement);
+        check(model_change.run(padded,0,root_only).initial_visits==0 && !replacement.input.empty(),"Model replacement clears root stats, priors and per-thread state");
         // Exercise the new limits through real tree promotion: a reduced full
         // search clears a preceding PCR tree rather than inheriting cheap flags.
         caps={101,50,0.75,0,true,true,0.9,3,20,0.1};
@@ -213,6 +336,28 @@ int main(){
         SearchSettings settings{256,1,1.5,1,0,6.75,true};settings.policy_target_pruning=true;
         auto pruned=root_selection_weights({{0.5,50,25,100,100,100},{0.5,-50,25,100,100,100}},settings,false);
         near(pruned[0],100.0/109,"Retrospective inverse PUCT pruning");near(pruned[1],9.0/109,"Ceil reduced visits");
+        {
+            SearchSettings fractional;fractional.c_puct=1;fractional.policy_target_pruning=true;
+            // Nonpositive inverse-PUCT gaps retain the raw weight before ceil.
+            // The stable edge keeps its fractional weight; only other edges round.
+            for(bool zero_gap:{false,true}) {
+                double prior=zero_gap?0:0.9,q=zero_gap?0:1;
+                std::vector<RootChildStats> edges{{prior,0,0,10,10.2,10.404},
+                                                {1-prior,1.2*q,1.2*q*q,2,1.2,0.72}};
+                auto raw=root_selection_weights(edges,fractional,false,{},false);
+                near(raw[0],10.2,"Pruning preserves fractional stable-edge weight");
+                near(raw[1],2,"Nonpositive gap still rounds other-edge weight upward");
+                auto normalized=root_selection_weights(edges,fractional,false);
+                near(normalized[1],2.0/12.2,"Normalize only after rounding other edges");
+                fractional.policy_target_pruning=false;
+                near(root_selection_weights(edges,fractional,false,{},false)[1],1.2,
+                     "Pruning ablation preserves fractional other-edge weight");
+                fractional.policy_target_pruning=true;
+            }
+            fractional.lcb_stdevs=1;
+            auto lcb=root_selection_weights({{0.9,0,0,10,10.2,10.404},{0.1,1.2,1.2,2,1.2,0.72}},fractional,true,{},false);
+            check(lcb[1]>lcb[0],"Rounding before LCB makes the higher-value edge eligible");
+        }
         settings.policy_target_pruning=false;settings.use_lcb=true;
         std::vector<RootChildStats> children{{0.5,20,100,100,100,100},{0.5,24,14.4,40,40,40}};
         auto before=root_selection_weights(children,settings,false),after=root_selection_weights(children,settings,true);
