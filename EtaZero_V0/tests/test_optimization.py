@@ -37,12 +37,16 @@ def test_d4_mixed_size_masks_features_and_targets():
     for channel in range(1, 5):
         obs[:, channel, channel, 4] = 1
     policy = obs[:, 3].flatten(1)
-    batch = {'obs': obs, 'policy': policy, 'globals': torch.randn(2, 4), 'value': torch.tensor([-1., 1.])}
+    batch = {'obs': obs, 'policy': policy, 'opponent_policy': obs[:,2].flatten(1),
+             'opponent_policy_weight': torch.tensor([1.,0.]),
+             'globals': torch.randn(2, 4), 'value': torch.tensor([-1., 1.])}
     original = {k: v.clone() for k, v in batch.items()}
     variants = []
     for symmetry in range(8):
         result = augment_batch(batch, symmetry)
         torch.testing.assert_close(result['obs'][:, 3].flatten(1), result['policy'])
+        torch.testing.assert_close(result['obs'][:, 2].flatten(1), result['opponent_policy'])
+        assert result['opponent_policy_weight'] is batch['opponent_policy_weight']
         assert result['obs'][0, 0].sum() == 25 and result['obs'][1, 0].sum() == 36
         assert not (result['policy'].bool() & ~result['obs'][:, 0].flatten(1).bool()).any()
         assert result['globals'] is batch['globals'] and result['value'] is batch['value']
@@ -59,10 +63,10 @@ def test_parameter_group_coverage_and_roles(config):
     ids = [id(p) for params in groups.values() for p in params]
     assert len(ids) == len(set(ids)) == len(list(model.parameters()))
     assert {id(p) for p in groups['input']} == {id(model.stem.weight), id(model.linear_global.weight)}
-    assert id(model.blocks[0].bn1.weight) in {id(p) for p in groups['normal_gamma']}
-    assert id(model.blocks[0].bn1.bias) in {id(p) for p in groups['noreg']}
-    assert id(model.value_out.bias) in {id(p) for p in groups['output_noreg']}
-    assert id(model.policy_bn.weight) in {id(p) for p in groups['output']}
+    assert id(model.blocks[0].pre.norm.weight) in {id(p) for p in groups['normal_gamma']}
+    assert id(model.blocks[0].pre.norm.bias) in {id(p) for p in groups['noreg']}
+    assert id(model.value_head.out.bias) in {id(p) for p in groups['output_noreg']}
+    assert id(model.trunk_norm.weight) in {id(p) for p in groups['output']}
     model.extra = torch.nn.Parameter(torch.ones(1))
     with pytest.raises(ValueError, match='every model parameter'):
         parameter_groups(model)
@@ -108,7 +112,7 @@ def test_lookahead_swa_and_round_boundary(config):
     assert optimization.swa.n_averaged == 0
     with torch.no_grad():
         parameter.fill_(6)
-        model.stem_bn.running_mean.fill_(7)
+        model.trunk_norm.running_mean.fill_(7)
     optimization.after_step()
     torch.testing.assert_close(parameter, torch.full_like(parameter, 3))
     torch.testing.assert_close(optimization.swa.module.stem.weight, torch.full_like(parameter, 3))
@@ -118,11 +122,11 @@ def test_lookahead_swa_and_round_boundary(config):
     optimization.after_step()
     with torch.no_grad():
         parameter.fill_(15)
-        model.stem_bn.running_mean.fill_(11)
+        model.trunk_norm.running_mean.fill_(11)
     optimization.after_step()
     torch.testing.assert_close(parameter, torch.full_like(parameter, 9))
     torch.testing.assert_close(optimization.swa.module.stem.weight, torch.full_like(parameter, 4.5))
-    torch.testing.assert_close(optimization.swa.module.stem_bn.running_mean, torch.full_like(model.stem_bn.running_mean, 11))
+    torch.testing.assert_close(optimization.swa.module.trunk_norm.running_mean, torch.full_like(model.trunk_norm.running_mean, 11))
     with torch.no_grad():
         parameter.fill_(99)
     optimization.after_step()
