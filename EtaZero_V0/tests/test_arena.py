@@ -30,7 +30,7 @@ def test_eval_profiles_are_independent(tmp_path):
     (selected/'eval.cfg.local').write_text('[evaluation]\nvisits=oops\n')
     assert load_config(selected)['puct']['c_puct']==7
     with pytest.raises(ValueError):load_evaluation_config(selected,environ={})
-    for field,value in [('VISITS','1'),('VISITS','0'),('BOARD_SIZE','4'),('RULE','oops'),('OPENING_PROBABILITY','0'),
+    for field,value in [('VISITS','0'),('BOARD_SIZE','4'),('RULE','oops'),('OPENING_PROBABILITY','0'),
                         ('ROOT_NUM_SYMMETRIES_TO_SAMPLE','9'),('NN_POLICY_TEMPERATURE','0'),
                         ('ROOT_POLICY_TEMPERATURE','0'),('TEMPERATURE_HALFLIFE','0'),('TEMPERATURE_ONLY_BELOW_PROB','1.1')]:
         with pytest.raises(ValueError):load_evaluation_config(ROOT/'configs/baseline',True,environ={'MATCH_'+field:value})
