@@ -67,6 +67,20 @@ def journal(root, events):
     return path
 
 
+def test_history_counts_amp_consumption_and_finite_gradients_separately(tmp_path):
+    save_json(tmp_path/'.internal/state.json', {'iteration': 2, 'checkpoint': {'id': 'c', 'path': 'checkpoints/c.pt'}})
+    save_json(tmp_path/'checkpoints/c.json', {'parent': None, 'committed_updates': ['skip', 'success']})
+    update = {'event': 'update', 'iteration': 1, 'policy_loss': 1, 'opponent_policy_loss': 1,
+              'soft_policy_loss': 1, 'soft_opponent_policy_loss': 1, 'value_loss': 1}
+    update.update({k:0 for k in ('td_value_long_loss','td_value_mid_loss','td_value_short_loss',
+                                'long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')})
+    journal(tmp_path, [{**update, 'update_id': 'skip', 'amp_skipped': True, 'loss': 6, 'grad_norm': float('inf')},
+                       {**update, 'update_id': 'success', 'amp_skipped': False, 'loss': 10, 'grad_norm': 5}])
+    row, = run_history(tmp_path)
+    assert row['steps'] == 2 and row['amp_skipped_steps'] == 1 and row['gradient_steps'] == 1
+    assert row['loss'] == 8 and row['grad_norm'] == 5
+
+
 def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     save_json(tmp_path/'.internal/state.json', {'iteration': 2, 'checkpoint': {'id': 'base', 'path': 'checkpoints/base.pt', 'total_steps': 1}})
     save_json(tmp_path/'checkpoints/base.json', {'parent': None, 'committed_updates': ['kept']})
@@ -77,6 +91,8 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     update = {'event': 'update', 'iteration': 1, 'total_steps': 1, 'update_id': 'kept',
               'loss': 6, 'policy_loss': 2, 'opponent_policy_loss': .5,
               'soft_policy_loss': 2, 'soft_opponent_policy_loss': .5, 'value_loss': 1, 'grad_norm': 5}
+    update.update({k:0 for k in ('td_value_long_loss','td_value_mid_loss','td_value_short_loss',
+                                'long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')})
     infer = {'event': 'inference', 'evaluator': 'network', 'iteration': 1, 'attempt': 'a', 'worker_id': 0,
              'requests': 8, 'batches': 2, 'queue_wait_us': 24, 'submitted': 10, 'cache_hits': 2}
     path = journal(tmp_path, [stats, stats, {'event': 'iteration_complete', 'iteration': 1, 'unique_rows': 40},
@@ -97,7 +113,8 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     assert list(figure.axes[4].lines[0].get_ydata()) == [10]
     assert list(figure.axes[2].lines[0].get_ydata()) == [6]
     assert [line.get_label() for line in figure.axes[3].lines] == [
-        'Policy', 'Opponent policy', 'Soft policy', 'Soft opponent policy', 'Value']
+        'Policy', 'Opponent policy', 'Soft policy', 'Soft opponent policy', 'Value',
+        'TD long', 'TD mid', 'TD short', 'Long optimistic', 'Short optimistic', 'Value error']
     assert sum(line.get_ydata()[0] for line in figure.axes[3].lines) == 6
     performance = performance_figure(rows, 8)
     assert list(performance.axes[1].lines[0].get_ydata()) == [8]
