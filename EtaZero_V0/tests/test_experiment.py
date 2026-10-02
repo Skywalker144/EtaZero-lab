@@ -5,12 +5,14 @@ import signal
 import subprocess
 import sys
 import time
+import numpy as np
 import pytest
 import torch
 from etazero.config import ROOT, load_config
 from etazero.experiment import (experiment_plan, initialization_key, prepare_initializations,
                                 arm_progress, write_arm_config, Scheduler)
-from etazero.plotting import run_history, training_figure, performance_figure, journal_events
+from etazero.plotting import (run_history, training_figure, loss_figure, performance_figure,
+                             journal_events, METRICS)
 from etazero.storage import save_json, load_json, sha256
 
 
@@ -110,12 +112,14 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     assert len(figure.axes) == 6
     assert list(figure.axes[0].lines[0].get_ydata()) == [.5]
     assert list(figure.axes[1].lines[0].get_ydata()) == [12]
-    assert list(figure.axes[4].lines[0].get_ydata()) == [10]
-    assert list(figure.axes[2].lines[0].get_ydata()) == [6]
+    assert list(figure.axes[4].lines[0].get_ydata()) == [5]
+    assert list(figure.axes[5].lines[0].get_ydata()) == [.2]
+    assert [line.get_label() for line in figure.axes[2].lines] == [
+        'Policy', 'Opponent policy', 'Soft policy', 'Soft opponent policy',
+        'Long optimistic', 'Short optimistic']
     assert [line.get_label() for line in figure.axes[3].lines] == [
-        'Policy', 'Opponent policy', 'Soft policy', 'Soft opponent policy', 'Value',
-        'TD long', 'TD mid', 'TD short', 'Long optimistic', 'Short optimistic', 'Value error']
-    assert sum(line.get_ydata()[0] for line in figure.axes[3].lines) == 6
+        'Value', 'TD long', 'TD mid', 'TD short', 'Value error']
+    assert sum(line.get_ydata()[0] for axis in figure.axes[2:4] for line in axis.lines) == 6
     performance = performance_figure(rows, 8)
     assert list(performance.axes[1].lines[0].get_ydata()) == [8]
     assert list(performance.axes[3].lines[0].get_ydata()) == [4]
@@ -123,6 +127,44 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     path.write_text('{broken\n'+json.dumps(stats)+'\n')
     with pytest.raises(ValueError, match='Corrupt journal'):
         list(journal_events(path))
+
+
+def test_validation_history_excludes_abandoned_and_uncommitted_rounds(tmp_path):
+    save_json(tmp_path/'.internal/state.json', {'iteration': 4, 'checkpoint': {'id': 'c', 'path': 'checkpoints/c.pt'}})
+    save_json(tmp_path/'checkpoints/c.json', {'parent': None, 'committed_updates': ['one', 'two', 'three']})
+    values = dict.fromkeys(METRICS, 1.0); values['loss'] = 11.0
+    def update(iteration, identity):
+        return dict(values, event='update', iteration=iteration, update_id=identity)
+    def complete(iteration):
+        return dict(event='iteration_complete', iteration=iteration, unique_rows=100*iteration)
+    def validation(iteration, loss):
+        return dict(values, event='validation', iteration=iteration, samples=16, batches=2, loss=loss)
+    journal(tmp_path, [update(1, 'abandoned'), validation(1, 999),
+                       dict(event='plan', iteration=1), update(1, 'one'), complete(1),
+                       update(2, 'two'), validation(2, 12), validation(2, 12), complete(2),
+                       validation(3, 999), dict(event='plan', iteration=3), update(3, 'three'),
+                       dict(event='validation', iteration=3, samples=0, batches=0,
+                            reason='no_complete_validation_batch'), complete(3),
+                       update(4, 'current'), validation(4, 999), complete(4)])
+    history = run_history(tmp_path)
+    assert [r['iteration'] for r in history] == [1, 2, 3]
+    assert 'validation' not in history[0]
+    assert history[1]['validation']['loss'] == 12
+    assert history[2]['validation']['samples'] == 0 and 'loss' not in history[2]['validation']
+    figure = loss_figure(history)
+    assert len(figure.axes) == 12
+    train, val = figure.axes[0].lines
+    assert list(train.get_ydata()) == [11, 11, 11]
+    np.testing.assert_equal(val.get_ydata(), [np.nan, 12, np.nan])
+    assert val.get_linestyle() == '--' and val.get_marker() == 'o'
+    figure.clear()
+    history[1]['q_winloss_loss'] = .25
+    history[1]['validation']['q_winloss_loss'] = .5
+    figure = loss_figure(history)
+    assert len(figure.axes) == 13 and figure.axes[-1].get_title() == 'W-L Q'
+    np.testing.assert_equal(figure.axes[-1].lines[0].get_ydata(), [np.nan, .25, np.nan])
+    assert figure.axes[-1].lines[1].get_ydata()[1] == .5
+    figure.clear()
 
 
 def test_budget_completion_requires_matching_run(tmp_path):
