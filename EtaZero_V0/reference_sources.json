@@ -37,7 +37,11 @@
       "cpp/search/searchnnhelpers.cpp": "82e4098b429e352bb385fca94f19c1f92b47dde95e107cba92e1a73c98ff40b4",
       "cpp/core/fancymath.cpp": "0c4668731eb4a252783f6accb70060a4df836b69a16b975fc0d1865515275a5b",
       "cpp/program/playsettings.cpp": "de8c04113549a85f7b897dcef50526cde56503debca1ba70c00282a3b0e3366c",
-      "cpp/program/playsettings.h": "163a06f9e517eeea9cf2720a6253333241388f00e3e7d039cd5d881b64349225"
+      "cpp/program/playsettings.h": "163a06f9e517eeea9cf2720a6253333241388f00e3e7d039cd5d881b64349225",
+      "python/export_model_pytorch.py": "eaaaf92d0f6e2f8b7486036822dd5fc1ee8add4200cdad27cba1e8bcfe604d9e",
+      "python/katago/train/modelconfigs.py": "4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e",
+      "docs/NetworkArchitectures.md": "c3198aaeb5762b69a59eef7192d4c66d6c2d83e800f569d5d831226afe18d9e4",
+      "docs/KataGoMethods.md": "95a6039d76fcc0bbd629e65c3248fa88d6fcf3216854c8038ab428ecd91c84d2"
     }
   },
   "MuZero_V2": {
@@ -116,6 +120,22 @@
       "python/nets.py": "efd718c480a2e7e1e15580683db94e8485effe5dd845ebb489860bb884d4ac96",
       "docs/architecture/input_features.md": "a4811ca5a9803dfab90f86dafabfb02cf13e96cd26dd2b6e8dc6f6b64cdd6de6",
       "configs/baseline/run.cfg": "7ba62b44e0ebb2b206301c853da10b5053fcb0db2ef97229cc67e28507d6b678"
+    }
+  },
+  "MuZero_web": {
+    "root": "/home/sky/RL/MuZero",
+    "sha256": {
+      "web/app.py": "aa47cdf1a167ceb426a7abcee2cebff2fd3a364678927d6f58601046c138a671",
+      "web/server.py": "6aabfdd04ff29e275882c5ffbe47270f5999c364799ff65d01705fcd9fdb1d36",
+      "web/static/index.html": "28e68b3b5343dc72d0313f98aa8298732290530ce35e332a5fec2a340226ae08",
+      "web/static/app.js": "fc41167ca174a7d52c2ed789aca869555c70446a7fc06987d81c33a762c20f8a",
+      "web/static/styles.css": "a0087397359cb5825eca8843377a7000e9cfc88a9154bbadcdf293f3ce932476",
+      "web/webui.sh": "e90521de5e4721055f72bdb0a8264e3001d527ca616ba4394932d42da91e101f",
+      "web/tests/test_web.py": "1b98a108e24029a01c4814e2e6931013af568ea86c7e7227b3a60287b77f4b3c",
+      "web/tests/test_browser.py": "7e9862361244eedf549148cef8ee9e47e149aa60fdfc9e2e214148694a8f1420",
+      "MuZero_V2/python/muzero/engine.py": "da661282641899370106293f1a019421719f9d8bd25e5d7d088b718ce6ec7bc8",
+      "MuZero_V2/cpp/src/eval_main.cpp": "b4392bc696e34f2c3b37e8ab6763541f1dc54530c90c92a7fe6275d27f0e243b",
+      "MuZero_V2/cpp/include/muzero/eval_session.h": "fcf2c512b311a62d5b82099476b1d4f46627afe63bd8f16d4b16a32d756d4383"
     }
   }
 }
