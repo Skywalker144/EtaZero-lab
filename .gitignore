@@ -1,6 +1,7 @@
 **/__pycache__/
 **/.pytest_cache/
-EtaZero_V0/build/
-EtaZero_V0/runs/
-EtaZero_V0/data/
+EtaZero_V*/build/
+EtaZero_V*/runs/
+EtaZero_V*/data/
+EtaZero_V*/tmp/
 *.cfg.local
