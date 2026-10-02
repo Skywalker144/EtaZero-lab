@@ -8,7 +8,7 @@ MuZero 和 Gumbel 属于后续阶段，选择它们会在启动 worker 前报错
 
 ## 构建与小规模验证
 
-以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖 C++17、CMake、zlib、OpenSSL Crypto 和该环境的 LibTorch；脚本不读取其他研究仓库的代码。
+以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖 C++17、CMake、zlib、OpenSSL Crypto 和该环境的 LibTorch；构建与训练脚本不读取其他研究仓库的代码。`scripts/` 放构建、运行、调度和性能测量工具，独立来源对照检查放在 `tests/reference/`，用途与命令见[验收与限制](docs/implementation.md#验收与限制)。
 
 ```bash
 bash scripts/build.sh
@@ -34,7 +34,7 @@ bootstrap 编号为 0，训练迭代从 1 编号，初始化 checkpoint 使用 0
 
 ## 实验目录与开局
 
-每个实验目录的公开入口为 `config/`、`logs/`、`selfplay/`、`snapshots/`、`checkpoints/` 和 `models/`，每轮提交后自动更新根目录 `training.png` 和 `logs/performance.png`，支持手动重建。缓存、索引、轮次恢复状态和源码证据集中在 `.internal/`；完整布局见 [运行目录](docs/implementation.md#运行目录)。
+每个实验目录的公开入口为 `config/`、`logs/`、`selfplay/`、`snapshots/`、`checkpoints/` 和 `models/`，每轮提交后自动更新根目录 `training.png`、`loss.png` 和 `logs/performance.png`，支持手动重建。缓存、索引、轮次恢复状态和源码证据集中在 `.internal/`；完整布局见 [运行目录](docs/implementation.md#运行目录)。
 
 `selfplay.cfg` 的 `[opening]`、`[policy_init]` 分别配置平衡开局和 policy init，基础配置沿用 KataGomo 的平衡开局参数。随机冷启动跳过二者，首次训练发布后启用。开局动作保留用于恢复完整对局，但不进入训练监督；局长包含开局，产样预算与 shuffle 统计 cap 与 surprise 随机取整后的实际训练行。机制、来源及适配差异见 [平衡开局](docs/algorithms.md#平衡开局与-policy-init)。
 
@@ -60,7 +60,9 @@ PDA 的普通局抽样及 side 分支概率见 [selfplay.cfg](configs/baseline/s
 
 ## 训练图与自动实验
 
-`training.png` 沿用 MuZero 的深色六面板布局，显示黑白胜／和棋、包含开局的局长、总 loss、policy／value／TD／optimistic／error 分量、排除开局的有效行数／局和裁剪前梯度范数。loss 与梯度是该轮已提交更新的原始算术均值，无平滑；bootstrap 编号为 0，不含训练指标。恢复后绘图按 checkpoint 提交链去重，只展示整轮已提交更新。阶段耗时、吞吐、组批、排队和缓存命中另存 `logs/performance.png`。
+`training.png` 使用深色三行两列布局，顶部显示黑白胜／和棋和包含开局的局长，中部保留固定分组的策略 loss 与价值 loss，底部显示裁剪前梯度范数和 NN 缓存命中率。策略组包含普通／对手、soft 和 optimistic policy，价值组包含主 value、三个 TD、短期价值误差及启用时的 Q；两组图例在面板内分两列显示。缓存命中率为该轮网络推理的 cache hits／submitted requests，随机冷启动不伪造零值。总 loss 和有效行数／局保留在日志中，不单独占用概览面板。累计有效行数横轴采用 `1.2e5` 形式的紧凑科学计数。loss 与梯度是该轮已提交更新的原始算术均值，无平滑；bootstrap 编号为 0，不含训练指标。恢复后绘图按 checkpoint 提交链去重，只展示整轮已提交更新。
+
+`loss.png` 以四列面板逐项展示总 loss 与每个实际启用的 loss 分量，蓝色实线为该轮训练均值，红色虚线为轮末 raw 模型的验证均值；每项独立纵轴，正值使用对数刻度。无验证或验证无完整 batch 时保留缺测，不填零；恢复重试前的验证记录不进入图表。训练是轮内均值，验证是轮末 eval/no_grad，二者时点和数据不同，曲线差距不直接等同于过拟合。阶段耗时、吞吐、组批、排队和缓存命中另存 `logs/performance.png`。
 
 ```bash
 bash scripts/run.sh plot --run-dir data/my_check
@@ -115,6 +117,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_experiment_
 | 任务 | 阅读入口 |
 |---|---|
 | 查看对局线程、搜索线程、共享组批及 C++ / Python 分工 | [执行架构](docs/implementation.md#执行架构) |
+| 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
 | 查看 replay ratio、累计缺口及 selfplay 局数 | [产样规划](docs/implementation.md#固定训练量与自对弈产量) |
 | 调整平衡开局及独立 policy init | [开局机制](docs/algorithms.md#平衡开局与-policy-init) |
