@@ -88,10 +88,11 @@ def compact_search(a):
     a['forbidden_input'] = np.full(int(a['row_repeats'].sum()), a['rules'][0]==2, np.uint8)
 
 
-def test_configuration_inheritance_and_fail_fast(tmp_path,config):
+def test_configuration_inheritance_and_fail_fast(tmp_path,config,monkeypatch):
     assert config['network']['canvas']==6 and config['optimizer']['kind']=='sgd'
     assert config['training']['d4_augmentation']
     shutil.copytree(ROOT/"configs",tmp_path/"configs")
+    monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     current=tmp_path/"configs"/"smoke_test"
     (current/"train.cfg.local").write_text("[training]\ntrain_steps=7\n")
     assert load_config(current)["training"]["train_steps"]==7
@@ -110,12 +111,12 @@ def test_script_config_environment_and_explicit_override(tmp_path):
     result=subprocess.run(command,cwd=tmp_path,env=env,text=True,capture_output=True,check=True)
     selected=json.loads(result.stdout)["config"]
     assert selected["network"]["canvas"]==6
-    assert selected["run"]["run_dir"]=="data/smoke_test"
+    assert selected["run"]["run_dir"]==str((ROOT/"data/smoke_test").resolve())
     result=subprocess.run(command+["--config-dir","configs/baseline"],cwd=tmp_path,
                           env=env,text=True,capture_output=True,check=True)
     selected=json.loads(result.stdout)["config"]
     assert selected["network"]["canvas"]==15
-    assert selected["run"]["run_dir"]=="data/baseline"
+    assert selected["run"]["run_dir"]==str((ROOT/"data/baseline").resolve())
     assert selected["run"]["max_iteration"]==0
 
 
@@ -350,10 +351,11 @@ def test_katago_window_hand_values(config):
         validate(config)
 
 
-def test_replay_configuration_has_source_window_extensions(tmp_path):
+def test_replay_configuration_has_source_window_extensions(tmp_path,monkeypatch):
     baseline=load_config(ROOT/'configs'/'baseline')
     assert set(baseline['replay'])=={'min_rows','taper_exponent','expand_per_row','keep_target_rows','taper_scale','add_to_data_rows','max_rows'}
     shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     selected=tmp_path/'configs'/'smoke_test'
     local=selected/'train.cfg.local'
     local.write_text('[replay]\nkeep_target_rows=all\n')
@@ -855,10 +857,11 @@ def test_output_row_forbidden_dropout_repeats_and_domains(config):
     assert grad[0,0]>0 and grad[2,2]>0 and torch.count_nonzero(grad[5])==0 and torch.count_nonzero(grad[:,5])==0
 
 
-def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path):
+def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatch):
     from etazero.eval_config import load_evaluation_config
     import shutil
     shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     base=tmp_path/'configs/baseline'
     selfplay=base/'selfplay.cfg'
     selfplay.write_text(selfplay.read_text().replace('\npolicy_init_mean = 6\n','\n').replace('\npolicy_temperature = 1.6\n','\n'))
