@@ -1,5 +1,17 @@
 # Reference code and attribution
 
+`python/etazero/muzero/data.py` and `training.py` adapt MuZero_V2's unroll, absorbing-state, replay-weight and hidden/loss gradient boundaries to EtaZero's complete heads, row multiplicity, masked side continuations and batch-sum optimizer convention. The isolated latent search reuses EtaZero's configured PUCT and subtree aggregation formulas, rather than claiming exact MuZero_V2 search parity.
+
+`python/etazero/muzero/network.py` uses the pinned MuZero_V2 masked min/max
+normalization and gradient-scaling definitions, checked against the unchanged
+source bodies by `tests/reference/check_muzero_network.py`. Its three independently
+sized NBT trunks, five-plane/six-global input and complete heads reuse EtaZero's
+KataGo-derived modules; they are not the V2 masked ResNet architecture. Latent
+normalization explicitly computes in FP32 under autocast. MuZero parameter roles
+are defined separately and reuse EtaZero's fson schedule. The independent native
+backend implements initial/recurrent inference and device-local latent ownership;
+AlphaZero's cache, batching and graph-search code is not transplanted into it.
+
 The native hint loader links the selected environment's OpenSSL Crypto library
 to verify SHA-256 over the exact bytes it parses. OpenSSL is a build dependency;
 no cryptographic implementation is copied into EtaZero.
