@@ -129,6 +129,32 @@ def test_unlimited_iterations_stop_and_auto_resume(tmp_path):
     assert_preserved(root,shards)
 
 
+def test_default_nested_run_directory_and_explicit_resume(tmp_path,monkeypatch,gpu_config):
+    from etazero.__main__ import main
+    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    selected=tmp_path/'configs/experiment/100v';selected.mkdir(parents=True)
+    (selected/'run.cfg').write_text('[run]\nextends=smoke_test\n')
+    monkeypatch.setattr('etazero.config.ROOT',tmp_path)
+    caller=tmp_path/'caller';caller.mkdir();monkeypatch.chdir(caller)
+    command=['etazero','run','--config-dir',str(selected)]
+    monkeypatch.setattr(sys,'argv',command+['--iterations','1'])
+    main()
+    root=tmp_path/'data/experiment/100v'
+    first=load_json(root/'.internal/state.json')
+    effective=load_json(root/'config/effective.json')
+    assert effective['run']['run_dir']==str(root)
+    assert first['iteration']==2 and first['checkpoint']['total_steps']==4
+    shards={p:sha256(p) for p in (root/'selfplay').rglob('*.npz')}
+    assert shards and not (caller/'data').exists()
+    monkeypatch.setattr(sys,'argv',command+['--iterations','2','--run-dir',str(root)])
+    main()
+    second=load_json(root/'.internal/state.json')
+    assert second['run_id']==first['run_id'] and second['iteration']==3
+    assert second['checkpoint']['total_steps']==8
+    assert load_json(root/'config/effective.json')==effective
+    assert all(sha256(p)==digest for p,digest in shards.items())
+
+
 def test_random_pda_bootstrap_and_cuda_training(tmp_path,gpu_config):
     c=copy.deepcopy(gpu_config)
     c['pda']['normal_asymmetric_playout_prob']=1
@@ -814,7 +840,7 @@ def test_stage_failure_recovery(tmp_path,gpu_config,monkeypatch,phase):
 def test_forced_process_kill_during_training(tmp_path,gpu_config):
     configs=tmp_path/"configs";shutil.copytree(ROOT/"configs",configs)
     (configs/"smoke_test"/"train.cfg.local").write_text("[training]\ntrain_steps=100\ncheckpoint_every=2\nreplay_ratio=8\n")
-    c=load_config(configs/"smoke_test");root=tmp_path/"run"
+    root=tmp_path/"run";c=load_config(configs/"smoke_test",run_dir=root)
     env=os.environ.copy();env["PYTHONPATH"]=str(ROOT/"python")
     command=[sys.executable,"-m","etazero","run","--config-dir",str(configs/"smoke_test"),
              "--run-dir",str(root),"--iterations","1"]
