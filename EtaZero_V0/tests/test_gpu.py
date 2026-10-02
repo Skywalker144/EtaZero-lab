@@ -26,6 +26,16 @@ pytestmark=pytest.mark.skipif(os.environ.get("ETAZERO_GPU_TESTS")!="1",reason="E
 BINARY=ROOT/"build"/"etazero"
 
 
+@pytest.fixture(autouse=True)
+def isolated_compiler_cache():
+    # Cases intentionally change network/precision and install instrumentation.
+    # Give each case its own controller cache budget, retaining caches across
+    # all rounds and resume calls within that case. Production limits stay intact.
+    torch._dynamo.reset()
+    yield
+    torch._dynamo.reset()
+
+
 def assert_preserved(root, files):
     for path, digest in files.items():
         if path.exists():
@@ -126,8 +136,17 @@ def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
     shards={p:sha256(p) for p in (root/"selfplay").rglob("*.npz")}
     assert shards
     for path in shards:
-        read_raw(path)
+        raw=read_raw(path)
+        np.testing.assert_array_equal(raw['sample_indices'],np.flatnonzero(raw['row_repeats']))
+        assert len(raw['policies'])==len(raw['visits'])==len(raw['sample_indices'])
+        assert len(raw['opponent_policies'])==len(raw['opponent_policy_weights'])==len(raw['policies'])
+    assert any(len(read_raw(path)['sample_indices'])<len(read_raw(path)['actions']) for path in shards)
     events=[json.loads(line) for line in (root/"logs/events.jsonl").read_text().splitlines()]
+    for event in (e for e in events if e['event']=='update'):
+        components=[event[key] for key in ('policy_loss','opponent_policy_loss','soft_policy_loss',
+                                          'soft_opponent_policy_loss','value_loss')]
+        assert all(np.isfinite(components)) and min(components)>0
+        assert sum(components)==pytest.approx(event['loss'],rel=2e-6)
     assert max(e["max_batch"] for e in events if e["event"]=="inference")>1
     starts=[e for e in events if e['event']=='worker_start']
     assert len(starts)>1 and len({e['pid'] for e in starts})==1
@@ -138,6 +157,85 @@ def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
     resumed=run_training(root,gpu_config,BINARY,resume=True,max_iteration=2)
     assert state==resumed and len(list((root/"checkpoints").glob("*.pt")))==before
     assert shards=={p:sha256(p) for p in shards}
+
+
+@pytest.mark.parametrize('amp',['off','float16','bfloat16'])
+def test_b5c192nbt_compiled_11x11_pipeline(tmp_path,gpu_config,amp):
+    c=copy.deepcopy(gpu_config)
+    c['network'].update(canvas=11,channels=192,blocks=5)
+    c['environment'].update(sizes='11',size_weights='1')
+    c['training'].update(compile=True,amp=amp)
+    c['shuffle']['group_rows']=512  # One complete 11x11 game can exceed smoke's 128-row cap.
+    state=run_training(tmp_path,c,BINARY,max_iteration=2)
+    assert state['checkpoint']['total_steps']==8 and state['checkpoint']['total_samples']==64
+    saved=load_checkpoint(tmp_path,state['checkpoint'],c)
+    assert saved['model']['value_head.hidden.weight'].shape==(80,96)
+    assert saved['model']['policy_head.out.weight'].shape==(4,32,1,1)
+    updates=[json.loads(line) for line in (tmp_path/'logs/events.jsonl').read_text().splitlines()]
+    updates=[e for e in updates if e['event']=='update']
+    assert len(updates)==8 and all(np.isfinite(e['loss']) and np.isfinite(e['grad_norm']) for e in updates)
+    info=load_json(tmp_path/Path(state['model']['path']).parent/'manifest.json')
+    assert info['weights']=='swa' and info['verification']['native']
+    assert run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)==state
+
+
+def test_checkpoint_retention_resume_history_and_old_model(tmp_path,gpu_config):
+    from etazero.plotting import run_history, plot_run
+    c=copy.deepcopy(gpu_config)
+    c['training'].update(checkpoint_keep=2,replay_ratio=1000)
+    state=run_training(tmp_path,c,BINARY,max_iteration=3)
+    statuses=[load_json(tmp_path/'.internal/iterations'/f'{i:06d}'/'status.json') for i in range(1,4)]
+    expected={tmp_path/s['checkpoint']['path'] for s in statuses[-2:]}
+    assert set((tmp_path/'checkpoints').glob('*.pt'))==expected
+    assert not (tmp_path/statuses[0]['checkpoint']['path']).exists()
+    sidecars={p:sha256(p) for p in (tmp_path/'checkpoints').glob('*.json')}
+    assert len(sidecars)==7  # Initialization plus two checkpoints per training round.
+    history=run_history(tmp_path)
+    assert [row['steps'] for row in history if row['iteration']>0]==[4,4,4]
+    models={p:sha256(p) for p in (tmp_path/'models').rglob('model.pt')}
+    raw={p:sha256(p) for p in (tmp_path/'selfplay').rglob('*.npz')}
+    assert run_training(tmp_path,c,BINARY,resume=True,max_iteration=3)==state
+    plot_run(tmp_path)
+    assert run_history(tmp_path)==history
+    assert (tmp_path/'training.png').stat().st_size>0
+    old_model=tmp_path/statuses[0]['model']['path']
+    _,evaluation=evaluate(load_evaluation_config(ROOT/'configs/smoke_test'),BINARY,
+                          tmp_path,model=old_model,size=5,rule='renju')
+    assert evaluation['result']['root_visits']==100
+    resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=4)
+    assert resumed['checkpoint']['total_steps']==16
+    assert set((tmp_path/'checkpoints').glob('*.pt'))=={
+        tmp_path/state['checkpoint']['path'],tmp_path/resumed['checkpoint']['path']}
+    assert [row['steps'] for row in run_history(tmp_path) if row['iteration']>0]==[4,4,4,4]
+    assert all(sha256(p)==digest for p,digest in {**sidecars,**models,**raw}.items())
+
+
+def test_resume_finishes_cleanup_after_round_commit(tmp_path,gpu_config,monkeypatch):
+    import etazero.runtime as runtime
+    from etazero.plotting import run_history
+    c=copy.deepcopy(gpu_config);c['training']['checkpoint_keep']=1
+    prune=runtime.prune_checkpoints
+    def interrupted(root,keep):
+        if load_json(root/'.internal/state.json')['iteration']==2:
+            raise RuntimeError('injected interruption before checkpoint cleanup')
+        return prune(root,keep)
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime,'prune_checkpoints',interrupted)
+        with pytest.raises(RuntimeError,match='before checkpoint cleanup'):
+            run_training(tmp_path,c,BINARY,max_iteration=1)
+    state=load_json(tmp_path/'.internal/state.json')
+    assert state['checkpoint']['total_steps']==4
+    assert len(list((tmp_path/'checkpoints').glob('*.pt')))==3
+    history=run_history(tmp_path)
+    preserved={p:sha256(p) for folder,pattern in [('checkpoints','*.json'),
+               ('models','model.pt'),('selfplay','*.npz')] for p in (tmp_path/folder).rglob(pattern)}
+    resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=1)
+    assert resumed==state
+    assert set((tmp_path/'checkpoints').glob('*.pt'))=={tmp_path/state['checkpoint']['path']}
+    assert run_history(tmp_path)==history
+    assert all(sha256(p)==digest for p,digest in preserved.items())
+    resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)
+    assert resumed['checkpoint']['total_steps']==8
 
 
 def test_unbounded_replay_window_pipeline(tmp_path,gpu_config):
@@ -176,7 +274,7 @@ def test_native_parity_all_sizes_rules_and_match(pipeline,gpu_config):
             native=json.loads(subprocess.run(command,text=True,capture_output=True,check=True).stdout)
             with torch.inference_mode():
                 p,v=model(*(torch.from_numpy(x).unsqueeze(0).cuda() for x in example_inputs(canvas,size,rule,(0,canvas,1))))
-            np.testing.assert_allclose(native["raw_logits"],p[0].cpu(),rtol=2e-4,atol=2e-5)
+            np.testing.assert_allclose(native["raw_logits"],p[0,0].cpu(),rtol=2e-4,atol=2e-5)
             np.testing.assert_allclose(native["raw_wdl"],v[0].float().softmax(0).cpu(),rtol=2e-4,atol=2e-5)
     model_b=root/load_json(root/".internal/iterations"/"000001"/"status.json")["model"]["path"]
     _,result=evaluate(load_evaluation_config(ROOT/"configs/smoke_test",match=True),BINARY,root,model_b=model_b,size=5,rule="renju",games=4)
@@ -202,7 +300,7 @@ def test_root_d4_probabilities_and_policy_temperatures(pipeline,gpu_config):
     with torch.inference_mode():
         for symmetry in range(8):
             logits,value=model(apply_symmetry(tensor,symmetry).contiguous(),global_tensor)
-            restored=apply_symmetry(logits.reshape(1,canvas,canvas),inverse[symmetry]).flatten(1)
+            restored=apply_symmetry(logits[:,0].reshape(1,canvas,canvas),inverse[symmetry]).flatten(1)
             policies.append(torch.softmax((restored/1.7).masked_fill(~legal,-torch.inf),dim=1))
             values.append(value.float().softmax(1))
     expected_policy=torch.stack(policies).mean(0)[0].cpu().numpy()
@@ -309,8 +407,11 @@ def test_optimizer_checkpoint_d4_and_swa_export(tmp_path,pipeline,gpu_config,kin
 
 @pytest.mark.parametrize('amp',['float16','bfloat16'])
 @pytest.mark.parametrize('kind',['sgd','adamw'])
-def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,monkeypatch):
-    root,_=pipeline;c=copy.deepcopy(gpu_config);c["training"]["amp"]=amp
+@pytest.mark.parametrize('compiled',[False,True])
+def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeypatch):
+    from torch._functorch import config as autograd_config
+    donation_before=autograd_config.donated_buffer
+    root,_=pipeline;c=copy.deepcopy(gpu_config);c['training'].update(amp=amp,compile=compiled)
     c['optimizer']['kind']=kind
     plan=load_json(root/".internal/iterations"/"000001"/"plan.json");plan["train_steps"]=2
     plan["snapshot_id"]=load_json(root/".internal/iterations"/"000001"/"status.json")["snapshot_id"]
@@ -333,6 +434,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,monkeypatch):
         return model
     monkeypatch.setattr("etazero.training.make_network",instrumented)
     result,done=train_iteration(tmp_path,c,plan,base,lambda event,**fields:events.append((event,fields)))
+    assert autograd_config.donated_buffer==donation_before
     assert done and result["total_steps"]==2
     assert len(forwards)==2
     if amp=="float16":
@@ -466,7 +568,8 @@ def test_native_selfplay_signal_flushes_complete_games(tmp_path,pipeline,gpu_con
 
 def test_multiple_servers_fp16_packed_waves_and_prefetch(tmp_path,gpu_config):
     c=copy.deepcopy(gpu_config)
-    c["selfplay"].update(server_threads=2,inference_precision="float16",game_threads=4,search_threads=3,cache_entries=64)
+    c["parallelism"].update(game_threads=4,search_threads=3)
+    c["inference"].update(server_threads=2,inference_precision="float16",cache_entries=64)
     c["shuffle"].update(waves=3,temp_dir=str(tmp_path/"scratch"))
     root=tmp_path/"run"
     state=run_training(root,c,BINARY,max_iteration=2)
@@ -530,21 +633,21 @@ def test_compiled_training_resume(tmp_path,pipeline,gpu_config,amp):
 
 @pytest.mark.parametrize('amp',['off','float16'])
 def test_inference_normalization_preserves_convolution_precision(gpu_config,amp):
-    c=copy.deepcopy(gpu_config);c['network'].update(canvas=15,channels=64,blocks=4,value_hidden=64)
+    c=copy.deepcopy(gpu_config);c['network'].update(canvas=15,channels=192,blocks=5)
     with torch.random.fork_rng():
         torch.manual_seed(53)
         model=make_network(c).cuda().eval()
         with torch.no_grad():
             for layer in model.modules():
                 if isinstance(layer,MaskedBatchNorm):
-                    layer.running_mean.uniform_(-0.5,0.5);layer.running_var.uniform_(0.1,2)
-                    layer.weight.uniform_(0.5,1.5);layer.bias.uniform_(-0.2,0.2)
+                    layer.running_mean.uniform_(-0.5,0.5);layer.running_std.uniform_(0.1,2)
+                    layer.weight.uniform_(-0.5,0.5);layer.bias.uniform_(-0.2,0.2)
         inference=torch.jit.script(inference_network(model))
         probes=[example_inputs(15,size,rule,(0,15,1)) for size in (9,15) for rule in ('freestyle','standard','renju')]
         obs=tuple(torch.from_numpy(np.stack(x)).cuda() for x in zip(*probes))
         with torch.backends.cudnn.flags(enabled=True,allow_tf32=True),torch.inference_mode(),torch.autocast('cuda',dtype=torch.float16,enabled=amp=='float16'):
             for inputs in (obs,tuple(x[:1] for x in obs)):
-                expected=model(*inputs)
+                p,v=model(*inputs);expected=p[:,0],v
                 # Include the optimized graph selected after JIT profiling.
                 for _ in range(6):
                     for reference,actual in zip(expected,inference(*inputs)):
@@ -555,9 +658,9 @@ def test_inference_normalization_preserves_convolution_precision(gpu_config,amp)
 @pytest.mark.parametrize('precision',['float32','float16'])
 def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision):
     c=copy.deepcopy(gpu_config)
-    c['network'].update(canvas=15,channels=64,blocks=4,value_hidden=64)
+    c['network'].update(canvas=15,channels=192,blocks=5)
     c['environment'].update(sizes='15',size_weights='1')
-    c['selfplay']['inference_precision']=precision
+    c['inference']['inference_precision']=precision
     (tmp_path/'models').mkdir();(tmp_path/'checkpoints').mkdir()
     write_native(c,tmp_path/'config/effective.cfg')
     with torch.random.fork_rng(),torch.backends.cudnn.flags(enabled=True,allow_tf32=True):
@@ -566,8 +669,8 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
         with torch.no_grad():
             for layer in model.modules():
                 if isinstance(layer,MaskedBatchNorm):
-                    layer.running_mean.uniform_(-2,2);layer.running_var.uniform_(0.03,2)
-                    layer.weight.uniform_(0.5,1.5);layer.bias.uniform_(-0.2,0.2)
+                    layer.running_mean.uniform_(-2,2);layer.running_std.uniform_(0.3,2)
+                    layer.weight.uniform_(-0.5,0.5);layer.bias.uniform_(-0.2,0.2)
         optimizer=optimizer_for(model,c)
         checkpoint=commit_checkpoint(tmp_path,c,model,optimizer,
                                      torch.amp.GradScaler('cuda',enabled=False),0,0,0,None,None,[],
@@ -854,11 +957,12 @@ def test_mixed_rule_openings_and_training_feature_dropout(tmp_path,pipeline,gpu_
     from etazero.schema import unpack_observations
     root,state=pipeline
     c=copy.deepcopy(gpu_config)
-    c['selfplay'].update(game_threads=1,search_threads=1,server_threads=1)
+    c['parallelism'].update(game_threads=1,search_threads=1)
+    c['inference']['server_threads']=1
     c['opening']['probability']=1
     datasets=[]
     for dropout in (0.,.5,1.):
-        c['selfplay']['forbidden_feature_dropout_prob']=dropout
+        c['environment']['forbidden_feature_dropout_prob']=dropout
         cfg=tmp_path/f'{dropout}.cfg';write_native(c,cfg)
         output=tmp_path/f'rows_{dropout}'
         command=[str(BINARY),'selfplay','--config',str(cfg),'--model',str(root/state['model']['path']),
@@ -893,11 +997,16 @@ def test_mixed_rule_openings_and_training_feature_dropout(tmp_path,pipeline,gpu_
 @pytest.mark.parametrize('lookback',[1,3])
 def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookback):
     c=copy.deepcopy(gpu_config)
-    c['opening'].update(probability=0,policy_init=False,policy_after=False,policy_on_failure=False)
-    c['selfplay'].update(game_threads=1,search_threads=1,policy_surprise_data_weight=0,value_surprise_data_weight=0)
-    c['search'].update(simulations=40,cheap_search_probability=0.5,cheap_search_visits=4,
-                       reduce_visits=True,reduce_visits_threshold=0,reduce_visits_threshold_lookback=lookback,
-                       reduced_visits_min=2,reduced_visits_weight=0.1)
+    # Exercise extreme-value/PCR transitions in random-evaluator trajectories,
+    # independent of the randomly initialized learner's value-head confidence.
+    c['selfplay']['bootstrap_games']=32
+    c['opening']['probability']=0
+    c['policy_init'].update(policy_init=False,policy_after=False,policy_on_failure=False)
+    c['parallelism'].update(game_threads=1,search_threads=1)
+    c['surprise_weighting'].update(policy_surprise_data_weight=0,value_surprise_data_weight=0)
+    c['search'].update(full_search_visits=41,cheap_search_probs=0.5,cheap_search_visits=4)
+    c['reduce_visits'].update(reduce_visits=True,reduce_visits_threshold=0,
+                             reduce_visits_threshold_lookback=lookback,reduced_visits_min=2,reduced_visits_weight=0.1)
     root=tmp_path/'run'
     state=run_training(root,c,BINARY,max_iteration=2)
     assert state['checkpoint']['total_steps']==8 and state['checkpoint']['total_samples']==64
@@ -906,9 +1015,10 @@ def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookba
     state=run_training(root,c,BINARY,resume=True,max_iteration=3)
     assert state['checkpoint']['total_steps']==12 and state['checkpoint']['total_samples']==96
     assert all(sha256(p)==digest for p,digest in files.items())
-    cheap_count=reduced_count=reduced_after_cheap=0
+    cheap_count=reduced_count=reduced_weight_count=reduced_after_cheap=cheap_reply_count=0
     for path in sorted((root/'selfplay').rglob('*.npz')):
         a=read_raw(path)
+        sampled={int(index):row for row,index in enumerate(a['sample_indices'])}
         for game,(lo,hi) in enumerate(zip(a['game_offsets'][:-1],a['game_offsets'][1:])):
             history=[];previous_cheap=False
             ol=a['observation_offsets'][game]
@@ -920,7 +1030,12 @@ def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookba
                     assert a['target_weights'][index]==0
                     assert a['row_repeats'][index]==0
                     assert 0 <= a['simulations'][index] <= 3
-                    assert a['visits'][index].sum()+1 >= 4
+                    assert index not in sampled
+                    if index>lo and index-1 in sampled:
+                        prior=sampled[index-1]
+                        assert a['opponent_policy_weights'][prior]==1
+                        assert a['opponent_policies'][prior].sum()==pytest.approx(1)
+                        cheap_reply_count+=1
                 else:
                     # Independently reconstruct certainty from stored completed WDL,
                     # rather than importing or translating the C++ limits helper.
@@ -934,10 +1049,14 @@ def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookba
                     unrounded_visits=41-39*reduction
                     # NPZ WDL is float32; allow only its rounding uncertainty at
                     # half-integer boundaries, not an extra search simulation.
-                    root_visits=int(a['visits'][index].sum())+1
+                    root_visits=int(a['simulations'][index])+1
+                    if index in sampled:
+                        assert int(a['visits'][sampled[index]].sum())+1==root_visits
                     assert abs(root_visits-unrounded_visits)<=0.5002
                     assert a['simulations'][index]==root_visits-1
                     assert a['target_weights'][index]==pytest.approx(expected_weight,abs=2e-6)
+                    if a['target_weights'][index]<1-1e-6:
+                        reduced_weight_count+=1
                     if root_visits<41:
                         reduced_count+=1
                         reduced_after_cheap+=int(previous_cheap)
@@ -945,6 +1064,8 @@ def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookba
                 wdl=a['search_wdl'][index].astype(np.float64)
                 history.append(player*(wdl[0]-wdl[2]))
                 previous_cheap=cheap
-    assert cheap_count>0 and reduced_count>0
+    assert cheap_count>0 and reduced_weight_count>0 and cheap_reply_count>0
     if lookback==1:
-        assert reduced_after_cheap>0
+        assert reduced_count>0 and reduced_after_cheap>0
+    # For lookback=3, a small but real weight reduction may round the visit cap
+    # back to 41. The per-turn checks above still verify both formulas exactly.
