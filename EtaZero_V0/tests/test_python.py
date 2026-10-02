@@ -44,6 +44,8 @@ def winning_record(rule=0):
     a["actions"]=np.array(actions,np.int32)
     a["visits"]=np.zeros((t,canvas*canvas),np.int64);a["visits"][np.arange(t),actions]=1
     a["policies"]=a["visits"].astype(np.float32)
+    a['opponent_policies']=np.concatenate((a['policies'][1:],np.full((1,canvas*canvas),1/(canvas*canvas),np.float32)))
+    a['opponent_policy_weights']=np.r_[np.ones(t-1,np.float32),np.zeros(1,np.float32)]
     a["simulations"]=np.ones(t,np.int32);a["temperatures"]=np.ones(t,np.float32)
     a["rewards"]=np.zeros(t,np.float32);a["rewards"][-1]=1
     a["game_offsets"]=np.array([0,t],np.int64);a["observation_offsets"]=np.array([0,t+1],np.int64)
@@ -51,6 +53,7 @@ def winning_record(rule=0):
         a[key]=np.array([value],dtype=RAW_DTYPES[key])
     a["train_mask"]=np.ones(t,np.uint8)
     a['row_repeats']=np.ones(t,np.int32);a['target_weights']=np.ones(t,np.float32)
+    a['sample_indices']=np.arange(t,dtype=np.int64)
     for key in ('policy_surprises','value_surprises'):
         a[key]=np.zeros(t,np.float32)
     a['cheap_search']=np.zeros(t,np.uint8)
@@ -62,6 +65,14 @@ def winning_record(rule=0):
        "worker_id":0,"iteration_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
     a["metadata"]=np.frombuffer(json.dumps(m).encode(),np.uint8)
     return a,m
+
+
+def compact_search(a):
+    indices = np.flatnonzero(a['row_repeats'])
+    rows = np.searchsorted(a['sample_indices'], indices)
+    for key in ('policies','visits','opponent_policies','opponent_policy_weights'):
+        a[key] = a[key][rows]
+    a['sample_indices'] = indices
 
 
 def test_configuration_inheritance_and_fail_fast(tmp_path,config):
@@ -145,16 +156,20 @@ def test_masked_statistics_and_training_policy_domain(config):
     x=torch.tensor([[[[1.,3.],[1000.,1000.]]]])
     mask=torch.tensor([[[[1.,1.],[0.,0.]]]])
     result=bn(x,mask)
-    torch.testing.assert_close(result[0,0,0],torch.tensor([-1.,1.]),rtol=1e-5,atol=1e-5)
+    torch.testing.assert_close(result[0,0,0],torch.tensor([-1.,1.])/math.sqrt(1.0001))
     assert result[0,0,1].eq(0).all()
-    torch.testing.assert_close(bn.running_mean,torch.tensor([0.2]))
+    torch.testing.assert_close(bn.running_mean,torch.tensor([0.002]))
+    torch.testing.assert_close(bn.running_std,torch.tensor([1+0.001*(math.sqrt(1.0001)-1)]))
     obs=torch.from_numpy(example_inputs(6,5,"standard",(0,))[0]).unsqueeze(0)
     policy=torch.zeros(1,36);policy[0,1]=1
     model=make_network(config)
-    loss,pl,vl=losses(torch.zeros(1,36),torch.zeros(1,3),obs,policy,torch.tensor([[1.,0.,0.]]))
+    loss,pl,opl,spl,sopl,vl=losses(torch.zeros(1,4,36),torch.zeros(1,3),obs,policy,
+                                 policy,torch.zeros(1),torch.tensor([[1.,0.,0.]]),8.0)
     assert float(pl)==pytest.approx(math.log(25),abs=1e-6) # includes the occupied point, excludes padding
     assert float(vl.detach())==pytest.approx(math.log(3),abs=1e-6)
-    assert float(loss.detach())==pytest.approx(math.log(25)+math.log(3),abs=1e-6)
+    assert float(opl)==float(sopl)==0
+    assert float(spl)==pytest.approx(8*math.log(25),abs=1e-5)
+    assert float(loss.detach())==pytest.approx(9*math.log(25)+math.log(3),abs=1e-5)
 
 
 def test_full_trajectory_targets_and_corruption(tmp_path):
@@ -172,6 +187,78 @@ def test_full_trajectory_targets_and_corruption(tmp_path):
         validate_raw(bad)
 
 
+def test_four_policy_losses_and_gradients_against_independent_probabilities():
+    # Three on-board cells; one occupied cell and one padding cell.
+    obs=torch.zeros(2,5,2,2);obs[:,0].flatten(1)[:,:3]=1;obs[:,1,0,0]=1
+    primary=torch.tensor([[0.,1.,0.,0.],[0.,0.,1.,0.]])
+    opponent=torch.tensor([[0.,0.,1.,0.],[.25,.25,.25,.25]])
+    enabled=torch.tensor([1.,0.])
+    logits=torch.tensor([[[1.,2.,3.,99.],[3.,1.,2.,99.],[2.,3.,1.,99.],[1.,3.,2.,99.]],
+                         [[3.,2.,1.,99.],[2.,1.,3.,99.],[3.,1.,2.,99.],[2.,3.,1.,99.]]],requires_grad=True)
+    result=losses(logits,torch.zeros(2,3),obs,primary,opponent,enabled,
+                  torch.tensor([[1.,0.,0.],[0.,0.,1.]]),8.0)
+    # Independent scalar construction of softened target ratios and analytic CE gradient.
+    expected=np.zeros(4);gradient=np.zeros((2,4,4))
+    for sample in range(2):
+        for head in range(4):
+            hard=(primary if head%2==0 else opponent)[sample,:3].numpy().astype(float)
+            target=hard if head<2 else np.array([math.sqrt(math.sqrt(float(p)+1e-7)) for p in hard])
+            if head>=2: target/=sum(target)
+            weight=(1 if head%2==0 else .15*float(enabled[sample]))*(1 if head<2 else 8)
+            unnormalized=np.exp(logits.detach().numpy()[sample,head,:3].astype(float))
+            probs=unnormalized/sum(unnormalized)
+            expected[head]+=weight*sum(-p*math.log(q) for p,q in zip(target,probs))/2
+            gradient[sample,head,:3]=weight*(probs-target)/2
+    np.testing.assert_allclose([float(x.detach()) for x in result[1:5]],expected,rtol=2e-6)
+    assert float(result[0].detach())==pytest.approx(sum(expected)+math.log(3),rel=2e-6)
+    result[0].backward()
+    np.testing.assert_allclose(logits.grad.numpy(),gradient,atol=2e-7,rtol=2e-6)
+    # Soft primary explicitly supervises occupied cell 0; padded cell 3 has zero gradient.
+    assert gradient[0,2,0] != 0 and not logits.grad[:,:,3].any()
+    assert not logits.grad[1,[1,3]].any()
+
+
+def test_network_preserves_independent_policy_and_value_features(config):
+    # Four targets must be able to express four spatial patterns. Centering
+    # removes the per-head constant, which has no effect on policy softmax.
+    # Also retain independent pooled board features before the value MLP.
+    with torch.random.fork_rng():
+        torch.manual_seed(23)
+        model=make_network(config).eval()
+        obs=torch.zeros(16,5,6,6);obs[:,0]=1
+        for row in range(16):
+            cells=torch.randperm(36)[:row+2]
+            obs[row,1].flatten()[cells[::2]]=1
+            obs[row,2].flatten()[cells[1::2]]=1
+        pooled=[]
+        hook=model.value_head.hidden.register_forward_pre_hook(lambda module,args:pooled.append(args[0]))
+        try:
+            with torch.no_grad():
+                policy,_=model(obs,torch.zeros(16,4))
+        finally:
+            hook.remove()
+    centered=policy-policy.mean(2,keepdim=True)
+    assert (torch.linalg.matrix_rank(centered,atol=1e-5)==4).all()
+    features=pooled[0]-pooled[0].mean(0,keepdim=True)
+    assert torch.linalg.matrix_rank(features,atol=1e-5)>=4
+
+
+def test_opponent_targets_survive_missing_successor_and_terminal_boundary():
+    a,m=winning_record()
+    # Keep only turn 0 (whose successor is cheap/unselected) and the terminal turn.
+    a['row_repeats'][:]=0;a['row_repeats'][[0,8]]=[2,1]
+    a['target_weights']=a['row_repeats'].astype(np.float32);a['cheap_search'][1]=1
+    compact_search(a);m['rows']=3;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    validate_raw(a);view=training_view(a)
+    assert view['opponent_policy'].argmax(1)[:2].tolist()==[6,6]
+    assert view['opponent_policy_weight'].tolist()==[1,1,0]
+    assert view['policy'].argmax(1).tolist()==[0,0,4]
+    bad=copy.deepcopy(a);bad['opponent_policy_weights'][-1]=1
+    with pytest.raises(ValueError,match='terminal weight'):validate_raw(bad)
+    bad=copy.deepcopy(a);bad['opponent_policies'][0]=bad['policies'][0]
+    with pytest.raises(ValueError,match='successor action'):validate_raw(bad)
+
+
 @pytest.mark.parametrize("waves",[1,3])
 def test_shuffle_conservation_and_reader_restoration(tmp_path,config,waves):
     config["replay"].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows='all')
@@ -181,13 +268,17 @@ def test_shuffle_conservation_and_reader_restoration(tmp_path,config,waves):
         a,m=winning_record(rule);path=tmp_path/"selfplay"/f"{rule}.npz";save_npz(path,a)
         entries.append({"path":str(path.relative_to(tmp_path)),"sha256":sha256(path),"metadata":m})
         view=training_view(a)
-        expected.update((obs.tobytes(),p.tobytes(),v.tobytes()) for obs,p,v in zip(view["obs"],view["policy"],view["value"]))
+        expected.update((obs.tobytes(),p.tobytes(),op.tobytes(),float(w),v.tobytes())
+                        for obs,p,op,w,v in zip(view["obs"],view["policy"],view['opponent_policy'],
+                                               view['opponent_policy_weight'],view["value"]))
     identity=build_snapshot(tmp_path,1,entries,config)
     snapshot=tmp_path/"snapshots"/identity
     manifest=json.loads((snapshot/"manifest.json").read_text());actual=Counter()
     for item in manifest["files"]:
         with np.load(snapshot/"data"/item["path"]) as a:
-            actual.update((obs.tobytes(),p.tobytes(),v.tobytes()) for obs,p,v in zip(a["obs"],a["policy"],a["value"]))
+            actual.update((obs.tobytes(),p.tobytes(),op.tobytes(),float(w),v.tobytes())
+                          for obs,p,op,w,v in zip(a["obs"],a["policy"],a['opponent_policy'],
+                                                 a['opponent_policy_weight'],a["value"]))
     assert expected==actual and manifest["rows"]==27
     assert manifest["resource_plan"]["waves"]==waves
     assert not list((tmp_path/"scratch").iterdir())
@@ -262,7 +353,7 @@ def test_replay_configuration_has_four_policy_fields(tmp_path):
 def test_katago_sampled_snapshot_waves_and_rebuild(tmp_path,config,files,target,group_rows,expected_rows):
     config['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=target)
     config['shuffle'].update(group_rows=group_rows,bucket_rows=2,training_shard_rows=2)
-    config['selfplay']['shard_rows']=16
+    config['writer']['shard_rows']=16
     validate(config)
     entries=[];original=Counter()
     for i in range(files):
@@ -410,7 +501,10 @@ def test_inference_normalization_keeps_mask_and_model_state(config):
     model.eval();original={k:v.clone() for k,v in model.state_dict().items()}
     folded=inference_network(model)
     with torch.inference_mode():
-        for a,b in zip(model(*obs),folded(*obs)):
+        p,v=model(*obs)
+        assert p.shape==(len(probes),4,36)
+        assert folded(*obs)[0].shape==(len(probes),36)
+        for a,b in zip((p[:,0],v),folded(*obs)):
             torch.testing.assert_close(a,b,rtol=2e-4,atol=2e-5)
     for key,value in model.state_dict().items():
         torch.testing.assert_close(value,original[key],rtol=0,atol=0)
@@ -426,11 +520,12 @@ def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
     for key in ('policies','visits','simulations','temperatures'):
         a[key][:prefix]=0
     m['rows']=5;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    compact_search(a)
     validate_raw(a)
     view=training_view(a)
     assert len(view['value'])==5
     np.testing.assert_array_equal(view['value'].argmax(1),[0,2,0,2,0])
-    np.testing.assert_array_equal(view['policy'],a['policies'][4:])
+    np.testing.assert_array_equal(view['policy'],a['policies'])
     np.testing.assert_array_equal(view['obs'][0],a['observations'][4])
     path=tmp_path/'selfplay'/'game.npz';save_npz(path,a)
     catalog=Catalog(tmp_path,'test','config')
@@ -445,13 +540,14 @@ def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
         catalog.close()
     corrupt=copy.deepcopy(a);corrupt['train_mask'][1]=1;corrupt['row_repeats'][1]=1;corrupt['target_weights'][1]=1
     m['rows']=6;corrupt['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
-    with pytest.raises(ValueError,match='temperature/budget|prefix mask|completed visits'):
+    with pytest.raises(ValueError,match='sample indices|temperature/budget|prefix mask|completed visits'):
         validate_raw(corrupt)
     # Policy init may end a game before search: retained evidence, zero training rows.
     a['train_mask'][:]=0;a['row_repeats'][:]=0;a['target_weights'][:]=0;a['opening_moves'][0]=9;a['policy_moves'][0]=5
     for key in ('policies','visits','simulations','temperatures'):
         a[key][:]=0
     m['rows']=0;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    compact_search(a)
     validate_raw(a)
     assert len(training_view(a)['value'])==0
 
@@ -474,9 +570,10 @@ def test_cold_start_quota_hand_values(config):
     assert iteration_plan(state,config)==plan
 
 
-@pytest.mark.parametrize('key,value',[('probability',1.1),('max_tries',0),('policy_temperature',0.01)])
-def test_opening_config_validation(config,key,value):
-    config['opening'][key]=value
+@pytest.mark.parametrize('section,key,value',[('opening','probability',1.1),('opening','max_tries',0),
+                                              ('policy_init','policy_temperature',0.01)])
+def test_opening_config_validation(config,section,key,value):
+    config[section][key]=value
     with pytest.raises(ValueError):
         validate(config)
 
@@ -522,7 +619,7 @@ def test_adamw_decoupled_decay_and_config(config):
         c['environment']['rule_weights']=weights
         with pytest.raises(ValueError,match='weights'): validate(c)
     for probability in (-.1,1.1):
-        c=copy.deepcopy(config);c['selfplay']['forbidden_feature_dropout_prob']=probability
+        c=copy.deepcopy(config);c['environment']['forbidden_feature_dropout_prob']=probability
         with pytest.raises(ValueError): validate(c)
 
 
@@ -539,10 +636,10 @@ def test_global_feature_corruption():
 
 def test_wdl_loss_distinguishes_draw_from_equal_win_loss():
     obs=torch.ones(2,5,5,5);policy=torch.zeros(2,25);policy[:,0]=1
-    logits=torch.zeros(2,25)
+    logits=torch.zeros(2,4,25)
     wdl_logits=torch.tensor([[0.,4.,0.],[0.,4.,0.]],requires_grad=True)
     target=torch.tensor([[0.,1.,0.],[.5,0.,.5]])
-    _,_,vl=losses(logits,wdl_logits,obs,policy,target)
+    *_,vl=losses(logits,wdl_logits,obs,policy,policy,torch.ones(2),target,8.0)
     # Same scalar Q=0 for both distributions, but the second target must penalize draw confidence.
     assert float(vl.detach())>2
     vl.backward()
@@ -556,6 +653,7 @@ def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
     # Targets may differ from normalized visits after pruning/LCB.
     a['visits'][0,1]=4;a['policies'][0,0]=.8;a['policies'][0,1]=.2
     m['rows']=int(repeats.sum());a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    compact_search(a)
     validate_raw(a);view=training_view(a)
     np.testing.assert_array_equal(view['value'],np.tile([1,0,0],(m['rows'],1)))
     assert np.array_equal(view['obs'][0],view['obs'][1])
@@ -575,19 +673,87 @@ def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
     with pytest.raises(ValueError,match='rounding'):validate_raw(a)
 
 
+def test_sampled_search_preserves_full_trajectory_and_exact_targets(tmp_path):
+    a,m=winning_record()
+    original={k:v.copy() for k,v in a.items()}
+    a['row_repeats']=np.array([2,0,1,0,0,1,0,0,3],np.int32)
+    a['target_weights']=a['row_repeats'].astype(np.float32)
+    # A cheap position can regain weight; an unselected full position is omitted too.
+    a['cheap_search'][5]=1
+    compact_search(a)
+    m['rows']=7;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    path=tmp_path/'sampled.npz';save_npz(path,a)
+    loaded=read_raw(path)
+    np.testing.assert_array_equal(loaded['sample_indices'],[0,2,5,8])
+    assert loaded['visits'].shape==(4,36)
+    for key in ('observations','globals','actions','game_offsets','observation_offsets'):
+        np.testing.assert_array_equal(loaded[key],original[key])
+    view=training_view(loaded)
+    for key,source in [('obs','observations'),('globals','globals'),('policy','policies')]:
+        np.testing.assert_array_equal(view[key],original[source][[0,0,2,5,8,8,8]])
+    np.testing.assert_array_equal(view['value'].argmax(1),[0,0,0,2,0,0,0])
+    corrupted=copy.deepcopy(loaded);corrupted['sample_indices'][1]=3
+    with pytest.raises(ValueError,match='sample indices'):
+        validate_raw(corrupted)
+
+
+@pytest.mark.parametrize('waves',[1,3])
+def test_temp_compression_preserves_snapshot_bytes(tmp_path,config,waves):
+    import zipfile
+    from etazero.storage import write_npz
+    a,m=winning_record()
+    raw=tmp_path/'selfplay/game.npz';save_npz(raw,a)
+    entry={'path':str(raw.relative_to(tmp_path)),'sha256':sha256(raw),'metadata':m}
+    config['replay'].update(min_rows=9,keep_target_rows='all')
+    config['shuffle'].update(waves=waves,bucket_rows=2,training_shard_rows=2)
+    results=[]
+    for compressed in (False,True):
+        config['shuffle']['compress_temp']=compressed
+        identity=build_snapshot(tmp_path,1,[entry],config)
+        manifest=json.loads((tmp_path/'snapshots'/identity/'manifest.json').read_text())
+        results.append(manifest['files'])
+    assert results[0]==results[1]
+    cache=tmp_path/'.internal/training_views'/(entry['sha256']+'.npz')
+    with zipfile.ZipFile(cache) as archive:
+        assert all(item.compress_type==zipfile.ZIP_DEFLATED for item in archive.infolist())
+    arrays={'zeros':np.zeros((4096,128),np.float32)}
+    for compressed in (False,True):
+        path=tmp_path/f'{compressed}.npz';write_npz(path,arrays,compressed)
+        with np.load(path,allow_pickle=False) as stored:
+            np.testing.assert_array_equal(stored['zeros'],arrays['zeros'])
+    assert (tmp_path/'True.npz').stat().st_size<(tmp_path/'False.npz').stat().st_size/20
+
+
+def test_shuffle_balances_output_shards_without_tiny_tail(tmp_path,config):
+    a,m=winning_record()
+    raw=tmp_path/'selfplay/game.npz';save_npz(raw,a)
+    entry={'path':str(raw.relative_to(tmp_path)),'sha256':sha256(raw),'metadata':m}
+    config['replay'].update(min_rows=9,keep_target_rows='all')
+    config['shuffle'].update(bucket_rows=100,training_shard_rows=8,waves=1)
+    identity=build_snapshot(tmp_path,1,[entry],config)
+    manifest=json.loads((tmp_path/'snapshots'/identity/'manifest.json').read_text())
+    assert sorted(item['rows'] for item in manifest['files'])==[4,5]
+    policies=[]
+    for item in manifest['files']:
+        with np.load(tmp_path/'snapshots'/identity/'data'/item['path']) as rows:
+            policies.extend(map(bytes,rows['policy']))
+    assert Counter(policies)==Counter(map(bytes,a['policies']))
+
+
 @pytest.mark.parametrize('section,key,value',[
-    ('search','cheap_search_visits',1000),('search','cheap_search_probability',1),
-    ('search','min_visit_prop_for_lcb',1.1),('search','fpu_parent_weight_by_visited_policy_pow',0),
-    ('selfplay','policy_surprise_data_weight',1),('exploration','dirichlet_total_concentration',0),
-    ('search','root_num_symmetries_to_sample',0),('search','root_num_symmetries_to_sample',9),
-    ('search','nn_policy_temperature',0),('search','root_policy_temperature',0),
-    ('search','root_policy_temperature_early',0),('search','temperature_halflife',0),
-    ('search','temperature_only_below_prob',1.1),('search','value_weight_exponent',-0.1),
-    ('search','fpu_loss_prop',1.1),('search','c_puct_stdev_scale',1.1),
-    ('search','reduce_visits_threshold',1),('search','reduce_visits_threshold',-0.1),
-    ('search','reduce_visits_threshold_lookback',0),('search','reduce_visits_threshold_lookback',1001),
-    ('search','reduced_visits_min',1),('search','reduced_visits_min',10),
-    ('search','reduced_visits_weight',1.1)])
+    ('search','full_search_visits',1),('search','full_search_visits',2**31),
+    ('search','cheap_search_visits',1000),('search','cheap_search_probs',1),
+    ('lcb','min_visit_prop_for_lcb',1.1),('fpu','fpu_parent_weight_by_visited_policy_pow',0),
+    ('surprise_weighting','policy_surprise_data_weight',1),('dirichlet_noise','dirichlet_total_concentration',0),
+    ('symmetry','root_num_symmetries_to_sample',0),('symmetry','root_num_symmetries_to_sample',9),
+    ('temperature','nn_policy_temperature',0),('temperature','root_policy_temperature',0),
+    ('temperature','root_policy_temperature_early',0),('temperature','temperature_halflife',0),
+    ('temperature','temperature_only_below_prob',1.1),('value_weighting','value_weight_exponent',-0.1),
+    ('fpu','fpu_loss_prop',1.1),('puct','c_puct_stdev_scale',1.1),
+    ('reduce_visits','reduce_visits_threshold',1),('reduce_visits','reduce_visits_threshold',-0.1),
+    ('reduce_visits','reduce_visits_threshold_lookback',0),('reduce_visits','reduce_visits_threshold_lookback',1001),
+    ('reduce_visits','reduced_visits_min',1),('reduce_visits','reduced_visits_min',10),
+    ('reduce_visits','reduced_visits_weight',1.1)])
 def test_search_enhancement_validation(config,section,key,value):
     config[section][key]=value
     with pytest.raises(ValueError):validate(config)
@@ -595,16 +761,16 @@ def test_search_enhancement_validation(config,section,key,value):
 
 def test_reduce_visits_config_inheritance_and_independent_pcr(config):
     baseline=load_config(ROOT/'configs/baseline')
-    assert baseline['search']['reduce_visits']
-    assert baseline['search']['reduce_visits_threshold']==0.9
-    assert baseline['search']['reduce_visits_threshold_lookback']==3
-    assert baseline['search']['reduced_visits_min']==20
-    assert baseline['search']['reduced_visits_weight']==0.1
-    assert load_config(ROOT/'configs/minimal_test')['search']['reduced_visits_min']==20
-    assert config['search']['reduced_visits_min']==2
+    assert baseline['reduce_visits']['reduce_visits']
+    assert baseline['reduce_visits']['reduce_visits_threshold']==0.9
+    assert baseline['reduce_visits']['reduce_visits_threshold_lookback']==3
+    assert baseline['reduce_visits']['reduced_visits_min']==20
+    assert baseline['reduce_visits']['reduced_visits_weight']==0.1
+    assert load_config(ROOT/'configs/minimal_test')['reduce_visits']['reduced_visits_min']==20
+    assert config['reduce_visits']['reduced_visits_min']==2
     # These cases are valid; the two cap paths are alternatives, not stacked limits.
-    config['search'].update(reduced_visits_min=8,cheap_search_visits=4,
-                           reduce_visits_threshold=0,reduced_visits_weight=0)
+    config['search']['cheap_search_visits']=4
+    config['reduce_visits'].update(reduced_visits_min=8,reduce_visits_threshold=0,reduced_visits_weight=0)
     validate(config)
     from etazero.eval_config import load_evaluation_config
     assert 'reduce_visits' not in load_evaluation_config(ROOT/'configs/smoke_test')['evaluation']
