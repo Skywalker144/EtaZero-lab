@@ -80,12 +80,15 @@ def experiment_plan(directory, environ=None, work_dir=None):
 
 def initialization_key(config):
     identity = [CONTRACT_ID, config['network'], config['run']['seed']]
+    if config['agent']['algorithm'] == 'muzero':
+        identity.append({'algorithm': 'muzero', 'muzero_config': config['muzero']})
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
 def prepare_initializations(work, arms):
     import torch
     from .network import make_network
+    from .training import model_identity
     references = {}
     for arm in arms:
         key = initialization_key(arm['config'])
@@ -100,7 +103,7 @@ def prepare_initializations(work, arms):
             with torch.random.fork_rng(devices=[]):
                 torch.random.default_generator.manual_seed(arm['config']['run']['seed'])
                 model = make_network(arm['config'])
-                value = {'contract': CONTRACT_ID, 'network_config': arm['config']['network'],
+                value = {'contract': CONTRACT_ID, **model_identity(arm['config']),
                          'model': model.state_dict()}
                 if path.exists():
                     # A crash between payload and sidecar publication is repairable.
@@ -148,7 +151,7 @@ def write_arm_config(config, directory):
     for name in FILES:
         parser = configparser.ConfigParser(interpolation=None)
         for section, (owner, _) in FIELDS.items():
-            if owner == name:
+            if owner == name and section in config:
                 parser[section] = {key: str(value).lower() if isinstance(value, bool) else str(value)
                                    for key, value in config[section].items()}
         stream = io.StringIO(); parser.write(stream)

@@ -278,10 +278,17 @@ class PolicyValueNet(nn.Module):
 
 
 def make_network(config):
+    if config['agent']['algorithm'] == 'muzero':
+        from .muzero.network import MuZeroNet, network_config
+        return MuZeroNet(network_config(config))
     return PolicyValueNet(**config["network"])
 
 
-def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale):
+def row_mean(value, weight=None):
+    return value.mean(0) if weight is None else (value * weight.reshape((-1,) + (1,) * (value.ndim-1))).mean(0)
+
+
+def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight=None):
     """Float targets on the logits' device: policy/opponent [N,A], weight [N], WDL [N,3].
 
     Training logits are [N,4,A], A=canvas². Reduce every weighted component
@@ -297,12 +304,12 @@ def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_wei
     soft = soft / soft.sum(2, keepdim=True)
     targets = torch.cat((policies, soft), dim=1)
     ce = -(targets * logp[:, :4]).sum(2)
-    policy_loss = 0.930 * ce[:, 0].mean()
-    opponent_policy_loss = (0.15 * opponent_policy_weight * ce[:, 1]).mean()
-    soft_policy_loss = soft_policy_weight_scale * ce[:, 2].mean()
-    soft_opponent_policy_loss = (0.15 * soft_policy_weight_scale * opponent_policy_weight * ce[:, 3]).mean()
+    policy_loss = 0.930 * row_mean(ce[:, 0], row_weight)
+    opponent_policy_loss = row_mean(0.15 * opponent_policy_weight * ce[:, 1], row_weight)
+    soft_policy_loss = soft_policy_weight_scale * row_mean(ce[:, 2], row_weight)
+    soft_opponent_policy_loss = row_mean(0.15 * soft_policy_weight_scale * opponent_policy_weight * ce[:, 3], row_weight)
     # v15 ordinary policy scale; value CE's internal 1.20 times CLI default 0.6.
-    value_loss = 1.20 * 0.6 * -(target * torch.log_softmax(value.float(), dim=1)).sum(1).mean()
+    value_loss = 1.20 * 0.6 * -row_mean((target * torch.log_softmax(value.float(), dim=1)).sum(1), row_weight)
     total = policy_loss + opponent_policy_loss + soft_policy_loss + soft_opponent_policy_loss + value_loss
     # Log weighted contributions, so all five components add up to total loss.
     return total, policy_loss, opponent_policy_loss, soft_policy_loss, soft_opponent_policy_loss, value_loss
@@ -326,11 +333,11 @@ def error_variance(raw):
 
 
 def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
-                     full_game_weight, disable_optimistic_policy):
+                     full_game_weight, disable_optimistic_policy, row_weight=None):
     """Row multiplicity is already resolved; complete-game gate is independent of TD."""
     td_logp = torch.log_softmax(td_logits.float(), dim=2)
     entropy = -(td_target * torch.log(td_target + 1e-30)).sum(2)
-    td = 0.72 * (-(td_target * td_logp).sum(2) - entropy).mean(0)
+    td = 0.72 * row_mean(-(td_target * td_logp).sum(2) - entropy, row_weight)
     variance = error_variance(raw_error)
     predicted = torch.softmax(td_logits[:, 2].float(), dim=1)
     predicted = (predicted[:, 0] - predicted[:, 2]).detach()
@@ -339,7 +346,7 @@ def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_targe
     difference = (variance - error_target).abs()
     # KataGo's Huber is unnormalized, unlike torch smooth_l1_loss.
     huber = torch.where(difference <= 0.4, 0.5 * difference.square(), 0.4 * (difference - 0.2))
-    error_loss = (2.0 * full_game_weight * huber).mean()
+    error_loss = row_mean(2.0 * full_game_weight * huber, row_weight)
     if disable_optimistic_policy:
         long_weight = torch.full_like(full_game_weight, 0.5)
         short_weight = long_weight
@@ -350,12 +357,12 @@ def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_targe
     logp = torch.log_softmax(logits[:, 4:6].float().masked_fill(~mask[:, None], -1e9), dim=2)
     normalized = policy / policy.sum(1, keepdim=True)
     ce = -(normalized[:, None] * logp).sum(2)
-    long_loss = (0.100 * long_weight * ce[:, 0]).mean()
-    short_loss = (0.200 * short_weight * ce[:, 1]).mean()
+    long_loss = row_mean(0.100 * long_weight * ce[:, 0], row_weight)
+    short_loss = row_mean(0.200 * short_weight * ce[:, 1], row_weight)
     return td[0], td[1], td[2], long_loss, short_loss, error_loss
 
 
-def q_winloss_loss(prediction, target, visits):
+def q_winloss_loss(prediction, target, visits, row_weight=None):
     """Source v17 per-action pure W-L Q supervision, mean over output rows.
 
     Prediction is pre-tanh; targets are writer int16/32000, visits are capped
@@ -365,19 +372,19 @@ def q_winloss_loss(prediction, target, visits):
     weights=torch.sqrt(visits.float())
     ce=torch.nn.functional.binary_cross_entropy_with_logits(
         prediction.float()*mask*2.0,(1.0+target.float())/2.0,reduction='none')
-    return (1.5*((ce*weights).sum(1)/(weights.sum(1)+1.0))).mean()
+    return row_mean(1.5*((ce*weights).sum(1)/(weights.sum(1)+1.0)), row_weight)
 
 
 def losses(logits, value, td_logits, raw_error, obs, policy, opponent_policy,
            opponent_policy_weight, target, td_target, full_game_weight,
-           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None):
-    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale)
+           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None, row_weight=None):
+    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight)
     auxiliary = auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
-                                 full_game_weight, disable_optimistic_policy)
+                                 full_game_weight, disable_optimistic_policy, row_weight)
     if logits.shape[1]==7:
         if q_values is None or q_visits is None:
             raise ValueError('Enabled Q head requires per-action Q value/node-visit targets')
-        qloss=q_winloss_loss(logits[:,6],q_values,q_visits)
+        qloss=q_winloss_loss(logits[:,6],q_values,q_visits,row_weight)
         return (base[0] + sum(auxiliary)+qloss, *base[1:], *auxiliary, qloss)
     return (base[0] + sum(auxiliary), *base[1:], *auxiliary)
 
@@ -430,6 +437,9 @@ class InferenceNormalization(nn.Module):
 
 def inference_network(model):
     """Cache final BN statistics on the inference device, retaining CUDA operation order."""
+    from .muzero.network import MuZeroNet, inference_network as muzero_inference
+    if isinstance(model, MuZeroNet):
+        return muzero_inference(model)
     if model.training:
         raise ValueError('Inference normalization conversion requires evaluation mode')
     result = copy.deepcopy(model)

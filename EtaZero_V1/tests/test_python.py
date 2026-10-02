@@ -154,7 +154,7 @@ def test_source_identity_excludes_sibling_run_data(tmp_path,monkeypatch):
 
 @pytest.mark.parametrize("algorithm,root,nonroot,message",[
     ("alphazero","puct","gumbel","not an allowed"),
-    ("muzero","puct","puct","not implemented"),
+    ("muzero","puct","puct","explicit muzero and unroll"),
     ("alphazero","gumbel","puct","not implemented"),
     ("alphazero","gumbel","gumbel","not implemented"),
 ])

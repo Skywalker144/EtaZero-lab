@@ -73,6 +73,10 @@ class BatchReader:
             raise ValueError(f"Snapshot file checksum mismatch: {path}")
         with np.load(path, allow_pickle=False) as file:
             arrays = {key: file[key] for key in file.files}
+        if self.manifest.get('algorithm') == 'muzero':
+            from .muzero.data import validate_view
+            validate_view(arrays, info['rows'], self.manifest['canvas'], self.manifest['unroll_steps'])
+            return arrays
         if set(arrays) != {"obs", "globals", "policy", "opponent_policy", "opponent_policy_weight", "value", "td_value", "full_game_weight", "q_values", "q_visits"} or len(arrays["value"]) != info["rows"]:
             raise ValueError(f"Invalid training view: {path}")
         canvas = self.manifest["canvas"]
@@ -120,6 +124,9 @@ class BatchReader:
             # Source drops each file's suffix. Never fill from another file or
             # wrap a partly filled batch across passes/snapshots.
             batch['obs']=unpack_observations(batch['obs'],self.manifest['canvas'])
+            if self.manifest.get('algorithm') == 'muzero':
+                from .muzero.data import prepare_batch
+                batch = prepare_batch(batch, self.manifest['unroll_weight_mean'], self.random)
             return batch
 
 

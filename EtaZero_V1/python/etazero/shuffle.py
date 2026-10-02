@@ -191,6 +191,10 @@ def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
     train_bytes = 6*4 + 5*((canvas*canvas+7)//8) + 16*canvas*canvas + 2*4 + 9*4 + 12
     # Raw includes int64 visits and at most twice as many observations as moves.
     raw_bytes = 20*canvas*canvas + 10*((canvas*canvas+7)//8) + 164
+    if config.get('agent', {}).get('algorithm') == 'muzero':
+        steps = config['unroll']['steps']
+        train_bytes += steps * (16*canvas*canvas + 56) + 8*steps + 9*(steps+1)
+        raw_bytes += 6*canvas*canvas
     budget = s["memory_mb"]*1024**2
     per_worker = budget//s["workers"]
     group_rows=min(s['group_rows'],max(1,per_worker//(3*train_bytes)-max_raw_rows))
@@ -357,6 +361,14 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None):
                     'validation_rows':sum(e['rows'] for e in validation_outputs),'validation_resource_plan':val_plan,
                     'skip_validation':skip,
                     'recipe':{'replay':r,'shuffle':s,'network':{'canvas':config['network']['canvas']}}}
+        if config['agent']['algorithm'] == 'muzero':
+            from .muzero.data import replay_weight_mean
+            if any(e['metadata'].get('unroll_steps') != config['unroll']['steps'] or
+                   e['metadata'].get('algorithm') != 'muzero' for e in chosen):
+                raise ValueError('MuZero replay algorithm/unroll configuration mismatch')
+            manifest.update(algorithm='muzero', unroll_steps=config['unroll']['steps'],
+                            unroll_weight_mean=replay_weight_mean(root, train_sources))
+            manifest['recipe'].update(agent=config['agent'], unroll=config['unroll'])
         save_json(stage/"manifest.json",manifest,immutable=True)
         sync_directory(stage);os.rename(stage,snapshots/identity);sync_directory(snapshots)
         return identity

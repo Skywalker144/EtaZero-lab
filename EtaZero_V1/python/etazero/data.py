@@ -42,7 +42,11 @@ def validate_raw(a, source="record"):
     def require(ok, message):
         if not ok:
             raise ValueError(f"{source}: {message}")
-    require(set(a) == set(RAW_DTYPES), "raw fields do not match schema")
+    m = metadata(a)
+    require(m.get('algorithm', 'alphazero') in ('alphazero', 'muzero'), 'unknown raw algorithm')
+    muzero = m.get('algorithm') == 'muzero'
+    extra = {'trajectory_policy', 'trajectory_q_values', 'trajectory_q_visits'} if muzero else set()
+    require(set(a) == set(RAW_DTYPES) | extra, "raw fields do not match schema")
     for key, dtype in RAW_DTYPES.items():
         require(a[key].dtype == np.dtype(dtype), f"{key}: dtype mismatch")
     m = metadata(a)
@@ -70,6 +74,9 @@ def validate_raw(a, source="record"):
         expected[key] = (t,)
     for key, shape in expected.items():
         require(a[key].shape == shape, f"{key}: shape mismatch")
+    if muzero:
+        from .muzero.data import validate_trajectory
+        validate_trajectory(a)
     require(len(np.unique(a["game_ids"])) == n, "duplicate game IDs in shard")
     require(((a["sizes"] >= 5) & (a["sizes"] <= canvas) & (lengths <= a["sizes"]**2)).all(), "game sizes/lengths")
     require(np.isin(a["rules"], [0, 1, 2]).all() and np.isin(a["winners"], [-1, 0, 1]).all() and
@@ -213,6 +220,9 @@ def validate_raw(a, source="record"):
             require((obs[j, 1] == (board == players[j])).all() and
                     (obs[j, 2] == (board == -players[j])).all(), "observation/transition mismatch")
             legal = (mask & (board == 0)).flatten()
+            if muzero:
+                require(not a['trajectory_policy'][lo+j][~legal.astype(bool)].any(), 'MuZero trajectory policy on occupied/padded point')
+                require(not a['trajectory_q_visits'][lo+j][~legal.astype(bool)].any(), 'MuZero trajectory Q visited masked action')
             if lo+j in sample_lookup:
                 require((a["visits"][sample_lookup[lo+j]][~legal.astype(bool)] == 0).all(), "search visited masked action")
                 require(not a['q_visits'][sample_lookup[lo+j]][~legal.astype(bool)].any(), 'Q visited masked action')
@@ -255,6 +265,13 @@ def trajectory_td_targets(search_wdl, players, terminal, area):
 
 
 def training_view(a):
+    if metadata(a).get('algorithm') == 'muzero':
+        from .muzero.data import training_view as sequence_view
+        return sequence_view(a)
+    return alphazero_training_view(a)
+
+
+def alphazero_training_view(a):
     # Each sampled position is stored once; multiplicity is resolved only here.
     samples = a['sample_indices']
     rows = np.repeat(np.arange(len(samples)), a['row_repeats'][samples])
@@ -375,6 +392,11 @@ class Catalog:
                         digest.update(a[key][lo:hi].tobytes())
                     for key in ('observations','globals'):
                         digest.update(a[key][ol:oh].tobytes())
+                    if m.get('algorithm') == 'muzero':
+                        digest.update(str(m['unroll_steps']).encode())
+                        for key in ('trajectory_policy','trajectory_q_values','trajectory_q_visits',
+                                    'target_weights','train_mask','reanalyzed','reanalysis_used_outcome'):
+                            digest.update(a[key][lo:hi].tobytes())
                     fingerprints.append(digest.hexdigest())
                 stats = {'games':int(owners.sum()),'rows':m['rows'],'plies':int(np.diff(offsets)[owners].sum()),
                          'black_wins':int((winners[owners]==1).sum()),'white_wins':int((winners[owners]==-1).sum()),

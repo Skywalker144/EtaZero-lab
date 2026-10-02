@@ -100,6 +100,9 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
 
 
 def optimizer_for(model, config):
+    if config['agent']['algorithm'] == 'muzero':
+        from .muzero.optimization import optimizer_for as muzero_optimizer
+        return muzero_optimizer(model, config)
     groups = parameter_groups(model)
     options = config['optimizer']
     baselines = model_norms(groups)
@@ -109,6 +112,13 @@ def optimizer_for(model, config):
     if options['kind'] == 'adamw':
         return torch.optim.AdamW(groups, fused=next(model.parameters()).is_cuda)
     return torch.optim.SGD(groups, momentum=0.9)
+
+
+def optimization_for(model, config, optimizer, state=None):
+    if not config.get('muzero_training', {}).get('katago_optimizer', True):
+        from .muzero.optimization import PlainOptimization
+        return PlainOptimization(model, config, optimizer, state)
+    return Optimization(model, config, optimizer, state)
 
 
 class Optimization:
@@ -145,6 +155,14 @@ class Optimization:
         for group in self.optimizer.param_groups:
             group['lr'], group['weight_decay'] = group_settings(
                 group['group_name'], self.options, self.batch_size, self.consumed_samples, self.norms, self.baselines, self.model.norm_kind)
+
+    @property
+    def backward_scale(self):
+        return self.batch_size
+
+    @property
+    def swa_count(self):
+        return int(self.swa.n_averaged.item())
 
     def begin_round(self):
         """Map a local round to the source epoch; resumed batches retain its clock."""
@@ -236,6 +254,6 @@ class Optimization:
 
 def inference_weights(checkpoint):
     swa = checkpoint['optimization']['swa']
-    if swa['n_averaged'].item() == 0:
+    if swa is None or swa['n_averaged'].item() == 0:
         return checkpoint['model']
     return {name.removeprefix('module.'): value for name, value in swa.items() if name.startswith('module.')}

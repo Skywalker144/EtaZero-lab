@@ -28,6 +28,8 @@ VALUE_LOSSES = (
     ('td_value_mid_loss', 'TD mid', '#7fbf7f'), ('td_value_short_loss', 'TD short', '#e5c07b'),
     ('shortterm_value_error_loss', 'Value error', GREY))
 Q_LOSS = ('q_winloss_loss', 'W-L Q', '#c678dd')
+MODULE_GRADIENTS = (('representation', 'Representation h', BLUE),
+                    ('dynamics', 'Dynamics g', GREEN), ('prediction', 'Prediction f', ORANGE))
 
 
 def journal_events(path):
@@ -97,6 +99,16 @@ def run_history(run_dir, state=None):
             row[metric] = row.get(metric, 0) + event[metric]
         if 'q_winloss_loss' in event:
             row['q_winloss_loss']=row.get('q_winloss_loss',0)+event['q_winloss_loss']
+        if 'step_losses' in event:
+            measured=event['step_losses']
+            total=row.setdefault('step_losses',[0.0]*len(measured))
+            if len(total)!=len(measured):raise ValueError('Unroll length changed within a training round')
+            row['step_losses']=[a+b for a,b in zip(total,measured)]
+            row['step_loss_updates']=row.get('step_loss_updates',0)+1
+        if 'grad_norms' in event and not skipped:
+            totals=row.setdefault('grad_norms',dict.fromkeys((k for k,_,_ in MODULE_GRADIENTS),0.0))
+            for key in totals:totals[key]+=event['grad_norms'][key]
+            row['module_gradient_steps']=row.get('module_gradient_steps',0)+1
     for row in history.values():
         if row['steps']:
             for metric in METRICS:
@@ -105,6 +117,10 @@ def run_history(run_dir, state=None):
                 else:
                     row[metric] /= row['steps']
             if 'q_winloss_loss' in row:row['q_winloss_loss']/=row['steps']
+            if 'step_losses' in row:
+                row['step_losses']=[v/row['step_loss_updates'] for v in row['step_losses']]
+            if 'grad_norms' in row:
+                row['grad_norms']={k:v/row['module_gradient_steps'] for k,v in row['grad_norms'].items()}
         # Validation has no update ID. Only completed rounds can expose the
         # latest attempt's result; a new plan clears an abandoned attempt.
         if row['iteration'] in completed and row['iteration'] in validation:
@@ -167,19 +183,28 @@ def _compact_number(value, _):
     return label
 
 
-def training_figure(history):
+def training_figure(history, algorithm=None):
     import matplotlib as mpl
+    import numpy as np
     from matplotlib.ticker import FuncFormatter, PercentFormatter
+    if algorithm is None:
+        algorithm='muzero' if any('step_losses' in r or 'grad_norms' in r for r in history) else 'alphazero'
+    muzero=algorithm=='muzero'
+    titles=['Self-play outcomes', 'Self-play game length', 'Policy losses', 'Value losses',
+            'Gradient norm', 'NN cache hit rate']
+    labels=[('Cumulative effective self-play rows', 'Share of games'),
+            ('Cumulative effective self-play rows', 'Moves per game'),
+            ('Iteration (1-based)', 'Mean weighted loss'), ('Iteration (1-based)', 'Mean weighted loss'),
+            ('Iteration (1-based)', 'Mean L2 grad norm (before clipping)'),
+            ('Cumulative effective self-play rows', 'Share of submitted requests')]
+    if muzero:
+        titles+=['Loss by unroll step', 'Gradient norms by module']
+        labels+=[('Unroll step k (0 = representation)', 'Mean weighted loss per step'),
+                 ('Iteration (1-based)', 'Mean L2 grad norm (before clipping)')]
     with mpl.rc_context(THEME):
         figure, axes = _figure(
-            ('Self-play outcomes', 'Self-play game length', 'Policy losses', 'Value losses',
-             'Gradient norm', 'NN cache hit rate'),
-            [('Cumulative effective self-play rows', 'Share of games'),
-             ('Cumulative effective self-play rows', 'Moves per game'),
-             ('Iteration (1-based)', 'Mean weighted loss'), ('Iteration (1-based)', 'Mean weighted loss'),
-             ('Iteration (1-based)', 'Mean L2 grad norm (before clipping)'),
-             ('Cumulative effective self-play rows', 'Share of submitted requests')],
-            'EtaZero AlphaZero training progress', figsize=(15, 11))
+            titles, labels, f'EtaZero {"MuZero" if muzero else "AlphaZero"} training progress',
+            figsize=(15, 14.5) if muzero else (15, 11))
         selfplay = [r for r in history if r.get('games', 0) > 0]
         x = [r['total_rows'] for r in selfplay]
         _series(axes[0], [(label, color, x, [r[key]/r['games'] for r in selfplay])
@@ -207,6 +232,19 @@ def training_figure(history):
         _series(axes[5], [('Cache hits', BLUE, [r['total_rows'] for r in cached],
                           [r['cache_hits']/r['submitted'] for r in cached])])
         axes[5].set_ylim(0, 1.025); axes[5].yaxis.set_major_formatter(PercentFormatter(1))
+        if muzero:
+            measured=[r['step_losses'] for r in trained if 'step_losses' in r]
+            series=[]
+            if measured:
+                matrix=np.asarray(measured,dtype=float);steps=np.arange(matrix.shape[1])
+                series=[('Mean over measured iterations', ORANGE, steps, matrix.mean(axis=0))]
+                if trained and 'step_losses' in trained[-1]:
+                    series.append(('Latest iteration', BLUE, steps, trained[-1]['step_losses']))
+                axes[6].set_xticks(steps if len(steps)<=9 else np.arange(0,len(steps),max(1,(len(steps)-1)//8)))
+            _series(axes[6],series,logarithmic=True)
+            _series(axes[7],[(label,color,x,[r.get('grad_norms',{}).get(key,float('nan')) for r in trained])
+                              for key,label,color in MODULE_GRADIENTS],logarithmic=True)
+            axes[7].set_xlim(0,max(1.25,max(x,default=1)*1.025))
         games = sum(r['games'] for r in selfplay)
         figure.supxlabel(f'{len([r for r in trained if "total_rows" in r])} completed training iterations · '
                          f'{games:,} self-play games · {samples:,} effective rows\n'
@@ -280,7 +318,7 @@ def plot_run(run_dir, state=None):
     os.environ.setdefault('MPLCONFIGDIR', str(root/'.internal/matplotlib'))
     history = run_history(root,state)
     config = load_json(root/'.internal/run.json')['config']
-    figures = [(root/'training.png', training_figure(history)),
+    figures = [(root/'training.png', training_figure(history, config['agent']['algorithm'])),
                (root/'loss.png', loss_figure(history)),
                (root/'logs/performance.png', performance_figure(history, config['training']['batch_size']))]
     for destination, figure in figures:

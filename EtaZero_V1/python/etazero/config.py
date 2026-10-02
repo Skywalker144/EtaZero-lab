@@ -52,6 +52,11 @@ FIELDS = {
     "environment": ("env", {"sizes": str, "size_weights": str, "rules": str, "rule_weights": str,
                               "forbidden_feature_dropout_prob": float}),
     "network": ("net", {"architecture": str, "canvas": int, "channels": int, "blocks": int, "predict_q_values":boolean}),
+    "muzero": ("net", {"latent_channels": int, "dynamics_channels": int, "dynamics_blocks": int,
+                         "prediction_channels": int, "prediction_blocks": int}),
+    "unroll": ("train", {"steps": int, "hidden_gradient_scale": float}),
+    "muzero_training": ("train", {"auxiliary_losses": boolean, "katago_optimizer": boolean,
+                                  "learning_rate": float, "weight_decay": float}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
                            'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'no_repeat_files':boolean,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
@@ -187,6 +192,12 @@ def load_config(directory):
     values.update(_read(directory, local=True))
     config = {}
     for section, (_, fields) in FIELDS.items():
+        if section == 'muzero_training' and not any(s == section for s, _ in values):
+            continue
+        if section in ('muzero', 'unroll', 'muzero_training') and values.get(('agent', 'algorithm')) != 'muzero':
+            if any(s == section for s, _ in values):
+                raise ValueError(f'{section} configuration requires agent.algorithm = muzero')
+            continue
         config[section] = {}
         for key, convert in fields.items():
             if section=="reanalysis" and key!="use_reanalyze" and (section,key) not in values and not config[section]["use_reanalyze"]:
@@ -225,15 +236,26 @@ def validate(c):
         raise ValueError("Invalid algorithm/search enum")
     if a["root_search_algo"] == "puct" and a["nonroot_search_algo"] == "gumbel":
         raise ValueError("PUCT root + Gumbel nonroot is not an allowed project combination")
-    if tuple(a[k] for k in ("algorithm", "root_search_algo", "nonroot_search_algo")) != ("alphazero", "puct", "puct"):
+    if any(a[k] != 'puct' for k in ('root_search_algo', 'nonroot_search_algo')):
         raise ValueError("Selected algorithm/search combination is not implemented in this version")
+    if a['algorithm'] == 'muzero':
+        from .muzero.network import network_config
+        network_config(c)
+        if not 1 <= c['unroll']['steps'] <= 32 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
+            raise ValueError('MuZero unroll.steps must be in [1,32], hidden_gradient_scale in [0,1]')
+        if c['network']['architecture'] != 'nbt':
+            raise ValueError('MuZero requires the NBT architecture')
+        if not c.get('muzero_training', {}).get('auxiliary_losses', True) and c['network']['predict_q_values']:
+            raise ValueError('MuZero without auxiliary losses requires predict_q_values=false')
+        if c['graph_search']['use_graph_search'] or c['search']['reuse_tree'] or c['symmetry']['root_num_symmetries_to_sample'] != 1:
+            raise ValueError('MuZero requires use_graph_search=false, reuse_tree=false and root_num_symmetries_to_sample=1')
     for section, fields in c.items():
         for key, value in fields.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if not math.isfinite(value) or (value < 0 and (section,key)!=("replay","add_to_data_rows")):
                     raise ValueError(f"{section}.{key} must be nonnegative and finite")
-                zero_allowed = {"first_file_min_random_proportion","hint_positions_prob","early_fork_game_prob","fork_game_prob","early_fork_game_expected_move_prop","reanalyze_prop","reanalyze_policy_surprise_weight","reanalyze_value_surprise_weight","reanalyze_surprise_exponent","side_position_prob","normal_asymmetric_playout_prob","uncertainty_exponent", "policy_optimism", "root_policy_optimism", "noise_pruning_cap", "graph_search_catch_up_leak_prob", "max_playouts", "max_time", "nn_symmetry", "fpu_parent_weight", "fpu_parent_weight_by_visited_policy_pow", "seed", "max_iteration", "max_seconds", "blocks", "batch_wait_us",
-                                "virtual_loss", "noise_fraction", "temperature", "temperature_early",
+                zero_allowed = {"dynamics_blocks", "prediction_blocks", "hidden_gradient_scale", "first_file_min_random_proportion","hint_positions_prob","early_fork_game_prob","fork_game_prob","early_fork_game_expected_move_prop","reanalyze_prop","reanalyze_policy_surprise_weight","reanalyze_value_surprise_weight","reanalyze_surprise_exponent","side_position_prob","normal_asymmetric_playout_prob","uncertainty_exponent", "policy_optimism", "root_policy_optimism", "noise_pruning_cap", "graph_search_catch_up_leak_prob", "max_playouts", "max_time", "nn_symmetry", "fpu_parent_weight", "fpu_parent_weight_by_visited_policy_pow", "seed", "max_iteration", "max_seconds", "blocks", "batch_wait_us",
+                                "weight_decay", "virtual_loss", "noise_fraction", "temperature", "temperature_early",
                                 "final_temperature", "gradient_clip", "soft_policy_weight_scale", "swa_period_samples", "input_wd_factor", "normal_wd_factor", "normal_attn_wd_factor", "forbidden_feature_dropout_prob", "expand_per_row", "cache_entries",
                                 "policy_surprise_data_weight", "value_surprise_data_weight", "cheap_search_probs",
                                 "cheap_search_target_weight", "fpu_reduction_max", "root_fpu_reduction_max",
@@ -249,7 +271,7 @@ def validate(c):
         raise ValueError('training.sub_epochs cannot exceed the fixed round batch budget')
     env, net = c["environment"], c["network"]
     network_widths(net["channels"], net['architecture'])
-    if net['predict_q_values'] and net['architecture']!='transformer':
+    if a['algorithm']=='alphazero' and net['predict_q_values'] and net['architecture']!='transformer':
         raise ValueError('predict_q_values requires the v17 Transformer preset')
     if net['architecture'] == 'plain' and net['blocks'] != 10:
         raise ValueError('plain requires b10c128-fson-mish: channels=128, blocks=10')

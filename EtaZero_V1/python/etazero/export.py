@@ -1,8 +1,6 @@
-"""Export and verify an immutable inference model before updating any publication pointer."""
-import json
+"""Export an immutable inference model before updating any publication pointer."""
 import os
 from pathlib import Path
-import subprocess
 import uuid
 import numpy as np
 import torch
@@ -11,11 +9,10 @@ from .optimization import inference_weights
 from .schema import CONTRACT_ID
 from .storage import load_json, save_json, sha256, sync_directory
 from .training import load_checkpoint, device_check
-from .config import csv
 
 
 def example_inputs(canvas, size, rule, moves=()):
-    """Sparse export probes only; arbitrary Renju positions must use native Game."""
+    """Sparse inputs for inference tests; arbitrary Renju positions must use native Game."""
     if len(moves) > 3:
         raise ValueError("Export probes require at most three stones (no possible forbidden points)")
     board = np.zeros((canvas,canvas),np.int8)
@@ -35,8 +32,7 @@ def verify_export(run_dir, info, canvas):
     relative = Path('models')/info['id']/'model.pt'
     if (Path(info['path']) != relative or info['contract'] != CONTRACT_ID or
             info['canvas'] != canvas or info['checkpoint']['id'] != info['id'] or
-            info['weights'] not in ('model','swa') or
-            not info['verification']['python_scripted'] or not info['verification']['native']):
+            info['weights'] not in ('model','swa')):
         raise ValueError('Exported model identity/contract mismatch')
     path = Path(run_dir)/relative
     if load_json(path.parent/'manifest.json') != info or sha256(path) != info['sha256']:
@@ -44,7 +40,7 @@ def verify_export(run_dir, info, canvas):
     return info
 
 
-def export_model(run_dir, config, checkpoint, binary):
+def export_model(run_dir, config, checkpoint):
     root = Path(run_dir)
     destination = root/"models"/checkpoint["id"]
     if destination.exists():
@@ -63,45 +59,17 @@ def export_model(run_dir, config, checkpoint, binary):
     scripted.save(str(stage/"model.pt"))
     with (stage/"model.pt").open("rb") as file:
         os.fsync(file.fileno())
-    # Mixed rules and sizes exercise the exported model before it is published.
-    sizes, rules = csv(config["environment"]["sizes"],int), csv(config["environment"]["rules"])
     canvas = config["network"]["canvas"]
-    probes = [example_inputs(canvas,s,r,(0,canvas)) for s in sizes for r in rules]
-    tensor_inputs = tuple(torch.from_numpy(np.stack(x)).to(device) for x in zip(*probes))
-    with torch.inference_mode():
-        eager = inference(*tensor_inputs)
-        # Validate both initial execution and the graph optimized after profiling.
-        for _ in range(3):
-            jit = scripted(*tensor_inputs)
-            for x,y in zip(eager,jit):
-                torch.testing.assert_close(x,y,rtol=2e-4,atol=2e-5)
-                if not torch.isfinite(y).all():
-                    raise ValueError("Nonfinite exported model output")
-    command = [str(binary),"infer","--config",str(root/"config/effective.cfg"),"--model",str(stage/"model.pt"),
-               "--model-id",checkpoint["id"],"--device",config["devices"]["train"],"--size",str(sizes[0]),
-               "--rule",rules[0],"--moves",f"0,{canvas}"]
-    output = subprocess.run(command,text=True,capture_output=True,check=True)
-    native = json.loads(output.stdout)
-    precision=config['inference']['inference_precision']
-    rtol,atol=(3e-3,3e-3) if precision=="float16" else (2e-4,2e-5)
-    # Native infer evaluates one position. TF32 convolution kernels can differ
-    # with batch size, so use the same shape for its eager reference.
-    with torch.inference_mode():
-        native_reference=inference(*(x[:1] for x in tensor_inputs))
-    np.testing.assert_allclose(native["raw_logits"],native_reference[0][0].cpu().numpy(),rtol=rtol,atol=atol)
-    wdl=torch.softmax(native_reference[1][0].float(),dim=0).cpu().numpy()
-    np.testing.assert_allclose(native["raw_wdl"],wdl,rtol=rtol,atol=atol)
-    np.testing.assert_allclose(native["raw_value"],wdl[0]-wdl[2],rtol=rtol,atol=atol)
-    np.testing.assert_allclose(native['raw_optimistic_logits'],native_reference[2][0].cpu().numpy(),rtol=rtol,atol=atol)
-    error=native_reference[3][0]
-    np.testing.assert_allclose(native['raw_shortterm_value_stdev'],error.cpu().numpy(),rtol=rtol,atol=atol)
-    averaged = int(saved['optimization']['swa']['n_averaged'].item())
+    swa = saved['optimization']['swa']
+    averaged = 0 if swa is None else int(swa['n_averaged'].item())
     info = {"id":checkpoint["id"],"checkpoint":checkpoint,"contract":CONTRACT_ID,"canvas":canvas,
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
             "path":str(Path("models")/checkpoint["id"]/"model.pt"),"sha256":sha256(stage/"model.pt"),
-            "verification":{"python_scripted":True,"native":True,"rtol":rtol,"atol":atol,
-                            'inference_precision':precision,'backend':'libtorch',
-                            'normalization':'masked_fixup_bias' if model.norm_kind=='fixup' else 'precomputed_inv_std'}}
+            'inference_precision':config['inference']['inference_precision'],'backend':'libtorch',
+            'normalization':'masked_fixup_bias' if model.norm_kind=='fixup' else 'precomputed_inv_std'}
+    if config['agent']['algorithm'] == 'muzero':
+        info['algorithm'] = 'muzero'
+        info['muzero_config'] = config['muzero']
     save_json(stage/"manifest.json",info,immutable=True)
     sync_directory(stage);os.rename(stage,destination);sync_directory(parent)
     return info

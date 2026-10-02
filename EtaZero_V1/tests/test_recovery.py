@@ -14,8 +14,7 @@ from etazero.storage import save_json, sha256
 def exported(root):
     path=root/'models/fixed/model.pt';path.parent.mkdir(parents=True);path.write_bytes(b'complete artifact')
     info={'id':'fixed','path':'models/fixed/model.pt','contract':CONTRACT_ID,'canvas':6,
-          'checkpoint':{'id':'fixed'},'weights':'model','sha256':sha256(path),
-          'verification':{'python_scripted':True,'native':True}}
+          'checkpoint':{'id':'fixed'},'weights':'model','sha256':sha256(path)}
     save_json(path.parent/'manifest.json',info)
     return path,info
 
