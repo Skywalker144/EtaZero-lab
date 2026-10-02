@@ -37,7 +37,16 @@ public:
     virtual void initialize() {} // Called on the owning service thread, before taking requests.
     virtual std::vector<Evaluation> evaluate(const InferenceInputs& inputs) = 0;
 };
-class BatchEvaluator final : public Evaluator {
+class InferenceService : public Evaluator {
+public:
+    std::atomic<uint64_t> requests{0}, batches{0}, max_observed_batch{0}, wait_microseconds{0};
+    std::atomic<uint64_t> cache_hits{0}, submitted{0};
+    std::vector<uint64_t> rows_by_server;
+    virtual void finish() = 0;
+    virtual void drain() = 0;
+    virtual void reset_stats() = 0;
+};
+class BatchEvaluator final : public InferenceService {
     struct Request {
         uint64_t id;
         const BatchEvaluator* owner=nullptr;
@@ -79,9 +88,6 @@ class BatchEvaluator final : public Evaluator {
     std::vector<std::thread> servers_;
     void serve(size_t index);
 public:
-    std::atomic<uint64_t> requests{0}, batches{0}, max_observed_batch{0}, wait_microseconds{0};
-    std::atomic<uint64_t> cache_hits{0}, submitted{0};
-    std::vector<uint64_t> rows_by_server; // Inspect after finish() joins all owners.
     BatchEvaluator(std::unique_ptr<Backend> backend, std::string model, int canvas,
                    size_t max_batch, size_t capacity, int wait_us);
     BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, std::string model, int canvas,

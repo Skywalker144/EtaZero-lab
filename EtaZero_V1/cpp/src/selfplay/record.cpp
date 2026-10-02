@@ -235,6 +235,7 @@ struct RecordWriter::Buffers {
     std::vector<int64_t> game_offsets,obs_offsets,visits,sample_indices;
     std::vector<int32_t> actions,simulations;
     std::vector<int16_t> policies,opponent_policies;
+    std::vector<int16_t> trajectory_policy,trajectory_q_values,trajectory_q_visits;
     std::vector<float> opponent_policy_weights,temperatures,rewards;
     Buffers(int c,size_t rows) : canvas(c),actions_count(c*c),packed_area((c*c+7)/8),row_capacity(rows+c*c) {
         // Training rows cap the shard, not trajectory plies. Sparse sampling may
@@ -249,6 +250,7 @@ struct RecordWriter::Buffers {
         game_offsets.reserve(row_capacity+1);obs_offsets.reserve(row_capacity+1);reset();
     }
     void reset() {
+        trajectory_policy.clear();trajectory_q_values.clear();trajectory_q_visits.clear();
         row_begin=rows=0;
         side_observations.clear();side_globals.clear();side_wdl.clear();side_target_weights.clear();
         side_players.clear();side_game_indices.clear();side_row_repeats.clear();side_policies.clear();
@@ -316,6 +318,19 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
         // Retain the full trajectory even when only a span of its final training
         // rows belongs to this shard. TD/opponent targets and per-row randomness
         // must be identical on both sides of a shard boundary.
+        if(source_.unroll_steps>0) {
+            // Independent per-position rounding, stable across writer row splits.
+            std::mt19937_64 trajectory_rng(g.seed ^ (0xD6E8FEB86659FD93ULL*(turn+1)));
+            if(s.trainable) {
+                if(s.policy_target.size()!=s.policy.size())throw std::runtime_error("Missing MuZero trajectory policy");
+                b.trajectory_policy.insert(b.trajectory_policy.end(),s.policy_target.begin(),s.policy_target.end());
+                append_q_targets(s.q_values,s.q_visits,1,b.actions_count,b.trajectory_q_values,b.trajectory_q_visits,trajectory_rng);
+            } else {
+                b.trajectory_policy.insert(b.trajectory_policy.end(),b.actions_count,0);
+                b.trajectory_q_values.insert(b.trajectory_q_values.end(),b.actions_count,0);
+                b.trajectory_q_visits.insert(b.trajectory_q_visits.end(),b.actions_count,0);
+            }
+        }
         if(s.trainable && s.row_repeats>0) {
             for(int repeat=0;repeat<s.row_repeats;++repeat)
                 b.forbidden_input.push_back(g.rule==Rule::RENJU && use_forbidden(feature_rng));
@@ -425,11 +440,18 @@ void RecordWriter::publish() {
          << ",\"config_id\":" << quote(source_.config) << ",\"source_id\":" << quote(source_.source)
          << ",\"shard_id\":" << quote(source_.attempt+":"+std::to_string(source_.worker)+":"+shard)
          << ",\"created_ns\":" << created << ",\"opening_failures\":[";
-    for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<quote(b.opening_failures[i]);}meta<<"]}";
+    for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<quote(b.opening_failures[i]);}meta<<"]";
+    if(source_.unroll_steps>0)meta<<",\"algorithm\":\"muzero\",\"unroll_steps\":"<<source_.unroll_steps;
+    meta<<"}";
     std::string metadata = meta.str(); std::vector<uint8_t> meta_bytes(metadata.begin(), metadata.end());
     auto destination = directory_ / shard, temporary = destination; temporary += ".tmp";
     if (std::filesystem::exists(destination)) throw std::runtime_error("Refusing to overwrite raw data");
     Zip zip(temporary);
+    if(source_.unroll_steps>0) {
+        zip.array("trajectory_policy",b.trajectory_policy,"<i2",{t,static_cast<size_t>(actions_count)});
+        zip.array("trajectory_q_values",b.trajectory_q_values,"<i2",{t,static_cast<size_t>(actions_count)});
+        zip.array("trajectory_q_visits",b.trajectory_q_visits,"<i2",{t,static_cast<size_t>(actions_count)});
+    }
     zip.array("observations", b.observations, "|u1", {o, INPUT_PLANES, static_cast<size_t>(b.packed_area)});
     zip.array("globals", b.globals, "<f4", {o, GLOBAL_FEATURES});
     zip.array("players", b.players, "|i1", {o}); zip.array("actions", b.actions, "<i4", {t});

@@ -4,6 +4,8 @@
 #include "etazero/random_evaluator.h"
 #include "etazero/search_limits.h"
 #include "etazero/sampling.h"
+#include "etazero/muzero/search.h"
+#include "etazero/muzero/torch_backend.h"
 #include <csignal>
 #include <charconv>
 #include <chrono>
@@ -15,6 +17,7 @@
 #include <set>
 #include <torch/torch.h>
 #include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAGuard.h>
 using namespace etazero;
 namespace {
 static_assert(std::atomic<bool>::is_always_lock_free, "Signal stop flag must be lock-free");
@@ -98,14 +101,49 @@ template<class T> void array(std::ostream& out, const std::vector<T>& values) {
     out << '['; bool first = true;
     for (auto x : values) { if (!first) out << ','; out << x; first = false; } out << ']';
 }
-std::unique_ptr<BatchEvaluator> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false) {
+std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false) {
     std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "evaluate" ? "evaluation" : mode;
     int batch = c.integer(prefix+".max_batch"), canvas = c.integer("network.canvas");
     std::vector<std::unique_ptr<Backend>> backends;
     std::string kind=a.get("evaluator","network");
     if(kind!="random" && kind!="network")throw std::runtime_error("Unknown evaluator: "+kind);
     if(kind=="random" && mode!="selfplay")throw std::runtime_error("Random evaluator is for cold-start selfplay only");
+    std::string algorithm=c.contains("agent.algorithm")?c.text("agent.algorithm"):"alphazero";
+    std::optional<torch::jit::Module> detected_model;
+    if(kind=="network" && mode!="selfplay" && mode!="infer") {
+        // Detect from the actual inference model, then hand it to its backend.
+        // Selfplay already knows the algorithm and retains its owner-thread load.
+        torch::Device device(a.get("device"));c10::cuda::OptionalCUDAGuard guard;
+        if(device.is_cuda())guard.set_device(device);
+        detected_model=torch::jit::load(a.get(second?"model-b":"model"),device);
+        detected_model->eval();
+        if(device.is_cuda())c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
+        auto metadata=detected_model->get_method("metadata")({}).toTuple();
+        if(metadata->elements().size()==4)algorithm=metadata->elements()[2].toStringRef();
+        else if(metadata->elements().size()==2)algorithm="alphazero";
+        else throw std::runtime_error("Unknown model metadata");
+    }
+    if(algorithm=="muzero") {
+        std::vector<std::unique_ptr<muzero::Backend>> models;
+        for(int i=0;i<c.integer(prefix+".server_threads");++i) {
+            if(kind=="random")models.push_back(std::make_unique<muzero::RandomBackend>(canvas,std::stoull(a.get("seed"))));
+            else {
+                auto precision=c.text(prefix+".inference_precision");
+                if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+                models.push_back(std::make_unique<muzero::TorchBackend>(a.get(second?"model-b":"model"),a.get("device"),canvas,batch,precision,
+                    i==0?std::move(detected_model):std::nullopt));
+            }
+        }
+        return std::make_unique<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),
+            c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
+            c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
+            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0),c.integer(prefix+".queue_capacity"));
+    }
+    if(algorithm!="alphazero")throw std::runtime_error("Unknown model algorithm");
     auto loaded_model=std::make_shared<TorchBackend::LoadedModel>();
+    if(detected_model) {
+        loaded_model->module=std::move(*detected_model);loaded_model->ready=true;
+    }
     for (int i=0;i<c.integer(prefix+".server_threads");++i) {
         if(kind=="random")backends.push_back(std::make_unique<RandomBackend>(canvas,std::stoull(a.get("seed"))));
         else backends.push_back(std::make_unique<TorchBackend>(a.get(second ? "model-b" : "model"),a.get("device"),canvas,batch,
@@ -117,18 +155,22 @@ std::unique_ptr<BatchEvaluator> evaluator(const Args& a, const Config& c, const 
                                           c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
                                           std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0));
 }
+std::unique_ptr<GameSearch> search_for(InferenceService& evaluator,SearchSettings settings,uint64_t seed) {
+    if(auto mu=dynamic_cast<muzero::Evaluator*>(&evaluator))return std::make_unique<muzero::Search>(*mu,settings,seed);
+    return std::make_unique<Search>(evaluator,settings,seed);
+}
 void moves(Game& g, const std::string& text) {
     if (text.empty()) return;
     std::istringstream in(text); std::string item;
     while (std::getline(in,item,',')) g.play(std::stoi(item));
 }
-void stats(BatchEvaluator& e) {
+void stats(InferenceService& e) {
     std::cout << "{\"event\":\"inference\",\"requests\":" << e.requests << ",\"batches\":" << e.batches
               << ",\"max_batch\":" << e.max_observed_batch << ",\"queue_wait_us\":" << e.wait_microseconds
               << ",\"submitted\":" << e.submitted << ",\"cache_hits\":" << e.cache_hits << ",\"rows_by_server\":";
     array(std::cout,e.rows_by_server);std::cout<<"}"<<std::endl;
 }
-int selfplay(const Args& a,const Config& c,BatchEvaluator& service,ForkPool& forks) {
+int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& forks) {
     int count = a.integer("games"), canvas = c.integer("network.canvas");
     if (count < 1) throw std::runtime_error("Selfplay requires positive game count");
     auto* eval=&service;eval->reset_stats();
@@ -136,6 +178,7 @@ int selfplay(const Args& a,const Config& c,BatchEvaluator& service,ForkPool& for
     GameForkConfig fork_config(c);auto hints=load_hint_positions(c,canvas);
     bool random=a.get("evaluator","network")=="random";
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
+    if(c.text("agent.algorithm")=="muzero")source.unroll_steps=c.integer("unroll.steps");
     RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),
                         c.number("writer.first_file_min_random_proportion"),std::stoull(a.get("seed"))^0xA0761D6478BD642FULL);
     std::vector<int> sizes; std::vector<Rule> rules; std::vector<double> sw, rw;
@@ -148,7 +191,7 @@ int selfplay(const Args& a,const Config& c,BatchEvaluator& service,ForkPool& for
     std::mutex error_mutex; std::exception_ptr error;
     auto loop = [&] {
         try {
-            Search search(*eval,settings(c,"selfplay"),0);
+            auto search_owner=search_for(*eval,settings(c,"selfplay"),0);auto& search=*search_owner;
             while (!stop_requested && !failure) {
                 int id = next.fetch_add(1); if (id >= count) break;
                 uint64_t game_seed = mix(seed+id); std::mt19937_64 rng(game_seed);
@@ -244,7 +287,7 @@ std::string read_field() {
     return value;
 }
 int worker(const Args& base,const Config& config) {
-    ForkPool forks;std::unique_ptr<BatchEvaluator> cached;
+    ForkPool forks;std::unique_ptr<InferenceService> cached;
     std::string model,path,operation;
     while(!stop_requested && std::getline(std::cin,operation)) {
         if(operation=="release") {
@@ -280,8 +323,21 @@ int evaluate(const Args& a, const Config& c, bool raw) {
     array(std::cout,network.logits);std::cout << ",\"raw_wdl\":";array(std::cout,std::vector<double>(network.wdl.begin(),network.wdl.end()));
     std::cout << ",\"raw_optimistic_logits\":";array(std::cout,network.optimistic_logits);
     std::cout << ",\"raw_shortterm_value_stdev\":" << network.shortterm_value_stdev;
+    if(raw)if(auto mu=dynamic_cast<muzero::Evaluator*>(eval.get())) {
+        auto output=mu->initial(game.observation());std::cout<<",\"recurrent\":[";
+        int index=0;
+        for(int action:{0,game.canvas(),0}) {
+            output=mu->recurrent(output.latent,action);const auto& e=output.evaluation;
+            if(index++)std::cout<<',';
+            std::cout<<"{\"logits\":";array(std::cout,e.logits);
+            std::cout<<",\"wdl\":";array(std::cout,std::vector<double>(e.wdl.begin(),e.wdl.end()));
+            std::cout<<",\"optimistic_logits\":";array(std::cout,e.optimistic_logits);
+            std::cout<<",\"stdev\":"<<e.shortterm_value_stdev<<'}';
+        }
+        std::cout<<']';
+    }
     if (!raw) {
-        Search search(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));
+        auto search_owner=search_for(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
         SearchRun options;options.should_stop=[]{return stop_requested.load();};
         auto result=search.run(game,move_temperature(c,"evaluate",game),options);
         std::cout << ",\"action\":" << result.action << ",\"value\":" << result.value << ",\"simulations\":" << result.simulations << ",\"root_visits\":" << result.root_visits
@@ -342,7 +398,7 @@ void web_analysis(const SearchResult& result,const Game& game,double seconds,uin
 }
 int serve(const Args& a,const Config& c) {
     auto eval=evaluator(a,c,"evaluate");
-    Search search(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));
+    auto search_owner=search_for(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
     std::optional<Game> game;
     std::vector<int> played;
     const int canvas=c.integer("network.canvas");
@@ -463,9 +519,9 @@ int match(const Args& a,const Config& c) {
         Game game(size,canvas,parse_rule(a.get("rule")));for(int action:task.moves)game.play(action);
         game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
         auto start=std::chrono::steady_clock::now();uint64_t seed=task.seed^(0xd1b54a32d192ed03ULL*(color+1));
-        Search sa(*ea,settings(c,"match"),mix(seed));
-        std::unique_ptr<Search> sb;
-        if(!same_bot)sb=std::make_unique<Search>(*eb,settings(c,"match"),mix(seed^0x9e3779b97f4a7c15ULL));
+        auto sa_owner=search_for(*ea,settings(c,"match"),mix(seed));auto& sa=*sa_owner;
+        std::unique_ptr<GameSearch> sb;
+        if(!same_bot)sb=search_for(*eb,settings(c,"match"),mix(seed^0x9e3779b97f4a7c15ULL));
         std::vector<int> actions=task.moves;std::vector<int64_t> visits,initial_visits,new_playouts;
         while(!game.finished()) {
             if(stop_requested)return;
@@ -496,8 +552,8 @@ int main(int argc,char** argv) {
         if(argc<2)throw std::runtime_error("Expected selfplay, worker, evaluate, infer, match or serve");
         std::string mode=argv[1]; Args args(argc,argv); Config config(args.get("config"));
         if(mode=="selfplay" || mode=="worker" || mode=="infer")
-            if(config.text("agent.algorithm")!="alphazero" || config.text("agent.root_search_algo")!="puct" || config.text("agent.nonroot_search_algo")!="puct")
-                throw std::runtime_error("Native executable only supports AlphaZero/PUCT/PUCT");
+            if((config.text("agent.algorithm")!="alphazero" && config.text("agent.algorithm")!="muzero") || config.text("agent.root_search_algo")!="puct" || config.text("agent.nonroot_search_algo")!="puct")
+                throw std::runtime_error("Native executable requires AlphaZero or MuZero with PUCT/PUCT");
         torch::set_num_threads(config.integer((mode=="evaluate" || mode=="serve")?"evaluation.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
         if(mode=="selfplay") {ForkPool forks;auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service,forks);service->finish();return code;}

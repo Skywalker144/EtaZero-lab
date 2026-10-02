@@ -98,7 +98,14 @@ struct SearchNodeSnapshot {
     size_t id;bool root, ready;int pending;std::string identity;
     ValueStats stats;std::vector<SearchEdgeSnapshot> edges;
 };
-class Search {
+class GameSearch {
+public:
+    virtual ~GameSearch() = default;
+    virtual SearchResult run(const Game&, double temperature, SearchRun options = {}) = 0;
+    virtual void advance(int action) = 0;
+    virtual void reset(uint64_t seed) = 0;
+};
+class Search : public GameSearch {
     struct Node;
     struct Edge {
         int move_index=-1;

@@ -41,9 +41,9 @@ ReanalysisConfig reanalysis_config(const Config& config);
 std::vector<size_t> select_reanalysis_turns(const FinishedGame& record,const ReanalysisConfig& config,std::mt19937_64& rng);
 void reanalyze_positions(FinishedGame& record,const std::vector<Game>& positions,const std::vector<double>& history,
                         const SelfplaySearchConfig& search_config,PlayoutAdvantage advantage,const ReanalysisConfig& config,
-                        Search& search,const std::function<double(const Game&)>& temperature,std::mt19937_64& rng,
+                        GameSearch& search,const std::function<double(const Game&)>& temperature,std::mt19937_64& rng,
                         const std::function<bool()>& should_stop);
-void search_side_positions(std::vector<Game>& positions,FinishedGame& record,Search& search,Evaluator& evaluator,
+void search_side_positions(std::vector<Game>& positions,FinishedGame& record,GameSearch& search,Evaluator& evaluator,
                            int full_visits,bool randomize,int symmetry,
                            const std::function<double(const Game&)>& move_temperature,std::mt19937_64& rng,
                            const std::function<bool()>& should_stop);
