@@ -1,55 +1,72 @@
 const $ = id => document.getElementById(id);
 const columns = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
-const rules = {freestyle: '自由五子棋', standard: '标准五子棋', renju: '连珠规则'};
-const notes = {freestyle: '自由规则下，五子或长连均获胜。', standard: '恰好五子获胜，长连不计胜。', renju: '黑棋三三、四四、长连禁手判负；恰好五子优先。白棋五子或长连获胜。'};
-let state = null;
-let catalog = null;
-let pending = false;
-let formKey = '';
-let online = false;
-let notice = '';
+const rules = {freestyle: 'Freestyle', standard: 'Standard', renju: 'Renju'};
+const notes = {freestyle: 'Freestyle · 五子或长连获胜。', standard: 'Standard · 恰好五子获胜，长连不计胜。', renju: 'Renju · 黑棋三三、四四、长连判负，恰好五子优先；白棋五子或长连获胜。'};
+let state = null, catalog = null, pending = false, online = false, notice = '';
+let formKey = '', viewTurn = null, highlight = null, catalogRevision = -1;
+let sortField = 'selection_weight', sortDirection = -1;
+let analysisKey = null;
+let historyKey = '';
 
-function coordinate(action, size) {
-  return columns[action % size] + (size - Math.floor(action / size));
+function coordinate(action, size) { return columns[action % size] + (size - Math.floor(action / size)); }
+function percent(value, digits = 1) { return (value * 100).toFixed(digits); }
+function samePosition(game, analysis) {
+  return game && analysis && game.board_size === analysis.board_size && game.turn === analysis.turn &&
+    game.board.every((value, i) => value === analysis.board[i]);
 }
-
 function connection(value) {
   online = value;
-  $('connection').textContent = value ? '本地引擎已连接' : '连接中断，正在重连';
+  $('connection').textContent = value ? '引擎已连接' : '断线 · 重连中';
   $('connection-dot').classList.toggle('online', value);
 }
-
 async function api(path, body) {
-  const response = await fetch(path, body ? {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-  } : {});
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || `请求失败 (${response.status})`);
-  return result;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(path, {signal: controller.signal, ...(body ? {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    } : {})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `请求失败 (${response.status})`);
+    return result;
+  } finally { clearTimeout(timeout); }
 }
-
 function accept(next) {
   if (state && next.instance === state.instance && next.version < state.version) return;
+  if (!state || next.instance !== state.instance || next.game_id !== state.game_id ||
+      JSON.stringify(next.game?.moves) !== JSON.stringify(state.game?.moves)) {
+    viewTurn = null;
+    highlight = null;
+  }
   state = next;
   render();
 }
-
 async function command(operation, values = {}) {
   if (!state || pending || state.busy || !online) return;
   pending = true;
   notice = '';
   render();
-  try {
-    accept(await api(`/api/${operation}`, {version: state.version, ...values}));
-  } catch (error) {
+  try { accept(await api(`/api/${operation}`, {version: state.version, ...values})); }
+  catch (error) {
     notice = error.message;
     try { accept(await api('/api/state')); } catch { connection(false); }
-  } finally {
-    pending = false;
-    render();
-  }
+  } finally { pending = false; render(); }
 }
-
+function displayedGame() {
+  const game = state?.game;
+  if (!game || viewTurn === null) return game;
+  const moves = game.moves.slice(0, viewTurn);
+  const board = Array(game.board_size ** 2).fill(0);
+  moves.forEach((action, i) => { board[action] = i % 2 === 0 ? 1 : -1; });
+  return {...game, board, moves, turn: viewTurn, player: viewTurn % 2 === 0 ? 1 : -1};
+}
+function navigate(turn) {
+  if (!state?.game) return;
+  const value = Math.max(0, Math.min(state.game.turn, turn));
+  viewTurn = value === state.game.turn ? null : value;
+  highlight = null;
+  render();
+}
 function renderBoard(game, disabled) {
   const size = game?.board_size || Number($('size').value) || catalog.default_size;
   const step = 100 / (size + 1);
@@ -81,14 +98,29 @@ function renderBoard(game, disabled) {
     drawing += `<button class="board-point" data-action="${action}" aria-label="${label}" style="left:${(action % size + 1) * step}%;top:${(Math.floor(action / size) + 1) * step}%;width:${step * .96}%;height:${step * .96}%" ${disabled || stone ? 'disabled' : ''}>${stone ? `<span class="stone ${color} ${last ? 'last' : ''}">${number}</span>` : ''}</button>`;
   }
   $('board').innerHTML = drawing;
-  $('board').classList.toggle('white-turn', state.human === -1);
+  const analysis = state.analysis;
+  if (analysis && samePosition(game, analysis) && $('overlay').value !== 'none') {
+    const field = $('overlay').value;
+    const maximum = Math.max(0, ...analysis.candidates.map(c => c[field]));
+    for (const candidate of analysis.candidates) {
+      if (candidate[field] <= 0) continue;
+      const cell = $('board').querySelector(`[data-action="${candidate.action}"]`);
+      const value = document.createElement('span');
+      value.className = 'overlay-value';
+      value.style.background = `hsl(${160 - 125 * candidate[field] / maximum} 55% 70% / .8)`;
+      value.textContent = size > 15 ? '' : (candidate[field] * 100).toFixed(1);
+      cell?.append(value);
+    }
+  }
+  if (highlight !== null) $('board').querySelector(`[data-action="${highlight}"]`)?.classList.add('highlight');
+  $('board').classList.toggle('white-turn', game?.player === -1);
   $('board').classList.toggle('hide-numbers', !$('numbers').checked);
 }
 
 function renderHeatmap(id, field, maximumId, analysis) {
   const size = analysis.board_size;
   const candidates = new Map(analysis.candidates.map(candidate => [candidate.action, candidate]));
-  const maximum = Math.max(...analysis.candidates.map(candidate => candidate[field]));
+  const maximum = Math.max(0, ...analysis.candidates.map(candidate => candidate[field]));
   let html = '<span></span>';
   for (let x = 0; x < size; x++) html += `<span class="heat-axis">${columns[x]}</span>`;
   for (let y = 0; y < size; y++) {
@@ -100,7 +132,7 @@ function renderHeatmap(id, field, maximumId, analysis) {
       const value = candidate ? candidate[field] : 0;
       const ratio = maximum > 0 ? value / maximum : 0;
       const color = value > 0 ? `hsl(${160 - 125 * ratio} 55% ${94 - 38 * ratio}%)` : '#edf0e8';
-      const detail = `${coordinate(action, size)} · ` + (stone ? `${stone === 1 ? '黑' : '白'}棋` :
+      const detail = `${coordinate(action, size)} · ` + (stone ? `${stone === 1 ? '黑' : '白'}棋` : !candidate ? '不可选点' :
         `网络先验 ${(candidate.network_prior * 100).toFixed(3)}% · 访问 ${candidate.visits} 次（${(candidate.visit_policy * 100).toFixed(3)}%） · 选择权重 ${(candidate.selection_weight * 100).toFixed(3)}%`);
       const percent = value === 0 ? '·' : value < .001 ? '&lt;0.1' : (value * 100).toFixed(1);
       html += `<div class="heat-cell ${action === analysis.action ? 'chosen-point' : ''}" data-action="${action}" data-value="${value}" data-detail="${detail}" role="img" aria-label="${detail}" title="${detail}" tabindex="0" style="background:${color}">${stone ? `<i class="heat-stone ${stone === 1 ? 'black' : 'white'}"></i>` : `<span>${percent}</span>`}</div>`;
@@ -113,162 +145,316 @@ function renderHeatmap(id, field, maximumId, analysis) {
   $(maximumId).textContent = `${(maximum * 100).toFixed(2)}%`;
 }
 
+
 function renderHeatmaps() {
   const analysis = state.analysis;
   $('heatmap-empty').hidden = Boolean(analysis);
   $('heatmap-data').hidden = !analysis;
-  $('search-map-kind').disabled = !analysis;
-  $('heatmap-position').textContent = analysis ? `第 ${analysis.turn + 1} 手落子前 · ${analysis.player === 1 ? '黑' : '白'}方` : '等待 AI 搜索';
-  $('heatmap-detail').textContent = '悬停或聚焦点位，查看数值；描边标记 AI 的实际落点。';
   if (!analysis) {
     $('prior-map').replaceChildren();
     $('search-map').replaceChildren();
     return;
   }
+  $('heatmap-position').textContent = `第 ${analysis.turn + 1} 手落子前 · ${analysis.player === 1 ? '黑' : '白'}方视角`;
+  $('heatmap-detail').textContent = '悬停 / 聚焦查看数值；描边为搜索建议点。';
   renderHeatmap('prior-map', 'network_prior', 'prior-max', analysis);
   renderHeatmap('search-map', $('search-map-kind').value, 'search-max', analysis);
 }
-
+function renderCandidates() {
+  const analysis = state?.analysis;
+  $('candidates').replaceChildren();
+  if (!analysis) return;
+  const candidates = analysis.candidates.filter(c => !$('visited-only').checked || c.visits > 0)
+    .sort((a, b) => sortDirection * (a[sortField] - b[sortField]) || a.action - b.action);
+  $('candidate-count').textContent = `${candidates.length} / ${analysis.candidates.length} 个候选点`;
+  const labels = {action: '点位', network_prior: '先验 %', visits: '访问', visit_policy: '访问 %', selection_weight: '选择 %'};
+  document.querySelectorAll('[data-sort]').forEach(button => {
+    button.textContent = labels[button.dataset.sort] + (sortField === button.dataset.sort ? (sortDirection === -1 ? ' ↓' : ' ↑') : '');
+    button.parentElement.setAttribute('aria-sort', sortField === button.dataset.sort ? (sortDirection === -1 ? 'descending' : 'ascending') : 'none');
+  });
+  const fragment = document.createDocumentFragment();
+  for (const c of candidates) {
+    const row = document.createElement('tr');
+    row.dataset.action = c.action;
+    row.classList.toggle('selected', highlight === c.action);
+    row.innerHTML = `<td><button data-candidate="${c.action}" class="${c.action === analysis.action ? 'chosen' : ''}" title="在棋盘定位 ${coordinate(c.action, analysis.board_size)}">${coordinate(c.action, analysis.board_size)}${c.action === analysis.action ? ' ★' : ''}</button></td><td>${percent(c.network_prior, 2)}</td><td>${c.visits}</td><td>${percent(c.visit_policy, 2)}</td><td>${percent(c.selection_weight, 2)}</td>`;
+    fragment.append(row);
+  }
+  $('candidates').append(fragment);
+}
+function renderAnalysis() {
+  const a = state.analysis;
+  $('analysis-empty').hidden = Boolean(a);
+  $('analysis-data').hidden = !a;
+  $('analysis-move').textContent = a ? `第 ${a.turn + 1} 手前 · ${a.player === 1 ? '黑' : '白'}方` : '—';
+  if (!a) { analysisKey = null; renderHeatmaps(); return; }
+  $('analysis-context').textContent = samePosition(state.game, a) ? '当前局面分析' : `历史分析 · 搜索后已落子`;
+  const key = JSON.stringify(a);
+  if (key !== analysisKey) {
+    $('seconds').textContent = `${a.seconds.toFixed(3)}s`;
+    $('completed').textContent = a.completed_visits.toLocaleString();
+    $('throughput').textContent = a.seconds > 0 ? Math.round(a.completed_visits / a.seconds).toLocaleString() : '—';
+    $('value-label').textContent = `${a.player === 1 ? '黑' : '白'}方视角 · 搜索 W−L`;
+    $('value').textContent = `${a.root_value >= 0 ? '+' : ''}${a.root_value.toFixed(4)}`;
+    $('wdl').textContent = `搜索 W / D / L   ${a.wdl.map(v => percent(v) + '%').join(' / ')}`;
+    $('network-wdl').textContent = `网络 W / D / L   ${a.network_wdl.map(v => percent(v) + '%').join(' / ')}`;
+    ['wdl-win', 'wdl-draw', 'wdl-loss'].forEach((id, i) => { $(id).style.width = `${a.wdl[i] * 100}%`; });
+    $('inference-metrics').textContent = `NN 请求 ${a.requests} · 批次 ${a.batches} · 平均批量 ${a.batches ? (a.requests / a.batches).toFixed(2) : '—'}`;
+    $('raw-analysis').textContent = JSON.stringify(a, null, 2);
+    renderHeatmaps();
+    analysisKey = key;
+  }
+  renderCandidates();
+}
 function render() {
   if (!state || !catalog) return;
   const game = state.game;
   const busy = pending || state.busy || !online;
-  const key = game ? [state.model, game.board_size, state.rule, state.human, state.visits].join('|') : '';
-  if (key && key !== formKey) {
-    $('model').value = state.model;
-    $('size').value = game.board_size;
-    $('rule').value = state.rule;
-    $('visits').value = state.visits;
-    document.querySelector(`input[name="human"][value="${state.human}"]`).checked = true;
+  const key = game ? [state.game_id, state.model, game.board_size, state.rule, state.human, state.visits, state.mode].join('|') : '';
+  if (key !== formKey) {
+    if (game) {
+      $('model-filter').value = '';
+      populateModels(state.model);
+      $('size').value = game.board_size;
+      $('rule').value = state.rule;
+      $('visits').value = state.visits;
+      $('mode').value = state.mode;
+      document.querySelector(`input[name="human"][value="${state.human}"]`).checked = true;
+      updateSizes();
+    }
     formKey = key;
-    updateSizes();
   }
   for (const input of $('settings').elements) input.disabled = busy;
-  const humanBlack = state.human === 1;
-  $('human-stone').className = `player-stone ${humanBlack ? 'black' : 'white'}`;
-  $('ai-stone').className = `player-stone ${humanBlack ? 'white' : 'black'}`;
-  $('human-label').textContent = humanBlack ? '执黑 · 先行' : '执白 · 后行';
-  $('ai-label').textContent = humanBlack ? '执白 · 后行' : '执黑 · 先行';
+  updateSizes();
+  $('new-game').disabled = busy || !$('model').value;
+  $('apply-settings').disabled = busy || !game;
+  $('refresh-models').disabled = busy;
   const rule = game ? state.rule : $('rule').value;
-  $('rule-badge').textContent = rules[rule];
-  $('rule-note').textContent = notes[rule];
+  $('rule-badge').textContent = rules[rule] || '—';
+  $('rule-note').textContent = notes[rule] || '';
   $('move-count').textContent = `第 ${game?.turn || 0} 手`;
-  $('new-game').innerHTML = `${game ? '重新开始一局' : '开始新局'} <span>↗</span>`;
-  $('undo').disabled = busy || !game?.moves.some((_, i) => (i % 2 === 0 ? 1 : -1) === state.human);
-  $('retry').hidden = busy || !game || game.finished || game.player === state.human;
+  $('new-game').textContent = game ? '按配置重开棋局' : '创建棋局';
+  $('session-mode').textContent = game ? (state.mode === 'manual' ? '手动双方' : `人类执${state.human === 1 ? '黑' : '白'}`) : '未创建';
+  const activeModel = catalog.models.find(m => m.id === state.model);
+  $('session-info').textContent = game ? `${activeModel?.label || state.model} · ${state.visits}v` : '模型常驻 · 每次搜索从新根开始';
+  $('session-info').title = game ? state.model : '';
+  $('state-version').textContent = `单会话 · 状态 v${state.version} · ${catalog.device}`;
+  $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => (i % 2 === 0 ? 1 : -1) === state.human));
+  $('analyze').disabled = $('step').disabled = busy || !game || game.finished || viewTurn !== null;
+  $('retry').hidden = busy || state.mode !== 'play' || !game || game.finished || game.player === state.human;
   $('error').textContent = notice || state.error || '';
   $('error').hidden = !$('error').textContent;
-  renderBoard(game, busy || !game || game.finished || game.player !== state.human);
+  const displayed = displayedGame();
+  renderBoard(displayed, busy || !game || game.finished || viewTurn !== null || (state.mode === 'play' && game.player !== state.human));
+  const overlayMismatch = $('overlay').value !== 'none' && !samePosition(displayed, state.analysis);
+  $('view-note').hidden = viewTurn === null && !overlayMismatch;
+  $('view-note').textContent = viewTurn !== null ? `回看第 ${viewTurn} / ${game.turn} 手 · 只读；点击“从此处继续”回退并进入手动研究。` : '当前局面尚无匹配分析，叠加暂不显示。按 A 分析，或点击“定位局面”查看上次搜索。';
   renderStatus();
   const history = $('history');
+  const scrollTop = history.scrollTop;
   history.replaceChildren();
-  if (!game?.turn) {
-    const empty = document.createElement('span');
-    empty.className = 'empty-inline';
-    empty.textContent = '每一步，都从这里开始。';
-    history.append(empty);
-  } else {
-    game.moves.forEach((action, i) => {
-      const item = document.createElement('span');
-      item.className = 'history-item';
-      item.innerHTML = `<small>${i + 1}</small><i class="tiny-stone ${i % 2 === 0 ? 'black' : 'white'}"></i><span>${coordinate(action, game.board_size)}</span>`;
-      history.append(item);
-    });
-    history.scrollLeft = history.scrollWidth;
+  (game?.moves || []).forEach((action, i) => {
+    const item = document.createElement('button');
+    item.className = 'history-item';
+    item.classList.toggle('active', i + 1 === (viewTurn ?? game.turn));
+    item.dataset.turn = i + 1;
+    item.title = `查看第 ${i + 1} 手后的局面`;
+    item.innerHTML = `<small>${i + 1}</small><i class="tiny-stone ${i % 2 === 0 ? 'black' : 'white'}"></i>${coordinate(action, game.board_size)}`;
+    history.append(item);
+  });
+  history.scrollTop = scrollTop;
+  const nextHistoryKey = `${state.game_id}:${game?.turn}:${viewTurn}`;
+  if (historyKey !== nextHistoryKey) {
+    const active = history.querySelector('.active');
+    if (active) {
+      const row = active.getBoundingClientRect(), container = history.getBoundingClientRect();
+      if (row.bottom > container.bottom) history.scrollTop += row.bottom - container.bottom;
+      else if (row.top < container.top) history.scrollTop += row.top - container.top;
+    }
+    historyKey = nextHistoryKey;
   }
-  $('history-count').textContent = game?.turn ? `${game.turn} 手` : '尚未落子';
-  const analysis = state.analysis;
-  renderHeatmaps();
-  $('analysis-empty').hidden = Boolean(analysis);
-  $('analysis-data').hidden = !analysis;
-  $('analysis-move').textContent = analysis ? `第 ${analysis.turn + 1} 手 · ${analysis.player === 1 ? '黑' : '白'}` : '—';
-  if (analysis) {
-    $('seconds').textContent = `${analysis.seconds.toFixed(2)} s`;
-    $('completed').textContent = analysis.completed_visits.toLocaleString();
-    $('wdl').textContent = `搜索 W / D / L：${analysis.wdl.map(value => (value * 100).toFixed(1) + '%').join(' / ')}`;
-    $('value-label').textContent = `AI（${analysis.player === 1 ? '黑' : '白'}方）局面估值`;
-    $('value').textContent = `${analysis.root_value >= 0 ? '+' : ''}${analysis.root_value.toFixed(3)}`;
-    $('value-fill').style.width = `${Math.max(0, Math.min(100, (analysis.root_value + 1) * 50))}%`;
-    $('candidates').replaceChildren();
-    analysis.candidates.slice(0, 5).forEach((candidate, i) => {
-      const row = document.createElement('tr');
-      row.innerHTML = `<td class="${candidate.action === analysis.action ? 'chosen' : ''}"><span class="rank">${i + 1}</span>${coordinate(candidate.action, analysis.board_size)}${candidate.action === analysis.action ? ' · 落子' : ''}</td><td>${candidate.visits}</td><td>${(candidate.selection_weight * 100).toFixed(1)}%</td>`;
-      $('candidates').append(row);
-    });
-  }
+  $('history-count').textContent = `${viewTurn ?? game?.turn ?? 0} / ${game?.turn || 0} 手`;
+  $('timeline').max = game?.turn || 0;
+  $('timeline').value = viewTurn ?? game?.turn ?? 0;
+  $('timeline').disabled = !game?.turn;
+  $('first').disabled = $('prev').disabled = !game || (viewTurn ?? game.turn) === 0;
+  $('next').disabled = $('live').disabled = viewTurn === null;
+  $('branch').hidden = viewTurn === null;
+  $('branch').disabled = busy;
+  const evaluation = {...catalog.evaluation, visits: state.game ? state.visits : catalog.default_visits, reuse_tree: false};
+  if (game) { evaluation.board_size = game.board_size; evaluation.rule = state.rule; }
+  if (evaluation.inference_precision === 'auto') evaluation.inference_precision = evaluation.device.startsWith('cuda:') ? 'float16' : 'float32';
+  $('engine-config').textContent = JSON.stringify(evaluation, null, 2);
+  renderSettingsNote();
+  renderAnalysis();
 }
-
+function renderSettingsNote() {
+  const edited = state?.game && (Number($('visits').value) !== state.visits || $('mode').value !== state.mode ||
+    Number(document.querySelector('input[name="human"]:checked').value) !== state.human);
+  $('apply-settings').classList.toggle('settings-dirty', Boolean(edited));
+  $('settings-note').textContent = edited ? '模式 / 执子 / 预算尚未应用；分析使用当前会话配置。模型、棋盘和棋规需重开生效。' : '模型、棋盘和棋规在创建棋局时生效。';
+}
 function renderStatus() {
   if (!state) return;
   const game = state.game;
-  let text = '选择模型，开始一局';
+  let text = '选择模型，创建棋局';
   if (!online) text = '等待服务连接';
-  else if (state.busy) {
+  else if (state.busy || pending) {
     const elapsed = state.started_at ? Math.max(0, Date.now() / 1000 - state.started_at).toFixed(1) : '0.0';
-    text = `${state.phase === 'loading' ? '正在准备模型' : 'AI 思考中'} · ${elapsed}s`;
-  } else if (game?.finished) text = game.winner === 0 ? '本局和棋' : `${game.winner === 1 ? '黑棋' : '白棋'}获胜 · ${game.winner === state.human ? '你赢了' : 'EtaZero 获胜'}`;
-  else if (game) text = game.player === state.human ? '轮到你落子' : '等待 AI 落子';
+    text = `${state.phase === 'loading' ? '加载中' : '处理中'} · ${elapsed}s`;
+  } else if (state.error) text = '操作失败 · 查看错误信息后重试';
+  else if (game?.finished) text = game.winner === 0 ? '本局和棋' : `${game.winner === 1 ? '黑棋' : '白棋'}获胜`;
+  else if (game) text = state.mode === 'manual' ? `${game.player === 1 ? '黑' : '白'}方落子 · 手动研究` : game.player === state.human ? '轮到你落子' : '等待 AI 落子';
   if (game?.finished && game.reason === 2) text += ' · 黑棋禁手';
   $('status').textContent = text;
-  $('status').parentElement.classList.toggle('thinking', state.busy);
+  $('status').parentElement.classList.toggle('thinking', state.busy || pending);
 }
-
+function populateModels(selected = $('model').value || state?.model) {
+  const query = $('model-filter').value.trim().toLowerCase();
+  const filtered = catalog.models.filter(m => `${m.id} ${m.label}`.toLowerCase().includes(query));
+  $('model').replaceChildren(...filtered.map(m => new Option(m.label, m.id)));
+  if (filtered.some(m => m.id === selected)) $('model').value = selected;
+  $('model-count').textContent = `${filtered.length} / ${catalog.models.length}`;
+  updateSizes();
+}
+function updateSizes() {
+  const model = catalog.models.find(m => m.id === $('model').value);
+  for (const option of $('size').options) option.disabled = !model || Number(option.value) > model.canvas;
+  if (model && Number($('size').value) > model.canvas) $('size').value = model.canvas;
+  $('new-game').disabled = !model || !online || pending || Boolean(state?.busy);
+  $('model-summary').textContent = model ? `迭代 ${model.manifest.checkpoint.iteration} · ${model.manifest.weights || '—'} · 画布 ${model.canvas}² · 累计 ${(model.manifest.checkpoint.total_steps ?? 0).toLocaleString()} 步` : '无匹配模型';
+  $('model-info').textContent = model ? JSON.stringify({file: model.path, ...model.manifest}, null, 2) : '';
+}
+async function loadCatalog() {
+  const selected = $('model').value;
+  const size = $('size').value;
+  const first = !catalog;
+  catalog = await api('/api/catalog');
+  $('size').replaceChildren();
+  for (let value = 5; value <= Math.max(...catalog.models.map(m => m.canvas)); value++) $('size').add(new Option(`${value} × ${value}`, value));
+  $('size').value = size || catalog.default_size;
+  if (first) {
+    $('visits').value = catalog.default_visits;
+    $('rule').replaceChildren(...catalog.rules.map(rule => new Option(rules[rule], rule)));
+    $('rule').value = catalog.default_rule;
+  }
+  populateModels(selected);
+  $('engine-info').textContent = `${catalog.device} · ${catalog.search_threads} search threads · VL ${catalog.virtual_loss}`;
+}
+function sessionSettings() {
+  return {human: Number(document.querySelector('input[name="human"]:checked').value), visits: Number($('visits').value), mode: $('mode').value};
+}
 $('settings').addEventListener('submit', event => {
   event.preventDefault();
-  command('new', {model: $('model').value, size: Number($('size').value), rule: $('rule').value,
-    human: Number(document.querySelector('input[name="human"]:checked').value), visits: Number($('visits').value)});
+  command('new', {model: $('model').value, size: Number($('size').value), rule: $('rule').value, ...sessionSettings()});
+});
+$('settings').addEventListener('input', renderSettingsNote);
+$('apply-settings').addEventListener('click', () => {
+  if (!$('visits').reportValidity()) return;
+  command('configure', sessionSettings());
 });
 $('board').addEventListener('click', event => {
   const button = event.target.closest('button[data-action]');
   if (button && !button.disabled) command('play', {action: Number(button.dataset.action)});
 });
-$('undo').addEventListener('click', () => command('undo'));
-$('retry').addEventListener('click', () => command('retry'));
-$('numbers').addEventListener('change', () => $('board').classList.toggle('hide-numbers', !$('numbers').checked));
+for (const name of ['undo', 'retry', 'analyze', 'step']) $(name).addEventListener('click', () => command(name));
+$('refresh-models').addEventListener('click', () => command('refresh'));
+$('branch').addEventListener('click', () => { if (viewTurn !== null) command('branch', {turn: viewTurn}); });
+$('numbers').addEventListener('change', () => { $('board').classList.toggle('hide-numbers', !$('numbers').checked); savePreferences(); });
 $('search-map-kind').addEventListener('change', renderHeatmaps);
-for (const event of ['mouseover', 'focusin']) $('heatmap-data').addEventListener(event, event => {
-  const cell = event.target.closest('[data-detail]');
-  if (cell) $('heatmap-detail').textContent = cell.dataset.detail;
-});
-function updateSizes() {
-  const model = catalog.models.find(model => model.id === $('model').value);
-  for (const option of $('size').options) option.disabled = Number(option.value) > model.canvas;
-  if (Number($('size').value) > model.canvas) $('size').value = model.canvas;
-}
+$('visited-only').addEventListener('change', renderCandidates);
 $('model').addEventListener('change', updateSizes);
-$('rule').addEventListener('change', () => { if (!state?.game) render(); });
-$('size').addEventListener('change', () => { if (!state?.game) render(); });
+$('model-filter').addEventListener('input', () => populateModels());
+for (const id of ['rule', 'size']) $(id).addEventListener('change', () => { if (!state?.game) render(); });
+document.querySelectorAll('[data-visits]').forEach(button => button.addEventListener('click', () => { $('visits').value = button.dataset.visits; renderSettingsNote(); }));
+$('first').addEventListener('click', () => navigate(0));
+$('prev').addEventListener('click', () => navigate((viewTurn ?? state.game.turn) - 1));
+$('next').addEventListener('click', () => navigate((viewTurn ?? state.game.turn) + 1));
+$('live').addEventListener('click', () => navigate(state.game.turn));
+$('timeline').addEventListener('input', () => navigate(Number($('timeline').value)));
+$('history').addEventListener('click', event => { const button = event.target.closest('[data-turn]'); if (button) navigate(Number(button.dataset.turn)); });
+$('show-analysis').addEventListener('click', () => { if (state.analysis) navigate(state.analysis.turn); });
+$('overlay').addEventListener('change', () => {
+  if ($('overlay').value !== 'none' && state?.analysis) navigate(state.analysis.turn);
+  else render();
+});
+function selectCandidate(action) {
+  if (!state?.analysis) return;
+  navigate(state.analysis.turn);
+  highlight = action;
+  render();
+}
+$('candidates').addEventListener('click', event => { const button = event.target.closest('[data-candidate]'); if (button) selectCandidate(Number(button.dataset.candidate)); });
+for (const eventName of ['mouseover', 'focusin']) {
+  $('board').addEventListener(eventName, event => {
+    const point = event.target.closest('[data-action]');
+    if (point) $('board-coordinate').textContent = coordinate(Number(point.dataset.action), displayedGame()?.board_size || Number($('size').value));
+  });
+  $('heatmap-data').addEventListener(eventName, event => {
+    const cell = event.target.closest('[data-detail]');
+    if (cell) $('heatmap-detail').textContent = cell.dataset.detail;
+  });
+}
+$('heatmap-data').addEventListener('click', event => { const cell = event.target.closest('[data-action]'); if (cell) selectCandidate(Number(cell.dataset.action)); });
+document.querySelectorAll('[data-sort]').forEach(button => button.addEventListener('click', () => {
+  sortDirection = sortField === button.dataset.sort ? -sortDirection : button.dataset.sort === 'action' ? 1 : -1;
+  sortField = button.dataset.sort;
+  renderCandidates();
+}));
+const tabs = [...document.querySelectorAll('[data-tab]')];
+function selectTab(button) {
+  tabs.forEach(tab => {
+    const selected = tab === button;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    $(tab.dataset.tab).hidden = !selected;
+  });
+}
+tabs.forEach((button, index) => {
+  button.addEventListener('click', () => selectTab(button));
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    selectTab(tabs[next]); tabs[next].focus();
+  });
+});
+document.addEventListener('keydown', event => {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.repeat || event.target.closest('input,select,textarea,button,[contenteditable="true"]')) return;
+  const shortcuts = {a: 'analyze', s: 'step', u: 'undo', ArrowLeft: 'prev', ArrowRight: 'next', Home: 'first', End: 'live'};
+  const id = shortcuts[event.key] || shortcuts[event.key.toLowerCase()];
+  if (id && !$(id).disabled && !$(id).hidden) { event.preventDefault(); $(id).click(); }
+});
+function savePreferences() {
+  try { localStorage.setItem('etazero-ui', JSON.stringify({theme: document.documentElement.dataset.theme, numbers: $('numbers').checked})); } catch { /* Browser storage is optional. */ }
+}
+try {
+  const preferences = JSON.parse(localStorage.getItem('etazero-ui') || '{}');
+  document.documentElement.dataset.theme = preferences.theme === 'dark' ? 'dark' : 'light';
+  $('numbers').checked = preferences.numbers !== false;
+} catch { /* Use defaults when storage is unavailable. */ }
+$('theme').addEventListener('click', () => {
+  document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  savePreferences();
+});
 setInterval(renderStatus, 200);
-
 async function start() {
   for (;;) {
-    try {
-      catalog = await api('/api/catalog');
-      for (const model of catalog.models) {
-        const label = model.label;
-        $('model').add(new Option(label, model.id));
-      }
-      for (let size = 5; size <= Math.max(...catalog.models.map(model => model.canvas)); size++) $('size').add(new Option(`${size} × ${size}`, size));
-      $('size').value = catalog.default_size;
-      $('visits').value = catalog.default_visits;
-      for (const rule of catalog.rules) $('rule').add(new Option(rules[rule], rule));
-      $('rule').value = catalog.default_rule;
-      updateSizes();
-      $('engine-info').textContent = `${catalog.search_threads} 线程 · 虚拟损失 ${catalog.virtual_loss} · ${catalog.device}`;
-      break;
-    } catch {
-      connection(false);
-      await new Promise(resolve => setTimeout(resolve, 1500));
-    }
+    try { await loadCatalog(); break; }
+    catch (error) { connection(false); $('error').textContent = error.message; $('error').hidden = false; await new Promise(resolve => setTimeout(resolve, 1500)); }
   }
   for (;;) {
     try {
-      const next = await api(`/api/state${state ? `?since=${state.version}` : ''}`);
+      const next = await api(`/api/state${state && online ? `?since=${state.version}` : ''}`);
+      const changed = !online || !state || next.instance !== state.instance || next.version !== state.version;
+      if (!state || next.instance !== state.instance || next.catalog_revision !== catalogRevision) {
+        await loadCatalog();
+        catalogRevision = next.catalog_revision;
+      }
       connection(true);
-      accept(next);
-    } catch {
-      connection(false);
-      render();
+      if (changed) accept(next);
+    } catch (error) {
+      connection(false); render();
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
   }
