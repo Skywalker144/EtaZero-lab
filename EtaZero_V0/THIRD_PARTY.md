@@ -18,6 +18,12 @@ MuZero_V2 working tree, preserving exact-five priority, overline, distinct-four 
 recursive live-three semantics. MuZero_V2 supplies the plotting theme/layout and thin-script experiment scheduler reference, as adapted in `python/etazero/plotting.py` and `experiment.py`. SkyZero V7.19/V8.1 informs umbrella discovery, GPU queuing and resumable experiment usage. Shared initialization here means weights only, with independent random bootstrap per arm. MuZero_V2 supplies the deterministic random evaluator and cold-start quota reference and informed the opening/data integration boundary. It is also a reference for the TorchScript /
 LibTorch boundary. EtaZero's input feature contract follows the scoped SkyZero_V7.19 adaptation described below.
 
+The repository-level `web/` interface, HTTP session handling and persistent process
+wrapper are adapted from the user's MuZero `web/` working tree and V2 `engine.py`.
+EtaZero adds published-model manifest/checksum validation, canvas-aware controls and
+search W/D/L display; its native `serve` command uses EtaZero Game and PUCT directly.
+MuZero's `eval_main.cpp` supplies the session protocol and analysis JSON reference.
+
 [reference_sources.json](reference_sources.json) records the actual inspected source
 paths and SHA-256 values. These directories are development references; builds and
 runs use only files and dependencies inside EtaZero and the selected Python environment.
@@ -35,7 +41,7 @@ KataGomo is the mechanism's authoritative source. Its MIT license is retained in
 [licenses/KataGomo.txt](licenses/KataGomo.txt).
 
 The reference scope is the stated runtime/data architecture, opening and Renju semantics.
-Go rules, score utility and auxiliary learning heads, distributed training services and
+Go rules, score utility and auxiliary heads beyond the four policy outputs, distributed training services and
 its multiple native inference backends are outside the first-round implementation.
 
 
@@ -55,7 +61,7 @@ match profiles, model identities and game/evaluator concurrency.
 
 SkyZero_V7.19 supplies the input-feature reference (`cpp/envs/gomoku.h`, `cpp/selfplay_manager.h`, `python/nets.py`): five spatial planes, the first four global features, global linear projection, and per-training-row forbidden-feature dropout on an independent RNG stream. Draw utility and PDA are outside this adaptation. Renju feature calculation uses EtaZero's existing rule analyzer, not a second rule implementation.
 
-Training D4 in `python/etazero/symmetry.py` follows the exact eight-transform numbering and batch-level sampling of SkyZero_V8.1 `katago/python/katago/train/data_processing_pytorch.py`. Optimizer grouping, BN learning-rate/weight-decay policies, warmup, Lookahead and SWA in `optimization.py` follow its native `katago/python/train.py`, model regularization groups and norm metrics. EtaZero retains its own architecture and mean loss reporting, uses batch-sum backward, checkpointable augmentation RNG and slow weights, and refreshes LR/WD each update. Optimizer groups and BN head assignments are adapted to the current residual network. KataGomo `python/train.py` and `python/train.sh` were inspected for optimizer settings; its older SGD decay coefficients and SWA-scale-1 launcher are research references rather than active defaults. These adaptations retain the KataGo MIT license.
+Training D4 in `python/etazero/symmetry.py` follows the exact eight-transform numbering and batch-level sampling of SkyZero_V8.1 `katago/python/katago/train/data_processing_pytorch.py`. Optimizer grouping, BN learning-rate/weight-decay policies, warmup, Lookahead and SWA in `optimization.py` follow its native `katago/python/train.py`, model regularization groups and norm metrics. EtaZero uses its NBT/fson architecture and mean loss reporting, uses batch-sum backward, checkpointable augmentation RNG and slow weights, and refreshes LR/WD each update. Optimizer groups follow NBT/fson roles, including zero-centered gamma offsets and output-group final normalization. KataGomo `python/train.py` and `python/train.sh` were inspected for optimizer settings; its older SGD decay coefficients and SWA-scale-1 launcher are research references rather than active defaults. These adaptations retain the KataGo MIT license.
 
 WDL, FPU visited-policy interpolation/reduction, shaped Dirichlet concentration,
 forced root playouts, inverse-PUCT target pruning and LCB selection in
@@ -81,5 +87,28 @@ evaluations use the identity symmetry rather than source-option random orientati
 EtaZero retains its own RNG and architecture, terminal WDL supervision, and full-game
 raw records with persisted stochastic row repeats. Go score utility, uncertainty
 weighting, noise pruning, subtree value bias, graph search, reanalysis and auxiliary
-heads are outside this adaptation. Draw is a real Gomoku draw rather than KataGo's
+heads beyond the four policy outputs are outside this adaptation. Draw is a real Gomoku draw rather than KataGo's
 no-result channel.
+
+The four policy outputs in `network.py` follow KataGo `model_pytorch.py` head
+ordering and `metrics_pytorch.py` targets: next actual turn opponent policy,
+0.15 opponent coefficient, epsilon-plus-fourth-root softening over on-board
+cells, and `train.py` default soft weight 8. `record.cpp` follows
+`trainingwrite.cpp` successor availability independently of successor row sampling.
+Export exposes only primary policy, retaining the four-filter convolution shape to preserve CUDA rounding.
+EtaZero omits Go pass, retains float32 targets instead of int16 quantization,
+and logs weighted mean contributions for all policy heads. Other auxiliary
+KataGo heads and metadata-only soft-policy filtering are outside this scope.
+
+The NBT2 trunk, global policy head, size-conditioned WDL value path, Mish gain,
+truncated-normal initialization, fixed activation scaling and one final masked
+BatchNorm in `python/etazero/network.py` are adapted from KataGo
+`python/katago/train/model_pytorch.py`. The starting dimensions and global-block
+placement follow `b5c192nbt` in `modelconfigs.py`, with the `-fson-mish` variants.
+EtaZero derives other widths from trunk channels with alignment to eight and
+extends the b5 global-block cadence to configurable depth. It retains its own
+Gomoku inputs, four policy outputs and actual-draw WDL, and omits Go pass/score
+heads, RepVGG convolutions and dual-head training. Final normalization retains
+KataGo's EMA of population mean/std (epsilon 1e-4, momentum 0.001); reciprocal
+then multiplication implements division with a cacheable inference operation.
+No external source checkout is needed to build or run this network.
