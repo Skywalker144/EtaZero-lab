@@ -26,7 +26,7 @@
 
 采用 AlphaZero 的策略价值网络、真实规则树搜索和自对弈监督闭环；网络预测落子概率与当前玩家的期望终局结果，训练结合策略交叉熵、价值误差与正则化。模型持续更新并供自对弈使用，固定模型评估独立运行，不默认加入“胜过旧模型才发布”的门控。[AlphaZero 原文，算法描述及式 1](https://arxiv.org/pdf/1712.01815)
 
-本项目将其适配到三种五子棋规则和可配置硬件规模。以下明确的是 EtaZero 的实现约定，不声称复现原论文的棋类任务、网络规模或实验预算。搜索接入 KataGo 的 FPU、shaped Dirichlet noise、playout cap randomization、forced playout / policy target pruning、加权价值统计、LCB、根多对称与分层温度；对局采样使用 policy/value surprise weighting。五子棋无 score utility、pass、提子和 no-result，WDL 的 D 表示真实和棋。辅助头、图搜索和 reanalysis 未接入。
+本项目将其适配到三种五子棋规则和可配置硬件规模。以下明确的是 EtaZero 的实现约定，不声称复现原论文的棋类任务、网络规模或实验预算。搜索接入 KataGo 的 FPU、shaped Dirichlet noise、playout cap randomization、forced playout / policy target pruning、加权价值统计、LCB、根多对称与分层温度；对局采样使用 policy/value surprise weighting，学习接入四项 policy 监督。五子棋无 score utility、pass、提子和 no-result，WDL 的 D 表示真实和棋。其余辅助头、图搜索和 reanalysis 未接入。
 
 ### 游戏状态与棋规
 
@@ -73,15 +73,23 @@ KataGomo 原生用 WDL 转换为行棋方标量，EtaZero 使用相同视角的 
 
 禁手平面仅 Renju 非零；两个平面都表示黑方禁手，白方本身没有禁手。占用点与 padding 均为零，禁手判定复用真实落子使用的递归 RenjuAnalyzer。全局输入为 `float32[N,4]`：`is_standard`、`is_renju`、Renju 执色（黑 -1、白 +1，其他规则 0）、禁手特征可用标志（仅完整 Renju 输入为 1）。Freestyle 由前两项均为 0 表示。draw utility/PDA 尚未接入，因此不包含 SkyZero 的最后 3 个全局量。全局量经无 bias 的线性层投影到 trunk 通道，广播加到首层空间卷积输出。
 
-`selfplay.forbidden_feature_dropout_prob` 沿用 SkyZero 的训练行独立抽样方式：被选中的 Renju 行将空间 3、4 和全局 3 同时置零；其余规则、执色、棋子和监督目标保持完整。随机流由局种子独立派生，不消耗尺寸、规则、开局或动作采样的 RNG。搜索、平衡开局的两个根视角及候选评估、固定模型评估均保留完整特征。原始轨迹保存实际训练输入，开局前缀和末状态不 dropout，shuffle 不再次随机化。
+`environment.forbidden_feature_dropout_prob` 沿用 SkyZero 的训练行独立抽样方式：被选中的 Renju 行将空间 3、4 和全局 3 同时置零；其余规则、执色、棋子和监督目标保持完整。随机流由局种子独立派生，不消耗尺寸、规则、开局或动作采样的 RNG。搜索、平衡开局的两个根视角及候选评估、固定模型评估均保留完整特征。原始轨迹保存实际训练输入，开局前缀和末状态不 dropout，shuffle 不再次随机化。
 
 尺寸与规则每局分别按配置权重采样，零权重不参与采样。平衡开局的候选 Game 继承该局的尺寸与规则，反事实根评估同时交换己敌方平面、禁手平面和 Renju 执色符号；实际棋盘和行棋方保持不变。
 
-策略价值网络使用可配置的残差卷积主体、逐点 policy 输出与 masked 全局池化价值头，输出每个画布落点的原始 policy logits 和当前玩家视角的 W/D/L 三分类 logits `[N,3]`。训练用终局 WDL one-hot 的交叉熵；native 推理在 FP32 中 softmax 得到概率，`v = W-L`。BatchNorm 统计、卷积中间特征与价值池化均处理有效棋盘 mask；实现见 [network.py](../python/etazero/network.py)。搜索保留网络原始 WDL、回传的 WDL 均值和 `W-L` 二阶矩；和棋概率在换视角时保持，胜负概率互换。
+策略价值网络采用 KataGo `b5c192nbt-fson-mish` 的卷积结构，适配五子棋输入、四项策略监督和 WDL。`network.blocks` 表示外层嵌套瓶颈块数，`network.channels` 表示主干宽度；内部宽度由 [network_widths](../python/etazero/config.py) 唯一推导，不再配置 `value_hidden`。主干通道须为不小于 24 的偶数。瓶颈为主干的一半，主干全局分支及 Policy/Value 卷积宽度按主干的 1/6 向上取整到 8 的倍数，Value 隐藏层按主干的 5/12 同样取整；192 通道正好还原源配置的 96、32、80 宽度。宽度推导是 EtaZero 的可配置约定，并非 KataGo 全部预设的统一比例。
 
-搜索时将已占用点和画布外位置 mask 掉，每个网络评估先将 logits 除以 `nn_policy_temperature`，再对可提交动作归一化先验；这个全树 policy 温度同时作用于根和所有非根。训练策略 softmax 的域为有效棋盘上的全部落点：已占用点目标为零，画布外点不参与归一化。这个搜索与训练的区别需要固定样例验证，不能由不同调用方各自选择。
+每个 NBT 块先用前激活 1×1 卷积将主干投影到瓶颈，依次执行两个内层残差块（每个包含两层前激活 3×3 卷积），再通过前激活 1×1 投影回主干并加上外层残差。按源 b5 排列，第 2、4、6……个外层块的第一个内层块带全局池化；其首层将瓶颈宽度分为局部和全局卷积分支，全局分支经激活、池化和线性投影后广播加到局部结果。池化使用每张棋盘的均值、按尺寸缩放的均值、有效区域最大值；padding 不参与。
 
-`training.d4_augmentation` 控制训练 D4，baseline 开启。沿用 SkyZero_V8.1 的 batch 级均匀八对称，按整个画布变换全部空间通道（包括有效棋盘和禁手 mask）与 policy 目标；小棋盘的有效区域可以随变换移动到其他角。全局特征和 WDL 目标不变，原始轨迹不重写。变换发生在 learner 消费 batch 后、联合编译前，结果保持 contiguous；随机流纳入 Torch CPU RNG checkpoint，AMP 重试复用同一变换与前向图。实现见 [symmetry.py](../python/etazero/symmetry.py)。
+激活使用 Mish，卷积及线性层使用 KataGo 的方差校正截断正态初始化。内部归一化为 `(1+gamma_offset) × fixed_scale × x + bias` 后应用 mask，gamma_offset 初始化为零并向零衰减。外层第 i 块入口缩放为 `1/sqrt(i+1)`（i 从零开始），两个内层入口分别为 1 和 `1/sqrt(2)`，瓶颈出口为 `1/sqrt(3)`。仅主干末端使用 masked BatchNorm，再乘 `1/sqrt(blocks+1)`；训练按有效点数计算总体均值和标准差，epsilon 为 1e-4，running mean/std 的 EMA 动量为 0.001，沿用源 fson 语义。导出在实际推理设备预计算倒数标准差，保持缩放与加法的运算顺序。
+
+PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bias、Mish、上述三项池化和线性层，广播加入局部特征，再经过 bias、Mish 和 1×1 输出；全局信息进入最终非线性之前，因此不会成为被 softmax 抵消的统一偏移。ValueHead 使用 1×1、bias、Mish 后的均值，拼接 `mean`、`mean × (sqrt(area)-14)/10`、`mean × ((sqrt(area)-14)²/100-0.1)`，经隐藏层、Mish 和线性输出 WDL；这三个均值保留源尺寸条件化形式，不使用最大值。固定尺寸下它们携带相同空间信息，混合尺寸时为价值层提供尺寸条件。KataGo 的 Go pass、score/ownership 等辅助头、RepVGG 额外卷积及双输出头训练不属于此实现。
+
+训练 policy logits 为 `[N,4,canvas²]`，顺序为 policy、opponent policy、soft policy、soft opponent policy，定义见 [schema.py](../python/etazero/schema.py)；价值为当前玩家视角的 W/D/L 三分类 logits `[N,3]`。导出保留四平面的卷积计算形状以保持 CUDA 数值一致性，仅向 native 返回主 policy `[N,canvas²]`。训练用终局 WDL one-hot 的交叉熵；native 推理在 FP32 中 softmax 得到概率，`v = W-L`。网络在各前激活处应用有效棋盘 mask，BatchNorm 和池化排除 padding；实现见 [network.py](../python/etazero/network.py)。搜索保留网络原始 WDL、回传的 WDL 均值和 `W-L` 二阶矩；和棋概率在换视角时保持，胜负概率互换。
+
+搜索时将已占用点和画布外位置 mask 掉，每个网络评估先将 logits 除以 `nn_policy_temperature`，再对可提交动作归一化先验；这个全树 policy 温度同时作用于根和所有非根。四项训练策略 softmax 的域均为有效棋盘上的全部落点：硬 policy 的已占用点目标为零，soft policy 经 epsilon 处理后占用点也有正目标；画布外点不参与归一化。这个搜索与训练的区别需要固定样例验证，不能由不同调用方各自选择。
+
+`training.d4_augmentation` 控制训练 D4，baseline 开启。沿用 SkyZero_V8.1 的 batch 级均匀八对称，按整个画布变换全部空间通道（包括有效棋盘和禁手 mask）与 policy / opponent policy 目标；小棋盘的有效区域可以随变换移动到其他角。全局特征和 WDL 目标不变，原始轨迹不重写。变换发生在 learner 消费 batch 后、联合编译前，结果保持 contiguous；随机流纳入 Torch CPU RNG checkpoint，AMP 重试复用同一变换与前向图。实现见 [symmetry.py](../python/etazero/symmetry.py)。
 
 搜索根由 `root_num_symmetries_to_sample` 控制 D4 集成，取值 1–8；大于 1 时从八种对称无放回均匀抽样。变换覆盖整个画布的全部空间输入，全局输入不变，输出 policy 还原到原始动作坐标。每个对称先独立执行全树温度及合法域 softmax，随后算术平均 policy 概率和 WDL 概率；不平均 logits，多个评估仍只构成一个根初始访问。根从非根子树推进而来时，启用多对称的正常搜索重新评估根，访问数不增加；零权重 cheap search 使用已有单对称评估，或只作一次身份对称评估。当前单对称根及非根使用身份对称，不启用来源可选的全树随机单对称。NN 缓存键包含实际变换后的完整输入，因此各朝向不会误用原朝向 logits；与来源的朝向无关缓存不同，此处可安全复用逐朝向确定性输出。实现见 [AlphaZeroState](../cpp/include/etazero/algorithm.h)。
 
@@ -106,7 +114,7 @@ explore_scaling = (c_puct + c_puct_log * log((T+c_puct_base)/c_puct_base))
 
 节点更新使用 KataGo 的 `value_weight_exponent`：先按原始权重计算简单子价值均值，对每个子树用 `sqrt(1e-8 + 1/(1.5*sqrt(weight)))` 估计标准差，以自由度 3 的 t 分布 CDF（[-50,50] 上 2000 点线性插值表）加 0.0001 后取配置指数，偏重较好的子价值。根有噪声时先执行 configured chosen-move subtract/prune；重分配后归一化回原始权重总和，再加入权重 1 的本节点网络样本。W−L、draw 和二阶矩使用同一重分配，权重平方和按缩放平方更新。指数为零是显式单位权重对照，不是默认搜索。实现见 [search_math.cpp](../cpp/src/search/search_math.cpp)。
 
-根节点网络展开与模拟次数分开计数。`search.simulations + 1` 为自对弈 full-search 根访问上限，cheap-search 使用独立访问上限；评估直接配置 visits。上限计入根初始网络样本和复用访问，只补足缺口。网络调用数、总树访问数和本手新增模拟数分别记录。新树至少完成一条根边；复用访问已达到上限时可新增零次模拟，仍使用真实已完成统计。取消或失败不以零访问分布冒充正常策略。
+根节点网络展开与模拟次数分开计数。`search.full_search_visits` 为自对弈 full-search 根访问上限，cheap-search 使用独立访问上限；评估直接配置 visits。上限计入根初始网络样本和复用访问，只补足缺口。网络调用数、总树访问数和本手新增模拟数分别记录。新树至少完成一条根边；复用访问已达到上限时可新增零次模拟，仍使用真实已完成统计。取消或失败不以零访问分布冒充正常策略。
 
 多线程的在途访问以 `pending * virtual_loss` 作为虚拟样本权重，价值向 −1 插值，PUCT 分母与 forced 配额使用同一虚拟权重；探索分子的总子权重只计完成统计。正式访问数、统计与训练目标只使用已完成结果。搜索返回前回收或取消全部在途工作，不能为了填满 batch 超出预算后又隐瞒实际完成量。
 
@@ -118,7 +126,7 @@ AlphaZero 可在同一模型代次内保留实际落子对应的子树。需要�
 
 Playout cap randomization 按每手独立 Bernoulli 选择 full / cheap cap。正常搜索按 `clear_before_search` 清树；cheap target weight 为零时保留已推进到实际落子后的子树，关闭根噪声、根 policy 温度、多对称评估和 forced playout，使用非根 FPU 参数；全树温度继续生效。访问上限包含复用量，因此 cheap search 可不新增模拟。下一次 full search 重新清树。`reuse_tree=false` 显式关闭跨手复用，cheap 权重大于零时仍按正常清树与探索配置执行。开局和模型换代均重置搜索。默认开启清树；训练预算仍由实际采样行数规划。
 
-Reduce Visits 与 PCR 的预算选择集中在 [search_limits.cpp](../cpp/src/selfplay/search_limits.cpp)，按 KataGo `play.cpp` 的分支顺序执行：命中 PCR cheap 时不再执行 Reduce Visits，不叠加预算缩减或目标权重。非 cheap 手在历史足够时，取最近 `reduce_visits_threshold_lookback` 手的完成搜索 W−L；历史统一为黑方视角，包括 cheap 与已缩减搜索，排除开局前缀和当前手，每局重新开始。令 `e=max(min(history),-max(history))`；只有同一方连续占优且 `e>reduce_visits_threshold` 才缩减，不能逐手取绝对值后把交替占优当作稳定局势。缩减比例为 `r=((min(e,1)-threshold)/(1-threshold))²`，访问 cap 为 `round(full_cap+r*(reduced_visits_min-full_cap))`，基础目标权重为 `1+r*(reduced_visits_weight-1)`。`round` 沿用 C++ 正半整数向上取整；cap 包含初始根评估，`full_cap=search.simulations+1`。
+Reduce Visits 与 PCR 的预算选择集中在 [search_limits.cpp](../cpp/src/selfplay/search_limits.cpp)，按 KataGo `play.cpp` 的分支顺序执行：命中 PCR cheap 时不再执行 Reduce Visits，不叠加预算缩减或目标权重。非 cheap 手在历史足够时，取最近 `reduce_visits_threshold_lookback` 手的完成搜索 W−L；历史统一为黑方视角，包括 cheap 与已缩减搜索，排除开局前缀和当前手，每局重新开始。令 `e=max(min(history),-max(history))`；只有同一方连续占优且 `e>reduce_visits_threshold` 才缩减，不能逐手取绝对值后把交替占优当作稳定局势。缩减比例为 `r=((min(e,1)-threshold)/(1-threshold))²`，访问 cap 为 `round(full_cap+r*(reduced_visits_min-full_cap))`，基础目标权重为 `1+r*(reduced_visits_weight-1)`。`round` 沿用 C++ 正半整数向上取整；cap 包含初始根评估，`full_cap=search.full_search_visits`。
 
 缩减的 full search 保留正常清树、根噪声、根温度、根 FPU、多对称、forced playout 和训练 target LCB 设置，不标为 cheap；即使缩减权重为零，也不切换到 cheap 的清树与探索行为。默认清树时，它丢弃前一手 PCR 保留的树并使用自己的 cap；显式关闭清树时，cap 仍包含复用访问。参数属于自对弈配置，baseline 沿用 SkyZero_V8.1 的阈值、lookback、最低访问数和目标权重；smoke_test 明确缩小最低访问数。当前搜索要求 cap 至少为 2、lookback 至少为 1，保证存在已完成根边及非空历史窗口。评估和比赛保持独立固定预算，不启用此机制。五子棋没有动态 score utility center，无须移植来源为该中心执行的 10v 预搜索。
 
@@ -128,17 +136,22 @@ Policy target pruning 先按 `child_weight*max(0,N-1)/max(1,N)+2*P_search` 选�
 
 LCB 使用完成样本的 W−L 加权均值、二阶矩和 `ESS = weight_sum² / weight_sq_sum`。按 KataGo 加入最大方差先验，先验权重为 `weight_sum / ESS³`，更新两种权重和后重新计算 ESS，再计算 `LCB = Q-lcb_stdevs*sqrt(variance/ESS)`。仅剪枝后权重大于零、达到稳定边原始权重比例门槛的边可成为 LCB 最优边；将最优边权重提升到至少 `other_weight * ((radius+excess)/(radius+0.2*excess))²`。此处采用修正后的 LCB 索引行为，首个子边同样有效。
 
-自对弈实际落子使用剪枝后、LCB 前的分布；训练 policy target 再应用 LCB。评估和比赛在落子分布和输出策略中都应用 LCB，分别由各自 profile 控制。落子温度为 `late + (early-late)*0.5^(turn/temperature_halflife*19/sqrt(board_area))`，手数包含开局。自对弈的 early/late 分别为 `exploration.temperature` / `final_temperature`，eval/match 为 `temperature_early` / `temperature`。温度只改变行为抽样，不改变监督；小于等于 1e-4 且无概率保护时，按来源选择首个最大权重子边；其余情况对权重执行稳定幂变换，`temperature_only_below_prob` 可保护超过概率阈值的部分，仅变换低概率尾部。根 WDL 和 Q 是包含初始网络样本的完成加权搜索均值，与训练用的真实终局 WDL 目标分别保存。评估输出 `network_policy` / `network_wdl` 为根集成结果，`search_policy` 为根温度和噪声后的先验，`policy` 为最终监督／选择策略。
+自对弈实际落子使用剪枝后、LCB 前的分布；训练 policy target 再应用 LCB。评估和比赛在落子分布和输出策略中都应用 LCB，分别由各自 profile 控制。落子温度为 `late + (early-late)*0.5^(turn/temperature_halflife*19/sqrt(board_area))`，手数包含开局。自对弈的 early/late 分别为 `temperature.temperature` / `final_temperature`，eval/match 为 `temperature_early` / `temperature`。温度只改变行为抽样，不改变监督；小于等于 1e-4 且无概率保护时，按来源选择首个最大权重子边；其余情况对权重执行稳定幂变换，`temperature_only_below_prob` 可保护超过概率阈值的部分，仅变换低概率尾部。根 WDL 和 Q 是包含初始网络样本的完成加权搜索均值，与训练用的真实终局 WDL 目标分别保存。评估输出 `network_policy` / `network_wdl` 为根集成结果，`search_policy` 为根温度和噪声后的先验，`policy` 为最终监督／选择策略。
 
 这些步骤直接核对 [KataGo FPU/forced/pruning](/home/sky/RL/SkyZero/KataGo/cpp/search/searchexplorehelpers.cpp)、[noise/LCB](/home/sky/RL/SkyZero/KataGo/cpp/search/searchhelpers.cpp)、[selection](/home/sky/RL/SkyZero/KataGo/cpp/search/searchresults.cpp)、[子树价值加权](/home/sky/RL/SkyZero/SkyZero_V8.1/katago/cpp/search/searchupdatehelpers.cpp) 和 [selfplay 调用边界](/home/sky/RL/SkyZero/KataGo/cpp/program/play.cpp)，并以 SkyZero_V8.1、MuZero_V2 交叉核对。EtaZero 使用 W−L 子树价值加权，未引入 Go score utility、uncertainty weighting、noise pruning、subtree value bias、图转置或专用推理算子。随机引擎、并行锁调度和单对称身份评估沿用 EtaZero，不承诺来源逐位复现；t(3) CDF 使用数学等价闭式求值生成同网格插值表。
 
 ### 学习与数据使用
 
-每个训练样本对应 `(spatial_t, globals_t, policy_target_t, WDL_target_t)`，来源为 [原始对局分片](implementation.md#原始对局分片)。基础损失约定为：
+每个训练样本包含当前输入、当前手搜索 policy、下一实际手搜索的 opponent policy、opponent 可用权重与终局 WDL，来源为 [原始对局分片](implementation.md#原始对局分片)。四项 policy 的机制对齐 [KataGo metrics_pytorch.py](/home/sky/RL/SkyZero/KataGo/python/katago/train/metrics_pytorch.py) 与 [trainingwrite.cpp](/home/sky/RL/SkyZero/KataGo/cpp/dataio/trainingwrite.cpp)：opponent 直接预测实际落子后下一手的搜索分布，不翻转执色或空间坐标，也不使用当前局面的对手视角网络先验。下一手即使是零采样权重的 cheap search，目标仍有效；末手没有后继搜索时，保存可归一化的均匀占位目标，令 opponent 权重为零。当前手的重复采样次数作用于整行，不额外乘下一手的采样权重。
+
+先分别归一化两项硬目标，再按 `soft(p) = normalize(((p + 1e-7) * on_board_mask)^0.25)` 生成 soft 目标；平滑域包含有效棋盘内已占用点，不含 padding。五子棋没有 Go 的 pass 动作。opponent 固定系数为 0.15，soft 系数 `s` 由 `training.soft_policy_weight_scale` 指定，默认采用 KataGo `train.py` 的 8。记 `w_next` 为后继搜索可用的 0/1 权重、`CE` 为交叉熵：
 
 ```text
-L = mean_t[-sum_k WDL_target_t[k] * log WDL_pred_t[k]
-           -sum_a policy_target_t[a] * log policy_pred_t[a]]
+L = mean_t[CE(WDL_target, WDL_pred)
+           + CE(policy_target, policy_pred)
+           + 0.15 * w_next * CE(opponent_target, opponent_pred)
+           + s * CE(soft(policy_target), soft_policy_pred)
+           + 0.15 * s * w_next * CE(soft(opponent_target), soft_opponent_pred)]
 ```
 
 优化器参照 [SkyZero_V8.1 native train.py](/home/sky/RL/SkyZero/SkyZero_V8.1/katago/python/train.py) 的 BN 分支，默认 SGD（momentum 0.9），支持 AdamW（CUDA fused）。输入权重、残差权重、残差/输入 BN gamma、相应 bias、head 权重及 head bias 分组，所有参数必须恰好归组一次；head 的 BN gamma/bias 按输出组处理。具体 LR、WD 系数、batch scaling、warmup 和范数自适应公式集中在 [optimization.py](../python/etazero/optimization.py)，不在文档维护第二套常量表。当前没有 attention 等参数，未接入 Muon/NorMuon/Aurora、自动或自定义 LR schedule。
@@ -147,9 +160,9 @@ L = mean_t[-sum_k WDL_target_t[k] * log WDL_pred_t[k]
 
 Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；完整训练轮结束丢弃未同步的 fast 权重，优化器状态与成功更新计数保留。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
 
-适配差异：范数按配置的 batch 间隔取 snapshot（默认对应来源的 100-batch print interval），LR/WD 每次更新刷新，而非来源的 5/50-batch 刷新；D4 使用可恢复的 Torch CPU RNG，不复现来源 NumPy 种子的逐位随机序列。网络和监督头仍是 EtaZero 的基础残差 policy/value，不宣称完整复现 KataGo 训练目标。
+适配差异：范数按配置的 batch 间隔取 snapshot（默认对应来源的 100-batch print interval），LR/WD 每次更新刷新，而非来源的 5/50-batch 刷新；D4 使用可恢复的 Torch CPU RNG，不复现来源 NumPy 种子的逐位随机序列。网络仍是 EtaZero 的基础残差网络。四项 policy loss 的日志均记录包含上述系数的 batch 均值，可直接与 value 相加得到总 loss；KataGo 的 soft loss 日志在乘 soft 系数之前记录。原始目标保留 float32，不采用 KataGo 的 int16 量化；没有 pass、元数据来源筛选或 Go 专有训练目标，不宣称复现完整 KataGo 网络与训练。
 
-learner 从该轮固定窗口快照中采样，完成 `train.cfg` 规定的训练步数和 batch size，保存完整训练状态并发布推理模型。自对弈产量按 [固定训练量与 replay ratio](implementation.md#固定训练量与自对弈产量) 规划。辅助策略头、reanalysis 和额外一致性损失未接入。
+learner 从该轮固定窗口快照中采样，完成 `train.cfg` 规定的训练步数和 batch size，保存完整训练状态并发布推理模型。自对弈产量按 [固定训练量与 replay ratio](implementation.md#固定训练量与自对弈产量) 规划。optimistic policy、reanalysis 和额外一致性损失未接入。
 
 ### Policy / value surprise weighting
 
@@ -157,7 +170,7 @@ learner 从该轮固定窗口快照中采样，完成 `train.cfg` 规定的训�
 
 初始普通 full 权重为 1，PCR cheap 权重来自配置，Reduce Visits full 权重来自预算缩减的同一比例。以这些初始权重计算平均 surprise，policy 重分配量为 `weight*policy_surprise + (1-weight)*max(0,policy_surprise-1.5*weighted_mean_policy_surprise)`；value 量为 `weight*value_surprise`。两者分别归一化到初始总权重，按配置比例与原始权重混合；平均 value surprise 小于 0.010 时同比减小 value 混合比例。分母下限沿用来源 1e-10，完全零 surprise 的对应份额会衰减，不伪造均匀 surprise。开局前缀始终排除，不能因 surprise 获得监督。
 
-期望权重可大于 1，按 `floor(weight)+Bernoulli(frac(weight))` 随机取整，只执行一次并保存 `row_repeats`。训练视图按该次数重复样本，零次数的搜索行仍保留完整轨迹。shuffle 不重新抽样这些权重，训练 loss 不再额外乘同一权重。replay、窗口和产样预算按实际重复后的行数计数，因此不会把大量 cheap 行当作完整监督。随机取整使用每局 RNG；原始权重、两种 surprise、网络/搜索 WDL、cheap 标记及实际次数均保存供核对。
+期望权重可大于 1，按 `floor(weight)+Bernoulli(frac(weight))` 随机取整，只执行一次并保存 `row_repeats`。训练视图按该次数重复样本；当前 policy、opponent policy 与 visits 仅保存正次数位置，每个位置一份，通过 `sample_indices` 对应完整轨迹。零次数位置保留轨迹与轻量诊断；其 policy 若作为采中前一手的 opponent 目标，仍随前一手保存。shuffle 不重新抽样这些权重，训练 loss 不再额外乘同一权重。replay、窗口和产样预算按实际重复后的行数计数，因此不会把大量 cheap 行当作完整监督。随机取整使用每局 RNG；原始权重、两种 surprise、网络/搜索 WDL、cheap 标记及实际次数均保存供核对。
 
 ## 后续算法接入
 
