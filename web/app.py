@@ -23,25 +23,30 @@ def integer(payload: dict, name: str, minimum: int, maximum: int) -> int:
 
 
 class App:
-    def __init__(self, binary: Path, models: dict[str, Path], config: dict[str, Any], default_size: int):
+    def __init__(self, binary: Path, models: dict[str, Path], config: dict[str, Any], default_size: int,
+                 discover_models=None):
         self.binary, self.models, self.config = binary, models, config
         self.metadata = {key: load_json(path.parent / 'manifest.json') for key, path in models.items()}
         self.default_size = default_size
+        self.discover_models = discover_models
         self.engine: Engine | None = None
         self.condition = Condition()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='etazero-game')
         self.closed = False
-        self.state = dict(instance=uuid4().hex, version=0, busy=False, phase='idle', game=None, analysis=None,
+        self.state = dict(instance=uuid4().hex, version=0, catalog_revision=0, game_id=None, busy=False, phase='idle', game=None, analysis=None,
                           error=None, model=None, human=1, rule='freestyle',
-                          visits=config['evaluation']['visits'], started_at=None)
+                          visits=config['evaluation']['visits'], mode='play', started_at=None)
 
     def catalog(self) -> dict:
         c = self.config['evaluation']
-        models = [dict(id=key, label=f"{key.split('/models/')[0]} · 第 {info['checkpoint']['iteration']} 轮 · {info['canvas']}×{info['canvas']}",
-                       canvas=info['canvas']) for key, info in self.metadata.items()]
+        with self.condition:
+            models = [dict(id=key, label=f"{key.split('/models/')[0]} · 第 {info['checkpoint']['iteration']} 轮 · {info['canvas']}×{info['canvas']}",
+                           canvas=info['canvas'], manifest=deepcopy(info), path=str(self.models[key]))
+                      for key, info in self.metadata.items()]
         return dict(models=models, rules=RULES, default_rule=c['rule'],
                     default_size=min(self.default_size, models[0]['canvas']), default_visits=c['visits'],
-                    search_threads=c['search_threads'], virtual_loss=c['virtual_loss'], device=c['device'])
+                    search_threads=c['search_threads'], virtual_loss=c['virtual_loss'], device=c['device'],
+                    evaluation=deepcopy(c))
 
     def snapshot(self, since: int = -1) -> dict:
         with self.condition:
@@ -62,30 +67,43 @@ class App:
             if self.closed or self.state['busy'] or payload['version'] != self.state['version']:
                 raise Conflict('棋局状态已更新，请等待同步后再操作')
             game = self.state['game']
+            if operation in ('new', 'configure'):
+                integer(payload, 'visits', 2, 100000)
+                if type(payload.get('human')) is not int or payload['human'] not in (-1, 1):
+                    raise ValueError('执子必须为黑或白')
+                if payload.get('mode', 'play') not in ('play', 'manual'):
+                    raise ValueError('未知操作模式')
+                if operation == 'configure' and not game:
+                    raise Conflict('请先创建棋局')
             if operation == 'new':
                 if payload.get('model') not in self.models:
                     raise ValueError('请选择可用模型')
                 integer(payload, 'size', 5, self.metadata[payload['model']]['canvas'])
-                integer(payload, 'visits', 2, 100000)
-                if type(payload.get('human')) is not int or payload['human'] not in (-1, 1):
-                    raise ValueError('执子必须为黑或白')
                 if payload.get('rule') not in RULES:
                     raise ValueError('未知棋规')
             elif operation == 'play':
-                if not game or game['finished'] or game['player'] != self.state['human']:
+                if not game or game['finished'] or (self.state['mode'] == 'play' and game['player'] != self.state['human']):
                     raise Conflict('当前不能落子')
                 action = integer(payload, 'action', 0, game['board_size'] ** 2 - 1)
                 if game['board'][action]:
                     raise ValueError('此处已有棋子')
             elif operation == 'undo':
-                if not game or not any((1 if i % 2 == 0 else -1) == self.state['human'] for i in range(len(game['moves']))):
+                if not game or not game['moves'] or (self.state['mode'] == 'play' and not any(
+                        (1 if i % 2 == 0 else -1) == self.state['human'] for i in range(len(game['moves'])))):
                     raise ValueError('还没有可以撤回的人类落子')
+            elif operation == 'branch':
+                if not game or not game['moves']:
+                    raise Conflict('还没有可回退的棋局')
+                integer(payload, 'turn', 0, len(game['moves']) - 1)
+            elif operation in ('analyze', 'step'):
+                if not game or game['finished']:
+                    raise Conflict('当前没有可分析的局面')
             elif operation == 'retry':
-                if not game or game['finished'] or game['player'] == self.state['human']:
+                if self.state['mode'] != 'play' or not game or game['finished'] or game['player'] == self.state['human']:
                     raise Conflict('当前不需要 AI 落子')
-            else:
+            elif operation not in ('new', 'configure', 'refresh'):
                 raise ValueError('未知操作')
-            self.publish(busy=True, phase='loading' if operation == 'new' else 'thinking',
+            self.publish(busy=True, phase='loading' if operation in ('new', 'refresh') else 'thinking',
                          error=None, started_at=time.time())
             self.executor.submit(self.perform, operation, dict(payload))
             return deepcopy(self.state)
@@ -107,18 +125,38 @@ class App:
                 previous, self.engine = self.engine, engine
                 if replacement and previous:
                     previous.close()
-                self.publish(game=reply['state'], analysis=None, model=selected,
-                             human=payload['human'], rule=payload['rule'], visits=payload['visits'])
+                self.publish(game=reply['state'], game_id=uuid4().hex, analysis=None, model=selected,
+                             human=payload['human'], rule=payload['rule'], visits=payload['visits'],
+                             mode=payload.get('mode', 'play'))
             elif operation == 'play':
                 reply = self.engine.command(f"play {payload['action']}")
                 self.publish(game=reply['state'], analysis=None)
             elif operation == 'undo':
                 moves = self.state['game']['moves']
-                last_human = max(i for i in range(len(moves)) if (1 if i % 2 == 0 else -1) == self.state['human'])
+                last_human = len(moves) - 1 if self.state['mode'] == 'manual' else max(
+                    i for i in range(len(moves)) if (1 if i % 2 == 0 else -1) == self.state['human'])
                 reply = self.engine.command(f'undo {len(moves) - last_human}')
                 self.publish(game=reply['state'], analysis=None)
+            elif operation == 'branch':
+                reply = self.engine.command(f"undo {len(self.state['game']['moves']) - payload['turn']}")
+                self.publish(game=reply['state'], analysis=None, mode='manual')
+            elif operation == 'configure':
+                self.publish(visits=payload['visits'], human=payload['human'], mode=payload.get('mode', 'play'))
+            elif operation in ('analyze', 'step'):
+                reply = self.engine.command(f"{'analyze' if operation == 'analyze' else 'genmove'} {self.state['visits']}")
+                self.publish(game=reply['state'], analysis=reply['analysis'])
+            elif operation == 'refresh' and self.discover_models:
+                models = self.discover_models()
+                metadata = {key: load_json(path.parent / 'manifest.json') for key, path in models.items()}
+                with self.condition:
+                    # Keep the active model selectable even if its file was moved during this session.
+                    active = self.state['model']
+                    if active and active not in models:
+                        models[active], metadata[active] = self.models[active], self.metadata[active]
+                    self.models, self.metadata = models, metadata
+                self.publish(catalog_revision=self.state['catalog_revision'] + 1)
             game = self.state['game']
-            if game and not game['finished'] and game['player'] != self.state['human']:
+            if operation in ('new', 'play', 'retry') and self.state['mode'] == 'play' and game and not game['finished'] and game['player'] != self.state['human']:
                 self.publish(phase='thinking', started_at=time.time())
                 reply = self.engine.command(f"genmove {self.state['visits']}")
                 self.publish(game=reply['state'], analysis=reply['analysis'])
