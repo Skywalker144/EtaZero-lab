@@ -92,9 +92,9 @@ bash scripts/run.sh plot --run-dir data/my_check
 
 `--weights /absolute/path/to/checkpoint.pt` 为新运行导入兼容网络的模型状态，重新初始化优化器、计数和随机流，不能用于已有运行。恢复要求生效配置一致，改变实验条件时按用户的新运行或续训方案处理。
 
-## 网页人机对弈
+## Web 开发工作台
 
-在仓库根目录运行 `bash web/webui.sh`，打开 <http://127.0.0.1:8766>。默认选择 `minimal_test` 当前已发布模型，可切换历史权重、棋规、执子和搜索预算，支持悔棋、对局记录及网络／搜索策略热力图。使用常驻 LibTorch 模型和本版本原生棋规、PUCT；用法、加载范围和验证入口见 [Web 对弈室](../web/README.md)。
+在仓库根目录运行 `bash web/webui.sh`，打开 <http://127.0.0.1:8766>。默认选择 `minimal_test` 当前已发布模型，支持模型刷新、人机对弈、手动局面研究、仅分析与 AI 单步、历史回看与回退继续、完整候选分布和策略热力图。采用紧凑三栏布局，可查看模型元信息、生效搜索配置和原始分析数据。使用常驻 LibTorch 模型和本版本原生棋规、PUCT；用法、加载范围和验证入口见 [Web 开发工作台](../web/README.md)。
 
 ## 等时间 Elo
 
@@ -124,7 +124,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_experiment_
 | 查看实验产物和内部状态位置 | [运行目录](docs/implementation.md#运行目录) |
 | 调整配置、继承与本机覆盖 | [配置组织](docs/implementation.md#配置组织) |
 | 固定评估预算、成对比赛、续测与 Elo 图 | [评估与 Elo](docs/elo.md) |
-| 加载 minimal_test 模型进行网页人机对弈 | [Web 对弈室](../web/README.md) |
+| 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#第一轮-alphazero) |
 | 查看未来算法的组合约束和接入边界 | [算法组合](docs/algorithms.md#算法与搜索组合)、[后续接入](docs/algorithms.md#后续算法接入) |
