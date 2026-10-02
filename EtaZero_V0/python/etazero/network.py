@@ -1,7 +1,7 @@
-"""KataGo-style nested bottleneck convolutional policy/value network.
+"""KataGo plain, NBT and nested Transformer policy/value networks.
 
 Adapted from KataGo model_pytorch.py (MIT, attribution in THIRD_PARTY.md).
-NBT2 + Mish + fixed scaling with one masked BatchNorm at the trunk end.
+Convolution presets use fson/Mish; the bare Transformer uses fixup/ReLU.
 """
 import copy
 import math
@@ -11,13 +11,18 @@ from .config import network_widths
 from .schema import CONTRACT_ID, PLANES, GLOBALS, POLICY_HEADS
 
 
-def init_weights(tensor, scale=1.0, identity=False, fan_tensor=None):
+def init_weights(tensor, scale=1.0, identity=False, fan_tensor=None, activation='mish'):
     """KataGo's variance-corrected, two-sigma truncated normal initialization."""
+    if activation not in ('mish','relu'):
+        raise ValueError(f'Unsupported initialization activation: {activation}')
     fan_in = nn.init._calculate_fan_in_and_fan_out(tensor if fan_tensor is None else fan_tensor)[0]
-    gain = 1.0 if identity else math.sqrt(2.210277)  # Mish gain
+    gain = 1.0 if identity else math.sqrt(2.0 if activation == 'relu' else 2.210277)
     std = scale * gain / math.sqrt(fan_in) / 0.87962566103423978
     with torch.no_grad():
-        nn.init.trunc_normal_(tensor, std=std, a=-2 * std, b=2 * std)
+        if std < 1e-10:
+            tensor.zero_()
+        else:
+            nn.init.trunc_normal_(tensor, std=std, a=-2 * std, b=2 * std)
 
 
 class FixedScaleMask(nn.Module):
@@ -159,7 +164,7 @@ class NestedBottleneckBlock(nn.Module):
 
 
 class PolicyHead(nn.Module):
-    def __init__(self, channels, width):
+    def __init__(self, channels, width, activation='mish', predict_q_values=False):
         super().__init__()
         self.local = nn.Conv2d(channels, width, 1, bias=False)
         self.global_conv = nn.Conv2d(channels, width, 1, bias=False)
@@ -167,11 +172,11 @@ class PolicyHead(nn.Module):
         self.pool = GlobalPool()
         self.linear = nn.Linear(3 * width, width, bias=False)
         self.bias = BiasMask(width)
-        self.act = nn.Mish()
-        self.out = nn.Conv2d(width, len(POLICY_HEADS), 1, bias=False)
-        init_weights(self.local.weight, 0.8)
-        init_weights(self.global_conv.weight)
-        init_weights(self.linear.weight, 0.6)
+        self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
+        self.out = nn.Conv2d(width, len(POLICY_HEADS)+int(predict_q_values), 1, bias=False)
+        init_weights(self.local.weight, 0.8, activation=activation)
+        init_weights(self.global_conv.weight, activation=activation)
+        init_weights(self.linear.weight, 0.6, activation=activation)
         init_weights(self.out.weight, 0.3, identity=True)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -184,17 +189,17 @@ class PolicyHead(nn.Module):
 
 
 class ValueHead(nn.Module):
-    def __init__(self, channels, width, hidden):
+    def __init__(self, channels, width, hidden, activation='mish'):
         super().__init__()
         self.conv = nn.Conv2d(channels, width, 1, bias=False)
         self.bias = BiasMask(width)
         self.pool = ValuePool()
         self.hidden = nn.Linear(3 * width, hidden)
-        self.out = nn.Linear(hidden, 3)
-        self.act = nn.Mish()
-        init_weights(self.conv.weight)
-        init_weights(self.hidden.weight)
-        init_weights(self.hidden.bias, 0.2, fan_tensor=self.hidden.weight)
+        self.out = nn.Linear(hidden, 13)
+        self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
+        init_weights(self.conv.weight, activation=activation)
+        init_weights(self.hidden.weight, activation=activation)
+        init_weights(self.hidden.bias, 0.2, fan_tensor=self.hidden.weight, activation=activation)
         init_weights(self.out.weight, identity=True)
         init_weights(self.out.bias, 0.2, identity=True, fan_tensor=self.out.weight)
 
@@ -204,43 +209,79 @@ class ValueHead(nn.Module):
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, canvas, channels, blocks):
+    def __init__(self, canvas, channels, blocks, architecture, predict_q_values=False):
         super().__init__()
-        widths = network_widths(channels)
+        widths = network_widths(channels, architecture)
+        self.architecture = architecture
+        if predict_q_values and architecture!='transformer':
+            raise ValueError('predict_q_values requires the v17 Transformer preset')
+        self.predict_q_values = bool(predict_q_values)
+        self.fp32_heads = True
+        if architecture == 'plain' and blocks != 10:
+            raise ValueError('plain requires b10c128-fson-mish: channels=128, blocks=10')
+        if architecture == 'transformer' and blocks != 5:
+            raise ValueError('transformer requires b5c192h3nbttfrs: channels=192, blocks=5')
+        self.norm_kind = 'fixup' if architecture == 'transformer' else 'fixscaleonenorm'
+        self.model_version = 17 if architecture == 'transformer' else 15
+        activation = 'relu' if architecture == 'transformer' else 'mish'
         self.canvas = canvas
         self.contract = CONTRACT_ID
         self.stem = nn.Conv2d(len(PLANES), channels, 3, padding=1, bias=False)
         self.linear_global = nn.Linear(len(GLOBALS), channels, bias=False)
-        init_weights(self.stem.weight, 0.8)
-        init_weights(self.linear_global.weight, 0.6)
-        self.blocks = nn.ModuleList([
-            NestedBottleneckBlock(channels, widths['mid'], i, widths['gpool'] if i % 2 == 1 else 0)
-            for i in range(blocks)
-        ])
-        self.trunk_norm = MaskedBatchNorm(channels, 1.0 / math.sqrt(blocks + 1.0))
-        self.act = nn.Mish()
-        self.policy_head = PolicyHead(channels, widths['policy'])
-        self.value_head = ValueHead(channels, widths['value'], widths['value_hidden'])
+        init_weights(self.stem.weight, 0.8, activation=activation)
+        init_weights(self.linear_global.weight, 0.6, activation=activation)
+        if architecture == 'plain':
+            # Source regular blocks are the same two-convolution residual unit
+            # used inside NBT, with gpool only in source blocks 5 and 8.
+            self.blocks = nn.ModuleList([
+                InnerResidualBlock(channels, i, widths['gpool'] if i in (4, 7) else 0)
+                for i in range(blocks)
+            ])
+        elif architecture == 'transformer':
+            from .transformer import NestedBottleneckTransformerBlock
+            self.blocks = nn.ModuleList([NestedBottleneckTransformerBlock(canvas) for _ in range(blocks)])
+        else:
+            self.blocks = nn.ModuleList([
+                NestedBottleneckBlock(channels, widths['mid'], i, widths['gpool'] if i % 2 == 1 else 0)
+                for i in range(blocks)
+            ])
+        self.trunk_norm = (BiasMask(channels) if architecture == 'transformer' else
+                           MaskedBatchNorm(channels, 1.0 / math.sqrt(blocks + 1.0)))
+        self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
+        self.policy_head = PolicyHead(channels, widths['policy'], activation, self.predict_q_values)
+        self.value_head = ValueHead(channels, widths['value'], widths['value_hidden'], activation)
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:
         return self.canvas, self.contract
 
-    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """FP32 inputs [N,5,H,W], [N,4]; policy [N,4,H*W], side-to-move WDL [N,3]."""
+    @torch.jit.export
+    def forward_all(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Six policies, WDL, three TD WDLs and raw error; current-player W/D/L."""
         mask = obs[:, 0:1]
         x = self.stem(obs * mask) + self.linear_global(globals).unsqueeze(-1).unsqueeze(-1)
         for block in self.blocks:
             x = block(x, mask)
         x = self.act(self.trunk_norm(x, mask))
-        return self.policy_head(x, mask), self.value_head(x, mask)
+        # Learner heads stay FP32 in both training and validation. Only the
+        # independent export copy follows the configured inference autocast.
+        if self.fp32_heads:
+            with torch.autocast("cuda", enabled=False):
+                policy, value = self.policy_head(x.float(), mask.float()), self.value_head(x.float(), mask.float())
+        else:
+            policy, value = self.policy_head(x, mask), self.value_head(x, mask)
+        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
+
+    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        policy, value, _, _ = self.forward_all(obs, globals)
+        return policy, value
 
 
 def make_network(config):
     return PolicyValueNet(**config["network"])
 
 
-def losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale):
+def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale):
     """Float targets on the logits' device: policy/opponent [N,A], weight [N], WDL [N,3].
 
     Training logits are [N,4,A], A=canvas². Reduce every weighted component
@@ -255,29 +296,110 @@ def losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, 
     soft = ((policies + 1e-7) * mask[:, None]).pow(0.25)
     soft = soft / soft.sum(2, keepdim=True)
     targets = torch.cat((policies, soft), dim=1)
-    ce = -(targets * logp).sum(2)
-    policy_loss = ce[:, 0].mean()
+    ce = -(targets * logp[:, :4]).sum(2)
+    policy_loss = 0.930 * ce[:, 0].mean()
     opponent_policy_loss = (0.15 * opponent_policy_weight * ce[:, 1]).mean()
     soft_policy_loss = soft_policy_weight_scale * ce[:, 2].mean()
     soft_opponent_policy_loss = (0.15 * soft_policy_weight_scale * opponent_policy_weight * ce[:, 3]).mean()
-    value_loss = -(target * torch.log_softmax(value.float(), dim=1)).sum(1).mean()
+    # v15 ordinary policy scale; value CE's internal 1.20 times CLI default 0.6.
+    value_loss = 1.20 * 0.6 * -(target * torch.log_softmax(value.float(), dim=1)).sum(1).mean()
     total = policy_loss + opponent_policy_loss + soft_policy_loss + soft_opponent_policy_loss + value_loss
     # Log weighted contributions, so all five components add up to total loss.
     return total, policy_loss, opponent_policy_loss, soft_policy_loss, soft_opponent_policy_loss, value_loss
 
 
-class TrainingForward(nn.Module):
-    """Compile the network and complete loss as one graph, keeping raw state ownership."""
-    def __init__(self, model, soft_policy_weight_scale):
-        super().__init__();self.model=model;self.soft_policy_weight_scale=soft_policy_weight_scale
+class ErrorSoftplus(torch.autograd.Function):
+    """KataGo v15/v17 squared forward with its intentionally surrogate backward."""
+    @staticmethod
+    def forward(ctx, raw):
+        ctx.save_for_backward(raw)
+        return torch.nn.functional.softplus(raw * 0.5).square()
 
-    def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight, target):
-        logits,value=self.model(obs,globals)
-        return losses(logits,value,obs,policy,opponent_policy,opponent_policy_weight,target,self.soft_policy_weight_scale)
+    @staticmethod
+    def backward(ctx, grad):
+        raw, = ctx.saved_tensors
+        return grad * (0.05 + 0.95 * torch.sigmoid(raw))
+
+
+def error_variance(raw):
+    return 0.25 * ErrorSoftplus.apply(raw.float())
+
+
+def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
+                     full_game_weight, disable_optimistic_policy):
+    """Row multiplicity is already resolved; complete-game gate is independent of TD."""
+    td_logp = torch.log_softmax(td_logits.float(), dim=2)
+    entropy = -(td_target * torch.log(td_target + 1e-30)).sum(2)
+    td = 0.72 * (-(td_target * td_logp).sum(2) - entropy).mean(0)
+    variance = error_variance(raw_error)
+    predicted = torch.softmax(td_logits[:, 2].float(), dim=1)
+    predicted = (predicted[:, 0] - predicted[:, 2]).detach()
+    actual = td_target[:, 2, 0] - td_target[:, 2, 2]
+    error_target = (predicted - actual).square() + 1e-8
+    difference = (variance - error_target).abs()
+    # KataGo's Huber is unnormalized, unlike torch smooth_l1_loss.
+    huber = torch.where(difference <= 0.4, 0.5 * difference.square(), 0.4 * (difference - 0.2))
+    error_loss = (2.0 * full_game_weight * huber).mean()
+    if disable_optimistic_policy:
+        long_weight = torch.full_like(full_game_weight, 0.5)
+        short_weight = long_weight
+    else:
+        long_weight = (target[:, 0] + 0.5 * target[:, 1]).square() * full_game_weight
+        short_weight = torch.sigmoid(3.0 * ((actual - predicted) / torch.sqrt(variance.detach() + 0.0001) - 1.5)) * full_game_weight
+    mask = obs[:, 0].flatten(1).bool()
+    logp = torch.log_softmax(logits[:, 4:6].float().masked_fill(~mask[:, None], -1e9), dim=2)
+    normalized = policy / policy.sum(1, keepdim=True)
+    ce = -(normalized[:, None] * logp).sum(2)
+    long_loss = (0.100 * long_weight * ce[:, 0]).mean()
+    short_loss = (0.200 * short_weight * ce[:, 1]).mean()
+    return td[0], td[1], td[2], long_loss, short_loss, error_loss
+
+
+def q_winloss_loss(prediction, target, visits):
+    """Source v17 per-action pure W-L Q supervision, mean over output rows.
+
+    Prediction is pre-tanh; targets are writer int16/32000, visits are capped
+    child NODE visits. Side rows participate even when full_game_weight=0.
+    """
+    mask=(visits!=0).float()
+    weights=torch.sqrt(visits.float())
+    ce=torch.nn.functional.binary_cross_entropy_with_logits(
+        prediction.float()*mask*2.0,(1.0+target.float())/2.0,reduction='none')
+    return (1.5*((ce*weights).sum(1)/(weights.sum(1)+1.0))).mean()
+
+
+def losses(logits, value, td_logits, raw_error, obs, policy, opponent_policy,
+           opponent_policy_weight, target, td_target, full_game_weight,
+           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None):
+    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale)
+    auxiliary = auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
+                                 full_game_weight, disable_optimistic_policy)
+    if logits.shape[1]==7:
+        if q_values is None or q_visits is None:
+            raise ValueError('Enabled Q head requires per-action Q value/node-visit targets')
+        qloss=q_winloss_loss(logits[:,6],q_values,q_visits)
+        return (base[0] + sum(auxiliary)+qloss, *base[1:], *auxiliary, qloss)
+    return (base[0] + sum(auxiliary), *base[1:], *auxiliary)
+
+
+class TrainingForward(nn.Module):
+    """Compile the network and all supervision in one graph."""
+    def __init__(self, model, soft_policy_weight_scale, disable_optimistic_policy):
+        super().__init__()
+        self.model = model
+        self.soft_policy_weight_scale = soft_policy_weight_scale
+        self.disable_optimistic_policy = disable_optimistic_policy
+
+    def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight, target, td_target, full_game_weight,
+                q_values=None, q_visits=None):
+        logits, value, td, error = self.model.forward_all(obs, globals)
+        with torch.autocast("cuda", enabled=False):
+            return losses(logits, value, td, error, obs, policy, opponent_policy, opponent_policy_weight,
+                          target, td_target, full_game_weight, self.soft_policy_weight_scale, self.disable_optimistic_policy,q_values,q_visits)
 
 
 class InferencePolicyValueNet(nn.Module):
-    """Expose only the primary policy to the native inference interface."""
+    """Only search outputs: ordinary/short optimistic logits, WDL and error stdev."""
     def __init__(self, model):
         super().__init__();self.model=model
 
@@ -285,9 +407,10 @@ class InferencePolicyValueNet(nn.Module):
     def metadata(self) -> tuple[int, str]:
         return self.model.metadata()
 
-    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        policy,value=self.model(obs,globals)
-        return policy[:,0],value
+    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        policy, value, _, raw = self.model.forward_all(obs, globals)
+        stdev = 0.5 * torch.nn.functional.softplus(raw.float() * 0.5)
+        return policy[:, 0], value, policy[:, 5], stdev
 
 
 class InferenceNormalization(nn.Module):
@@ -310,7 +433,9 @@ def inference_network(model):
     if model.training:
         raise ValueError('Inference normalization conversion requires evaluation mode')
     result = copy.deepcopy(model)
+    result.fp32_heads = False
     with torch.no_grad():
-        result.trunk_norm = InferenceNormalization(result.trunk_norm)
-    # Keep all four policy filters so CUDA selects the same convolution kernel.
+        if isinstance(result.trunk_norm, MaskedBatchNorm):
+            result.trunk_norm = InferenceNormalization(result.trunk_norm)
+    # Keep all six policy filters so CUDA selects the same convolution kernel.
     return InferencePolicyValueNet(result)

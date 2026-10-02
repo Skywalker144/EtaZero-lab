@@ -1,4 +1,4 @@
-"""KataGo optimizer policy and NBT/fson parameter roles."""
+"""KataGo fson/fixup optimizer policies and convolution/attention parameter roles."""
 import math
 import torch
 from torch.optim.swa_utils import AveragedModel
@@ -6,17 +6,22 @@ from .network import FixedScaleMask, BiasMask
 
 
 def parameter_groups(model):
-    groups = {name: [] for name in ('input', 'normal', 'normal_gamma', 'noreg', 'output', 'output_noreg')}
+    groups = {name: [] for name in ('input', 'normal', 'normal_attn', 'normal_gamma', 'noreg', 'output', 'output_noreg')}
     groups['input'] += [model.stem.weight, model.linear_global.weight]
     for block in model.blocks:
         for layer in block.modules():
             if isinstance(layer, (torch.nn.Conv2d, torch.nn.Linear)):
-                groups['normal'].append(layer.weight)
+                groups[getattr(layer,'parameter_group','normal')].append(layer.weight)
             elif isinstance(layer, FixedScaleMask):
                 groups['normal_gamma'].append(layer.weight)
                 groups['noreg'].append(layer.bias)
+            elif isinstance(layer, BiasMask):
+                groups['noreg'].append(layer.bias)
+            elif isinstance(layer, torch.nn.RMSNorm):
+                groups['noreg'].append(layer.weight)
     # Final fson BN belongs to the output groups in KataGo, like the heads.
-    groups['output'].append(model.trunk_norm.weight)
+    if hasattr(model.trunk_norm,'weight'):
+        groups['output'].append(model.trunk_norm.weight)
     groups['output_noreg'].append(model.trunk_norm.bias)
     for head in (model.policy_head, model.value_head):
         for layer in head.modules():
@@ -45,7 +50,7 @@ def warmup_factor(samples, enabled=True):
     return 1 / denominators[int(samples // 250000)] if samples < 2000000 else 1.0
 
 
-def group_settings(name, options, batch_size, samples, norms, baselines):
+def group_settings(name, options, batch_size, samples, norms, baselines, norm_kind='fixscaleonenorm'):
     adamw = options['kind'] == 'adamw'
     batch_scale = math.sqrt(batch_size / 256) if adamw else batch_size / 256
     warmup = warmup_factor(samples, options['lr_warmup'])
@@ -57,6 +62,20 @@ def group_settings(name, options, batch_size, samples, norms, baselines):
         lr *= options['head_lr_factor']
     if name in ('noreg', 'output_noreg'):
         lr *= options['noreg_lr_factor']
+    if norm_kind == 'fixup':
+        factor = (options['input_wd_factor'] if name == 'input' else options['normal_wd_factor'] if name == 'normal'
+                  else options['normal_attn_wd_factor'] if name == 'normal_attn' else 1.0)
+        if name in ('input','normal','normal_gamma','output','normal_attn'):
+            wd = (0.005 if adamw else 1e-6) * batch_scale * factor
+            if name == 'normal_attn':
+                wd *= 0.5
+        elif name in ('noreg','output_noreg'):
+            wd = 1e-8 * batch_scale
+        else:
+            raise ValueError(f'Unknown fixup optimizer group: {name}')
+        return lr, wd
+    if norm_kind != 'fixscaleonenorm':
+        raise ValueError(f'Unsupported optimizer norm kind: {norm_kind}')
     if name in ('input', 'normal', 'normal_gamma'):
         norm_key = 'input' if name == 'input' else 'normal'
         adaptive = 1.0
@@ -86,7 +105,7 @@ def optimizer_for(model, config):
     baselines = model_norms(groups)
     for group in groups:
         group['lr'], group['weight_decay'] = group_settings(
-            group['group_name'], options, config['training']['batch_size'], 0, {}, baselines)
+            group['group_name'], options, config['training']['batch_size'], 0, {}, baselines, model.norm_kind)
     if options['kind'] == 'adamw':
         return torch.optim.AdamW(groups, fused=next(model.parameters()).is_cuda)
     return torch.optim.SGD(groups, momentum=0.9)
@@ -102,6 +121,14 @@ class Optimization:
         self.norms = {} if state is None else state['norms']
         self.counter = 0 if state is None else state['lookahead_counter']
         self.swa_samples = 0 if state is None else state['swa_samples']
+        self.consumed_samples = 0 if state is None else state['consumed_samples']
+        self.optimizer_steps = 0 if state is None else state['optimizer_steps']
+        self.round_batches = 0 if state is None else state['round_batches']
+        self.subepoch=0 if state is None else state['subepoch']
+        self.subepoch_batches=0 if state is None else state['subepoch_batches']
+        self.norm_sums = {} if state is None else state['norm_sums'].copy()
+        self.norm_weights = {} if state is None else state['norm_weights'].copy()
+        self.pending_norms = None
         self.slow = {name: p.detach().clone() for name, p in model.named_parameters()}
         if state is not None:
             if set(state['slow']) != set(self.slow):
@@ -114,25 +141,67 @@ class Optimization:
         if state is not None:
             self.swa.load_state_dict(state['swa'])
 
-    def configure(self, total_steps):
-        # The reference samples norms at its 100-batch print interval. The
-        # schedule itself is refreshed each update here, including after resume.
-        if (total_steps + 1) % self.options['norm_interval'] == 0:
-            self.norms = model_norms(self.optimizer.param_groups)
-        samples = total_steps * self.batch_size
+    def configure(self):
         for group in self.optimizer.param_groups:
             group['lr'], group['weight_decay'] = group_settings(
-                group['group_name'], self.options, self.batch_size, samples, self.norms, self.baselines)
+                group['group_name'], self.options, self.batch_size, self.consumed_samples, self.norms, self.baselines, self.model.norm_kind)
+
+    def begin_round(self):
+        """Map a local round to the source epoch; resumed batches retain its clock."""
+        self.round_batches = 0
+        self.subepoch=-1
+        self.begin_subepoch()
+        self.configure()
+
+    def begin_subepoch(self):
+        # Source resets the counter, without copying fast weights to slow here.
+        # LR/norm/SWA and fast/slow weights are not reset at this boundary.
+        self.counter = 0
+        self.subepoch+=1
+        self.subepoch_batches=0
+
+    def before_step(self):
+        # Norm metrics describe the pre-update parameters, including on overflow.
+        is_print = (self.round_batches + 1) % self.options['norm_interval'] == 0
+        self.pending_norms = (model_norms(self.optimizer.param_groups)
+                              if is_print or not self.options['norm_only_at_print'] else None)
+
+    def record_norms(self):
+        is_print = self.round_batches % self.options['norm_interval'] == 0
+        if self.pending_norms is not None:
+            if self.options['norm_only_at_print']:
+                self.norm_sums = self.pending_norms.copy()
+                self.norm_weights = {name: 1.0 for name in self.pending_norms}
+            elif not (self.options['lookahead_print'] and self.options['lookahead_alpha'] < 1 and self.counter != 0):
+                for name, norm in self.pending_norms.items():
+                    self.norm_sums[name] = self.norm_sums.get(name, 0.0) + norm
+                    self.norm_weights[name] = self.norm_weights.get(name, 0.0) + 1.0
+            self.norms = {name: value / self.norm_weights[name] for name, value in self.norm_sums.items()}
+        # metrics_logging only decays *_sum per batch. Norms are *_batch:
+        # their historical sums AND weights shrink at the print point by .001.
+        if is_print:
+            self.norm_sums = {name: value * 0.001 for name, value in self.norm_sums.items()}
+            self.norm_weights = {name: value * 0.001 for name, value in self.norm_weights.items()}
+        self.pending_norms = None
 
     def gradient_cap(self, override):
         # EtaZero logs mean losses. Backward uses the batch sum, like KataGo.
         if override:
             return override * self.batch_size
-        cap = 11000 if self.options['kind'] == 'adamw' else 5500
+        cap = 11000 if self.options['kind'] == 'adamw' else 2500
         return cap * math.sqrt(self.batch_size / 256) / math.sqrt(max(1e-7, self.options['lr_scale']))
 
     @torch.no_grad()
-    def after_step(self):
+    def after_step(self, successful=True):
+        # GradScaler skip still consumes a batch in KataGo's scheduling clocks.
+        self.optimizer_steps += int(successful)
+        self.consumed_samples += self.batch_size
+        self.round_batches += 1
+        self.subepoch_batches += 1
+        self.record_norms()
+        if ((self.consumed_samples <= 200000000 and self.round_batches % 5 == 0)
+                or self.round_batches % 50 == 0):
+            self.configure()
         synced = True
         if self.options['lookahead_alpha'] < 1:
             self.counter += 1
@@ -150,7 +219,7 @@ class Optimization:
     @torch.no_grad()
     def finish_round(self):
         # Match the native epoch boundary: discard leftover fast weights while
-        # retaining optimizer moments and successful-update/sample counters.
+        # retaining optimizer moments and separate consumption/update counters.
         if self.options['lookahead_alpha'] < 1:
             for name, p in self.model.named_parameters():
                 p.copy_(self.slow[name])
@@ -158,6 +227,9 @@ class Optimization:
 
     def state_dict(self):
         return {'baselines': self.baselines, 'norms': self.norms,
+                'norm_sums': self.norm_sums, 'norm_weights': self.norm_weights,
+                'consumed_samples': self.consumed_samples, 'optimizer_steps': self.optimizer_steps,
+                'round_batches': self.round_batches,'subepoch':self.subepoch,'subepoch_batches':self.subepoch_batches,
                 'lookahead_counter': self.counter, 'slow': self.slow,
                 'swa_samples': self.swa_samples, 'swa': self.swa.state_dict()}
 
