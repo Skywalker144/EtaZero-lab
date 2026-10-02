@@ -271,7 +271,7 @@ def test_sampling_configuration_source_defaults_and_reanalysis_required_paramete
     # of the source algorithm's defaults.
     assert config['side_positions']['side_position_prob']==.04
     assert config['reanalysis']=={'use_reanalyze':False}
-    current=tmp_path/'cfg';current.mkdir();(current/'run.cfg').write_text('[run]\nextends=smoke_test\n')
+    current=tmp_path/'cfg';current.mkdir();(current/'run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path/"run"}\n')
     (current/'selfplay.cfg').write_text('[reanalysis]\nuse_reanalyze=true\n')
     with pytest.raises(ValueError,match='Missing required key: reanalysis.reanalyze_prop'):load_config(current)
     (current/'selfplay.cfg').write_text('[reanalysis]\nuse_reanalyze=true\nreanalyze_prop=0.7\nreanalyze_policy_surprise_weight=1\nreanalyze_value_surprise_weight=2\nreanalyze_surprise_exponent=0.5\nreanalyze_use_outcome_targets=false\n')
@@ -313,7 +313,7 @@ def test_hint_game_fork_defaults_bounds_and_input_identity(tmp_path):
     bad=copy.deepcopy(baseline);bad['hint_positions']['hint_positions_prob']=1
     with pytest.raises(ValueError,match='requires positions_file'):validate(bad)
     configs=tmp_path/'configs';configs.mkdir();profile=configs/'hints';profile.mkdir()
-    (profile/'run.cfg').write_text('[run]\nextends=smoke_test\n')
+    (profile/'run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path/"run"}\n')
     (profile/'selfplay.cfg').write_text('[hint_positions]\nhint_positions_prob=1\npositions_file=positions.txt\n')
     (profile/'positions.txt').write_text('5 renju 1 12 2 0 5\n')
     one=load_config(profile);assert one['hint_positions']['positions_file']==str(profile/'positions.txt')
