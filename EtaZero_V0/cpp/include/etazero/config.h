@@ -10,6 +10,11 @@ inline std::string trim(std::string s) {
     auto start = s.find_first_not_of(" \t\r\n"), end = s.find_last_not_of(" \t\r\n");
     return start == std::string::npos ? "" : s.substr(start, end - start + 1);
 }
+inline int parse_integer(const std::string& value, const std::string& field) {
+    size_t consumed=0;int result=std::stoi(value,&consumed);
+    if(consumed!=value.size())throw std::runtime_error("Invalid integer: "+field+"="+value);
+    return result;
+}
 class Config {
     std::map<std::string, std::string> fields_;
 public:
@@ -27,12 +32,13 @@ public:
             if (!fields_.emplace(key, trim(line.substr(pos+1))).second) throw std::runtime_error("Duplicate native key");
         }
     }
+    bool contains(const std::string& k) const { return fields_.count(k)!=0; }
     std::string text(const std::string& k) const {
         auto it=fields_.find(k);
         if(it==fields_.end())throw std::runtime_error("Missing native configuration field: "+k);
         return it->second;
     }
-    int integer(const std::string& k) const { return std::stoi(text(k)); }
+    int integer(const std::string& k) const { return parse_integer(text(k),k); }
     double number(const std::string& k) const { return std::stod(text(k)); }
     bool boolean(const std::string& k) const { return text(k) == "true"; }
     std::vector<std::string> list(const std::string& k) const {

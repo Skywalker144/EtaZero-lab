@@ -3,6 +3,7 @@
 #include "etazero/torch_backend.h"
 #include "etazero/random_evaluator.h"
 #include "etazero/search_limits.h"
+#include "etazero/sampling.h"
 #include <csignal>
 #include <charconv>
 #include <chrono>
@@ -32,7 +33,7 @@ struct Args {
     }
     std::string get(const std::string& key) const { return args.at(key); }
     std::string get(const std::string& key, std::string value) const { auto it = args.find(key); return it == args.end() ? value : it->second; }
-    int integer(const std::string& key) const { return std::stoi(get(key)); }
+    int integer(const std::string& key) const { return parse_integer(get(key),"--"+key); }
 };
 uint64_t mix(uint64_t n) {
     n += 0x9e3779b97f4a7c15ULL; n = (n^(n>>30))*0xbf58476d1ce4e5b9ULL;
@@ -44,15 +45,29 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     auto key = [&](const std::string& group, const std::string& name) {
         return (selfplay ? group : section) + "." + name;
     };
-    SearchSettings s{selfplay?c.integer("search.full_search_visits")-1:c.integer(section+".visits")-1,
+    SearchSettings s{selfplay?c.integer("search.full_search_visits")-1:std::max(1,c.integer(section+".visits")-1),
                      c.integer(key("parallelism","search_threads")),
                      c.number(key("puct","c_puct")),c.number(key("puct","virtual_loss")),
                      selfplay?c.number("dirichlet_noise.noise_fraction"):0,
                      selfplay?c.number("dirichlet_noise.dirichlet_total_concentration"):1,c.boolean(key("search","reuse_tree")),
                      selfplay?0:c.integer(section+".visits")};
+    s.graph_search=c.boolean(key("graph_search","use_graph_search"));
+    s.graph_catch_up_leak_prob=c.number(key("graph_search","graph_search_catch_up_leak_prob"));
+    s.use_uncertainty=c.boolean(key("uncertainty","use_uncertainty"));
+    s.uncertainty_coeff=c.number(key("uncertainty","uncertainty_coeff"));
+    s.uncertainty_exponent=c.number(key("uncertainty","uncertainty_exponent"));
+    s.uncertainty_max_weight=c.number(key("uncertainty","uncertainty_max_weight"));
+    s.policy_optimism=c.number(key("optimistic_policy","policy_optimism"));
+    s.root_policy_optimism=c.number(key("optimistic_policy","root_policy_optimism"));
+    s.use_noise_pruning=c.boolean(key("noise_pruning","use_noise_pruning"));
+    s.noise_prune_utility_scale=c.number(key("noise_pruning","noise_prune_utility_scale"));
+    s.noise_pruning_cap=c.number(key("noise_pruning","noise_pruning_cap"));
     s.use_fpu=c.boolean(key("fpu","use_fpu"));s.fpu_reduction_max=c.number(key("fpu","fpu_reduction_max"));
     s.root_fpu_reduction_max=c.number(key("fpu","root_fpu_reduction_max"));
     s.fpu_parent_power=c.number(key("fpu","fpu_parent_weight_by_visited_policy_pow"));
+    s.fpu_parent_weight_by_visited_policy=c.boolean(key("fpu","fpu_parent_weight_by_visited_policy"));
+    s.fpu_parent_weight=c.number(key("fpu","fpu_parent_weight"));
+    s.max_playouts=c.integer(key("search","max_playouts"));s.max_time=c.number(key("search","max_time"));
     s.use_lcb=c.boolean(key("lcb","use_lcb"));s.lcb_stdevs=c.number(key("lcb","lcb_stdevs"));
     s.min_lcb_visit_prop=c.number(key("lcb","min_visit_prop_for_lcb"));
     s.policy_target_pruning=c.boolean(key("policy_target","policy_target_pruning"));
@@ -63,6 +78,7 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     s.c_puct_stdev_prior=c.number(key("puct","c_puct_stdev_prior"));s.c_puct_stdev_prior_weight=c.number(key("puct","c_puct_stdev_prior_weight"));
     s.c_puct_stdev_scale=c.number(key("puct","c_puct_stdev_scale"));
     s.root_symmetries=c.integer(key("symmetry","root_num_symmetries_to_sample"));
+    s.nn_randomize=c.boolean(key("symmetry","nn_randomize"));s.nn_symmetry=c.integer(key("symmetry","nn_symmetry"));
     s.nn_policy_temperature=c.number(key("temperature","nn_policy_temperature"));
     s.root_policy_temperature=c.number(key("temperature","root_policy_temperature"));
     s.root_policy_temperature_early=c.number(key("temperature","root_policy_temperature_early"));
@@ -97,7 +113,9 @@ std::unique_ptr<BatchEvaluator> evaluator(const Args& a, const Config& c, const 
     }
     return std::make_unique<BatchEvaluator>(std::move(backends), a.get(second ? "model-b-id" : "model-id"), canvas,
                                           batch, c.integer(prefix+".queue_capacity"), c.integer(prefix+".batch_wait_us"),
-                                          c.integer(prefix+".cache_entries"));
+                                          c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
+                                          c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
+                                          std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0));
 }
 void moves(Game& g, const std::string& text) {
     if (text.empty()) return;
@@ -110,16 +128,18 @@ void stats(BatchEvaluator& e) {
               << ",\"submitted\":" << e.submitted << ",\"cache_hits\":" << e.cache_hits << ",\"rows_by_server\":";
     array(std::cout,e.rows_by_server);std::cout<<"}"<<std::endl;
 }
-int selfplay(const Args& a,const Config& c,BatchEvaluator& service) {
+int selfplay(const Args& a,const Config& c,BatchEvaluator& service,ForkPool& forks) {
     int count = a.integer("games"), canvas = c.integer("network.canvas");
     if (count < 1) throw std::runtime_error("Selfplay requires positive game count");
     auto* eval=&service;eval->reset_stats();
-    OpeningConfig opening(c,"policy_init"); auto search_config=selfplay_search_config(c);
+    OpeningConfig opening(c,"policy_init"); auto search_config=selfplay_search_config(c);auto reanalysis=reanalysis_config(c);
+    GameForkConfig fork_config(c);auto hints=load_hint_positions(c,canvas);
     bool random=a.get("evaluator","network")=="random";
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
-    RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),c.number("writer.flush_seconds"));
+    RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),
+                        c.number("writer.first_file_min_random_proportion"),std::stoull(a.get("seed"))^0xA0761D6478BD642FULL);
     std::vector<int> sizes; std::vector<Rule> rules; std::vector<double> sw, rw;
-    for (auto x : c.list("environment.sizes")) sizes.push_back(std::stoi(x));
+    for (auto x : c.list("environment.sizes")) sizes.push_back(parse_integer(x,"environment.sizes"));
     for (auto x : c.list("environment.rules")) rules.push_back(parse_rule(x));
     for (auto x : c.list("environment.size_weights")) sw.push_back(std::stod(x));
     for (auto x : c.list("environment.rule_weights")) rw.push_back(std::stod(x));
@@ -132,40 +152,76 @@ int selfplay(const Args& a,const Config& c,BatchEvaluator& service) {
             while (!stop_requested && !failure) {
                 int id = next.fetch_add(1); if (id >= count) break;
                 uint64_t game_seed = mix(seed+id); std::mt19937_64 rng(game_seed);
-                std::mt19937_64 feature_rng(game_seed ^ 0xD1B54A32D192ED03ULL);
-                std::bernoulli_distribution drop_feature(c.number("environment.forbidden_feature_dropout_prob"));
                 int size = sizes[std::discrete_distribution<size_t>(sw.begin(),sw.end())(rng)];
                 Rule rule = rules[std::discrete_distribution<size_t>(rw.begin(),rw.end())(rng)];
-                Game game(size,canvas,rule);search.reset(rng());
+                auto initial=forks.take(rng);
+                if(!initial)initial=sample_hint_position(hints,c.number("hint_positions.hint_positions_prob"),rng);
+                if(initial){size=initial->game.size();rule=initial->game.rule();}
+                Game game=initial?initial->game:Game(size,canvas,rule);search.reset(rng());
                 FinishedGame record{}; record.id=id; record.seed=game_seed; record.size=size; record.canvas=canvas; record.rule=rule;
+                record.forbidden_feature_dropout_prob=c.number("environment.forbidden_feature_dropout_prob");
+                InitialKind kind=initial?initial->kind:InitialKind::Ordinary;
+                bool fork_start=kind==InitialKind::EarlyFork || kind==InitialKind::GameFork || kind==InitialKind::HintFork;
+                auto advantage=fork_start?PlayoutAdvantage{}:sample_playout_advantage(c.number("pda.normal_asymmetric_playout_prob"),c.number("pda.max_asymmetric_ratio"),rng);
+                std::vector<Game> side_positions,positions;
                 std::vector<double> historical_values;
-                if(!random) {
+                if(initial) {
+                    record.opening.actions=initial->actions;record.opening.initial_position_moves=initial->actions.size();
+                    record.opening.initial_position_kind=static_cast<int>(kind);record.opening.hint_action=initial->hint_action;
+                } else if(!random) {
                     record.opening=initialize_opening(game,opening,*eval,rng,[&]{return stop_requested || failure;});
                     if(record.opening.status==OpeningStatus::Interrupted)break;
-                    Game prefix(size,canvas,rule);
-                    for(int action:record.opening.actions) {
-                        Step step{prefix.player(),action,0,0,0,prefix.observation(),
-                                  std::vector<double>(canvas*canvas,0),std::vector<int64_t>(canvas*canvas,0),false};
-                        prefix.play(action);if(prefix.finished())step.reward=prefix.winner()*step.player;
-                        record.steps.push_back(std::move(step));
-                    }
                 }
+                Game prefix(size,canvas,rule);prefix.set_pda(advantage.doublings,advantage.player);
+                for(int action:record.opening.actions) {
+                    Step step{prefix.player(),action,0,0,0,prefix.observation(),
+                              std::vector<double>(canvas*canvas,0),std::vector<int64_t>(canvas*canvas,0),false};
+                    prefix.play(action);if(prefix.finished())step.reward=prefix.winner()*step.player;
+                    record.steps.push_back(std::move(step));
+                }
+                const Game start=game;
+                game.set_pda(advantage.doublings,advantage.player);
                 while (!game.finished() && !stop_requested && !failure) {
+                    positions.push_back(game);
                     double temp = move_temperature(c,"selfplay",game);
-                    bool cheap=std::bernoulli_distribution(search_config.cheap_probability)(rng);
-                    auto limits=selfplay_search_limits(search_config,historical_values,cheap);
+                    auto context=hint_context(game,start,record.opening.hint_action,kind);
+                    double cheap_probability=cheap_search_probability(search_config,context);
+                    bool cheap=cheap_probability>0 && std::bernoulli_distribution(cheap_probability)(rng);
+                    auto limits=selfplay_search_limits(search_config,historical_values,cheap,advantage,game.player(),context);
+                    limits.search.should_stop=[&]{return stop_requested.load() || failure.load();};
                     auto result = search.run(game,temp,limits.search);
+                    if(stop_requested || failure)break;
+                    if(result.action<0)throw std::runtime_error("Selfplay search has no move: zero playout budget");
                     Step step{game.player(),result.action,result.simulations,static_cast<float>(temp),0,
-                              game.observation(game.player(), !(rule == Rule::RENJU && drop_feature(feature_rng))),std::move(result.policy),std::move(result.visits)};
+                              game.observation(),std::move(result.policy),std::move(result.visits)};
                     step.cheap_search=limits.cheap_search;step.target_weight=limits.target_weight;
-                    step.policy_surprise=result.policy_surprise;step.network_wdl=result.network_wdl;step.search_wdl=result.search_wdl;
-                    if(search_config.reduce_visits)historical_values.push_back(game.player()*result.value);
+                    step.policy_target=std::move(result.policy_target);step.policy_surprise=result.policy_surprise;step.network_wdl=result.network_wdl;step.search_wdl=result.search_wdl;
+                    step.q_values=std::move(result.q_values);step.q_visits=std::move(result.q_visits);
+                    historical_values.push_back(game.player()*result.value);
+                    if(c.number("side_positions.side_position_prob")>0 &&
+                       std::bernoulli_distribution(c.number("side_positions.side_position_prob"))(rng)) {
+                        int fork=sample_fork_move(game,result.network_policy,result.action,rng);
+                        if(fork>=0) {Game side=game;side.play(fork);side.set_pda(0,0);if(!side.finished())side_positions.push_back(std::move(side));}
+                    }
                     game.play(result.action); if (game.finished()) step.reward = game.winner() * step.player;
                     record.steps.push_back(std::move(step)); search.advance(result.action);
                 }
                 if (!game.finished()) break; // Interrupted trajectories never receive fabricated targets.
                 record.winner=game.winner(); record.reason=game.reason(); record.final_player=game.player(); record.final_observation=game.observation();
-                apply_training_weights(record,c.number("surprise_weighting.policy_surprise_data_weight"),c.number("surprise_weighting.value_surprise_data_weight"),rng);
+                reanalyze_positions(record,positions,historical_values,search_config,advantage,reanalysis,search,
+                    [&](const Game& position){return move_temperature(c,"selfplay",position);},rng,
+                    [&]{return stop_requested.load() || failure.load();});
+                if(stop_requested || failure)break;
+                apply_training_weights(record,c.number("surprise_weighting.policy_surprise_data_weight"),c.number("surprise_weighting.value_surprise_data_weight"),rng,reanalysis.direct_value_surprise,reanalysis.enabled);
+                search_side_positions(side_positions,record,search,*eval,search_config.full_visits,
+                    c.boolean("symmetry.nn_randomize"),c.integer("symmetry.nn_symmetry"),
+                    [&](const Game& position){return move_temperature(c,"selfplay",position);},rng,
+                    [&]{return stop_requested.load() || failure.load();});
+                if(stop_requested || failure)break;
+                if(auto position=make_game_fork(record,fork_config,*eval,c.boolean("symmetry.nn_randomize"),c.integer("symmetry.nn_symmetry"),rng,
+                                               [&]{return stop_requested.load() || failure.load();}))forks.add(std::move(*position));
+                if(stop_requested || failure)break;
+                if(auto position=make_hint_fork(record))forks.add(std::move(*position));
                 writer.enqueue(std::move(record)); finished.fetch_add(1);
             }
         } catch (...) { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error=std::current_exception(); failure=true; }
@@ -188,7 +244,7 @@ std::string read_field() {
     return value;
 }
 int worker(const Args& base,const Config& config) {
-    std::unique_ptr<BatchEvaluator> cached;
+    ForkPool forks;std::unique_ptr<BatchEvaluator> cached;
     std::string model,path,operation;
     while(!stop_requested && std::getline(std::cin,operation)) {
         if(operation=="release") {
@@ -199,10 +255,10 @@ int worker(const Args& base,const Config& config) {
         if(operation!="selfplay")throw std::runtime_error("Unknown worker operation");
         Args request=base;
         for(const char* key:{"model","model-id","games","output","attempt-id","iteration","seed","evaluator"})request.args[key]=read_field();
-        if(!cached || model!=request.get("model-id") || request.get("evaluator")=="random") {
+        if(!cached || model!=request.get("model-id") || path!=request.get("model") || request.get("evaluator")=="random") {
             cached.reset();cached=evaluator(request,config,"selfplay");model=request.get("model-id");path=request.get("model");
         } else if(path!=request.get("model"))throw std::runtime_error("Worker model identity collision");
-        int code=selfplay(request,config,*cached);
+        int code=selfplay(request,config,*cached,forks);
         std::cout<<"{\"event\":\"worker_complete\",\"attempt_id\":"<<quote(request.get("attempt-id"))<<",\"code\":"<<code<<"}"<<std::endl;
         if(code)return code;
     }
@@ -211,17 +267,30 @@ int worker(const Args& base,const Config& config) {
 int evaluate(const Args& a, const Config& c, bool raw) {
     Game game(a.integer("size"),c.integer("network.canvas"),parse_rule(a.get("rule")));
     moves(game,a.get("moves",""));
+    if(!raw)game.set_pda(c.number("evaluation.playout_doubling_advantage"),c.text("evaluation.playout_doubling_advantage_player")=="black"?1:-1);
     if (game.finished() && !raw) {
         std::cout << "{\"terminal\":true,\"winner\":" << game.winner() << ",\"value\":" << game.terminal_value() << ",\"reason\":" << game.reason() << "}\n";
         return 0;
     }
-    auto eval=evaluator(a,c,raw?"infer":"evaluate"); auto network=eval->evaluate(game.observation());
+    auto eval=evaluator(a,c,raw?"infer":"evaluate");
+    // Raw diagnostics must not seed the search cache with an identity-orientation output.
+    auto network=eval->evaluate_symmetry(game.observation(),0,true);
     std::cout.precision(12);
     std::cout << "{\"terminal\":" << (game.finished()?"true":"false") << ",\"raw_value\":" << network.value() << ",\"raw_logits\":";
     array(std::cout,network.logits);std::cout << ",\"raw_wdl\":";array(std::cout,std::vector<double>(network.wdl.begin(),network.wdl.end()));
+    std::cout << ",\"raw_optimistic_logits\":";array(std::cout,network.optimistic_logits);
+    std::cout << ",\"raw_shortterm_value_stdev\":" << network.shortterm_value_stdev;
     if (!raw) {
-        Search search(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0"))); auto result=search.run(game,move_temperature(c,"evaluate",game));
-        std::cout << ",\"action\":" << result.action << ",\"value\":" << result.value << ",\"simulations\":" << result.simulations << ",\"root_visits\":" << result.root_visits << ",\"policy\":";
+        Search search(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));
+        SearchRun options;options.should_stop=[]{return stop_requested.load();};
+        auto result=search.run(game,move_temperature(c,"evaluate",game),options);
+        std::cout << ",\"action\":" << result.action << ",\"value\":" << result.value << ",\"simulations\":" << result.simulations << ",\"root_visits\":" << result.root_visits
+                  << ",\"initial_visits\":" << result.initial_visits << ",\"new_playouts\":" << result.new_playouts << ",\"seconds\":" << result.seconds
+                  << ",\"network_sample_weight\":" << result.network_sample_weight << ",\"network_value_stdev\":" << result.network_value_stdev
+                  << ",\"search_weight\":" << result.search_weight << ",\"search_weight_sq\":" << result.search_weight_sq
+                  << ",\"graph_hits\":" << result.graph_hits << ",\"graph_catch_ups\":" << result.graph_catch_ups
+                  << ",\"graph_cycles\":" << result.graph_cycles << ",\"graph_nodes\":" << result.graph_nodes
+                  << ",\"stopped_early\":" << (result.stopped_early?"true":"false") << ",\"policy\":";
         array(std::cout,result.policy); std::cout << ",\"wdl\":";
         array(std::cout,std::vector<double>(result.search_wdl.begin(),result.search_wdl.end()));
         std::cout << ",\"network_wdl\":";array(std::cout,std::vector<double>(result.network_wdl.begin(),result.network_wdl.end()));
@@ -230,7 +299,9 @@ int evaluate(const Args& a, const Config& c, bool raw) {
         std::cout << ",\"visits\":"; array(std::cout,result.visits);
     }
     eval->finish();
-    std::cout << ",\"nn_requests\":" << eval->requests << ",\"cache_hits\":" << eval->cache_hits << "}\n"; return 0;
+    auto precision=c.text(raw?"inference.inference_precision":"evaluation.inference_precision");
+    if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+    std::cout << ",\"inference_precision\":" << quote(precision) << ",\"nn_requests\":" << eval->requests << ",\"cache_hits\":" << eval->cache_hits << "}\n"; return stop_requested?130:0;
 }
 // Interactive actions use the actual board width, unlike search's canvas indices.
 int web_integer(const std::string& text) {
@@ -303,9 +374,12 @@ int serve(const Args& a,const Config& c) {
                 if(visits<2 || visits>100000)throw std::runtime_error("Visits must be in [2, 100000]");
                 Game before=*game;
                 SearchRun options;options.max_visits=visits;options.clear_before_search=true;
+                options.should_stop=[]{return stop_requested.load();};
                 auto requests=eval->requests.load(),batches=eval->batches.load();
                 auto start=std::chrono::steady_clock::now();
                 auto result=search.run(before,move_temperature(c,"evaluate",before),options);
+                if(stop_requested)break;
+                if(result.action<0)throw std::runtime_error("Search has no move: zero playout budget");
                 double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
                 if(words[0]=="genmove") {
                     game->play(result.action);played.push_back(result.action/canvas*game->size()+result.action%canvas);
@@ -322,6 +396,8 @@ int serve(const Args& a,const Config& c) {
     eval->finish();return 0;
 }
 int match(const Args& a,const Config& c) {
+    const bool same_bot=a.get("model-id")==a.get("model-b-id");
+    if(same_bot && a.get("model")!=a.get("model-b"))throw std::runtime_error("Match model identity collision");
     auto ea=evaluator(a,c,"match"),eb=evaluator(a,c,"match",true);
     const int size=a.integer("size"),canvas=c.integer("network.canvas");
     OpeningConfig opening(c);
@@ -363,15 +439,18 @@ int match(const Args& a,const Config& c) {
         for(int retry=0;retry<100;++retry) {
             if(stop_requested)return;
             Game game(size,canvas,parse_rule(a.get("rule")));
-            auto result=initialize_opening(game,opening,task.generator==0?*ea:*eb,random,[]{return stop_requested.load();});
+            auto result=initialize_opening(game,opening,task.generator==0?*ea:*eb,task.generator==0?*eb:*ea,random,[]{return stop_requested.load();});
             if(result.status==OpeningStatus::Interrupted)return;
             if(result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced match opening failed: "+result.failure);
             if(game.finished())continue;
             task.moves=result.actions;task.generated=true;
             std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"opening\",\"id\":"<<task.id
                 <<",\"generator\":"<<task.generator<<",\"seed\":"<<task.seed<<",\"attempts\":"<<result.attempts
+                <<",\"balanced_moves\":"<<result.balanced_moves<<",\"policy_moves\":"<<result.policy_moves
                 <<",\"value\":"<<result.start_value<<",\"moves\":";
-            write_moves(row,task.moves);row<<'}';
+            write_moves(row,task.moves);row<<",\"reference_black_a\":"<<(task.generator==0?"true":"false")
+                <<",\"balance_evaluators\":";array(row,result.balance_evaluators);
+            row<<",\"policy_evaluators\":";array(row,result.policy_evaluators);row<<'}';
             std::lock_guard<std::mutex> lock(output);std::cout<<row.str()<<std::endl;return;
         }
         throw std::runtime_error("100 consecutive terminal openings");
@@ -382,20 +461,31 @@ int match(const Args& a,const Config& c) {
     workers(games.size(),[&](int index){
         auto [task_index,color]=games[index];const auto& task=tasks[task_index];
         Game game(size,canvas,parse_rule(a.get("rule")));for(int action:task.moves)game.play(action);
+        game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
         auto start=std::chrono::steady_clock::now();uint64_t seed=task.seed^(0xd1b54a32d192ed03ULL*(color+1));
-        Search sa(*ea,settings(c,"match"),seed),sb(*eb,settings(c,"match"),seed);
-        std::vector<int> actions=task.moves;std::vector<int64_t> visits;
+        Search sa(*ea,settings(c,"match"),mix(seed));
+        std::unique_ptr<Search> sb;
+        if(!same_bot)sb=std::make_unique<Search>(*eb,settings(c,"match"),mix(seed^0x9e3779b97f4a7c15ULL));
+        std::vector<int> actions=task.moves;std::vector<int64_t> visits,initial_visits,new_playouts;
         while(!game.finished()) {
             if(stop_requested)return;
-            auto result=((game.player()==1)==(color==0)?sa:sb).run(game,move_temperature(c,"match",game));
+            SearchRun options;options.clear_before_search=same_bot;options.should_stop=[]{return stop_requested.load();};
+            auto& bot=same_bot || ((game.player()==1)==(color==0))?sa:*sb;
+            auto result=bot.run(game,move_temperature(c,"match",game),options);
+            if(stop_requested)return;
+            if(result.action<0)throw std::runtime_error("Match search has no move: zero playout budget");
             game.play(result.action);actions.push_back(result.action);visits.push_back(result.root_visits);
-            sa.advance(result.action);sb.advance(result.action);
+            initial_visits.push_back(result.initial_visits);new_playouts.push_back(result.new_playouts);
+            sa.advance(result.action);if(sb)sb->advance(result.action);
         }
         double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
         std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"game\",\"id\":"<<2*task.id+color
             <<",\"opening_id\":"<<task.id<<",\"black_a\":"<<(color==0?"true":"false")
             <<",\"winner\":"<<game.winner()<<",\"seconds\":"<<seconds<<",\"root_visits\":";
-        array(row,visits);row<<",\"moves\":";write_moves(row,actions);row<<'}';
+        array(row,visits);row<<",\"initial_visits\":";array(row,initial_visits);row<<",\"new_playouts\":";array(row,new_playouts);
+        auto precision=c.text("match.inference_precision");
+        if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+        row<<",\"same_bot\":"<<(same_bot?"true":"false")<<",\"inference_precision\":"<<quote(precision)<<",\"moves\":";write_moves(row,actions);row<<'}';
         std::lock_guard<std::mutex> lock(output);std::cout<<row.str()<<std::endl;
     });
     ea->finish();eb->finish();return stop_requested?130:0;
@@ -410,7 +500,7 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("Native executable only supports AlphaZero/PUCT/PUCT");
         torch::set_num_threads(config.integer((mode=="evaluate" || mode=="serve")?"evaluation.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
-        if(mode=="selfplay") {auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service);service->finish();return code;}
+        if(mode=="selfplay") {ForkPool forks;auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service,forks);service->finish();return code;}
         if(mode=="worker")return worker(args,config);
         if(mode=="evaluate"||mode=="infer")return evaluate(args,config,mode=="infer");
         if(mode=="serve")return serve(args,config);
