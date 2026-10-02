@@ -1,6 +1,6 @@
 # EtaZero V0
 
-EtaZero 面向 Freestyle、Standard、Renju 五子棋。当前实现 WDL AlphaZero + PUCT 图搜索（局面共享、边访问追赶、FPU、Shaped Dirichlet Noise、Playout Cap Randomization、Reduce Visits、Forced Playout / Policy Target Pruning、训练与评估 LCB、Policy / Value Surprise Weighting）的完整逐轮训练链路：多局自对弈、共享多服务 GPU 批量推理与 NN 缓存、观测 bit packing 的完整对局与采样搜索数组 NPZ、压缩视图缓存与 multi-wave 窗口 shuffle、固定训练量与可选本地分段、checkpoint、模型校验发布与整轮恢复（启动前核验已提交权重与checkpoint）。冷启动使用 random evaluator；网络阶段支持 KataGomo 平衡开局与独立 policy init。自对弈支持非对称 PDA 预算与条件输入、独立 side 分支及递归；可显式启用 cheap-position reanalysis 和 direct value surprise。并行与主要数据管线参考 KataGo，算法语义见 [算法说明](docs/algorithms.md)。
+EtaZero 面向 Freestyle、Standard、Renju 五子棋。当前实现 WDL AlphaZero + PUCT 图搜索（局面共享、边访问追赶、FPU、Shaped Dirichlet Noise、Playout Cap Randomization、Reduce Visits、Forced Playout / Policy Target Pruning、训练与评估 LCB、Policy / Value Surprise Weighting）的完整逐轮训练链路：多局自对弈、共享多服务 GPU 批量推理与 NN 缓存、观测 bit packing 的完整对局与采样搜索数组 NPZ、压缩视图缓存与 multi-wave 窗口 shuffle、固定训练量与可选本地分段、checkpoint、模型导出发布与整轮恢复（启动前核验已提交权重与checkpoint）。冷启动使用 random evaluator；网络阶段支持 KataGomo 平衡开局与独立 policy init。自对弈支持非对称 PDA 预算与条件输入、独立 side 分支及递归；可显式启用 cheap-position reanalysis 和 direct value surprise。并行与主要数据管线参考 KataGo，算法语义见 [算法说明](docs/algorithms.md)。
 
 推理可明确选择 FP32 / FP16，导出时在推理设备上预计算归一化逆标准差并保留原运算顺序；搜索采用分级 child 统计存储、复用线程和并行图节点回收。训练支持 batch 级 D4 增广、SGD / AdamW、参数分组与自适应衰减、样本计数 warmup、Lookahead、SWA、FP32 / AMP、网络与损失联合编译、CUDA fused AdamW、后台 batch 准备和独立 stream 上传。推理后端当前是 LibTorch；KataGo 专用原生算子后端尚未移植，不宣称性能完全对齐。
 
@@ -24,7 +24,7 @@ CONFIG_DIR=configs/baseline bash scripts/run.sh
 
 配置中的相对 `run.run_dir` 以本版本目录为基准，baseline、minimal_test、smoke_test 分别保存到 `data/baseline/`、`data/minimal_test/`、`data/smoke_test/`，包含自对弈数据、checkpoint、模型、日志与运行证据。`--run-dir` 可指定其他目录，相对路径以调用时的工作目录为基准。
 
-iteration 0 用 random evaluator 完成 `selfplay.bootstrap_games` 局，只测量并保存实际采样行数／局。iteration 1 继续使用随机评估，补足 `replay.min_rows` 后执行首轮训练与模型发布，并以此时实际累计有效行数固定 replay 记账起点。iteration 2 起，一次 `iteration` 是完整的自对弈 → shuffle → 训练 → 模型校验与发布，自对弈使用本次迭代开始时的已发布模型，按固定训练量和 replay ratio 规划产样；shuffle 从历史数据窗口生成训练快照；learner 消费配置的 `training.train_steps` 个 batch；新模型校验发布后，下一次迭代使用它生成数据。各阶段顺序执行，阶段内部并行。
+iteration 0 用 random evaluator 完成 `selfplay.bootstrap_games` 局，只测量并保存实际采样行数／局。iteration 1 继续使用随机评估，补足 `replay.min_rows` 后执行首轮训练与模型发布，并以此时实际累计有效行数固定 replay 记账起点。iteration 2 起，一次 `iteration` 是完整的自对弈 → shuffle → 训练 → 模型导出与发布，自对弈使用本次迭代开始时的已发布模型，按固定训练量和 replay ratio 规划产样；shuffle 从历史数据窗口生成训练快照；learner 消费配置的 `training.train_steps` 个 batch；新模型导出发布后，下一次迭代使用它生成数据。各阶段顺序执行，阶段内部并行。
 
 `[replay]` 使用 KataGo 的 power-law 窗口、random累计封顶、实际文件mtime近期排序和组内随机采样；支持 `taper_scale`、`add_to_data_rows`、`max_rows` 三项来源扩展。`keep_target_rows = all` 保留完整窗口。reader 每文件只消费完整batch并丢弃尾部；默认允许带间隔的文件重排重复消费，`training.no_repeat_files = true` 耗尽明确停止。默认启用验证（`skip_validation = false`），按原始文件basename的MD5留出1%，每轮训练结束用raw模型、随机D4验证，train/val跨快照不串用。`training.replay_ratio` 单独控制新增产样预算，配置和资源语义见 [窗口与 shuffle](docs/implementation.md#窗口与-shuffle)。
 
@@ -82,7 +82,7 @@ CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iter
 # 默认评估已发布模型，动作使用实际棋盘上的零起始行优先编号。
 bash scripts/run.sh evaluate --config-dir configs/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
 
-# model-b 指向另一份已校验发布的 model.pt，比赛生成成对平衡开局并交换模型执色。
+# model-b 指向另一份已发布的 model.pt，比赛生成成对平衡开局并交换模型执色。
 bash scripts/run.sh match --config-dir configs/smoke_test --run-dir data/my_check --model-b /absolute/path/to/models/model_id/model.pt --size 5 --rule freestyle --games 4 --output data/my_check_match
 
 bash scripts/run.sh plot --run-dir data/my_check

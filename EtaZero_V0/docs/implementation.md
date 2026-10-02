@@ -41,7 +41,7 @@ flowchart LR
 
 同步 evaluate 调用期间，调用者持有原始观测与 D4 变换后的暂存直到结果返回；线程复用请求、等待条件与 cache key 缓冲，服务线程复用 batch 暂存。CPU 上变换空间输入，再填入 pinned 缓冲；输出还原 canonical 坐标后缓存。结果一次回传 FP32 后转换到公共搜索数值类型。
 
-SP 的 `inference.inference_precision` 明确选择 FP32 或 FP16 autocast，baseline 使用 FP16。eval/match 支持 `auto`，当前 LibTorch 实现按明确指定的 CUDA 设备解析为 FP16、CPU 设备解析为 FP32；原生结果记录实际精度，显式 FP32 override 保留。FP16 仅适用于 CUDA，归一化仍显式累积 FP32，输出 head 必须实际使用 FP16；训练 AMP 由另一项配置独立决定。导出文件保存 FP32 权重，发布时根据实际推理精度核对数值和记录容差。该后端仍使用 TorchScript / LibTorch，没有移植 KataGo 的专用 CUDA/cuDNN 算子后端。
+SP 的 `inference.inference_precision` 明确选择 FP32 或 FP16 autocast，baseline 使用 FP16。eval/match 支持 `auto`，当前 LibTorch 实现按明确指定的 CUDA 设备解析为 FP16、CPU 设备解析为 FP32；原生结果记录实际精度，显式 FP32 override 保留。FP16 仅适用于 CUDA，归一化仍显式累积 FP32，输出 head 必须实际使用 FP16；训练 AMP 由另一项配置独立决定。导出文件保存 FP32 权重，每轮导出不执行推理数值对照；数值正确性由独立测试验证。该后端仍使用 TorchScript / LibTorch，没有移植 KataGo 的专用 CUDA/cuDNN 算子后端。
 
 单朝向默认随机 D4，cache 命中保留首次输出且不推进朝向 RNG；指定朝向覆盖未命中请求的默认随机行为；已有 cache 仍复用首次输出，绕 cache 才强制实际朝向。根多对称请求绕过缓存读写；raw 诊断指定 identity 并绕缓存。服务的朝向 RNG 独立于搜索与落子 RNG，共享服务请求次序仍依赖线程调度。
 
@@ -53,13 +53,13 @@ NN 缓存采用有界直接映射表与分段锁，保存不可变原始主/短�
 
 [Python 控制器](../python/etazero/runtime.py)依次执行 selfplay → shuffle → train → export。阶段内部保留对局并行、树内并行、后台 writer、shuffle worker 和文件预取，Shell 只负责薄启动。
 
-bootstrap 为 iteration 0，只执行 selfplay，不 shuffle、不训练、不导出初始网络。iteration 1 补足有效训练行并完成首轮训练发布；后续四个阶段合为一次 `iteration`，完成校验发布与状态提交后才增加迭代编号。`.internal/state.json` 的 `iteration` 从 0 开始，表示当前未完成或下一次待处理的迭代；初始化 checkpoint 的迭代编号为 0。`.internal/iterations/<编号>/` 保存计划、阶段状态和 learner 进度，原始分片保存到 `selfplay/iteration_<编号>/`。checkpoint 的 `step` 是迭代内消费的 batch 数，`total_steps` 跨迭代累计消费；`total_samples` 包含 AMP 跳步消费，`optimizer_steps` 单独累计成功更新。`run.max_iteration` 是整个运行的累计完成目标，0 表示无限迭代；`--iterations` 可临时覆盖目标，时间限制与停止信号仍有效。
+bootstrap 为 iteration 0，只执行 selfplay，不 shuffle、不训练、不导出初始网络。iteration 1 补足有效训练行并完成首轮训练发布；后续四个阶段合为一次 `iteration`，完成模型发布与状态提交后才增加迭代编号。`.internal/state.json` 的 `iteration` 从 0 开始，表示当前未完成或下一次待处理的迭代；初始化 checkpoint 的迭代编号为 0。`.internal/iterations/<编号>/` 保存计划、阶段状态和 learner 进度，原始分片保存到 `selfplay/iteration_<编号>/`。checkpoint 的 `step` 是迭代内消费的 batch 数，`total_steps` 跨迭代累计消费；`total_samples` 包含 AMP 跳步消费，`optimizer_steps` 单独累计成功更新。`run.max_iteration` 是整个运行的累计完成目标，0 表示无限迭代；`--iterations` 可临时覆盖目标，时间限制与停止信号仍有效。
 
 `devices.selfplay` 每个列表项启动一个独立 worker，记录设备、worker 身份和种子；可以指定多个 GPU，或同一 GPU 上的多个进程。learner 使用 `devices.train`，当前为单卡训练。没有 DDP 或跨机器调度。
 
 worker 随机流从运行种子、iteration、持久化 attempt 序号和 worker 身份派生，产物 UUID 只负责文件身份。同一配置的独立运行具有一致的 worker 种子，重试使用新序号。实际每局种子随轨迹保存，树内并行调度仍可能影响访问顺序。
 
-每轮使用计划中固定的输入模型，新模型校验发布后，下一轮才换代。[常驻 worker](../python/etazero/native.py) 按请求处理 bootstrap 与补局。随机阶段使用 CPU RandomBackend 经过共享队列与正常搜索，无模型前向或 CUDA 推理分配；每次 attempt 的随机输出由其种子和完整观测决定，不依赖服务线程调度。网络阶段在同一生产阶段复用模型服务和 CUDA 上下文；每次请求仍使用独立 attempt 目录和记录。在进入 shuffle / train 前排空推理、释放 selfplay 模型与 CUDA allocator 缓存，worker 进程保持存活，下一轮明确加载新模型。正常停止阻止新局并取消半局，在途搜索收尾后 writer 排空已完成对局；半局不会写成和棋。控制器退出关闭 worker 输入并等待其退出。
+每轮使用计划中固定的输入模型，新模型发布后，下一轮才换代。[常驻 worker](../python/etazero/native.py) 按请求处理 bootstrap 与补局。随机阶段使用 CPU RandomBackend 经过共享队列与正常搜索，无模型前向或 CUDA 推理分配；每次 attempt 的随机输出由其种子和完整观测决定，不依赖服务线程调度。网络阶段在同一生产阶段复用模型服务和 CUDA 上下文；每次请求仍使用独立 attempt 目录和记录。在进入 shuffle / train 前排空推理、释放 selfplay 模型与 CUDA allocator 缓存，worker 进程保持存活，下一轮明确加载新模型。正常停止阻止新局并取消半局，在途搜索收尾后 writer 排空已完成对局；半局不会写成和棋。控制器退出关闭 worker 输入并等待其退出。
 
 常驻进程仍保留 CUDA 上下文的固定显存开销；训练显存预算须计入该开销。模型权重、推理输入和 allocator 缓存随 release 请求释放。
 
@@ -169,7 +169,7 @@ baseline默认启用验证；`training.skip_validation = true` 可选择同步�
 
 冷启动分为两个独立阶段：iteration 0 完成 `bootstrap_games` 局随机评估搜索，只测量有效行数／局，不训练；中断未提交的bootstrap同样归档完整已发布对局后重跑整轮，不用半局补监督。iteration 1 根据实测均值估算 `min_rows` 缺口，实际不足就继续补局，直至达到门槛。两阶段均跳过网络平衡开局与 policy init，仍执行正常搜索和真实终局监督。
 
-首次有效训练、模型校验与发布完成后，在同一次持久化提交中保存实际累计行数 `replay_origin_rows`，将 `target_rows` 重置为该值。此后的恢复沿用已提交起点，不再次重置。首轮及 bootstrap 多产的数据保留在回放池中，但不抵扣 iteration 2 以后的新增预算。
+首次有效训练、模型导出与发布完成后，在同一次持久化提交中保存实际累计行数 `replay_origin_rows`，将 `target_rows` 重置为该值。此后的恢复沿用已提交起点，不再次重置。首轮及 bootstrap 多产的数据保留在回放池中，但不抵扣 iteration 2 以后的新增预算。
 
 ```text
 U_i = train_steps_i * batch_size_i
@@ -205,9 +205,9 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 
 清理先验证完整提交链和待保留文件，再删除 payload；删除过程中中断可重复执行。重启在归档未提交轮后补做清理，即使累计迭代上限已达到也会执行；清理事件记录在 `logs/events.jsonl`。训练结束仍保留最近的完整状态，`checkpoint_every` 的轮内保存频率不受保留数量影响。
 
-[exporter](../python/etazero/export.py) 优先使用已采样的 SWA 权重，无采样时使用训练权重，并在 manifest 中记录选择与采样次数。在实际推理设备上预计算 evaluation normalization 的 FP32 逆标准差，保留原归一化运算顺序、卷积权重、精度设置与 mask 位置，再导出独立 TorchScript 模型，核对 metadata 和全部配置尺寸/规则的所选权重网络 eager / scripted 输出，包含 JIT 预热后的优化图，再真实加载 C++ 后端核对数值。合并归一化 scale / offset 或将其乘进卷积权重都会改变舍入，CPU / CUDA 的逆平方根也可能有不同舍入；微小差异可被后续 TF32 卷积量化放大。归一化仅对新建中间量分开执行原地乘、加，阻止 JIT 预热后的乘加融合改变舍入。C++ 单局推理与同样 batch 大小的 eager 输出比较，避免不同 batch 的卷积 kernel 差异干扰校验。不修改训练网络和 checkpoint，通过原有精度容差检查后生成不可变模型目录，整轮提交后更新 `models/current.json`，身份来自 checkpoint，不依赖 mtime，没有比赛胜率门控。
+[exporter](../python/etazero/export.py) 优先使用已采样的 SWA 权重，无采样时使用训练权重，并在 manifest 中记录选择与采样次数。在实际推理设备上预计算 evaluation normalization 的 FP32 逆标准差，保留原归一化运算顺序、卷积权重、精度设置与 mask 位置，再导出独立 TorchScript 模型。归一化仅对新建中间量分开执行原地乘、加，避免 JIT 融合改变舍入。每轮导出只生成模型、记录 manifest 和 SHA-256 并原子发布，不执行 eager / TorchScript / C++ 数值对照或 FP16 对 FP32 的容差检查；这些检查由独立推理测试承担。checkpoint 身份与配置、模型 manifest、契约、路径和文件校验继续保留，实际推理时检查输出维度和非有限值。不修改训练网络和 checkpoint，整轮提交后更新 `models/current.json`，身份来自 checkpoint，不依赖 mtime，没有比赛胜率门控。
 
-`.internal/state.json` 是整轮提交的唯一权威：本轮完成自对弈、shuffle、训练、模型校验和绘图，保存 `logs/iterations/<iteration>.json` 后才原子推进 state。`models/current.json` 在提交后更新，启动时先核对已提交checkpoint SHA及模型manifest/契约/路径/权重SHA和checkpoint身份，再从state重建发布指针；校验失败在启动worker之前拒绝。iteration 0 的 bootstrap 也按完整轮提交。
+`.internal/state.json` 是整轮提交的唯一权威：本轮完成自对弈、shuffle、训练、模型导出和绘图，保存 `logs/iterations/<iteration>.json` 后才原子推进 state。`models/current.json` 在提交后更新，启动时先核对已提交checkpoint SHA及模型manifest/契约/路径/权重SHA和checkpoint身份，再从state重建发布指针；校验失败在启动worker之前拒绝。iteration 0 的 bootstrap 也按完整轮提交。
 
 无论中断发生在 selfplay、shuffle、train、export 还是最终提交前，重启都从上一完整轮的 checkpoint 重跑整轮，不采用本轮 `learner.json`。中断轮的对局、checkpoint、快照、模型、轮次状态和候选指标及强制终止遗留的私有export staging目录移入 `.internal/discarded/<id>/`，保留原始字节；catalog 作为派生索引重建。半局始终不构造监督。已经原子提交但发布指针尚未更新的轮次仍有效，不重复训练。底层 learner 的 checkpoint/游标恢复能力用于内部验证，用户训练入口采用整轮恢复。同目录控制器由OS flock独占；checkpoint不可覆盖的原子link、模型完整目录rename、state/current原子replace分别构成发布边界。未发布暂存不被consumer当作模型。
 

@@ -15,7 +15,7 @@ from etazero.config import ROOT, load_config, write_native
 from etazero.data import read_raw, metadata, game_row_ranges
 from etazero.evaluation import evaluate
 from etazero.eval_config import load_evaluation_config
-from etazero.export import example_inputs, export_model
+from etazero.export import example_inputs, export_model, verify_export
 from etazero.network import make_network, inference_network, MaskedBatchNorm
 from etazero.optimization import Optimization, inference_weights
 from etazero.runtime import run_training
@@ -196,7 +196,8 @@ def test_b5c192nbt_compiled_11x11_pipeline(tmp_path,gpu_config,amp):
     assert len(updates)==8 and all(np.isfinite(e['loss']) and (e['amp_skipped'] or np.isfinite(e['grad_norm'])) for e in updates)
     assert saved['optimizer_steps']==8-sum(e['amp_skipped'] for e in updates)
     info=load_json(tmp_path/Path(state['model']['path']).parent/'manifest.json')
-    assert info['weights']=='swa' and info['verification']['native']
+    assert info['weights']=='swa'
+    assert verify_export(tmp_path,info,c['network']['canvas'])==info
     assert run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)==state
 
 
@@ -223,7 +224,8 @@ def test_b10c128_plain_mixed_sizes_compiled_pipeline_and_resume(tmp_path,gpu_con
     assert len(updates)==8 and all(np.isfinite(e['loss']) and (e['amp_skipped'] or np.isfinite(e['grad_norm'])) for e in updates)
     assert saved['optimizer_steps']==8-sum(e['amp_skipped'] for e in updates)
     manifest=load_json(root/Path(state['model']['path']).parent/'manifest.json')
-    assert manifest['weights']=='swa' and manifest['verification']['native']
+    assert manifest['weights']=='swa'
+    assert verify_export(root,manifest,c['network']['canvas'])==manifest
     assert run_training(root,c,BINARY,resume=True,max_iteration=2)==state
     # Resume after a real compiled update, comparing against uninterrupted
     # consumption of the same native/shuffled snapshot and initialization.
@@ -296,8 +298,9 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
             expected=np.concatenate(expected)[m['row_begin']:m['row_begin']+m['rows']]
             np.testing.assert_array_equal(view['q_values'],expected/np.float32(32000))
     manifest=load_json(root/Path(state['model']['path']).parent/'manifest.json')
-    assert manifest['weights']=='swa' and manifest['verification']['native']
-    assert manifest['verification']['normalization']=='masked_fixup_bias'
+    assert manifest['weights']=='swa'
+    assert verify_export(root,manifest,c['network']['canvas'])==manifest
+    assert manifest['normalization']=='masked_fixup_bias'
     assert run_training(root,c,BINARY,resume=True,max_iteration=2)==state
     # Audit exact state recovery under a deterministic attention backend.
     from torch.nn.attention import sdpa_kernel,SDPBackend
@@ -618,9 +621,9 @@ def test_optimizer_checkpoint_d4_and_swa_export(tmp_path,pipeline,gpu_config,kin
     assert any(not torch.equal(a['model'][k],v) for k,v in inference_weights(a).items())
     (destinations[0]/'config').mkdir()
     write_native(c,destinations[0]/'config/effective.cfg')
-    info=export_model(destinations[0],c,full,BINARY)
+    info=export_model(destinations[0],c,full)
     assert info['weights']=='swa' and info['swa_samples']==2
-    assert info['verification']['native'] and info['verification']['python_scripted']
+    assert verify_export(destinations[0],info,c['network']['canvas'])==info
 
 
 @pytest.mark.parametrize('amp',['float16','bfloat16'])
@@ -778,10 +781,10 @@ def test_stage_failure_recovery(tmp_path,gpu_config,monkeypatch,phase):
             patch.setattr(runtime,"build_snapshot",lambda *a,**k:(_ for _ in ()).throw(RuntimeError("injected stage failure")))
         elif phase=="export":
             original=runtime.export_model
-            def failed_export(root,config,checkpoint,binary):
+            def failed_export(root,config,checkpoint):
                 if checkpoint["iteration"]:
                     raise RuntimeError("injected stage failure")
-                return original(root,config,checkpoint,binary)
+                return original(root,config,checkpoint)
             patch.setattr(runtime,"export_model",failed_export)
         else:
             original=runtime.Controller.publish
@@ -927,7 +930,7 @@ def test_multiple_servers_fp16_packed_waves_and_prefetch(tmp_path,gpu_config):
         assert read_raw(path)["observations"].shape[1:]==(5,5) # ceil(6*6/8)
     assert not list((tmp_path/"scratch").iterdir())
     scripted=torch.jit.load(str(root/state["model"]["path"])).cuda().eval()
-    assert state["model"]["verification"]["inference_precision"]=="float16"
+    assert state["model"]["inference_precision"]=="float16"
     previous_autocast=torch._C._jit_set_autocast_mode(False)
     try:
         for size in (5,6):
@@ -1041,10 +1044,22 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
         checkpoint=commit_checkpoint(tmp_path,c,model,optimizer,
                                      torch.amp.GradScaler('cuda',enabled=False),0,0,0,None,None,[],
                                      Optimization(model,c,optimizer))
-        info=export_model(tmp_path,c,checkpoint,BINARY)
-    assert info['verification']['python_scripted'] and info['verification']['native']
-    assert info['verification']['normalization']==('masked_fixup_bias' if architecture=='transformer' else 'precomputed_inv_std')
-    assert info['verification']['inference_precision']==precision
+        info=export_model(tmp_path,c,checkpoint)
+        # Numerical parity belongs to this independent test, not model publication.
+        inference=inference_network(model)
+        scripted=torch.jit.load(str(tmp_path/info['path']))
+        probes=[example_inputs(15,size,rule,(0,15)) for size in (11,15)
+                for rule in ('freestyle','standard','renju')]
+        inputs=tuple(torch.from_numpy(np.stack(x)).cuda() for x in zip(*probes))
+        with torch.inference_mode():
+            expected=inference(*inputs)
+            for _ in range(3):
+                for actual,reference in zip(scripted(*inputs),expected):
+                    torch.testing.assert_close(actual,reference,rtol=2e-4,atol=2e-5)
+                    assert torch.isfinite(actual).all()
+    assert verify_export(tmp_path,info,c['network']['canvas'])==info
+    assert info['normalization']==('masked_fixup_bias' if architecture=='transformer' else 'precomputed_inv_std')
+    assert info['inference_precision']==precision
     assert sha256(tmp_path/checkpoint['path'])==checkpoint['sha256']
 
 
@@ -1600,8 +1615,8 @@ def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config):
     assert all(np.isfinite(e['loss']) for e in events if e['event']=='update')
     assert all(e['td_value_short_loss']>0 for e in events if e['event']=='update')
     write_native(c,root/'config/effective.cfg')
-    info=export_model(root,c,reference,BINARY)
-    assert info['verification']['native']
+    info=export_model(root,c,reference)
+    assert verify_export(root,info,c['network']['canvas'])==info
     save_json(root/'side_validation.json',{'rows':len(view['value']), 'side_rows':int((view['full_game_weight']==0).sum()),
                                         'checkpoint':reference,'export':info,'events':events})
 
@@ -1911,8 +1926,8 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
     assert done and reference['total_samples']==16 and reference['optimizer_steps']==2
     learned=load_checkpoint(root,reference,c)['model']['linear_global.weight']
     assert learned.shape[1]==6 and not torch.equal(learned[:,4:6],original[:,4:6])
-    write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference,BINARY)
-    assert info['verification']['native'] and all(np.isfinite(e['loss']) for e in events if e['event']=='update')
+    write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference)
+    assert verify_export(root,info,c['network']['canvas'])==info and all(np.isfinite(e['loss']) for e in events if e['event']=='update')
     assert all(('q_winloss_loss' in e)==predict_q_values for e in events if e['event']=='update')
     if predict_q_values:assert all(e['q_winloss_loss']>0 for e in events if e['event']=='update')
     (root/'validation.json').write_text(json.dumps({'main_positions':main_count,'side_positions':side_count,
@@ -2014,7 +2029,7 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
     reference,done=train_iteration(root,c,{'iteration':1,'snapshot_id':snapshot,'train_steps':2,'batch_size':8},initial,
         lambda event,**fields:events.append({'event':event,**fields}))
     assert done and reference['optimizer_steps']==2 and reference['total_samples']==16
-    write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference,BINARY);assert info['verification']['native']
+    write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference);assert verify_export(root,info,c['network']['canvas'])==info
     (root/'validation.json').write_text(json.dumps(dict(games=games,checkpoint=reference,export=info,events=events),indent=2))
 
 
@@ -2369,7 +2384,7 @@ def test_native_final_row_shards_cuda_training_and_export(tmp_path,gpu_config):
         lambda event,**fields:events.append({'event':event,**fields}))
     assert done and reference['total_samples']==16 and reference['optimizer_steps']==2
     assert all(np.isfinite(e['loss']) for e in events if e['event']=='update')
-    write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference,BINARY)
-    assert info['verification']['native']
+    write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference)
+    assert verify_export(root,info,c['network']['canvas'])==info
     save_json(root/'writer_validation.json',{'shards':len(entries),'rows':rows,'games':4,'represented_trajectories':len(represented),
         'checkpoint':reference,'export':info})

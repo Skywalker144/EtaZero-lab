@@ -322,7 +322,7 @@ class Controller:
             if self.stopping():
                 break
             if status["phase"]=="export":
-                model=self.phase("export",iteration,lambda:export_model(root,c,status["checkpoint"],self.binary))
+                model=self.phase("export",iteration,lambda:export_model(root,c,status["checkpoint"]))
                 status={**status,"phase":"completed","model":model};save_json(status_path,status)
             if status["phase"]!="completed":
                 raise ValueError(f'Unknown persisted phase: {status["phase"]}')
