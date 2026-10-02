@@ -2,11 +2,13 @@
 
 `evaluate` 做单局面搜索，`match` 做一对模型的可恢复比赛，`arena` 选择历史模型、安排比赛并输出 Elo。所有公开动作使用实际棋盘零起始行优先编号，native 内部才转换为网络画布编号。评估必须用 `--model` 或 `--run-dir` 明确指定模型来源，不从评估配置目录猜测训练目录。模型由 manifest 校验身份与内容，同场模型画布须相同，网络宽度和深度可以不同。
 
-## 独立配置与 100v
+## 独立配置与搜索预算
 
 [evaluation 配置](../configs/baseline/eval.cfg) 和 [比赛配置](../configs/baseline/match.cfg) 只沿 `run.cfg` 的 extends 继承链读取自身文件与叶子目录的 `.local`。训练文件、训练环境变量和另一个评估文件不会覆盖它们，修改评估条件不改变训练配置身份。可使用 `EVAL_VISITS=100`、`MATCH_VISITS=100` 等前缀环境覆盖；开局字段使用 `MATCH_OPENING_` 前缀。字段校验集中在 [eval_config.py](../python/etazero/eval_config.py)。
 
-默认搜索预算为 100v：根的一次初始评估和后续完成的边访问合计 100。默认不复用树，因此每手新增 99 次模拟；单局面输出 `root_visits=100`、`simulations=99` 和总和为 99 的动作访问数组。若明确启用树复用，已有访问计入上限，不再额外新增 100 次模拟。此预算参考 KataGo `maxVisits` 包含复用访问的语义，训练 full cap 为 `search.full_search_visits`，同样计入复用量；也不同于 MuZero_V2 将根评估外的边模拟数命名为 visits 的计数方式。网络缓存命中、终局节点和开局评估使 NN 请求数不等于 visits。
+baseline 搜索预算为 500v，smoke_test 显式覆盖为 100v；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 eval 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；详细边界和严格并行发放与来源的差异见 [搜索预算](algorithms.md#puct-与搜索预算)。
+
+NN 单朝向默认随机 D4，cache 命中复用首次 canonical 输出，根多对称绕 cache。落子温度使用来源 Match profile 的半衰期调度；policy target 不乘落子温度。eval/match 的 `inference_precision=auto` 在本实现指定 CUDA 时使用 FP16、指定 CPU 时使用 FP32，结果记录实际精度，显式 FP32 保留。网络缓存、终局节点和根集成使 NN 请求数不等于 visits。
 
 评估和比赛均无训练根噪声，默认零落子温度、单搜索线程；并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用 EtaZero LibTorch 后端，不宣称复制 KataGo 的全部比赛功能或数值行为。
 
@@ -18,7 +20,7 @@ bash scripts/run.sh evaluate --config-dir configs/baseline --run-dir data/my_run
 bash scripts/run.sh match --config-dir configs/baseline --model /path/to/a/model.pt --model-b /path/to/b/model.pt --games 40 --output data/my_match
 ```
 
-每对模型局数为四的正倍数。双方各生成一半平衡开局，同一个开局交换模型执黑／执白下两局，棋盘颜色和 Renju 规则不变。平衡开局及 policy init 的默认参数取 MuZero_V2 的比赛配置，独立于训练开局参数；只接受成功且非终局的开局。无认输、无提前截断，按真实棋规结束。每局保存完整落子、胜者、时间与逐手根访问数。
+每对模型局数为四的正倍数。以A或B作为参考黑方的开局各占一半（任务 `generator` 表示参考黑方模型），另一个模型为参考白方。每次balance尝试随机选参考botB/botW评估两个根视角与全部候选；可选policy init每手按当前棋盘执色选参考模型。参数遵循固定KataGomo：Match平衡指数10，policy init默认关闭，开启时显式mean、温度缺省1。开局记录保存参考黑方及实际balance/policy模型索引（0黑/1白）。同一个已生成开局交换A/B执黑／执白下两局，棋盘颜色和Renju规则不变。这是EtaZero的成对换色协议，第二侧不重新生成开局；与KataGomo逐局独立初始化区分。只接受成功且非终局的开局。无认输、无提前截断，按真实棋规结束。每局保存完整落子、胜者、时间与逐手根访问数。
 
 开局和单局完成后分别原子落盘，重启只安排缺失的一侧或新开局。中断的半局重跑，同开局已完成的一侧保持不变。相同输出目录可以用 `--games` 增加成对开局，不能减少目标；模型、搜索条件、种子、二进制或配对身份变化时使用新输出目录。训练采用整轮提交，比赛采用逐开局／逐局提交，两者边界独立。
 
