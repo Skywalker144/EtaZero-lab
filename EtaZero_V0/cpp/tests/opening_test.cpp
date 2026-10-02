@@ -16,6 +16,14 @@ struct Constant : Evaluator {
         inputs.push_back(observation);return {std::vector<double>((observation.size()-GLOBAL_FEATURES)/INPUT_PLANES,0),wdl(v)};
     }
 };
+struct PolicyBiased : Evaluator {
+    double logit;
+    explicit PolicyBiased(double l):logit(l){}
+    Evaluation evaluate(const std::vector<float>& observation) override {
+        std::vector<double> logits((observation.size()-GLOBAL_FEATURES)/INPUT_PLANES,0);logits[0]=logit;
+        return {logits,wdl(0)};
+    }
+};
 struct Asymmetric : Evaluator {
     int calls=0,left=0,right=0;
     std::vector<float> root;
@@ -105,6 +113,67 @@ int main() {
             policy_terminal=policy.finished();
         }
         check(policy_terminal,"Policy initialization can finish a complete game without search rows");
+        // Independent Black/White models: a balance attempt uses exactly one,
+        // while pure-policy moves alternate models with actual player colors.
+        settings.probability=0;settings.policy_init_mean=100;
+        bool saw_both=false;
+        for(int seed=0;seed<10 && !saw_both;++seed) {
+            Game game(5,5,Rule::FREESTYLE);Constant black(0),white(0);std::mt19937_64 rng(seed);
+            auto prefix=initialize_opening(game,settings,black,white,rng);
+            check(prefix.policy_evaluators.size()==static_cast<size_t>(prefix.policy_moves),"Every policy move records its bot");
+            for(size_t i=0;i<prefix.policy_evaluators.size();++i)
+                check(prefix.policy_evaluators[i]==static_cast<int>(i%2),"Policy bot selected by actual color");
+            saw_both=!black.inputs.empty() && !white.inputs.empty();
+        }
+        check(saw_both,"Policy init calls both models");
+        settings.probability=1;settings.policy_init=false;settings.rejection_probability=0;
+        bool chose_black=false,chose_white=false;
+        for(int seed=0;seed<40;++seed) {
+            Game game(5,5,Rule::FREESTYLE);Constant black(0),white(0);std::mt19937_64 rng(seed);
+            auto prefix=initialize_opening(game,settings,black,white,rng);
+            check(prefix.balance_evaluators.size()==1,"Unrejected balance uses one bot choice");
+            int choice=prefix.balance_evaluators[0];chose_black|=choice==0;chose_white|=choice==1;
+            check((choice==0?white:black).inputs.empty(),"Counterfactual and all candidate values use selected bot");
+            check((choice==0?black:white).inputs.size()>=3,"Selected balance bot evaluates root and candidate");
+        }
+        check(chose_black && chose_white,"Balance randomly chooses both bots");
+        // Same seed, same Exp draw, subtract exactly two per existing move.
+        settings.probability=0;settings.policy_init=true;settings.policy_init_mean=12;
+        for(int seed=0;seed<40;++seed) {
+            Game empty(5,5,Rule::FREESTYLE),started(5,5,Rule::FREESTYLE);started.play(0);started.play(5);
+            Constant black(0),white(0);std::mt19937_64 ra(seed),rb(seed);
+            auto a=initialize_opening(empty,settings,black,white,ra);
+            auto b=initialize_opening(started,settings,black,white,rb);
+            if(!empty.finished() && !started.finished())
+                check(b.policy_moves==std::max(0,a.policy_moves-4),"Policy count compensates existing moves");
+        }
+        // Hand-computed T=2 odds for one log(4) action among 25 legal cells:
+        // sqrt(4)/(24+sqrt(4)), plus the source's .0002 uniform mixture.
+        settings.probability=0;settings.policy_init=true;settings.policy_init_mean=100;settings.policy_temperature=2;
+        PolicyBiased biased(std::log(4.0));int preferred=0,draws=0;
+        for(int seed=0;seed<3000;++seed) {
+            Game game(5,5,Rule::FREESTYLE);std::mt19937_64 rng(seed);
+            auto prefix=initialize_opening(game,settings,biased,rng);
+            if(prefix.actions.empty())continue;
+            ++draws;preferred+=prefix.actions.front()==0;
+        }
+        double expected_probability=(1-0.0002)*2/26+0.0002/25;
+        check(std::abs(preferred-draws*expected_probability)<5*std::sqrt(draws*expected_probability*(1-expected_probability)),
+              "Policy initialization samples temperature-transformed network probabilities");
+        // Select a seed whose source-sized rare coin fires. A logit gap 200
+        // makes an ordinary policy move deterministic; a different first move
+        // therefore demonstrates the uniform outlier branch.
+        settings.policy_temperature=1;PolicyBiased peaked(200);bool rare=false;
+        constexpr uint64_t mask=(1ULL<<53)-1;
+        for(int seed=0;seed<200000 && !rare;++seed) {
+            std::mt19937_64 probe(seed);double first=static_cast<double>(probe()&mask)/static_cast<double>(1ULL<<53);
+            double coin=static_cast<double>(probe()&mask)/static_cast<double>(1ULL<<53);
+            if(first<=1e-17 || -std::log(first)*100<1 || coin>=0.0002)continue;
+            Game game(5,5,Rule::FREESTYLE);std::mt19937_64 rng(seed);
+            auto prefix=initialize_opening(game,settings,peaked,rng);
+            rare=!prefix.actions.empty() && prefix.actions.front()!=0;
+        }
+        check(rare,"Policy initialization retains .0002 uniform outlier branch");
         Game position(5,7,Rule::STANDARD);auto input=position.observation();
         RandomBackend a(7,7),b(7,7),other(7,8);
         auto batch=a.evaluate({&input,&input});auto single=b.evaluate({&input})[0];
