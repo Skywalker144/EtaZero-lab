@@ -11,8 +11,9 @@ from etazero.storage import save_json, load_json, sha256
 from etazero.schema import CONTRACT_ID
 
 
-def test_eval_profiles_are_independent(tmp_path):
+def test_eval_profiles_are_independent(tmp_path,monkeypatch):
     shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     selected=tmp_path/'configs/smoke_test'
     before=load_config(selected)
     (selected/'eval.cfg.local').write_text('[evaluation]\nvisits = 71\n')
