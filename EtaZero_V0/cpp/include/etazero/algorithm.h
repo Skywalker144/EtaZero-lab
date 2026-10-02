@@ -24,6 +24,19 @@ public:
         if(symmetry!=0)throw std::runtime_error("State does not support D4 evaluation");
         return evaluate();
     }
+    virtual Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature) const {
+        (void)skip_cache; (void)policy_temperature;
+        return evaluate_symmetry(symmetry);
+    }
+    virtual Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature, bool randomize) const {
+        (void)randomize;return evaluate_symmetry(symmetry,skip_cache,policy_temperature);
+    }
+    virtual Evaluation evaluate_symmetry(int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) const {
+        (void)optimism;return evaluate_symmetry(symmetry,skip_cache,temperature,randomize);
+    }
+    // Exact situation identity includes all rule/history/input conditions that affect continuations.
+    // Unsupported state adapters must refuse graph search explicitly.
+    virtual std::string graph_key() const { throw std::runtime_error("State does not support graph search"); }
     virtual Transition move(int action) = 0;
 };
 class AlphaZeroState final : public SearchState {
@@ -44,29 +57,31 @@ public:
     Evaluation evaluate() const override { return evaluator_.evaluate(game_.observation()); }
     int symmetry_count() const override { return 8; }
     Evaluation evaluate_symmetry(int symmetry) const override {
-        if(symmetry<0 || symmetry>=8)throw std::runtime_error("Invalid D4 symmetry");
-        auto input=game_.observation(),transformed=input;
-        int n=game_.canvas(),area=game_.actions();
-        std::vector<int> mapping(area);
-        for(int a=0;a<area;++a) {
-            int x=a%n,y=a/n,tx=x,ty=y;
-            switch(symmetry) {
-                case 1:tx=y;ty=n-1-x;break;
-                case 2:tx=n-1-x;ty=n-1-y;break;
-                case 3:tx=n-1-y;ty=x;break;
-                case 4:tx=y;ty=x;break;
-                case 5:tx=n-1-x;break;
-                case 6:tx=n-1-y;ty=n-1-x;break;
-                case 7:ty=n-1-y;break;
-            }
-            mapping[a]=ty*n+tx;
-            for(int p=0;p<INPUT_PLANES;++p)transformed[p*area+mapping[a]]=input[p*area+a];
+        return evaluate_symmetry(symmetry,false,1);
+    }
+    Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature) const override {
+        return evaluator_.evaluate_symmetry(game_.observation(),symmetry,skip_cache,policy_temperature);
+    }
+    Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature, bool randomize) const override {
+        return evaluator_.evaluate_symmetry(game_.observation(),symmetry,skip_cache,policy_temperature,randomize);
+    }
+    Evaluation evaluate_symmetry(int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) const override {
+        return evaluator_.evaluate_symmetry(game_.observation(),symmetry,skip_cache,temperature,randomize,optimism);
+    }
+    std::string graph_key() const override {
+        // NOVC Gomoku only adds stones: repetitions/ko/pass/history-based adjudication do not occur.
+        // The terminal flag/result distinguish an ended path from a playable board of the same layout.
+        std::string key;
+        for(int n:{game_.size(),game_.canvas(),game_.player(),game_.turn(),int(game_.rule()),
+                   int(game_.finished()),game_.winner(),game_.reason()}) {
+            uint32_t bits=static_cast<uint32_t>(n);
+            for(int i=0;i<4;++i)key.push_back(static_cast<char>((bits>>(8*i))&255));
         }
-        auto result=evaluator_.evaluate(transformed);
-        if(result.logits.size()!=mapping.size())throw std::runtime_error("Invalid symmetry policy shape");
-        auto logits=result.logits;
-        for(int a=0;a<area;++a)result.logits[a]=logits[mapping[a]];
-        return result;
+        // Conditioning changes NN input at every depth and must split transpositions.
+        double d=game_.pda_doublings();
+        key.append(reinterpret_cast<const char*>(&d),sizeof(d));key.push_back(static_cast<char>(game_.pda_player()));
+        for(int8_t cell:game_.board().cells)key.push_back(static_cast<char>(cell));
+        return key;
     }
     Transition move(int action) override {
         int parent=game_.player();game_.play(action);

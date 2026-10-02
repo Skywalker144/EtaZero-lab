@@ -1,6 +1,7 @@
 #include "etazero/random_evaluator.h"
 #include "etazero/schema.h"
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 namespace etazero {
 namespace {
@@ -19,9 +20,20 @@ std::vector<Evaluation> RandomBackend::evaluate(const InferenceInputs& inputs) {
         if (observation->size() != static_cast<size_t>(INPUT_PLANES*actions_ + GLOBAL_FEATURES))
             throw std::runtime_error("Random observation shape mismatch");
         uint64_t key = seed_;
-        for (float value : *observation) {
-            if (value != -1 && value != 0 && value != 1) throw std::runtime_error("Invalid random binary observation");
+        const size_t spatial = INPUT_PLANES*actions_;
+        for (size_t i=0;i<spatial;++i) {
+            float value=(*observation)[i];
+            if (value != 0 && value != 1) throw std::runtime_error("Invalid random binary spatial observation at feature "+std::to_string(i));
             key = mix(key ^ static_cast<uint64_t>(static_cast<int>(value)+1));
+        }
+        // Global features include continuous, signed PDA conditioning. Hash the
+        // exact float bits so fractional advantages remain distinct and seeded
+        // outputs stay independent of batch/thread scheduling.
+        for (size_t i=spatial;i<observation->size();++i) {
+            float value=(*observation)[i];
+            if (!std::isfinite(value)) throw std::runtime_error("Nonfinite random global observation at feature "+std::to_string(i-spatial));
+            uint32_t bits;std::memcpy(&bits,&value,sizeof(bits));
+            key = mix(key ^ bits);
         }
         std::mt19937_64 random(key); std::normal_distribution<double> gaussian;
         Evaluation e; e.logits.resize(actions_);

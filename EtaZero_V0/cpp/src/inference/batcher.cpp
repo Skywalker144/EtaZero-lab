@@ -5,20 +5,67 @@
 #include <stdexcept>
 namespace etazero {
 namespace {
+std::vector<int> symmetry_mapping(size_t input_size,int symmetry) {
+    if(symmetry<0 || symmetry>=8 || input_size<GLOBAL_FEATURES)throw std::runtime_error("Invalid D4 request");
+    size_t area=(input_size-GLOBAL_FEATURES)/INPUT_PLANES;
+    int n=static_cast<int>(std::sqrt(area));
+    if(n*n!=static_cast<int>(area) || area*INPUT_PLANES+GLOBAL_FEATURES!=input_size)
+        throw std::runtime_error("Invalid D4 input shape");
+    std::vector<int> mapping(area);
+    for(int a=0;a<static_cast<int>(area);++a) {
+        int x=a%n,y=a/n,tx=x,ty=y;
+        switch(symmetry) {
+            case 1:tx=y;ty=n-1-x;break;
+            case 2:tx=n-1-x;ty=n-1-y;break;
+            case 3:tx=n-1-y;ty=x;break;
+            case 4:tx=y;ty=x;break;
+            case 5:tx=n-1-x;break;
+            case 6:tx=n-1-y;ty=n-1-x;break;
+            case 7:ty=n-1-y;break;
+        }
+        mapping[a]=ty*n+tx;
+    }
+    return mapping;
+}
+std::vector<float> transform_input(const std::vector<float>& obs,const std::vector<int>& mapping) {
+    auto transformed=obs;size_t area=mapping.size();
+    for(int p=0;p<INPUT_PLANES;++p)for(size_t a=0;a<area;++a)
+        transformed[p*area+mapping[a]]=obs[p*area+a];
+    return transformed;
+}
+void restore_output(Evaluation& output,const std::vector<int>& mapping) {
+    if(output.logits.size()!=mapping.size())throw std::runtime_error("Invalid symmetry policy shape");
+    auto logits=output.logits;
+    for(size_t a=0;a<mapping.size();++a)output.logits[a]=logits[mapping[a]];
+    if(output.has_auxiliary) {
+        if(output.optimistic_logits.size()!=mapping.size())throw std::runtime_error("Invalid optimistic symmetry shape");
+        auto optimistic=output.optimistic_logits;
+        for(size_t a=0;a<mapping.size();++a)output.optimistic_logits[a]=optimistic[mapping[a]];
+    }
+}
 std::vector<std::unique_ptr<Backend>> single(std::unique_ptr<Backend> backend) {
     std::vector<std::unique_ptr<Backend>> result; result.push_back(std::move(backend)); return result;
 }
+}
+Evaluation Evaluator::evaluate_symmetry(const std::vector<float>& obs,int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) {
+    (void)skip_cache;(void)temperature;(void)randomize;(void)optimism; // Generic evaluators use the caller's seeded fallback orientation.
+    auto mapping=symmetry_mapping(obs.size(),symmetry);
+    auto transformed=transform_input(obs,mapping);auto output=evaluate(transformed);
+    restore_output(output,mapping);return output;
 }
 BatchEvaluator::BatchEvaluator(std::unique_ptr<Backend> backend, std::string model, int canvas,
                                size_t max_batch, size_t capacity, int wait_us)
     : BatchEvaluator(single(std::move(backend)), std::move(model), canvas, max_batch, capacity, wait_us, 0) {}
 BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, std::string model, int canvas,
-                               size_t max_batch, size_t capacity, int wait_us, size_t cache_entries)
-    : backends_(std::move(backends)), cache_(cache_entries), model_(std::move(model)), max_batch_(max_batch),
+                               size_t max_batch, size_t capacity, int wait_us, size_t cache_entries,bool randomize,int symmetry,uint64_t seed)
+    : backends_(std::move(backends)), cache_(cache_entries), model_(std::move(model)),
+      randomize_(randomize),symmetry_(symmetry),random_(seed),max_batch_(max_batch),
       capacity_(capacity), input_size_(INPUT_PLANES * canvas * canvas + GLOBAL_FEATURES), wait_us_(wait_us) {
-    if (backends_.empty() || model_.empty() || !max_batch || !capacity || wait_us < 0)
+    if (backends_.empty() || model_.empty() || !max_batch || !capacity || wait_us < 0 || symmetry<0 || symmetry>=8)
         throw std::runtime_error("Invalid inference service configuration");
     for (auto& b : backends_) if (!b) throw std::runtime_error("Null inference backend");
+    for(const auto& backend:backends_)if(backend->supports_auxiliary()!=backends_[0]->supports_auxiliary())
+        throw std::runtime_error("Inference servers disagree on auxiliary capability");
     rows_by_server.resize(backends_.size(),0);
     try {
         for (size_t i=0; i<backends_.size(); ++i) servers_.emplace_back(&BatchEvaluator::serve, this, i);
@@ -44,13 +91,22 @@ void BatchEvaluator::reset_stats() {
     std::fill(rows_by_server.begin(),rows_by_server.end(),0);
 }
 Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
+    return evaluate_symmetry(obs,symmetry_,false,1,randomize_);
+}
+Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) {
     if (obs.size() != input_size_) throw std::runtime_error("Inference input shape mismatch");
+    if(!std::isfinite(temperature) || temperature<=0)throw std::runtime_error("Invalid NN policy temperature");
+    if(symmetry<0 || symmetry>=8)throw std::runtime_error("Invalid D4 symmetry");
+    if(!std::isfinite(optimism) || optimism<0 || optimism>1)throw std::runtime_error("Invalid policy optimism");
+    // Unsupported backends have no optimistic output; match the source's absent-head condition.
+    if(!backends_[0]->supports_auxiliary())optimism=0;
     // evaluate() is synchronous: the caller owns its input until completion.
     // One thread-local request replaces per-query shared_ptr/promise allocations.
     thread_local Request local;
     Request* request=&local;
     ++submitted;
-    if (!cache_.empty()) {
+    request->use_cache=!skip_cache && !cache_.empty();request->symmetry=symmetry;
+    if (request->use_cache) {
         // Pack binary spatial planes and append exact global float bytes. The
         // evaluator is bound to one model, precision, and canvas.
         const size_t spatial = obs.size() - GLOBAL_FEATURES;
@@ -60,6 +116,10 @@ Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
             if (obs[i]) request->cache_key[i/8] |= static_cast<char>(1 << (7-i%8));
         }
         request->cache_key.append(reinterpret_cast<const char*>(obs.data()+spatial), GLOBAL_FEATURES*sizeof(float));
+        // Orientation is excluded, as in KataGo's NNInputParams hash. NN temperature
+        // is included even though this adapter stores canonical raw logits.
+        request->cache_key.append(reinterpret_cast<const char*>(&temperature),sizeof(temperature));
+        request->cache_key.append(reinterpret_cast<const char*>(&optimism),sizeof(optimism));
         uint64_t hash=14695981039346656037ULL;
         for (unsigned char c:request->cache_key) { hash^=c;hash*=1099511628211ULL; }
         // Avalanche before indexing: packed sparse planes otherwise leave poor
@@ -80,13 +140,21 @@ Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
             ++cache_hits;return *found;
         }
     }
+    if(randomize) {
+        std::lock_guard<std::mutex> lock(random_mutex_);
+        symmetry=std::uniform_int_distribution<int>(0,7)(random_);
+    }
+    request->symmetry=symmetry;
+    auto mapping=symmetry_mapping(obs.size(),symmetry);
+    auto transformed=transform_input(obs,mapping);
     static std::atomic<uint64_t> next{0};
-    request->id=next.fetch_add(1);request->owner=this;request->observation=&obs;
+    request->id=next.fetch_add(1);request->owner=this;request->observation=&transformed;
     request->submitted = std::chrono::steady_clock::now();
     {std::lock_guard<std::mutex> lock(request->mutex);request->done=false;request->error=nullptr;}
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        changed_.wait(lock, [&] { return queue_.size() < capacity_ || closing_ || failure_; });
+        // KataGo forcePush accepts pending queries beyond the nominal queue
+        // capacity. Only the result wait blocks the caller, not queue admission.
         if (failure_) std::rethrow_exception(failure_);
         if (closing_) throw std::runtime_error("Inference service is closing");
         queue_.push_back(request);
@@ -147,17 +215,24 @@ void BatchEvaluator::serve(size_t index) {
                 if (out.logits.size() * INPUT_PLANES + GLOBAL_FEATURES != input_size_ || !std::isfinite(out.value()) || std::abs(out.value()) > 1.00001)
                     throw std::runtime_error("Invalid inference output value/shape");
                 for (double p : out.logits) if (!std::isfinite(p)) throw std::runtime_error("Nonfinite policy logits");
+                if(out.has_auxiliary) {
+                    if(out.optimistic_logits.size()!=out.logits.size() || !std::isfinite(out.shortterm_value_stdev) || out.shortterm_value_stdev<0)
+                        throw std::runtime_error("Invalid auxiliary inference output");
+                    for(double p:out.optimistic_logits)if(!std::isfinite(p))throw std::runtime_error("Nonfinite optimistic logits");
+                }
             }
+            for(const auto& output:outputs)if(output.has_auxiliary!=backends_[index]->supports_auxiliary())
+                throw std::runtime_error("Backend auxiliary output violates capability contract");
+            for(size_t i=0;i<outputs.size();++i)
+                restore_output(outputs[i],symmetry_mapping(input_size_,batch[i]->symmetry));
             requests.fetch_add(batch.size()); batches.fetch_add(1);
             rows_by_server[index]+=batch.size();
             uint64_t previous=max_observed_batch.load();
             while (previous<batch.size() && !max_observed_batch.compare_exchange_weak(previous,batch.size())) {}
-            std::vector<std::shared_ptr<const Evaluation>> cached;
-            if (!cache_.empty()) for (auto& out:outputs) cached.push_back(std::make_shared<const Evaluation>(out));
             for (size_t i = 0; i < batch.size(); ++i) {
-                if (!cache_.empty()) {
+                if (batch[i]->use_cache) {
                     auto& r=*batch[i];
-                    CacheEntry replacement{r.cache_key,std::move(cached[i])};
+                    CacheEntry replacement{r.cache_key,std::make_shared<const Evaluation>(outputs[i])};
                     {
                         std::lock_guard<std::mutex> lock(cache_locks_[r.cache_slot%cache_locks_.size()]);
                         std::swap(cache_[r.cache_slot],replacement);

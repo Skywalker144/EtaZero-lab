@@ -19,6 +19,7 @@ private:
     int canvas_;
     torch::Tensor host_, global_host_;
 public:
+    bool supports_auxiliary() const override { return true; }
     int max_batch_;
     TorchBackend(const std::string& path, const std::string& device, int canvas, int max_batch,
                  const std::string& precision = "float32", std::shared_ptr<LoadedModel> shared_model = nullptr);

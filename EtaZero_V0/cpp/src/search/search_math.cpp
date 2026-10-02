@@ -65,24 +65,57 @@ double value_weight_cdf(double z) {
     if(d>=1999)return 1;
     int index=int(d);return table[index]+(d-index)*(table[index+1]-table[index]);
 }
-ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& s,bool noisy_root) {
-    std::vector<double> adjusted(children.size());double total=0,maximum=0,simple_value=0;
+double mixed_policy_logit(double ordinary,double optimistic,double optimism) {
+    // The fixed source CUDA/ROCm adapter mixes its float output buffers on the host.
+    float p=static_cast<float>(ordinary),pOpt=static_cast<float>(optimistic),o=static_cast<float>(optimism);
+    return p+(pOpt-p)*o;
+}
+double uncertainty_weight(double stdev,bool supported,const SearchSettings& s) {
+    if(!s.use_uncertainty || !supported)return 1;
+    if(!std::isfinite(stdev) || stdev<0)throw std::runtime_error("Invalid shortterm error standard deviation");
+    double powered=s.uncertainty_exponent==1?stdev:s.uncertainty_exponent==0.5?std::sqrt(stdev):std::pow(stdev,s.uncertainty_exponent);
+    double weight=s.uncertainty_coeff/(powered+s.uncertainty_coeff/s.uncertainty_max_weight);
+    if(!std::isfinite(weight) || weight<=0)throw std::runtime_error("Nonpositive uncertainty sample weight");
+    return weight;
+}
+std::vector<double> noise_pruned_weights(const std::vector<RootChildStats>& children,const SearchSettings& s) {
+    std::vector<double> weights;double total=0;
+    for(const auto& c:children){weights.push_back(c.weight);total+=c.weight;}
+    if(!s.use_noise_pruning || children.size()<=1 || total<=0.00001)return weights;
+    double utility_sum=0,weight_sum=0,policy_sum=0;
+    for(size_t i=0;i<children.size();++i) {
+        const auto& c=children[i];if(c.weight<=0)continue;double utility=c.value_sum/c.weight,policy=std::max(1e-30,c.prior);
+        double next=weights[i];
+        if(weight_sum>0 && policy_sum>0) {
+            double gap=utility_sum/weight_sum-utility;
+            if(gap>0) {
+                double lenient=2*weight_sum*policy/policy_sum;
+                if(next>lenient)next-=std::min((next-lenient)*(1-std::exp(-gap/s.noise_prune_utility_scale)),s.noise_pruning_cap);
+            }
+        }
+        weights[i]=next;utility_sum+=utility*next;weight_sum+=next;policy_sum+=policy;
+    }
+    return weights;
+}
+ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& s,bool noisy_root,double initial_weight) {
+    auto adjusted=noise_pruned_weights(children,s);double total=std::accumulate(adjusted.begin(),adjusted.end(),0.0),maximum=0,simple_value=0;
     int64_t visits=1;
     for(size_t i=0;i<children.size();++i) {
-        const auto& c=children[i];visits+=c.visits;
-        adjusted[i]=c.weight;total+=c.weight;maximum=std::max(maximum,c.weight);simple_value+=c.value_sum;
+        const auto& c=children[i];visits+=c.visits;maximum=std::max(maximum,adjusted[i]);
+        if(c.weight>0)simple_value+=c.value_sum/c.weight*adjusted[i];
     }
-    double subtract=noisy_root?std::min(s.chosen_move_subtract,maximum/64):0;
-    double prune=noisy_root?std::min(s.chosen_move_prune,maximum/64):0;
+    // Noise pruning takes precedence over the root-only chosen prune/subtract backup branch.
+    double subtract=noisy_root && !s.use_noise_pruning?std::min(s.chosen_move_subtract,maximum/64):0;
+    double prune=noisy_root && !s.use_noise_pruning?std::min(s.chosen_move_prune,maximum/64):0;
     double adjusted_total=0;
     if(total>0) {
         simple_value/=total;
         for(size_t i=0;i<children.size();++i) {
             const auto& c=children[i];if(c.weight<=0 || c.visits<=0)continue;
-            if(c.weight<prune)adjusted[i]=0;
-            else adjusted[i]=std::max(0.0,c.weight-subtract);
+            double stdev=std::sqrt(1e-8+1/(1.5*std::sqrt(adjusted[i])));
+            if(adjusted[i]<prune)adjusted[i]=0;
+            else adjusted[i]=std::max(0.0,adjusted[i]-subtract);
             if(s.value_weight_exponent>0) {
-                double stdev=std::sqrt(1e-8+1/(1.5*std::sqrt(c.weight)));
                 double z=(c.value_sum/c.weight-simple_value)/stdev;
                 adjusted[i]*=std::pow(value_weight_cdf(z)+0.0001,s.value_weight_exponent);
             }
@@ -90,14 +123,16 @@ ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>
         }
         if(adjusted_total<=0)throw std::runtime_error("Value weighting removed every child");
     }
-    double value=initial[0]-initial[2],value_sq=value*value,draw=initial[1],weight_sq=1;
+    double own=initial[0]-initial[2],value=initial_weight*own,value_sq=initial_weight*own*own;
+    double draw=initial_weight*initial[1],weight_sq=initial_weight*initial_weight;
     for(size_t i=0;i<children.size();++i) {
         const auto& c=children[i];if(c.weight<=0)continue;
         double desired=adjusted[i]*total/adjusted_total,scale=desired/c.weight;
         value+=scale*c.value_sum;value_sq+=scale*c.value_sq_sum;draw+=scale*c.draw_sum;
         weight_sq+=scale*scale*c.weight_sq;
     }
-    return {visits,value/(1+total),value_sq/(1+total),draw/(1+total),1+total,weight_sq};
+    double weight=initial_weight+total;
+    return {visits,value/weight,value_sq/weight,draw/weight,weight,weight_sq};
 }
 double explore_scaling(double total,const ValueStats& parent,const SearchSettings& s) {
     double stdev=s.c_puct_stdev_prior;

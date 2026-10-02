@@ -9,8 +9,9 @@ TorchBackend::TorchBackend(const std::string& path, const std::string& device, i
                            std::shared_ptr<LoadedModel> shared_model)
     : device_(device), path_(path), precision_(precision), shared_model_(shared_model?std::move(shared_model):std::make_shared<LoadedModel>()),
       canvas_(canvas), max_batch_(max_batch) {
-    if (precision!="float32" && precision!="float16") throw std::runtime_error("Invalid inference precision");
-    if (precision=="float16" && !device_.is_cuda()) throw std::runtime_error("FP16 inference requires CUDA");
+    if(precision_=="auto")precision_=device_.is_cuda()?"float16":"float32";
+    if (precision_!="float32" && precision_!="float16") throw std::runtime_error("Invalid inference precision");
+    if (precision_=="float16" && !device_.is_cuda()) throw std::runtime_error("FP16 inference requires CUDA");
 }
 void TorchBackend::initialize() {
     // Like KataGo's compute handle, each server owns its device binding, stream and buffers.
@@ -59,17 +60,22 @@ std::vector<Evaluation> TorchBackend::evaluate(const InferenceInputs& inputs) {
     }
     auto input = host_.narrow(0, 0, n).to(device_, true);
     auto out = model_.forward({input, global_host_.narrow(0, 0, n).to(device_, true)}).toTuple();
-    if (out->elements().size() != 2) throw std::runtime_error("Expected policy and value outputs");
+    if (out->elements().size() != 4) throw std::runtime_error("Expected ordinary/WDL/optimistic/error outputs");
     auto logits = out->elements()[0].toTensor(), values = out->elements()[1].toTensor();
+    auto optimistic=out->elements()[2].toTensor(), error=out->elements()[3].toTensor();
+    if(optimistic.sizes()!=logits.sizes() || error.dim()!=1 || error.size(0)!=n)
+        throw std::runtime_error("Native auxiliary output shape mismatch");
     if (precision_=="float16" && (logits.scalar_type()!=torch::kFloat16 || values.scalar_type()!=torch::kFloat16))
         throw std::runtime_error("FP16 inference did not execute half-precision output heads");
     if (logits.dim() != 2 || logits.size(0) != n || logits.size(1) != actions || values.dim() != 2 || values.size(0) != n || values.size(1) != 3)
         throw std::runtime_error("Native model output shape mismatch");
-    auto cpu = torch::cat({logits.to(torch::kFloat32), torch::softmax(values.to(torch::kFloat32),1)}, 1).to(torch::kCPU).to(torch::kFloat32).contiguous();
+    auto cpu = torch::cat({logits.to(torch::kFloat32), torch::softmax(values.to(torch::kFloat32),1), optimistic.to(torch::kFloat32), error.to(torch::kFloat32).unsqueeze(1)}, 1).to(torch::kCPU).to(torch::kFloat32).contiguous();
     std::vector<Evaluation> result(n);
     for (int64_t i = 0; i < n; ++i) {
-        auto row = cpu.data_ptr<float>() + i * (actions+3);
+        auto row = cpu.data_ptr<float>() + i * (2*actions+4);
         result[i].logits.assign(row, row+actions); result[i].wdl = {row[actions],row[actions+1],row[actions+2]};
+        result[i].optimistic_logits.assign(row+actions+3,row+2*actions+3);
+        result[i].shortterm_value_stdev=row[2*actions+3];result[i].has_auxiliary=true;
     }
     return result;
 }

@@ -1,14 +1,24 @@
 #pragma once
 #include "rules.h"
+#include <cmath>
 namespace etazero {
 class Game {
     Board board_;
     int canvas_, player_ = 1, turn_ = 0, winner_ = 0, reason_ = 0;
     Rule rule_;
     bool finished_ = false;
+    double pda_doublings_ = 0; int pda_player_ = 0;
 public:
     explicit Game(int size, int canvas, Rule rule) : board_(size), canvas_(canvas), rule_(rule) {
         if (canvas < size || canvas > 25) throw std::runtime_error("Invalid canvas size");
+    }
+    double pda_doublings() const { return pda_doublings_; }
+    int pda_player() const { return pda_player_; }
+    void set_pda(double doublings,int player) {
+        if(!std::isfinite(doublings) || doublings<0 || doublings>std::log2(100.0) ||
+           (player!=1 && player!=-1 && player!=0) || (doublings!=0 && player==0))
+            throw std::runtime_error("Invalid PDA conditioning");
+        pda_doublings_=doublings; pda_player_=doublings==0?0:player;
     }
     int size() const { return board_.size; }
     int canvas() const { return canvas_; }
@@ -44,6 +54,9 @@ public:
         out[spatial + 1] = rule_ == Rule::RENJU;
         out[spatial + 2] = rule_ == Rule::RENJU ? -perspective : 0;
         out[spatial + 3] = enabled;
+        if(pda_doublings_!=0) {
+            out[spatial+4]=1;out[spatial+5]=static_cast<float>(0.5*pda_doublings_*(perspective==pda_player_?1:-1));
+        }
         return out;
     }
     double terminal_value() const {
