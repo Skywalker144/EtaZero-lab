@@ -41,7 +41,19 @@
       "python/export_model_pytorch.py": "eaaaf92d0f6e2f8b7486036822dd5fc1ee8add4200cdad27cba1e8bcfe604d9e",
       "python/katago/train/modelconfigs.py": "4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e",
       "docs/NetworkArchitectures.md": "c3198aaeb5762b69a59eef7192d4c66d6c2d83e800f569d5d831226afe18d9e4",
-      "docs/KataGoMethods.md": "95a6039d76fcc0bbd629e65c3248fa88d6fcf3216854c8038ab428ecd91c84d2"
+      "docs/KataGoMethods.md": "95a6039d76fcc0bbd629e65c3248fa88d6fcf3216854c8038ab428ecd91c84d2",
+      "python/katago/train/metrics_logging.py": "e4a4bfe209f4b91a92dc183d69e7b37a74ed5c03e4fd3d913b12e7268fe10755",
+      "cpp/program/setup.cpp": "363dd9470f10f24998f4114dbeabd93835ef4a75d44b4cb761991036b8b31f4b",
+      "cpp/configs/training/selfplay8mainb18.cfg": "fe83edefccf869826e2f0019c259a707421824c3f76fd8cab4e998dc342124c0",
+      "cpp/neuralnet/nninputs.cpp": "643f6753453996d678ce10550d32d4a39d7a4cf54e3b3fd1074d892c88c077ec",
+      "cpp/neuralnet/nninputs.h": "53a18a9e653bb27b7ed7548b0908dd1f5fe3c83375f94cda9388db08eac0c607",
+      "cpp/game/graphhash.cpp": "99e78ffdce4c429eea98b90844062891f2c15104a32ee9d6b7d3fefd8a886410",
+      "cpp/game/graphhash.h": "c91ca68075fec3dd3e6b1425d303b31cc9c2c31cee33e9efab64adb122b5889e",
+      "cpp/neuralnet/cudaandrocmbackend.inc": "4e170b0c014693d0c99962df3a563460f8019a458c23004e653aa1c5932d359e",
+      "python/katago/train/fused_swiglu.py": "0ff1ca85fd6dcdc8871b4607a11c6c79ed94b28c5757a768a97d253b01a8b0d9",
+      "python/katago/utils/training_data_generator.py": "e1b9535b94e7aba76bc00d8802a03b30370692f735cb92cfb66672dcacf84b6f",
+      "python/selfplay/shuffle.sh": "755ebf8f7368d5edc34f1387846407fb2767d571a508c883f3e0b4f93e2580bf",
+      "python/selfplay/synchronous_loop.sh": "f9ea27696a8fefb13773547931d87c46bab29dab8bf6b23c2d96161d284a01e5"
     }
   },
   "MuZero_V2": {
@@ -84,8 +96,20 @@
       "cpp/program/playutils.cpp": "f87f975c8564f84f98da4005e24a1182fe94982d6babced078ce30ebba09b0c6",
       "LICENSE": "f81d8b1bf34bdc67dee8690266b2f2559e48f16aabb87db5e408046af0d06dbc",
       "python/train.py": "61d963f38d9deed1a2db15d1687979aedffd95c962ce386498f843f3a669415a",
-      "python/train.sh": "69b861e3b0d019a53300dbd4d9eb3b07a1976fe9b69ef183874dd48ed2bf7b5d"
-    }
+      "python/train.sh": "69b861e3b0d019a53300dbd4d9eb3b07a1976fe9b69ef183874dd48ed2bf7b5d",
+      "cpp/forbiddenPoint/ForbiddenPointFinder.cpp": "a7e4b9d8433358f0196882ac403ff930b74edacdb0ae3374c738810d048ad9a7",
+      "cpp/forbiddenPoint/ForbiddenPointFinder.h": "342dbd3119f51ce2893b3a4975b37fe720bdfb6a3d151b0558cd18fb1c5a9329",
+      "cpp/game/gamelogic.cpp": "80a4a7d3a67ff93ecbcb7eb1b06fa53676e452e402ca06d66d510a371c922baf",
+      "cpp/game/boardhistory.cpp": "2bc8af7c978cec320e18a2024f195656a49aeecfa11c659d49fce224b5d1e337",
+      "cpp/game/rules.h": "c7e6376d67dbc7408744ab9dcefd1e9e19c3850982acf9883ec65392f8626ddd",
+      "cpp/neuralnet/nninputs.cpp": "9c497f808c07103b21c4a2229bf63231d043bdf17c6c22298014d9e4387a32a5",
+      "cpp/dataio/trainingwrite.cpp": "43b24a942a30b7852d9074e15bda68d0e1f1811495bcc07567c569ad117561f7",
+      "cpp/program/playsettings.cpp": "c9f17dc6a2ae031bbfdea624cbf05d8c1014929c909d20f255d8e08b521899b1",
+      "cpp/core/config.h": "92d2c76e28432de8399f5bf93b57f8d921c3225a22524f5fdf9bfc332a161a7e",
+      "scripts/selfplay.cfg": "063d3ddf5ef6925afdb6607ec71ea46fb80806451f8f4caefe53c70111923cb0",
+      "cpp/core/global.h": "41b4d77062640ae96b1df37bf6315f6c43e2b9c1d4ab51152e002de0e95d9e86"
+    },
+    "commit": "df152116e3787c75c6a3de099d261ca092b7dfc1"
   },
   "SkyZero_V8.1": {
     "root": "/home/sky/RL/SkyZero/SkyZero_V8.1",
