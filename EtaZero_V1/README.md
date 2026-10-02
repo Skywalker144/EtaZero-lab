@@ -1,10 +1,10 @@
 # EtaZero V1
 
-EtaZero 面向 Freestyle、Standard、Renju 五子棋。当前实现 WDL AlphaZero + PUCT 图搜索（局面共享、边访问追赶、FPU、Shaped Dirichlet Noise、Playout Cap Randomization、Reduce Visits、Forced Playout / Policy Target Pruning、训练与评估 LCB、Policy / Value Surprise Weighting）的完整逐轮训练链路：多局自对弈、共享多服务 GPU 批量推理与 NN 缓存、观测 bit packing 的完整对局与采样搜索数组 NPZ、压缩视图缓存与 multi-wave 窗口 shuffle、固定训练量与可选本地分段、checkpoint、模型校验发布与整轮恢复（启动前核验已提交权重与checkpoint）。冷启动使用 random evaluator；网络阶段支持 KataGomo 平衡开局与独立 policy init。自对弈支持非对称 PDA 预算与条件输入、独立 side 分支及递归；可显式启用 cheap-position reanalysis 和 direct value surprise。并行与主要数据管线参考 KataGo，算法语义见 [算法说明](docs/algorithms.md)。
+EtaZero 面向 Freestyle、Standard、Renju 五子棋。当前实现 WDL AlphaZero + PUCT 图搜索（局面共享、边访问追赶、FPU、Shaped Dirichlet Noise、Playout Cap Randomization、Reduce Visits、Forced Playout / Policy Target Pruning、训练与评估 LCB、Policy / Value Surprise Weighting）的完整逐轮训练链路：多局自对弈、共享多服务 GPU 批量推理与 NN 缓存、观测 bit packing 的完整对局与采样搜索数组 NPZ、压缩视图缓存与 multi-wave 窗口 shuffle、固定训练量与可选本地分段、checkpoint、模型导出发布与整轮恢复（启动前核验已提交权重与checkpoint）。冷启动使用 random evaluator；网络阶段支持 KataGomo 平衡开局与独立 policy init。自对弈支持非对称 PDA 预算与条件输入、独立 side 分支及递归；可显式启用 cheap-position reanalysis 和 direct value surprise。并行与主要数据管线参考 KataGo，算法语义见 [算法说明](docs/algorithms.md)。
 
 推理可明确选择 FP32 / FP16，导出时在推理设备上预计算归一化逆标准差并保留原运算顺序；搜索采用分级 child 统计存储、复用线程和并行图节点回收。训练支持 batch 级 D4 增广、SGD / AdamW、参数分组与自适应衰减、样本计数 warmup、Lookahead、SWA、FP32 / AMP、网络与损失联合编译、CUDA fused AdamW、后台 batch 准备和独立 stream 上传。推理后端当前是 LibTorch；KataGo 专用原生算子后端尚未移植，不宣称性能完全对齐。
 
-MuZero 和 Gumbel 属于后续阶段，选择它们会在启动 worker 前报错。当前提供单卡 learner、常驻 selfplay worker 和 shuffle 进程池、增量数据索引与可重建的派生数据回收；轮次仍依次执行各阶段。多卡 DDP、跨机器调度和异步 learner 不属于当前能力。
+MuZero 已接通独立 NBT 网络、完整 heads、latent 搜索和展开训练闭环，使用继承 baseline 的 [configs/muzero](configs/muzero/)；[configs/raw_muzero](configs/raw_muzero/) 保留 NBT/WDL 和对称增强，关闭 KataGo 搜索、采样、辅助损失和优化器增强，详见 [MuZero](docs/muzero.md)。Gumbel 组合仍在启动 worker 前明确报错。当前提供单卡 learner、常驻 selfplay worker 和 shuffle 进程池、增量数据索引与可重建的派生数据回收；轮次仍依次执行各阶段。多卡 DDP、跨机器调度和异步 learner 不属于当前能力。
 
 ## 构建与小规模验证
 
@@ -24,7 +24,7 @@ CONFIG_DIR=configs/baseline bash scripts/run.sh
 
 配置中的相对 `run.run_dir` 以本版本目录为基准，baseline、minimal_test、smoke_test 分别保存到 `data/baseline/`、`data/minimal_test/`、`data/smoke_test/`，包含自对弈数据、checkpoint、模型、日志与运行证据。`--run-dir` 可指定其他目录，相对路径以调用时的工作目录为基准。
 
-iteration 0 用 random evaluator 完成 `selfplay.bootstrap_games` 局，只测量并保存实际采样行数／局。iteration 1 继续使用随机评估，补足 `replay.min_rows` 后执行首轮训练与模型发布，并以此时实际累计有效行数固定 replay 记账起点。iteration 2 起，一次 `iteration` 是完整的自对弈 → shuffle → 训练 → 模型校验与发布，自对弈使用本次迭代开始时的已发布模型，按固定训练量和 replay ratio 规划产样；shuffle 从历史数据窗口生成训练快照；learner 消费配置的 `training.train_steps` 个 batch；新模型校验发布后，下一次迭代使用它生成数据。各阶段顺序执行，阶段内部并行。
+iteration 0 用 random evaluator 完成 `selfplay.bootstrap_games` 局，只测量并保存实际采样行数／局。iteration 1 继续使用随机评估，补足 `replay.min_rows` 后执行首轮训练与模型发布，并以此时实际累计有效行数固定 replay 记账起点。iteration 2 起，一次 `iteration` 是完整的自对弈 → shuffle → 训练 → 模型导出与发布，自对弈使用本次迭代开始时的已发布模型，按固定训练量和 replay ratio 规划产样；shuffle 从历史数据窗口生成训练快照；learner 消费配置的 `training.train_steps` 个 batch；新模型导出发布后，下一次迭代使用它生成数据。各阶段顺序执行，阶段内部并行。
 
 `[replay]` 使用 KataGo 的 power-law 窗口、random累计封顶、实际文件mtime近期排序和组内随机采样；支持 `taper_scale`、`add_to_data_rows`、`max_rows` 三项来源扩展。`keep_target_rows = all` 保留完整窗口。reader 每文件只消费完整batch并丢弃尾部；默认允许带间隔的文件重排重复消费，`training.no_repeat_files = true` 耗尽明确停止。默认启用验证（`skip_validation = false`），按原始文件basename的MD5留出1%，每轮训练结束用raw模型、随机D4验证，train/val跨快照不串用。`training.replay_ratio` 单独控制新增产样预算，配置和资源语义见 [窗口与 shuffle](docs/implementation.md#窗口与-shuffle)。
 
@@ -60,7 +60,9 @@ PDA 的普通局抽样及 side 分支概率见 [selfplay.cfg](configs/baseline/s
 
 ## 训练图与自动实验
 
-`training.png` 使用深色三行两列布局，顶部显示黑白胜／和棋和包含开局的局长，中部保留固定分组的策略 loss 与价值 loss，底部显示裁剪前梯度范数和 NN 缓存命中率。策略组包含普通／对手、soft 和 optimistic policy，价值组包含主 value、三个 TD、短期价值误差及启用时的 Q；两组图例在面板内分两列显示。缓存命中率为该轮网络推理的 cache hits／submitted requests，随机冷启动不伪造零值。总 loss 和有效行数／局保留在日志中，不单独占用概览面板。累计有效行数横轴采用 `1.2e5` 形式的紧凑科学计数。loss 与梯度是该轮已提交更新的原始算术均值，无平滑；bootstrap 编号为 0，不含训练指标。恢复后绘图按 checkpoint 提交链去重，只展示整轮已提交更新。
+`training.png` 在 AlphaZero 下使用深色三行两列布局，顶部显示黑白胜／和棋和包含开局的局长，中部保留固定分组的策略 loss 与价值 loss，底部显示裁剪前梯度范数和 NN 缓存命中率。策略组包含普通／对手、soft 和 optimistic policy，价值组包含主 value、三个 TD、短期价值误差及启用时的 Q；两组图例在面板内分两列显示。缓存命中率为该轮网络推理的 cache hits／submitted requests，随机冷启动不伪造零值。总 loss 和有效行数／局保留在日志中，不单独占用概览面板。累计有效行数横轴采用 `1.2e5` 形式的紧凑科学计数。loss 与梯度是该轮已提交更新的原始算术均值，无平滑；bootstrap 编号为 0，不含训练指标。恢复后绘图按 checkpoint 提交链去重，只展示整轮已提交更新。
+
+MuZero 的 `training.png` 扩展为四行两列，增加 **Loss by unroll step**（最新轮次与已测轮次均值）和 **Gradient norms by module**（representation、dynamics、prediction）。逐步 loss 保留前向权重，各步之和等于总 loss；模块梯度在 AMP 反缩放后、裁剪前记录，并除以 batch size。仅新记录这些指标的训练更新可绘制，旧日志缺测不填零。详细口径见 [MuZero 诊断图](docs/muzero.md#训练诊断图)。
 
 `loss.png` 以四列面板逐项展示总 loss 与每个实际启用的 loss 分量，蓝色实线为该轮训练均值，红色虚线为轮末 raw 模型的验证均值；每项独立纵轴，正值使用对数刻度。无验证或验证无完整 batch 时保留缺测，不填零；恢复重试前的验证记录不进入图表。训练是轮内均值，验证是轮末 eval/no_grad，二者时点和数据不同，曲线差距不直接等同于过拟合。阶段耗时、吞吐、组批、排队和缓存命中另存 `logs/performance.png`。
 
@@ -82,7 +84,7 @@ CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iter
 # 默认评估已发布模型，动作使用实际棋盘上的零起始行优先编号。
 bash scripts/run.sh evaluate --config-dir configs/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
 
-# model-b 指向另一份已校验发布的 model.pt，比赛生成成对平衡开局并交换模型执色。
+# model-b 指向另一份已发布的 model.pt，比赛生成成对平衡开局并交换模型执色。
 bash scripts/run.sh match --config-dir configs/smoke_test --run-dir data/my_check --model-b /absolute/path/to/models/model_id/model.pt --size 5 --rule freestyle --games 4 --output data/my_check_match
 
 bash scripts/run.sh plot --run-dir data/my_check
@@ -128,6 +130,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_experiment_
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#第一轮-alphazero) |
 | 查看未来算法的组合约束和接入边界 | [算法组合](docs/algorithms.md#算法与搜索组合)、[后续接入](docs/algorithms.md#后续算法接入) |
+| 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
 | 查看对齐profile、网络版本、五子棋监督映射和57项验收范围 | [对齐目标](../EtaZero.md#alignment-targets)、[实施计划](../plan.md) |
 | 核对工程执行路径、样本消费与并发边界的静态差异 | [E01—E26 工程审查](../EtaZero.md#engineering-audit)、[分批实施与验收](../plan.md) |
 | 核对代码来源和许可证 | [参考来源](THIRD_PARTY.md)、[来源校验值](reference_sources.json) |
