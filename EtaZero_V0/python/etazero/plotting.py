@@ -17,6 +17,17 @@ METRICS = ('loss', 'policy_loss', 'opponent_policy_loss', 'soft_policy_loss',
            'soft_opponent_policy_loss', 'value_loss', 'td_value_long_loss', 'td_value_mid_loss',
            'td_value_short_loss', 'long_optimistic_policy_loss', 'short_optimistic_policy_loss',
            'shortterm_value_error_loss', 'grad_norm')
+POLICY_LOSSES = (
+    ('policy_loss', 'Policy', BLUE), ('opponent_policy_loss', 'Opponent policy', RED),
+    ('soft_policy_loss', 'Soft policy', ORANGE),
+    ('soft_opponent_policy_loss', 'Soft opponent policy', '#c678dd'),
+    ('long_optimistic_policy_loss', 'Long optimistic', '#56b6c2'),
+    ('short_optimistic_policy_loss', 'Short optimistic', '#e5c07b'))
+VALUE_LOSSES = (
+    ('value_loss', 'Value', GREEN), ('td_value_long_loss', 'TD long', '#56b6c2'),
+    ('td_value_mid_loss', 'TD mid', '#7fbf7f'), ('td_value_short_loss', 'TD short', '#e5c07b'),
+    ('shortterm_value_error_loss', 'Value error', GREY))
+Q_LOSS = ('q_winloss_loss', 'W-L Q', '#c678dd')
 
 
 def journal_events(path):
@@ -44,12 +55,13 @@ def run_history(run_dir, state=None):
         sidecar = load_json((root/reference['path']).with_suffix('.json'))
         committed.update(sidecar['committed_updates'])
         reference = sidecar['parent']
-    updates, statistics, completed, phases, inference = {}, {}, {}, {}, {}
+    updates, statistics, completed, phases, inference, validation = {}, {}, {}, {}, {}, {}
     for event in journal_events(root/'logs/events.jsonl'):
         kind = event['event']; iteration = event.get('iteration')
         if kind == 'plan':
             # Only the latest attempt of a committed round contributes timings.
             phases.pop(iteration, None)
+            validation.pop(iteration, None)
             for key in [k for k in inference if k[0] == iteration]:
                 del inference[key]
         if kind == 'update' and event['update_id'] in committed:
@@ -58,6 +70,8 @@ def run_history(run_dir, state=None):
             statistics[iteration] = event
         elif kind == 'iteration_complete' and iteration < state['iteration']:
             completed[iteration] = event
+        elif kind == 'validation' and iteration < state['iteration']:
+            validation[iteration] = event
         elif kind == 'phase_end':
             totals = phases.setdefault(iteration, {})
             totals[event['phase']] = totals.get(event['phase'], 0) + event['seconds']
@@ -91,6 +105,10 @@ def run_history(run_dir, state=None):
                 else:
                     row[metric] /= row['steps']
             if 'q_winloss_loss' in row:row['q_winloss_loss']/=row['steps']
+        # Validation has no update ID. Only completed rounds can expose the
+        # latest attempt's result; a new plan clears an abandoned attempt.
+        if row['iteration'] in completed and row['iteration'] in validation:
+            row['validation'] = validation[row['iteration']]
         counters = [e for (iteration, _, _), e in inference.items() if iteration == row['iteration']]
         row['requests'] = sum(e['requests'] for e in counters)
         row['batches'] = sum(e['batches'] for e in counters)
@@ -100,31 +118,38 @@ def run_history(run_dir, state=None):
     return [history[k] for k in sorted(history)]
 
 
-def _series(axis, series, logarithmic=False):
+def _series(axis, series, logarithmic=False, legend_columns=1, linestyles=None):
     import numpy as np
     positive = True
-    for label, color, x, y in series:
+    for index, (label, color, x, y) in enumerate(series):
         values = np.asarray(y, dtype=float)
         if not np.isfinite(values).any():
             continue
         positive &= bool((values[np.isfinite(values)] > 0).all())
-        axis.plot(x, values, color=color, linewidth=1.7, marker='o' if len(values) == 1 else None, label=label)
+        axis.plot(x, values, color=color, linewidth=1.7,
+                  marker='o' if len(values) == 1 or not np.isfinite(values).all() else None, markersize=3,
+                  linestyle=linestyles[index] if linestyles else '-', label=label)
     if axis.lines:
         if logarithmic and positive:
             axis.set_yscale('log')
-        axis.legend(loc='best', fontsize=9)
+        axis.legend(loc='best', fontsize=8 if legend_columns > 1 else 9, ncols=legend_columns,
+                    frameon=legend_columns > 1, facecolor=THEME['axes.facecolor'], edgecolor='none', framealpha=.9)
     else:
         axis.text(.5, .5, 'No measurements yet', ha='center', va='center',
                   color='#8a93a3', transform=axis.transAxes)
 
 
-def _figure(titles, labels, title):
+def _figure(titles, labels, title, columns=2, figsize=(15, 13.5), sharex=False):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.ticker import MaxNLocator
-    figure = Figure(figsize=(15, 13.5), layout='constrained')
+    figure = Figure(figsize=figsize, layout='constrained')
     FigureCanvasAgg(figure)
-    axes = list(figure.subplots(3, 2).flat)
+    rows = (len(titles) + columns - 1) // columns
+    axes = list(figure.subplots(rows, columns, sharex=sharex, squeeze=False).flat)
+    for axis in axes[len(titles):]:
+        figure.delaxes(axis)
+    axes = axes[:len(titles)]
     figure.suptitle(title, fontsize=17)
     for axis, name, (xlabel, ylabel) in zip(axes, titles, labels):
         axis.set(title=name, xlabel=xlabel, ylabel=ylabel)
@@ -134,19 +159,27 @@ def _figure(titles, labels, title):
     return figure, axes
 
 
+def _compact_number(value, _):
+    label = f'{value:.3g}'
+    if 'e' in label:
+        mantissa, exponent = label.split('e')
+        return f'{mantissa}e{int(exponent)}'
+    return label
+
+
 def training_figure(history):
     import matplotlib as mpl
     from matplotlib.ticker import FuncFormatter, PercentFormatter
     with mpl.rc_context(THEME):
         figure, axes = _figure(
-            ('Self-play outcomes', 'Self-play game length', 'Total loss', 'Loss components',
-             'Effective training rows per game', 'Gradient norm'),
+            ('Self-play outcomes', 'Self-play game length', 'Policy losses', 'Value losses',
+             'Gradient norm', 'NN cache hit rate'),
             [('Cumulative effective self-play rows', 'Share of games'),
              ('Cumulative effective self-play rows', 'Moves per game'),
-             ('Iteration (1-based)', 'Mean loss'), ('Iteration (1-based)', 'Mean weighted loss'),
-             ('Cumulative effective self-play rows', 'Effective rows per game'),
-             ('Iteration (1-based)', 'Mean L2 grad norm (before clipping)')],
-            'EtaZero AlphaZero training progress')
+             ('Iteration (1-based)', 'Mean weighted loss'), ('Iteration (1-based)', 'Mean weighted loss'),
+             ('Iteration (1-based)', 'Mean L2 grad norm (before clipping)'),
+             ('Cumulative effective self-play rows', 'Share of submitted requests')],
+            'EtaZero AlphaZero training progress', figsize=(15, 11))
         selfplay = [r for r in history if r.get('games', 0) > 0]
         x = [r['total_rows'] for r in selfplay]
         _series(axes[0], [(label, color, x, [r[key]/r['games'] for r in selfplay])
@@ -154,33 +187,62 @@ def training_figure(history):
                                                    ('white_wins', 'White win', RED), ('draws', 'Draw', GREY))])
         axes[0].set_ylim(0, 1.025); axes[0].yaxis.set_major_formatter(PercentFormatter(1))
         _series(axes[1], [('Mean (including opening)', ORANGE, x, [r['avg_game_length'] for r in selfplay])])
-        _series(axes[4], [('Mean (excluding opening)', BLUE, x, [r['avg_rows_per_game'] for r in selfplay])])
         samples = selfplay[-1]['total_rows'] if selfplay else 0
-        for axis in (axes[0], axes[1], axes[4]):
+        for axis in (axes[0], axes[1], axes[5]):
             axis.set_xlim(0, max(1, samples*1.025))
-            axis.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:.3g}'))
+            axis.xaxis.set_major_formatter(FuncFormatter(_compact_number))
         trained = [r for r in history if r['steps'] > 0]
         x = [r['iteration'] for r in trained]
-        _series(axes[2], [('Total', ORANGE, x, [r['loss'] for r in trained])], True)
-        _series(axes[3], [(label, color, x, [r[key] for r in trained]) for key, label, color in
-                          (('policy_loss', 'Policy', BLUE), ('opponent_policy_loss', 'Opponent policy', RED),
-                           ('soft_policy_loss', 'Soft policy', ORANGE),
-                           ('soft_opponent_policy_loss', 'Soft opponent policy', '#c678dd'),
-                           ('value_loss', 'Value', GREEN), ('td_value_long_loss', 'TD long', '#56b6c2'),
-                           ('td_value_mid_loss', 'TD mid', '#7fbf7f'), ('td_value_short_loss', 'TD short', '#e5c07b'),
-                           ('long_optimistic_policy_loss', 'Long optimistic', '#d19a66'),
-                           ('short_optimistic_policy_loss', 'Short optimistic', '#be5046'),
-                           ('shortterm_value_error_loss', 'Value error', GREY))]+
+        _series(axes[2], [(label, color, x, [r[key] for r in trained])
+                          for key, label, color in POLICY_LOSSES], logarithmic=True, legend_columns=2)
+        _series(axes[3], [(label, color, x, [r[key] for r in trained])
+                          for key, label, color in VALUE_LOSSES]+
                 ([('W-L Q', '#c678dd', x, [r['q_winloss_loss'] for r in trained])]
-                 if trained and all('q_winloss_loss' in r for r in trained) else []), True)
-        _series(axes[5], [('Network', ORANGE, x, [r['grad_norm'] for r in trained])], True)
-        for axis in (axes[2], axes[3], axes[5]):
+                 if trained and all('q_winloss_loss' in r for r in trained) else []),
+                logarithmic=True, legend_columns=2)
+        _series(axes[4], [('Network', ORANGE, x, [r['grad_norm'] for r in trained])], True)
+        for axis in (axes[2], axes[3], axes[4]):
             axis.set_xlim(0, max(1.25, max(x, default=1)*1.025))
+        cached = [r for r in history if 'total_rows' in r and r.get('submitted', 0) > 0]
+        _series(axes[5], [('Cache hits', BLUE, [r['total_rows'] for r in cached],
+                          [r['cache_hits']/r['submitted'] for r in cached])])
+        axes[5].set_ylim(0, 1.025); axes[5].yaxis.set_major_formatter(PercentFormatter(1))
         games = sum(r['games'] for r in selfplay)
         figure.supxlabel(f'{len([r for r in trained if "total_rows" in r])} completed training iterations · '
                          f'{games:,} self-play games · {samples:,} effective rows\n'
                          'Loss and gradients: arithmetic means of committed updates, unsmoothed; '
                          'bootstrap is iteration 0', fontsize=10, color='#8a93a3')
+    return figure
+
+
+def loss_figure(history):
+    """One weighted loss per panel, with round-mean train and end-of-round validation."""
+    import matplotlib as mpl
+    trained = [r for r in history if r['steps'] > 0]
+    metrics = [('loss', 'Total loss', ORANGE), *POLICY_LOSSES, *VALUE_LOSSES]
+    if any('q_winloss_loss' in r for r in trained):
+        metrics.append(Q_LOSS)
+    columns = 4
+    rows = (len(metrics) + columns - 1) // columns
+    with mpl.rc_context(THEME):
+        figure, axes = _figure(
+            [label for _, label, _ in metrics],
+            [('Iteration (1-based)', 'Mean weighted loss') for _ in metrics],
+            'EtaZero training and validation losses', columns=columns,
+            figsize=(18, 3.3 * rows), sharex=True)
+        for axis, (key, _, _) in zip(axes, metrics):
+            # Keep missing validation as a gap, rather than connecting across a
+            # round that had no complete held-out batch or skipped validation.
+            train = [r.get(key, float('nan')) for r in trained]
+            val = [r.get('validation', {}).get(key, float('nan')) for r in trained]
+            x = [r['iteration'] for r in trained]
+            _series(axis, [('Train', BLUE, x, train), ('Validation', RED, x, val)],
+                    logarithmic=True, linestyles=('-', '--'))
+            axis.set_xlim(0, max(1.25, max(x, default=1)*1.025))
+        figure.supxlabel(
+            'Train: round mean over committed consumed batches; validation: raw model at round end.\n'
+            'Weighted sample-mean losses, unsmoothed; missing validation is not replaced with zero.',
+            fontsize=10, color='#8a93a3')
     return figure
 
 
@@ -219,6 +281,7 @@ def plot_run(run_dir, state=None):
     history = run_history(root,state)
     config = load_json(root/'.internal/run.json')['config']
     figures = [(root/'training.png', training_figure(history)),
+               (root/'loss.png', loss_figure(history)),
                (root/'logs/performance.png', performance_figure(history, config['training']['batch_size']))]
     for destination, figure in figures:
         try:
