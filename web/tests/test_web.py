@@ -13,7 +13,7 @@ from etazero.eval_config import load_evaluation_config
 from etazero.config import write_native
 from etazero.evaluation import model_info
 from web.engine import Engine
-from web.app import App
+from web.app import App, Conflict
 from web.server import make_server
 
 
@@ -161,6 +161,76 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(candidate['visits'], reply['visits'][action])
                 self.assertAlmostEqual(candidate['network_prior'], reply['network_policy'][action], places=7)
                 self.assertAlmostEqual(candidate['selection_weight'], reply['policy'][action], places=7)
+
+    def test_manual_analysis_branch_configuration_and_catalog_refresh(self):
+        discovered = {'test': Path(MODEL)}
+        app = App(BINARY, discovered.copy(), self.config, 7, discover_models=lambda: discovered.copy())
+
+        def perform(operation, **payload):
+            app.submit(operation, dict(version=app.snapshot()['version'], **payload))
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                state = app.snapshot()
+                if not state['busy']:
+                    self.assertIsNone(state['error'])
+                    return state
+                time.sleep(.02)
+            self.fail('Timed out waiting for operation')
+
+        try:
+            state = perform('new', model='test', size=7, rule='renju', human=-1, visits=16, mode='manual')
+            self.assertEqual(state['game']['turn'], 0)  # Manual mode never auto-plays black.
+            game_id = state['game_id']
+            state = perform('play', action=24)
+            self.assertEqual(state['game']['moves'], [24])
+            before = state['game']
+            state = perform('analyze')
+            self.assertEqual(state['game'], before)  # Analysis must not advance the position.
+            self.assertEqual(state['analysis']['turn'], 1)
+            self.assertEqual(state['analysis']['player'], -1)
+            self.assertEqual(state['analysis']['board'], before['board'])
+            state = perform('configure', human=1, visits=32, mode='manual')
+            self.assertEqual(state['game'], before)
+            state = perform('step')
+            self.assertEqual(state['game']['turn'], 2)
+            self.assertEqual(state['analysis']['completed_visits'], 32)
+            state = perform('undo')
+            self.assertEqual(state['game']['moves'], [24])
+            self.assertIsNone(state['analysis'])
+            state = perform('play', action=0)
+            state = perform('configure', human=1, visits=16, mode='play')
+            state = perform('branch', turn=1)
+            self.assertEqual(state['mode'], 'manual')
+            self.assertEqual(state['game']['moves'], [24])
+            self.assertEqual(state['game_id'], game_id)
+            state = perform('play', action=1)
+            self.assertEqual(state['game']['moves'], [24, 1])
+            for turn in (-1, 2, True):
+                with self.assertRaises(ValueError):
+                    app.submit('branch', dict(version=state['version'], turn=turn))
+            with self.assertRaises(Conflict):
+                app.submit('step', dict(version=state['version'] - 1))
+            discovered['newly-published'] = Path(MODEL)
+            before = state['game']
+            state = perform('refresh')
+            self.assertEqual(state['game'], before)
+            self.assertEqual(state['catalog_revision'], 1)
+            catalog = app.catalog()
+            self.assertEqual(len(catalog['models']), 2)
+            self.assertIn('manifest', catalog['models'][0])
+            self.assertEqual(catalog['evaluation']['device'], self.config['evaluation']['device'])
+            # Finish a manual game, then recover a nonterminal position by branching.
+            perform('new', model='test', size=5, rule='freestyle', human=1, visits=16, mode='manual')
+            for action in [0, 5, 1, 6, 2, 7, 3, 8, 4]:
+                state = perform('play', action=action)
+            self.assertTrue(state['game']['finished'])
+            with self.assertRaises(Conflict):
+                app.submit('analyze', dict(version=state['version']))
+            state = perform('branch', turn=8)
+            self.assertFalse(state['game']['finished'])
+            self.assertEqual(state['game']['turn'], 8)
+        finally:
+            app.close()
 
 
 if __name__ == '__main__':
