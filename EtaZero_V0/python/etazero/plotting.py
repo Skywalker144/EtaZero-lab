@@ -14,7 +14,9 @@ THEME = {
     'font.size': 10, 'axes.titlesize': 12, 'axes.titleweight': 'bold', 'grid.linewidth': .7,
 }
 METRICS = ('loss', 'policy_loss', 'opponent_policy_loss', 'soft_policy_loss',
-           'soft_opponent_policy_loss', 'value_loss', 'grad_norm')
+           'soft_opponent_policy_loss', 'value_loss', 'td_value_long_loss', 'td_value_mid_loss',
+           'td_value_short_loss', 'long_optimistic_policy_loss', 'short_optimistic_policy_loss',
+           'shortterm_value_error_loss', 'grad_norm')
 
 
 def journal_events(path):
@@ -70,12 +72,25 @@ def run_history(run_dir, state=None):
         row = history.setdefault(event['iteration'], {'iteration': event['iteration'], 'steps': 0,
                                                       'phases': phases.get(event['iteration'], {})})
         row['steps'] += 1
+        skipped = event.get('amp_skipped', False)
+        row['amp_skipped_steps'] = row.get('amp_skipped_steps', 0) + int(skipped)
+        row['gradient_steps'] = row.get('gradient_steps', 0) + int(not skipped)
         for metric in METRICS:
+            # Preserve overflow norms in the raw journal; they are not finite
+            # gradient measurements for the round's plotted mean.
+            if metric == 'grad_norm' and skipped:
+                continue
             row[metric] = row.get(metric, 0) + event[metric]
+        if 'q_winloss_loss' in event:
+            row['q_winloss_loss']=row.get('q_winloss_loss',0)+event['q_winloss_loss']
     for row in history.values():
         if row['steps']:
             for metric in METRICS:
-                row[metric] /= row['steps']
+                if metric == 'grad_norm':
+                    row[metric] = row.get(metric, 0) / row['gradient_steps'] if row['gradient_steps'] else float('nan')
+                else:
+                    row[metric] /= row['steps']
+            if 'q_winloss_loss' in row:row['q_winloss_loss']/=row['steps']
         counters = [e for (iteration, _, _), e in inference.items() if iteration == row['iteration']]
         row['requests'] = sum(e['requests'] for e in counters)
         row['batches'] = sum(e['batches'] for e in counters)
@@ -151,7 +166,13 @@ def training_figure(history):
                           (('policy_loss', 'Policy', BLUE), ('opponent_policy_loss', 'Opponent policy', RED),
                            ('soft_policy_loss', 'Soft policy', ORANGE),
                            ('soft_opponent_policy_loss', 'Soft opponent policy', '#c678dd'),
-                           ('value_loss', 'Value', GREEN))], True)
+                           ('value_loss', 'Value', GREEN), ('td_value_long_loss', 'TD long', '#56b6c2'),
+                           ('td_value_mid_loss', 'TD mid', '#7fbf7f'), ('td_value_short_loss', 'TD short', '#e5c07b'),
+                           ('long_optimistic_policy_loss', 'Long optimistic', '#d19a66'),
+                           ('short_optimistic_policy_loss', 'Short optimistic', '#be5046'),
+                           ('shortterm_value_error_loss', 'Value error', GREY))]+
+                ([('W-L Q', '#c678dd', x, [r['q_winloss_loss'] for r in trained])]
+                 if trained and all('q_winloss_loss' in r for r in trained) else []), True)
         _series(axes[5], [('Network', ORANGE, x, [r['grad_norm'] for r in trained])], True)
         for axis in (axes[2], axes[3], axes[5]):
             axis.set_xlim(0, max(1.25, max(x, default=1)*1.025))

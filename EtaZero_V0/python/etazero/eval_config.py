@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters
 
-SEARCH = dict(seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
+SEARCH = dict(playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
               temperature=float, temperature_early=float, max_batch=int, server_threads=int, cache_entries=int,
               inference_precision=str, batch_wait_us=int, queue_capacity=int,
@@ -66,6 +66,12 @@ def load_evaluation_config(directory, match=False, environ=None):
         for key, convert in keys.items():
             override = prefix+('OPENING_' if group == 'opening' else '')+key.upper()
             raw = env.get(override, values.get((group, key)))
+            if raw is None and group == "opening":
+                defaults = {"policy_init": "false", "policy_temperature": "1", "policy_after": "true", "policy_on_failure": "true"}
+                if key == "policy_init_mean" and not result[group]["policy_init"]:
+                    raw = "0"
+                else:
+                    raw = defaults.get(key)
             if raw is None:
                 raise ValueError(f'Missing evaluation field: {group}.{key}')
             result[group][key] = convert(raw)
@@ -84,14 +90,16 @@ def validate_evaluation(config, match=False):
         raise ValueError('Invalid evaluation seed or board size')
     if c['rule'] not in ('freestyle', 'standard', 'renju'):
         raise ValueError('Invalid evaluation rule')
-    if c['visits'] < 2 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','queue_capacity')) or c['c_puct'] <= 0:
-        raise ValueError('Evaluation requires visits >= 2 and positive execution/search sizes')
-    if c['lcb_stdevs'] <= 0 or c['fpu_parent_weight_by_visited_policy_pow'] <= 0 or c['min_visit_prop_for_lcb'] > 1:
+    if not 1 <= c['visits'] <= 2**31-1 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','queue_capacity')) or c['c_puct'] <= 0:
+        raise ValueError('Evaluation requires visits >= 1 and positive execution/search sizes')
+    if c['lcb_stdevs'] <= 0 or c['fpu_parent_weight_by_visited_policy_pow'] < 0 or c['min_visit_prop_for_lcb'] > 1:
         raise ValueError('Invalid evaluation FPU/LCB settings')
+    if not 0<=c['playout_doubling_advantage']<=math.log2(100) or c['playout_doubling_advantage_player'] not in ('black','white'):
+        raise ValueError('Invalid evaluation PDA condition')
     validate_search_parameters(c)
     if c['device'] != 'cpu' and not (c['device'].startswith('cuda:') and c['device'][5:].isdigit()):
         raise ValueError('Evaluation device must be cpu or cuda:<index>')
-    if c['inference_precision'] not in ('float32', 'float16') or (c['device'] == 'cpu' and c['inference_precision'] == 'float16'):
+    if c['inference_precision'] not in ('auto', 'float32', 'float16') or (c['device'] == 'cpu' and c['inference_precision'] == 'float16'):
         raise ValueError('Invalid evaluation inference precision/device')
     if match:
         if c['games'] < 4 or c['games'] % 4 or c['game_threads'] < 1:

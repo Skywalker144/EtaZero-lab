@@ -18,7 +18,7 @@ import uuid
 from .config import ROOT, csv, fingerprint, write_native, native_text
 from .data import Catalog
 from .native import NativeWorker
-from .export import export_model
+from .export import export_model, verify_export
 from .shuffle import build_snapshot, desired_window, prune_derived
 from .storage import atomic_write, load_json, save_json, sha256, sync_directory
 from .training import initialize, train_iteration, prune_checkpoints
@@ -266,6 +266,12 @@ class Controller:
             raise ValueError("Run state identity mismatch")
         if 'elapsed_seconds' not in state:
             raise ValueError('Run predates whole-iteration commits; use a new run directory')
+        if state['checkpoint'] and sha256(root/state['checkpoint']['path']) != state['checkpoint']['sha256']:
+            raise ValueError('Committed checkpoint checksum mismatch')
+        if state['model']:
+            verify_export(root,state['model'],c['network']['canvas'])
+            if state['model']['checkpoint'] != state['checkpoint']:
+                raise ValueError('Committed model/checkpoint mismatch')
         recover_iteration(root, state)
         self.run_id=info["id"]
         for name in ("selfplay",".internal/iterations","logs","models","snapshots","checkpoints"):
@@ -338,7 +344,7 @@ class Controller:
                 while len(self.hot_snapshots)>c['shuffle']['snapshot_keep']:
                     evicted.append(self.hot_snapshots.popleft())
                 manifest=load_json(root/'snapshots'/status['snapshot_id']/'manifest.json')
-                prune_derived(root,evicted,{e['sha256'] for e in manifest['sources']})
+                prune_derived(root,evicted,{e['sha256'] for e in manifest['sources']+manifest['validation_sources']})
                 if evicted:
                     self.journal('snapshots_evicted',snapshots=evicted)
             # Prepare figures before the atomic commit, as in MuZero V2. A
@@ -381,6 +387,7 @@ class Controller:
         return value
 
     def publish(self,model,elapsed_seconds):
+        verify_export(self.root,model,self.config['network']['canvas'])
         path=self.root/"models/current.json"
         current=load_json(path) if path.exists() else None
         if current and current["model"]["id"]==model["id"]:
@@ -412,10 +419,8 @@ class Controller:
         if self.shuffle_pool is None:
             self.shuffle_pool=ProcessPoolExecutor(max_workers=self.config['shuffle']['workers'],
                                                  mp_context=multiprocessing.get_context('spawn'))
-        total,_,_=self.catalog.counts(self.config['selfplay']['recent_games'])
-        window=desired_window(total,self.config['replay'])
-        return build_snapshot(self.root,self.current_iteration,self.catalog.entries(window),self.config,
-                              pool=self.shuffle_pool,total_rows=total)
+        return build_snapshot(self.root,self.current_iteration,self.catalog.entries(),self.config,
+                              pool=self.shuffle_pool)
 
     def produce(self,plan):
         c=self.config;iteration=plan['iteration']
@@ -428,7 +433,7 @@ class Controller:
             if not self.stopping() and (games != c['selfplay']['bootstrap_games'] or not average):
                 raise RuntimeError('Bootstrap did not produce the configured games and valid training rows')
         else:
-            rows,_,average=self.catalog.counts(c['selfplay']['recent_games'])
+            rows,completed,average=self.catalog.counts(c['selfplay']['recent_games'])
             if not average:
                 raise RuntimeError('Cold start produced no valid rows-per-game estimate')
             deficit=max(0,plan['target_rows']-rows)
@@ -443,16 +448,25 @@ class Controller:
             if games and not self.stopping():
                 self.launch(plan,games);self.scan()
             while not self.stopping():
-                new_rows,_,average=self.catalog.counts(c['selfplay']['recent_games'])
-                if new_rows >= c['replay']['min_rows']:
+                new_rows,new_completed,average=self.catalog.counts(c['selfplay']['recent_games'])
+                if new_rows >= plan['target_rows']:
                     break
-                if new_rows <= rows or not average:
+                # PCR and stochastic multiplicity can give completed games no
+                # training rows. That is valid progress; keep filling the quota.
+                # A worker returning neither rows nor games is a real failure.
+                if new_rows < rows or (new_rows == rows and new_completed <= completed) or not average:
                     raise RuntimeError('Selfplay failed to produce enough valid training rows')
-                rows=new_rows
-                self.launch(plan,math.ceil((c['replay']['min_rows']-rows)/average));self.scan()
+                rows,completed=new_rows,new_completed
+                deficit=plan['target_rows']-rows
+                planned=math.ceil(deficit/average)
+                self.journal('selfplay_backfill',iteration=iteration,rows=rows,target=plan['target_rows'],
+                             deficit=deficit,rows_per_game=average,planned_games=planned)
+                self.launch(plan,planned);self.scan()
         if not self.stop:
-            for service in self.services.values():
+            for identity,service in self.services.items():
                 service.release()
+                self.journal('worker_release',iteration=iteration,worker_id=identity,pid=service.process.pid,
+                             model_id=plan['input_model']['id'])
 
     def launch(self,plan,games):
         c=self.config;iteration=plan["iteration"];attempt=uuid.uuid4().hex
@@ -541,6 +555,9 @@ def recover_iteration(root, state):
     root=Path(root); iteration=state['iteration']
     archive=root/'.internal/discarded'/uuid.uuid4().hex
     paths=[]
+    # A hard kill can leave private export staging directories. Preserve them
+    # for inspection, but never let a retry or consumer treat them as models.
+    paths.extend((root/'models').glob('.tmp_*'))
     for folder, pattern in (('.internal/iterations', '*'), ('selfplay','iteration_*'),
                              ('snapshots','*iteration_*'), ('checkpoints','iteration_*'),
                              ('models','iteration_*'), ('logs/iterations','*.json')):
@@ -563,7 +580,13 @@ def recover_iteration(root, state):
         save_json(archive/'rollback.json',{'next_iteration':iteration,'elapsed_seconds':state['elapsed_seconds']})
     current=root/'models/current.json'
     if state['model']:
-        save_json(current,{'model':state['model'],'elapsed_seconds':state['elapsed_seconds']})
+        publication={'model':state['model'],'elapsed_seconds':state['elapsed_seconds']}
+        try:
+            existing=load_json(current) if current.exists() else None
+        except ValueError:
+            existing=None
+        if not isinstance(existing,dict) or any(existing.get(key)!=value for key,value in publication.items()):
+            save_json(current,publication)
     else:
         current.unlink(missing_ok=True)
 

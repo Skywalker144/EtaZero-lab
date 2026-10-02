@@ -26,8 +26,22 @@ def example_inputs(canvas, size, rule, moves=()):
     obs[0,:size,:size] = 1
     obs[1] = board==player; obs[2] = board==-player
     globals = np.array([rule=="standard", rule=="renju", -player if rule=="renju" else 0,
-                        rule=="renju"],np.float32)
+                        rule=="renju",0,0],np.float32)
     return obs, globals
+
+
+def verify_export(run_dir, info, canvas):
+    """Verify the immutable artifact before restoring or publishing its pointer."""
+    relative = Path('models')/info['id']/'model.pt'
+    if (Path(info['path']) != relative or info['contract'] != CONTRACT_ID or
+            info['canvas'] != canvas or info['checkpoint']['id'] != info['id'] or
+            info['weights'] not in ('model','swa') or
+            not info['verification']['python_scripted'] or not info['verification']['native']):
+        raise ValueError('Exported model identity/contract mismatch')
+    path = Path(run_dir)/relative
+    if load_json(path.parent/'manifest.json') != info or sha256(path) != info['sha256']:
+        raise ValueError('Exported model manifest/checksum mismatch')
+    return info
 
 
 def export_model(run_dir, config, checkpoint, binary):
@@ -35,14 +49,15 @@ def export_model(run_dir, config, checkpoint, binary):
     destination = root/"models"/checkpoint["id"]
     if destination.exists():
         info = load_json(destination/"manifest.json")
-        if info["checkpoint"] != checkpoint or sha256(destination/"model.pt") != info["sha256"]:
+        if info["checkpoint"] != checkpoint:
             raise ValueError("Existing exported model does not match its source checkpoint")
-        return info
+        return verify_export(root,info,config['network']['canvas'])
     device = device_check(config["devices"]["train"])
     saved = load_checkpoint(root,checkpoint,config)
     with torch.random.fork_rng(devices=[]):
         model = make_network(config); model.load_state_dict(inference_weights(saved),strict=True);model.eval();model.to(device)
-        scripted = torch.jit.script(inference_network(model))
+        inference = inference_network(model)
+        scripted = torch.jit.script(inference)
     parent = destination.parent; parent.mkdir(exist_ok=True)
     stage = parent/(".tmp_"+uuid.uuid4().hex);stage.mkdir()
     scripted.save(str(stage/"model.pt"))
@@ -54,8 +69,7 @@ def export_model(run_dir, config, checkpoint, binary):
     probes = [example_inputs(canvas,s,r,(0,canvas)) for s in sizes for r in rules]
     tensor_inputs = tuple(torch.from_numpy(np.stack(x)).to(device) for x in zip(*probes))
     with torch.inference_mode():
-        eager_policy,eager_value = model(*tensor_inputs)
-        eager = eager_policy[:,0],eager_value
+        eager = inference(*tensor_inputs)
         # Validate both initial execution and the graph optimized after profiling.
         for _ in range(3):
             jit = scripted(*tensor_inputs)
@@ -73,17 +87,21 @@ def export_model(run_dir, config, checkpoint, binary):
     # Native infer evaluates one position. TF32 convolution kernels can differ
     # with batch size, so use the same shape for its eager reference.
     with torch.inference_mode():
-        native_reference=model(*(x[:1] for x in tensor_inputs))
-    np.testing.assert_allclose(native["raw_logits"],native_reference[0][0,0].cpu().numpy(),rtol=rtol,atol=atol)
+        native_reference=inference(*(x[:1] for x in tensor_inputs))
+    np.testing.assert_allclose(native["raw_logits"],native_reference[0][0].cpu().numpy(),rtol=rtol,atol=atol)
     wdl=torch.softmax(native_reference[1][0].float(),dim=0).cpu().numpy()
     np.testing.assert_allclose(native["raw_wdl"],wdl,rtol=rtol,atol=atol)
     np.testing.assert_allclose(native["raw_value"],wdl[0]-wdl[2],rtol=rtol,atol=atol)
+    np.testing.assert_allclose(native['raw_optimistic_logits'],native_reference[2][0].cpu().numpy(),rtol=rtol,atol=atol)
+    error=native_reference[3][0]
+    np.testing.assert_allclose(native['raw_shortterm_value_stdev'],error.cpu().numpy(),rtol=rtol,atol=atol)
     averaged = int(saved['optimization']['swa']['n_averaged'].item())
     info = {"id":checkpoint["id"],"checkpoint":checkpoint,"contract":CONTRACT_ID,"canvas":canvas,
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
             "path":str(Path("models")/checkpoint["id"]/"model.pt"),"sha256":sha256(stage/"model.pt"),
             "verification":{"python_scripted":True,"native":True,"rtol":rtol,"atol":atol,
-                            'inference_precision':precision,'backend':'libtorch','normalization':'precomputed_inv_std'}}
+                            'inference_precision':precision,'backend':'libtorch',
+                            'normalization':'masked_fixup_bias' if model.norm_kind=='fixup' else 'precomputed_inv_std'}}
     save_json(stage/"manifest.json",info,immutable=True)
     sync_directory(stage);os.rename(stage,destination);sync_directory(parent)
     return info

@@ -52,7 +52,8 @@ def evaluate(config,binary,run_dir,model=None,model_b=None,size=None,rule=None,m
              '--moves',encoded,'--seed',str(c['seed'])]
     result=json.loads(subprocess.run(command,text=True,capture_output=True,check=True).stdout)
     if 'action' in result:
-        result['action']=result['action']//a['canvas']*size+result['action']%a['canvas']
+        if result['action'] >= 0:
+            result['action']=result['action']//a['canvas']*size+result['action']%a['canvas']
         for key in ('raw_logits','policy','visits','network_policy','search_policy'):
             result[key]=[result[key][y*a['canvas']+x] for y in range(size) for x in range(size)]
     payload={'mode':'evaluate','config_id':fingerprint(config),'config':config,'model_a':a,
