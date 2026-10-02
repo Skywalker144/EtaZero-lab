@@ -188,6 +188,9 @@ void BatchEvaluator::serve(size_t index) {
                 auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(wait_us_);
                 changed_.wait_until(lock, deadline, [&] { return closing_ || queue_.size() >= max_batch_; });
             }
+            // Another server may consume the queue while this timed wait
+            // releases the mutex. Never dispatch an empty batch to a backend.
+            if (queue_.empty()) continue;
             while (!queue_.empty() && batch.size() < max_batch_) {
                 batch.push_back(std::move(queue_.front())); queue_.pop_front();
             }
