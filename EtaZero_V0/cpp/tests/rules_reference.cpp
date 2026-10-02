@@ -1,4 +1,4 @@
-// Built only by scripts/check_katagomo_rules.py against the fixed external source.
+// Built only by tests/reference/check_katagomo_rules.py against the fixed external source.
 #include "ForbiddenPointFinder.h"
 #include "etazero/rules.h"
 #include <iostream>

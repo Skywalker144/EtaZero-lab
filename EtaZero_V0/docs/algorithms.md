@@ -41,7 +41,7 @@
 
 Renju 沿用现有 MuZero / SkyZero 的棋盘局部规则，不扩展为完整比赛开局协议。参考中的禁手点允许实际落子，落下后判黑负，不在动作 mask 中提前删除；恰好五子与其他方向形状同时出现时按来源中的优先级判定。以固定版本 [KataGomo 禁手检测器](/home/sky/RL/SkyZero/KataGomo/cpp/forbiddenPoint/ForbiddenPointFinder.cpp) 和 [真实终局](/home/sky/RL/SkyZero/KataGomo/cpp/game/gamelogic.cpp) 核对具体规则；本地递归实现最初来自 MuZero / SkyZero。
 
-棋规对照入口为 [check_katagomo_rules.py](../scripts/check_katagomo_rules.py)，直接编译固定commit的KataGomo `CForbiddenPointFinder` 与本地 `RenjuAnalyzer`，覆盖五种目标尺寸的邻域穷举、交叉方向、边界、同方向双四、恰五优先和假三递归检查。有限局面语料不能证明所有递归状态等价。当前范围为方形Freestyle/Standard/Renju、无pass；VCN、矩形和对应额外终局语义不支持，配置或尺寸解析明确拒绝。
+棋规对照入口为 [check_katagomo_rules.py](../tests/reference/check_katagomo_rules.py)，直接编译固定commit的KataGomo `CForbiddenPointFinder` 与本地 `RenjuAnalyzer`，覆盖五种目标尺寸的邻域穷举、交叉方向、边界、同方向双四、恰五优先和假三递归检查。有限局面语料不能证明所有递归状态等价。当前范围为方形Freestyle/Standard/Renju、无pass；VCN、矩形和对应额外终局语义不支持，配置或尺寸解析明确拒绝。
 
 移植棋规要覆盖递归活三、边界与多方向交叉等情况，不能用局部字符串或简单形状计数代替来源语义。动作可提交性、落子后禁手判负和给网络的输入特征分别定义，不能混为一个“合法性”开关。
 
@@ -168,7 +168,7 @@ optimism 混合普通与短期 optimistic head 的 logits：`main+(short-main)*o
 
 noise pruning 按 child 激活顺序处理，不排序。以前缀已剪权重及 utility 累积得到均值；若当前 utility 较差、差值 `gap>0`，且 `W>2*Wprefix*P/Pprefix`，扣除 `min((W-2*Wprefix*P/Pprefix)*(1-exp(-gap/scale)),cap)`。先验下限、单 child 和近零总权重分支沿用来源。之后 value weighting 的均值、标准差和归一化基准均使用剩余权重，W−L/draw/二阶矩共用缩放；不能把减少的总权重重新补回。图父边先按 edge/child 访问比例换算，再执行该聚合；LCB 与父聚合各自保留不同 weight-square 缩放。
 
-[check_katago_search_corrections.py](../scripts/check_katago_search_corrections.py) 编译执行固定 KataGo 的 uncertainty、noise pruning 和后端 float logit 混合原函数/语句，与本地结果独立对照。C++ 手算覆盖非单位 NN/终局权重、D4 非线性顺序、晋升根零预算刷新、无辅助能力、noise cap 与根 chosen-prune 竞争。真实 CUDA 验收覆盖真实误差、ordinary/optimistic head、图并发和显式开启的 SP。输入 cache 使用 NN 温度和 optimism 的 exact double 字节；来源 NN hash 分别按 1/2048 与 1/1024 离散这些条件。EtaZero 沿用完整输入精确缓存而更细分条件，明确不宣称 cache 命中率、随机序列、并发调度或性能等价。上述检查不代表棋力或训练效果。
+[check_katago_search_corrections.py](../tests/reference/check_katago_search_corrections.py) 编译执行固定 KataGo 的 uncertainty、noise pruning 和后端 float logit 混合原函数/语句，与本地结果独立对照。C++ 手算覆盖非单位 NN/终局权重、D4 非线性顺序、晋升根零预算刷新、无辅助能力、noise cap 与根 chosen-prune 竞争。真实 CUDA 验收覆盖真实误差、ordinary/optimistic head、图并发和显式开启的 SP。输入 cache 使用 NN 温度和 optimism 的 exact double 字节；来源 NN hash 分别按 1/2048 与 1/1024 离散这些条件。EtaZero 沿用完整输入精确缓存而更细分条件，明确不宣称 cache 命中率、随机序列、并发调度或性能等价。上述检查不代表棋力或训练效果。
 
 ### 图搜索与局面共享
 
@@ -182,7 +182,7 @@ virtual loss 使用共享子节点的全部在途预约；完成策略及价值�
 
 根始终是独立节点，推进时复制命中子节点的统计、先验和父边，保留其共享后继；终局或未完成展开的节点不作为可复用根。所有搜索线程静止后从新根标记可达节点，删除每个未标记节点一次，大图使用常驻线程分摊删除；循环和多父不会递归析构或重复释放。不兼容局面、reset、完整清树及模型切换会清除旧图。只读 `inspect_graph()` 在同步调用返回后提供节点/父边统计和稳定ID，用于检查共享与回收。
 
-独立检查入口为 [check_katago_graph.py](../scripts/check_katago_graph.py)：执行固定来源的 child 权重、追赶函数和聚合循环，与逐步 diamond 统计对照。C++ 图测试另覆盖实际五子棋不同落子顺序、关闭共享、泄漏率、多线程、循环、终局、故障和大图推进/回收。真实 CUDA 的图共享验收关闭 NN cache，因而不会将 NN 输出复用误记为节点共享；这些检查不证明训练效果或吞吐改善。
+独立检查入口为 [check_katago_graph.py](../tests/reference/check_katago_graph.py)：执行固定来源的 child 权重、追赶函数和聚合循环，与逐步 diamond 统计对照。C++ 图测试另覆盖实际五子棋不同落子顺序、关闭共享、泄漏率、多线程、循环、终局、故障和大图推进/回收。真实 CUDA 的图共享验收关闭 NN cache，因而不会将 NN 输出复用误记为节点共享；这些检查不证明训练效果或吞吐改善。
 
 ### 学习与数据使用
 
@@ -200,7 +200,7 @@ L_base = mean_t[0.72 * CE(WDL_target, WDL_pred)
 
 可选v17 Q预测当前玩家视角的逐动作纯W−L。搜索遍历全部已分配root children，取正visits/weight的child **node visits**与纯价值均值（包含终局子节点），按edge的玩家转换符号；不使用edge visits、policy target或包含score的utility；并发graph catch-up与在途回传也可令node/edge计数不同，刚清树不保证相等。side独立搜索与reanalysis同样提取；不改变真实轨迹或hint首值复制规则。writer按每个最终重复输出行独立将float32 Q×32000进行无偏随机量化并限于±32000；node visits限于[0,32000]，无数据点两个目标均为0。learner只还原int16/32000，不重抽量化或重复乘频率。
 
-令 `z` 为第七输出pre-tanh，`n` 为量化后的node visits，`w=sqrt(n)`、`m=(n!=0)`、`p=(1+Q_target)/2`。来源纯W−L分量为 `L_Q = mean[1.5 * sum_a(w_a * BCEWithLogits(2*m_a*z_a,p_a)) / (1+sum_a w_a)]`；无数据行loss与Q梯度为0，side行即使完整主局标志为0也参与。W−L的tanh解释不在loss前显式计算。score Q因五子棋无对应语义而去除；Q不供native搜索消费。量化使用每局独立固定种子流，避免影响对局/禁手增强随机流；删去Go score量化及其Rand后不宣称来源随机序列相同。独立对照入口为 [check_katago_q.py](../scripts/check_katago_q.py) 与 [Q测试](../tests/test_qvalues.py)。
+令 `z` 为第七输出pre-tanh，`n` 为量化后的node visits，`w=sqrt(n)`、`m=(n!=0)`、`p=(1+Q_target)/2`。来源纯W−L分量为 `L_Q = mean[1.5 * sum_a(w_a * BCEWithLogits(2*m_a*z_a,p_a)) / (1+sum_a w_a)]`；无数据行loss与Q梯度为0，side行即使完整主局标志为0也参与。W−L的tanh解释不在loss前显式计算。score Q因五子棋无对应语义而去除；Q不供native搜索消费。量化使用每局独立固定种子流，避免影响对局/禁手增强随机流；删去Go score量化及其Rand后不宣称来源随机序列相同。独立对照入口为 [check_katago_q.py](../tests/reference/check_katago_q.py) 与 [Q测试](../tests/test_qvalues.py)。
 
 优化器参照固定来源 [KataGo train.py](/home/sky/RL/SkyZero/KataGo/python/train.py) 的 fson 分支，默认 SGD（momentum 0.9），支持 AdamW（CUDA fused）。输入权重、残差权重、残差/输入 BN gamma、相应 bias、head 权重及 head bias 分组，所有参数必须恰好归组一次；最终 masked BN 的 gamma/bias 按输出组处理。具体 LR、WD 系数、batch scaling、warmup 和范数自适应公式集中在 [optimization.py](../python/etazero/optimization.py)，不在文档维护第二套常量表。Transformer fixup/ReLU按七组规则单独处理attention衰减与RMSNorm；未接入 Muon/NorMuon/Aurora、自动或自定义 LR schedule。
 
@@ -230,7 +230,7 @@ Hint与game fork的生产入口为 [sampling.cpp](../cpp/src/selfplay/sampling.c
 
 Early/game fork按来源先抽early，失败才抽late；baseline概率及候选范围以 [selfplay.cfg](../configs/baseline/selfplay.cfg) 为事实源。early位置为 `floor(Exp(1)*expected_move_prop*area)`，late从完整历史（含前缀）均匀抽位置；非空历史的索引统一截到 `min(index,历史长度-1)`，从空盘重放该数量的着法，保留最后一手落子前的局面；空历史从空盘开始。early指数尾部因此仍进入候选评估；重放后已终局则丢弃。候选数量在配置范围均匀抽，按来源`chooseRandomLegalMoves`从实际合法空点有放回选择；候选可以重复，空点少于请求数时仍抽满请求数，无合法点则丢弃fork。以对手视角的普通NN `-(W-L)` 排序选择当前方最好的一着，这是纯WDL对来源`whiteScoreMean`的环境映射；普通NN温度1、无optimism、无PDA，终局候选仍可被排名但被选为终局后拒绝fork。未选hint则另行走hint着，非终局产生hintFork。冷启动使用其当前random evaluator，网络阶段使用该轮固定模型。
 
-对局线程共享随机取出并移除的fork池，池跨同一native worker的轮次及模型释放/更换保留，进程重启重建；不保证跨并发调度或重启复现同一fork顺序。池中位置优先于外部hint抽样。Fork跳过平衡开局、policy init和PDA抽样；外部hint跳过平衡/policy init，仍按普通局抽PDA。完整历史按独立initial前缀保存，前缀不训练；原始记录分开保存balanced/policy/initial计数、起点kind与hint action，不能将initial计成平衡或policy开局。hintFork没有再次强制hint，仅执行六手cheap减半。来源完整预算函数3072组合与C++独立prior/访问/续接检查见 [check_katago_forks.py](../scripts/check_katago_forks.py)、[sampling_test.cpp](../cpp/tests/sampling_test.cpp)。
+对局线程共享随机取出并移除的fork池，池跨同一native worker的轮次及模型释放/更换保留，进程重启重建；不保证跨并发调度或重启复现同一fork顺序。池中位置优先于外部hint抽样。Fork跳过平衡开局、policy init和PDA抽样；外部hint跳过平衡/policy init，仍按普通局抽PDA。完整历史按独立initial前缀保存，前缀不训练；原始记录分开保存balanced/policy/initial计数、起点kind与hint action，不能将initial计成平衡或policy开局。hintFork没有再次强制hint，仅执行六手cheap减半。来源完整预算函数3072组合与C++独立prior/访问/续接检查见 [check_katago_forks.py](../tests/reference/check_katago_forks.py)、[sampling_test.cpp](../cpp/tests/sampling_test.cpp)。
 
 PDA 在普通局以配置概率抽样：优势方均匀黑/白，doubling 值 `d` 均匀于 `[0,log2(max_ratio))`。令 `r=2^d`，先执行 PCR 或 Reduce Visits，再把优势方 visits/playouts 乘 `2r/(1+r)`，另一方乘 `2/(1+r)` 并 round；结果低于来源下限 5 或超出可表示范围明确失败。EtaZero 的 int32-max playout 字段表示无额外上限，仍保持无额外上限；显式有限值执行同一倍数。PDA 每手强制清图，输入随真实玩家翻转符号，在所有搜索深度、D4、cache、数据和模型导出中保持。当前 `Game` 保存条件，完整图身份包含它。默认 Eval/Match 的 `playout_doubling_advantage=0`；显式设置是固定搜索条件，预算仍由该 profile 决定，用于条件评估。五子棋无 handicap/komi，不加补偿或 PDA 后再次平衡的研究方案。
 
@@ -238,7 +238,7 @@ Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络�
 
 `reanalysis.use_reanalyze` 默认 false；开启必须提供 proportion、policy/value surprise 权重、指数和 outcome-target 开关。先对 cheap 位置逐项 Bernoulli 得到选取数，再按加权 surprise 的幂无放回选同样数量；全零权重均匀抽样，按时间排序处理。零比例不消耗选择 RNG。每个位置从原始真实局面开始，force-full 跳过 hint 与 PCR，Reduce Visits 只用该手之前的原始完成搜索历史，PDA 保持该局条件；替换监督及 NN/search 统计并恢复 counterfactual full 的基础权重，不改变真实 action/reward/终局。重分析行的 `used_outcome_targets=false` 按来源关闭下一实际手 opponent policy，并令该行及所有重复输出行的 `full_game_weight=0`，关闭 short-term error 和默认 long/short optimistic 监督。主 value、三个 TD 仍按主局完整轨迹及已替换搜索值生成，Q 保持有效；`disable_optimistic_policy=true` 分支仍使用来源固定 0.5 权重训练两个 policy head。使用 outcome targets 的重分析行及普通主局行保持 `full_game_weight=1`。重分析的 original visits、原选择 policy/value surprise 及目标开关随原分片保存。
 
-生产入口为 [sampling.cpp](../cpp/src/selfplay/sampling.cpp)、[预算](../cpp/src/selfplay/search_limits.cpp) 与 [writer](../cpp/src/selfplay/record.cpp)，独立来源公式检查为 [check_katago_sampling.py](../scripts/check_katago_sampling.py)。完整hint/PCR/reduced/PDA优先级检查见 [check_katago_forks.py](../scripts/check_katago_forks.py)，真实core频率重分配对照见 [check_katago_sampling_weights.py](../scripts/check_katago_sampling_weights.py)。采样使用 EtaZero 每局 RNG，不承诺来源种子逐位一致，也不声明学习效果或等时间吞吐。
+生产入口为 [sampling.cpp](../cpp/src/selfplay/sampling.cpp)、[预算](../cpp/src/selfplay/search_limits.cpp) 与 [writer](../cpp/src/selfplay/record.cpp)，独立来源公式检查为 [check_katago_sampling.py](../tests/reference/check_katago_sampling.py)。完整hint/PCR/reduced/PDA优先级检查见 [check_katago_forks.py](../tests/reference/check_katago_forks.py)，真实core频率重分配对照见 [check_katago_sampling_weights.py](../tests/reference/check_katago_sampling_weights.py)。采样使用 EtaZero 每局 RNG，不承诺来源种子逐位一致，也不声明学习效果或等时间吞吐。
 
 ### Policy / value surprise weighting
 

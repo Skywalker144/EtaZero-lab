@@ -23,7 +23,7 @@ The recursive Renju analyzer in `cpp/src/game/rules.cpp` is adapted from the use
 MuZero_V2 working tree, preserving exact-five priority, overline, distinct-four and
 recursive live-three semantics. Its forbidden outcomes and categories are independently
 checked against the fixed KataGomo `CForbiddenPointFinder` by
-`scripts/check_katagomo_rules.py`; this optional validation compiles the external
+`tests/reference/check_katagomo_rules.py`; this optional validation compiles the external
 reference, while normal builds remain self-contained. MuZero_V2 supplies the plotting theme/layout and thin-script experiment scheduler reference, as adapted in `python/etazero/plotting.py` and `experiment.py`. SkyZero V7.19/V8.1 informs umbrella discovery, GPU queuing and resumable experiment usage. Shared initialization here means weights only, with independent random bootstrap per arm. MuZero_V2 supplies the deterministic random evaluator and cold-start quota reference and informed the opening/data integration boundary. It is also a reference for the TorchScript /
 LibTorch boundary. EtaZero's input feature contract follows the scoped SkyZero_V7.19 adaptation described below.
 
@@ -127,7 +127,7 @@ and `searchupdatehelpers.cpp` for shared WDL nodes and independent parent edges.
 LCB scales weight-square linearly by edge/child visits, while parent aggregation
 scales the original weight-square quadratically. Gomoku graph identity stores
 exact board/rule/player/input conditions; Go `graphhash.cpp`'s repetition-history
-fold is inapplicable to monotonic NOVC play. `scripts/check_katago_graph.py`
+fold is inapplicable to monotonic NOVC play. `tests/reference/check_katago_graph.py`
 executes selected unchanged source bodies with scalar shims for independent
 validation. Normal builds and runs do not read the reference repositories.
 
@@ -135,7 +135,7 @@ Uncertainty sample/terminal weights and noise-pruned value aggregation adapt
 `searchupdatehelpers.cpp` with pure W-L utility (Go score derivative is zero).
 Optimistic prior mixing uses ordinary/short optimistic logits and the float
 statement from `neuralnet/cudaandrocmbackend.inc`, before temperature/softmax.
-`scripts/check_katago_search_corrections.py` executes the fixed source bodies
+`tests/reference/check_katago_search_corrections.py` executes the fixed source bodies
 for independent scalar comparisons. Cache keys use exact optimism bytes, whereas
 KataGo's NN hash discretizes positive optimism to 1/1024; cache hit rates, RNG
 sequences, scheduling and throughput are not claimed equivalent.
@@ -148,7 +148,7 @@ source factors/minimum, while EtaZero int32-max playouts represent no extra limi
 Side response selection restores LCB, recursive ordinary-policy evaluation uses
 temperature 1, and both side PDA globals are zero. Outcome-disable reanalysis
 suppresses successor policy; main WDL/TD still use the completed game.
-`scripts/check_katago_sampling.py` executes unchanged source scalar bodies.
+`tests/reference/check_katago_sampling.py` executes unchanged source scalar bodies.
 Hint/PCR priority, six-turn cheap-probability gates, root hint prior/forced
 exploration, hinted-value refresh and early/game/hint forks also follow the
 fixed `play.cpp`, `searchhelpers.cpp` and `searchexplorehelpers.cpp`. The NOVC
@@ -157,14 +157,14 @@ training validity 1), exact position comparison and pure W-L candidate ranking
 rather than SGF/Go score/komi/seki. Actual candidates are bounded by available
 empty cells; terminal starts are rejected. Shared forks persist across requests
 and evaluator release within a worker; process restart rebuilds them.
-`scripts/check_katago_forks.py` compiles the unchanged complete source search
+`tests/reference/check_katago_forks.py` compiles the unchanged complete source search
 limits body with scalar adapters, covering 3072 hint/PCR/reduced/PDA branches.
 Source float target weights and EtaZero's double internal frequencies have a
 6e-8 absolute comparison tolerance; disk values are float32. Integer caps,
 flags and probabilities retain 1e-12 relative/1e-14 absolute tolerance. Source
 RNG and concurrent scheduling equivalence are not claimed.
 
-`scripts/check_katago_sampling_weights.py` links the actual production core
+`tests/reference/check_katago_sampling_weights.py` links the actual production core
 library and compares 336 cases to the unchanged source redistribution block
 and value-surprise KL. Source float versus double intermediates are compared
 with 3e-7 relative / 6e-8 absolute tolerance; the observed maximum absolute
@@ -173,7 +173,7 @@ difference is 5.960464477539063e-8 after float32 serialization.
 The plain convolutional network in `python/etazero/network.py` follows the fixed
 KataGo `b10c128-fson-mish` preset: ten regular residual blocks, global pooling
 in blocks five/eight, fson normalization, Mish and v15 heads. The existing NBT
-uses `b5c192nbt-fson-mish`. `scripts/check_katago_network.py` runs the original
+uses `b5c192nbt-fson-mish`. `tests/reference/check_katago_network.py` runs the original
 source models with mapped weights to check forward values, gradients, parameter
 roles and initialization; input projections adapted to five spatial/six global
 Gomoku features, omitted pass/score outputs and
@@ -194,7 +194,7 @@ this is not a claim of source execution or throughput equivalence.
 and the custom-op namespace (`katago::` to `etazero::`) differ. CUDA training
 FP16/BF16 retains its fused forward rounding and recomputed backward. Export
 uses serializable SiLU/linear operations with explicit intermediate rounding.
-`optimization.py` and `scripts/check_reference_formulas.py` extend the registered
+`optimization.py` and `tests/reference/check_reference_formulas.py` extend the registered
 source `trainloop_helpers.py` fixup rules, including the separate attention
 weight-decay factor. Source files are pinned in `reference_sources.json`; none
 of the reference checkouts are needed for production.
@@ -205,5 +205,5 @@ Pure W-L Q extraction and training adapt the registered KataGo
 `python/katago/train/metrics_pytorch.py`. Q counts child nodes, including terminal
 children; side/reanalysis use their own search. Each repeated writer row receives
 independent stochastic quantization. EtaZero uses separate per-game seed streams
-and excludes score targets and Go Rand sequencing. `scripts/check_katago_q.py`
+and excludes score targets and Go Rand sequencing. `tests/reference/check_katago_q.py`
 uses the pinned unmodified source quantizer against the actual core library.

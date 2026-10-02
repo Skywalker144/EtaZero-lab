@@ -8,9 +8,11 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import torch
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'python'))
 from etazero.config import ROOT,load_config
 from etazero.network import make_network
 from etazero.optimization import Optimization,optimizer_for

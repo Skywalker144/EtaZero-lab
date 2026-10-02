@@ -3,7 +3,7 @@ import argparse,ast,copy,hashlib,itertools,json,subprocess,sys,logging
 from pathlib import Path
 import torch
 from torch.optim.swa_utils import AveragedModel
-ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'python'));sys.path.insert(0,str(ROOT/'tests'))
+ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'python'));sys.path.insert(0,str(ROOT/'tests'))
 from etazero.config import load_config
 from etazero.training import subepoch_ends
 from test_optimization import small_optimization

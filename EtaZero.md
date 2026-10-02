@@ -78,7 +78,7 @@ Train分为 **SP（自对弈产数据）**、**L（learner更新）**；Eval分�
 | D02 Forbidden-plane dropout（KataGomo） | 训练时随机隐藏禁手提示 | 写每个row时useForbiddenInput~Bernoulli(0.5)；平面与特征可用标志同步改变 | Gomo训练writer每行抽样；仅Renju编码禁手；KataGo无禁手平面 | useForbiddenInput默认true，搜索保留提示 | [writer][GM-WRITE]、[编码][GM-INPUT]、[常量][GM-CONSTANT] | **输出行粒度一致（独立/真实CUDA样例）**。writer在repeats确定后逐最终行独立Bernoulli，保存forbidden_input；完整轨迹保留提示，view展开后同步隐藏两个平面及flag。重复行可不同，重新shuffle不再抽样；dropout0/0.5/1不改变开局、搜索、权重及结果。搜索/Eval/Match完整，其他规则flag0。[writer][EZ-WRITER]、[view][EZ-VIEW]。 |
 | D03 Policy init | 纯网络policy随机走开局，增加状态覆盖 | Gomo n=max(0,floor(Exp(1)·mean−2·已有手数))、0.0002均匀分支；mean是抽样公式参数，不保证固定开局手数；Go n=floor(Gamma(k)·area·prop/k)，k=1为指数 | Gomo独立于balanced，SP必须显式配置init开关，mean loader默认12、T默认1；Go主线init=true、prop=0.08、k默认1、T默认1；还含komi/结束逻辑 | Gomo Match init默认false；启用后必须显式给mean（无loader默认），T默认1；Go Match默认init=true、prop=0.04，区别于SP | [Gomo init][GM-POLICYINIT]、[SP加载][GM-PLAYSETTINGS-SP]、[Match加载][GM-PLAYSETTINGS]、[Go init][KG-POLICYINIT]、[Go loader][KG-PLAYSETTINGS] | **NOVC机制/加载默认及显式预设已验证**。SP init开关必填、loader mean12/T1，baseline显式采用GM scripts mean6/T1.6；Match默认关闭，开启必须显式mean、T缺省1。每手按参考棋盘执色选botB/W；已有手数补偿与0.0002均匀分支保留。after/failure可配置消融默认均true，非Go面积/komi路径。[init][EZ-POLICY-INIT-CODE]、[调用][EZ-MATCH-CALL]。 |
 | D04 Multi-board size | 一套网络混合尺寸，以mask排除padding | 尺寸按权重抽样；空间层mask；pool和BN按有效面积；value含尺寸条件 | Go尺寸7/9/11/13/15/17/19/8/10/12/14/16/18；权重1/4/3/10/7/9/75/1/2/4/6/8/10；矩形概率0.10 | Match示例19/13/9、权重90/5/5；固定局面按自身尺寸推理 | [抽样][KG-GAMEINIT]、[mask/pool][KG-MODEL]、[配置][KG-SP] | **用户环境适配（尺寸/mask已验证）**。保留方形15/14/13/12/11、权重100/10/5/3/1、canvas15；baseline及Eval/Match默认15。真实CUDA各尺寸/规则推理和smoke混合尺寸产样通过；mask/pool/BN回归，矩形配置明确拒绝。三架构均使用有效区域mask，指定预设的原源码前向/梯度及真实训练/导出已核对。[env][EZ-ENV]、[输入][EZ-GAME]、[pool/BN][EZ-NORM-CODE]。 |
-| D05 Multi-rule | 条件化网络学习不同真实棋规 | 规则影响转移、终局和全局输入，不能只改标签 | Go ko=SIMPLE/POSITIONAL/SITUATIONAL、scoring=AREA/TERRITORY、tax=NONE/NONE/SEKI/SEKI/ALL、suicide=false/true、button=false/false/true；Gomo basicRule/VCN另按其配置 | 比赛可混合或固定规则；输入条件仍完整 | [Go抽样][KG-GAMEINIT]、[Go输入][KG-INPUT]、[Gomo输入][GM-INPUT] | **用户环境适配＋有限语料独立对照通过**。三规则可混训，baseline权重1/0/0；真实CUDA三规则产样、五种尺寸及长连/恰五/禁手终局通过。136125个KataGomo独立禁手/类别对照含邻域穷举、边缘、同方向双四及假三/递归；未证明所有递归局面等价。无Go规则、VCN或矩形。[env][EZ-ENV]、[转移][EZ-GAME]、[独立检查](/home/sky/RL/EtaZero-lab/EtaZero_V0/scripts/check_katagomo_rules.py)。 |
+| D05 Multi-rule | 条件化网络学习不同真实棋规 | 规则影响转移、终局和全局输入，不能只改标签 | Go ko=SIMPLE/POSITIONAL/SITUATIONAL、scoring=AREA/TERRITORY、tax=NONE/NONE/SEKI/SEKI/ALL、suicide=false/true、button=false/false/true；Gomo basicRule/VCN另按其配置 | 比赛可混合或固定规则；输入条件仍完整 | [Go抽样][KG-GAMEINIT]、[Go输入][KG-INPUT]、[Gomo输入][GM-INPUT] | **用户环境适配＋有限语料独立对照通过**。三规则可混训，baseline权重1/0/0；真实CUDA三规则产样、五种尺寸及长连/恰五/禁手终局通过。136125个KataGomo独立禁手/类别对照含邻域穷举、边缘、同方向双四及假三/递归；未证明所有递归局面等价。无Go规则、VCN或矩形。[env][EZ-ENV]、[转移][EZ-GAME]、[独立检查](/home/sky/RL/EtaZero-lab/EtaZero_V0/tests/reference/check_katagomo_rules.py)。 |
 
 ## 3. 网络、归一化与优化
 
@@ -481,7 +481,7 @@ SP是主局数据生产；E/M是固定局面eval及Match的搜索profile。Match
 ## 核查证据
 
 - **静态来源**：沿KataGo入口→setup/play settings→search/NN→writer→shuffle→learner追分支；沿EtaZero配置加载→实际SP/Match调用→记录/重复行→loss/优化→模型发布与恢复对照。已实现项的“静态一致”限定到本表所写子集与二值mask等输入约束。
-- **可复跑入口**：[check_reference_formulas.py](/home/sky/RL/EtaZero-lab/EtaZero_V0/scripts/check_reference_formulas.py:1)仅用标准库，从源码AST提取真实函数及梯度阈值分支；不导入训练模块、PyTorch或CUDA，不更新模型、不写实验产物。结果以JSON输出，含六个被核对文件与核查脚本的SHA256；任一对照不符合预期时非零退出。
+- **可复跑入口**：[check_reference_formulas.py](/home/sky/RL/EtaZero-lab/EtaZero_V0/tests/reference/check_reference_formulas.py:1)仅用标准库，从源码AST提取真实函数及梯度阈值分支；不导入训练模块、PyTorch或CUDA，不更新模型、不写实验产物。结果以JSON输出，含六个被核对文件与核查脚本的SHA256；任一对照不符合预期时非零退出。
 - **纯函数对照结果**：replay四参数公式252个案例整数结果完全一致；SGD/AdamW六参数组共31104组案例的LR和WD均一致，浮点容限为相对`1e−12`、绝对`1e−15`。这些是脚本的实际复跑计数，每个参数组计一个案例，同时检查LR与WD；仅证明同输入的局部公式，不消除累计量、norm采样和刷新节奏差异。
 - **裁剪与范数时序**：12个SGD fson和12个AdamW阈值案例均与来源一致；batch128/scale1的SGD cap=1767.76695297。范数snapshot/all-batch、Lookahead筛选开关及2/100打印间隔，5760个累积和/权重/均值对照通过；使用来源metrics_logging及set_snapshot_metrics函数，不自行复制预期公式。
 - **文档检查**：57个唯一ID、每行7列、无待填项；全部引用定义和本地文件/行号有效。
@@ -498,7 +498,7 @@ SP是主局数据生产；E/M是固定局面eval及Match的搜索profile。Match
 在仓库根目录执行：
 
 ```bash
-conda run -n pytorch python EtaZero_V0/scripts/check_reference_formulas.py
+conda run -n pytorch python EtaZero_V0/tests/reference/check_reference_formulas.py
 ```
 
 来源路径默认`~/RL/SkyZero/KataGo`，可用`--katago-root /absolute/path/to/KataGo`指定。该脚本独立于训练入口；更换来源后需重新核对本表的commit和适用分支，不能沿用旧结果。

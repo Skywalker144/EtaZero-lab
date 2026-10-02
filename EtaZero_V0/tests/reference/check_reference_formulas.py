@@ -193,7 +193,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--katago-root', type=Path, default=Path.home()/'RL/SkyZero/KataGo')
     args = parser.parse_args()
-    eta_root = Path(__file__).resolve().parents[1]
+    eta_root = Path(__file__).resolve().parents[2]
     eta_shuffle = Source(eta_root/'python/etazero/shuffle.py')
     eta_optimizer = Source(eta_root/'python/etazero/optimization.py')
     kg_shuffle = Source(args.katago_root/'python/shuffle.py')

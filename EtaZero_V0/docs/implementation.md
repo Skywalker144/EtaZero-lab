@@ -63,6 +63,21 @@ worker 随机流从运行种子、iteration、持久化 attempt 序号和 worker
 
 常驻进程仍保留 CUDA 上下文的固定显存开销；训练显存预算须计入该开销。模型权重、推理输入和 allocator 缓存随 release 请求释放。
 
+### Selfplay 并行参数短测
+
+[benchmark_selfplay.py](../scripts/benchmark_selfplay.py) 使用指定配置和固定网络权重逐项测量完整 selfplay 请求，包括平衡开局、主局、side 搜索与后台 writer 排空。每组参数使用独立常驻 worker，先预热，再以相同局数和种子序列测量；NN cache 与 fork pool 按生产 worker 的生命周期保留。模型加载和首次 JIT 执行包含在预热中，不计入测量。产物写入新的独立目录，不进入训练回放。
+
+```bash
+conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
+  --config-dir configs/minimal_test --model /absolute/path/to/model.pt \
+  --output data/selfplay_benchmark_new --games 1024 --warmup-games 128 --repeats 2 \
+  --candidates 32:32:1:1:0 128:128:1:1:0
+```
+
+候选项依次为 `game_threads:max_batch:server_threads:search_threads:batch_wait_us`。模型须符合当前输入契约和配置画布；`--evaluator random` 可省略模型，用于单独检查冷启动，此时每个请求重建随机服务，与生产行为一致。GPU 不可见的托管沙箱须在可访问宿主 CUDA 的执行环境运行。比较时保持网络、访问预算、棋规和采样参数一致，优先看完整请求的训练行／秒与局／秒，并检查局长及采样量波动。`simulations` 只统计主局逐手搜索，不含开局和 side 搜索；其吞吐用于辅助区分工作量变化。所有棋局完成后才结束计时，因此包含批次末尾并行度下降的耗时。
+
+输出保留生效配置、源码快照、二进制和模型校验值、硬件与依赖、原始事件及 NPZ，并记录实际平均 batch、cache 命中率、排队时间与每秒采样的 GPU／内存指标。资源采样自身有少量开销；这是 selfplay 短测，不是完整训练轮性能或棋力结论。改变并行度会改变请求、随机 D4 和 fork pool 的调度顺序；提高树内线程数还会改变搜索访问顺序，须作为实验条件变化记录。
+
 ## 配置组织
 
 每套配置位于 `configs/<name>/`，分为 `run.cfg`、`env.cfg`、`net.cfg`、`selfplay.cfg`、`train.cfg`、`eval.cfg`、`match.cfg`。`env.cfg` 的 `[environment]` 管理棋盘、规则和训练行的禁手特征 dropout。`selfplay.cfg` 首部 `[search]` 集中完整／cheap 根访问预算、cheap 概率与权重；搜索技巧按独立 section 配置，底部 `[parallelism]`、`[inference]`、`[writer]` 管理执行资源。训练字段以 [config.py](../python/etazero/config.py) 为事实源；评估／比赛仅读取自身文件，字段以 [eval_config.py](../python/etazero/eval_config.py) 为事实源，不参与训练配置身份。
@@ -84,6 +99,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 | `checkpoints/` | 最近若干轮末的完整训练状态 `.pt`，以及全部历史 checkpoint 的 `.json` 提交记录 |
 | `models/`、`models/current.json` | 已校验推理模型和发布指针；首轮训练前无已发布网络 |
 | `training.png` | 每轮提交、正常退出和恢复后自动重建的训练图；也可手动重绘 |
+| `loss.png` | 总 loss 与每项实际启用的损失分量，逐面板对照训练均值与轮末验证均值 |
 | `logs/performance.png` | 阶段耗时、吞吐与推理统计 |
 | `logs/iterations/` | 与整轮提交对应的指标、累计训练时间和模型身份 |
 | `.internal/discarded/` | 不参与训练或图表的中断轮原始产物 |
@@ -195,7 +211,7 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 
 无论中断发生在 selfplay、shuffle、train、export 还是最终提交前，重启都从上一完整轮的 checkpoint 重跑整轮，不采用本轮 `learner.json`。中断轮的对局、checkpoint、快照、模型、轮次状态和候选指标及强制终止遗留的私有export staging目录移入 `.internal/discarded/<id>/`，保留原始字节；catalog 作为派生索引重建。半局始终不构造监督。已经原子提交但发布指针尚未更新的轮次仍有效，不重复训练。底层 learner 的 checkpoint/游标恢复能力用于内部验证，用户训练入口采用整轮恢复。同目录控制器由OS flock独占；checkpoint不可覆盖的原子link、模型完整目录rename、state/current原子replace分别构成发布边界。未发布暂存不被consumer当作模型。
 
-固定KataGo来源的save函数保存model、optimizer、metrics/running_metrics、train_state、validation metrics、config及可选SWA；train_state含SWA采样累积和文件使用状态。它没有捕获Python/NumPy/Torch/CUDA RNG、AMP scaler或函数局部Lookahead fast/slow cache/counter。Eta额外保存这些恢复状态和文件内已消费游标；不能把本地精确learner续训或整轮回滚协议说成来源默认能力。独立入口[check_katago_persistence.py](../scripts/check_katago_persistence.py)执行原save函数四种分支并实测本地checkpoint字段。
+固定KataGo来源的save函数保存model、optimizer、metrics/running_metrics、train_state、validation metrics、config及可选SWA；train_state含SWA采样累积和文件使用状态。它没有捕获Python/NumPy/Torch/CUDA RNG、AMP scaler或函数局部Lookahead fast/slow cache/counter。Eta额外保存这些恢复状态和文件内已消费游标；不能把本地精确learner续训或整轮回滚协议说成来源默认能力。独立入口[check_katago_persistence.py](../tests/reference/check_katago_persistence.py)执行原save函数四种分支并实测本地checkpoint字段。
 
 来源export_model_for_selfplay.sh的USEGATING=0直接发布到models，非零时交给gatekeeper；本地按用户profile直接发布，无额外棋力门控。同步来源示例仍运行gatekeeper，但该示例不能证明所有来源运行都必须gating。
 
@@ -213,6 +229,25 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 训练预算和 Elo 使用 state 与逐轮指标中的 `elapsed_seconds`：仅累加成功提交轮从计划准备到绘图完成的墙钟，包含 bootstrap、自对弈、shuffle、训练和导出，排除初始化、启动恢复、暂停、排队和作废尝试。`max_seconds` 在轮次边界检查，可能超出一轮；不将最后模型假定为恰好位于预算点。日志 `active_seconds` 与 heartbeat 保留实际活动耗时作为审计信息，包含作废工作，不作训练比较横轴。阶段时间不累加线程耗时冒充墙钟。
 
 ## 验收与限制
+
+`tests/test_*.py` 是 pytest 自动发现的 Python 测试，`cpp/tests/` 是 CTest 使用的原生测试；`tests/reference/check_*.py` 是手动运行的来源对照检查，不随普通 pytest 自动执行。来源检查读取本地 KataGo / KataGomo 源码，多数会核对 `reference_sources.json` 中固定的 commit 和 SHA256；链接生产库或运行 `build/` 下测试程序的检查须先执行 `scripts/build.sh`。构建、训练、调度与性能测量入口保留在 `scripts/`。
+
+| 来源对照检查 | 范围 |
+|---|---|
+| [Q量化](../tests/reference/check_katago_q.py) | 固定来源的随机量化函数与生产库逐项比较 |
+| [网络](../tests/reference/check_katago_network.py) | plain、NBT、Transformer 的参数映射、初始化、输出与梯度 |
+| [图搜索](../tests/reference/check_katago_graph.py)、[搜索修正](../tests/reference/check_katago_search_corrections.py) | 子节点权重、边访问追赶、聚合及 uncertainty / noise / optimistic 混合 |
+| [采样](../tests/reference/check_katago_sampling.py)、[权重](../tests/reference/check_katago_sampling_weights.py)、[分支预算](../tests/reference/check_katago_forks.py) | PDA、value surprise、权重重分配及 hint / PCR / reduced 预算分支 |
+| [回放](../tests/reference/check_katago_replay.py) | 窗口、分组、文件顺序与整 batch 读取 |
+| [训练时钟](../tests/reference/check_katago_clocks.py)、[保存状态](../tests/reference/check_katago_persistence.py) | LR / Lookahead / SWA 时机及 checkpoint 字段范围 |
+| [禁手](../tests/reference/check_katagomo_rules.py)、[标量公式](../tests/reference/check_reference_formulas.py) | KataGomo Renju 判断及窗口、优化器、梯度阈值和范数统计公式 |
+
+以下来源检查示例在版本目录执行；`--output` 使用新的结果路径，检查失败会以非零状态退出。其他参数见各检查入口的 `--help`；保存状态检查直接运行并将 JSON 打印到 stdout。
+
+```bash
+conda run -n pytorch python tests/reference/check_reference_formulas.py
+conda run -n pytorch python tests/reference/check_katago_q.py --output /tmp/etazero_q_reference.json
+```
 
 ```bash
 # 在版本目录执行
@@ -234,13 +269,15 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 
 ## 训练图与性能图
 
-[plotting.py](../python/etazero/plotting.py) 根据 `logs/events.jsonl` 和 checkpoint 的 sidecar 提交链重建图。`training.png` 使用 MuZero V2 的配色与六面板阅读顺序，AlphaZero 只展示真实存在的胜负、局长、loss 与梯度指标。总局长包含开局动作，有效行数排除开局并按采样次数计数；自对弈横轴为迭代完成时的累计有效行数，包含 iteration 0 的 bootstrap。训练横轴从 iteration 1 起，loss 按该轮已提交消费 batch 取算术均值，包含 AMP 跳步，无平滑；梯度均值只使用成功更新的有限范数，原始 overflow 范数仍在日志中，聚合同时记录跳步与有效梯度 batch 数。梯度范数为整个网络裁剪前的 L2 范数；loss 分量含六项 policy、主 value、三个 TD value 和短期价值误差；每条曲线为已乘训练系数的 batch 均值，Q关闭时十一项之和等于总loss，Q开启时另有`q_winloss_loss`曲线并计入总loss；关闭时不伪造零值曲线。优化器解耦衰减不计入 loss。
+[plotting.py](../python/etazero/plotting.py) 根据 `logs/events.jsonl` 和 checkpoint 的 sidecar 提交链重建图。`training.png` 使用深色三行两列布局：顶部为胜负和局长，中部固定分为策略 loss 与价值 loss，底部为梯度范数和 NN 缓存命中率。策略组包含六项普通／对手、soft 和 optimistic policy；价值组包含主 value、三个 TD value、短期价值误差及启用时的 Q。两组图例在面板内分两列显示，分量全为正时使用对数纵轴；总 loss 和有效行数／局保留在日志中，不单独占用概览面板。总局长包含开局动作，有效行数排除开局并按采样次数计数；自对弈和缓存命中率横轴为迭代完成时的累计有效行数，包含 iteration 0 的 bootstrap，刻度采用 `1.2e5` 形式的紧凑科学计数。缓存命中率为该轮各 worker 的 cache hits 总数／submitted requests 总数，只显示有网络请求的已完成轮次，随机冷启动不填零。训练横轴从 iteration 1 起，loss 按该轮已提交消费 batch 取算术均值，包含 AMP 跳步，无平滑；梯度均值只使用成功更新的有限范数，原始 overflow 范数仍在日志中，聚合同时记录跳步与有效梯度 batch 数。梯度范数为整个网络裁剪前平均 loss 的 L2 范数；每条 loss 曲线为已乘训练系数的 batch 均值，Q关闭时十一项之和等于总loss，Q开启时另有`q_winloss_loss`曲线并计入总loss；关闭时不伪造零值曲线。优化器解耦衰减不计入 loss。
+
+`loss.png` 使用四列面板，逐项展示总 loss 与实际启用的所有分量，蓝色实线为训练、红色虚线为验证。每个面板单独决定纵轴范围，正值使用对数刻度。验证取已完成轮次最后一次尝试的 `validation` 事件；新的 `plan` 清除该轮先前尝试的验证记录，当前未提交轮次不显示。无验证事件或无完整验证 batch 时留空，不填零且不跨缺测轮连接曲线。训练为轮内已提交消费 batch 的均值，验证为轮末 raw 模型 eval/no_grad 的样本均值，二者时点、模型状态与数据不同，差距不能直接全部归因于过拟合。验证不会替代已发布 SWA 模型的棋力评估。
 
 已完成轮次的自对弈统计取最后一次尝试的对应日志。训练指标只采用 state checkpoint 提交链中的 update ID，并按 ID 去重；当前未完成轮次、未保存更新和废弃分支均不显示。阶段耗时和推理计数只取成功尝试，原始失败日志仍保留供审计。日志中间损坏会报错，仅末尾未完成 JSON 可忽略。
 
 `logs/performance.png` 单独显示各阶段已完成尝试的累计 wall seconds、有效行／自对弈秒、已提交训练样本／训练秒，以及 NN 平均 batch、每请求排队微秒和缓存命中率。训练耗时包含对象创建、数据等待、计算和 checkpoint 等开销。没有完成事件的中断阶段缺少耗时，不进入分母；当前未完成训练轮次也不显示吞吐，因此这些图不能直接作为完整跨中断端到端性能比较。推理计数按 iteration、attempt、worker 去重。bootstrap 使用 random evaluator，未发生网络组批时相关面板无值。
 
-每轮在 state 提交前先 flush 日志并准备两张 PNG，将绘图耗时计入本轮；controller 正常返回和重启时可从已提交 state 重建；绘图不修改 checkpoint、数据或随机流。`bash scripts/run.sh plot --run-dir <实验目录>` 可手动重建，`--plot` 保留为返回后的显式重绘选项。绘图异常会明确报错，已提交训练状态保留，重启可重建。
+每轮在 state 提交前先 flush 日志并准备三张 PNG，将绘图耗时计入本轮；controller 正常返回和重启时可从已提交 state 重建；绘图不修改 checkpoint、数据或随机流。`bash scripts/run.sh plot --run-dir <实验目录>` 可手动重建，`--plot` 保留为返回后的显式重绘选项。绘图异常会明确报错，已提交训练状态保留，重启可重建。
 
 ## 自动实验
 

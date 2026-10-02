@@ -12,7 +12,7 @@ import tempfile
 from types import SimpleNamespace
 import numpy as np
 import torch
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'python'));sys.path.insert(0,str(ROOT/'tests'))
 from etazero.config import load_config
 from etazero.shuffle import desired_window,_groups,resource_plan,validation_file

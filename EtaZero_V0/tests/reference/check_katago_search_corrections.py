@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from check_katago_graph import body
 
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
 
 
 def main():

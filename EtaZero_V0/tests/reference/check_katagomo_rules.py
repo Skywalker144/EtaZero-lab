@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 COMMIT = 'df152116e3787c75c6a3de099d261ca092b7dfc1'
 
 

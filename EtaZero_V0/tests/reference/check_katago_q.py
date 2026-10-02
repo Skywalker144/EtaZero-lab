@@ -7,7 +7,7 @@ import re
 import subprocess
 import tempfile
 from check_katago_graph import body
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);args=parser.parse_args()
