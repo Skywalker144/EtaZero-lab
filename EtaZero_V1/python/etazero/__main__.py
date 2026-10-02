@@ -17,8 +17,8 @@ def main():
     for name in ("check-config","run","evaluate","match"):
         sub=subparsers.add_parser(name)
         sub.add_argument("--config-dir",default=os.environ.get("CONFIG_DIR") or str(ROOT/"configs"/"baseline"))
+        sub.add_argument("--run-dir")
         if name!="check-config":
-            sub.add_argument("--run-dir")
             sub.add_argument("--binary",default=str(ROOT/"build"/"etazero"))
         if name=="run":
             sub.add_argument("--resume",action="store_true",default=None,
@@ -49,12 +49,13 @@ def main():
         from .eval_config import load_evaluation_config
         config=load_evaluation_config(directory, match=args.command=='match')
     else:
-        config=load_config(directory)
+        config=load_config(directory, run_dir=args.run_dir)
     if args.command=="check-config":
         print(json.dumps({"id":fingerprint(config),"config":config},indent=2));return
     if args.command in ('evaluate','match') and not args.run_dir and not args.model:
         parser.error('Evaluation requires --model or --run-dir to identify the model')
-    root=Path(args.run_dir).resolve() if args.run_dir else ROOT/(config["run"]["run_dir"] if "run" in config else "data")
+    root=Path(config['run']['run_dir']) if args.command=='run' else (
+        Path(args.run_dir).resolve() if args.run_dir else ROOT/'data')
     binary=Path(args.binary).resolve()
     if args.command=="run":
         if args.iterations is not None and args.iterations<0:
