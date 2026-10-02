@@ -1,17 +1,17 @@
 # 算法与搜索设计
 
-本文描述当前 AlphaZero 的算法语义和后续算法边界。运行架构、数据保存与验收见 [运行实现](implementation.md)。AlphaZero / PUCT 已实现，MuZero / Gumbel 仍属后续设计，网络规模、训练参数与正式实验方案由用户确定。
+本文描述当前 AlphaZero 的算法语义和后续算法边界。运行架构、数据保存与验收见 [运行实现](implementation.md)。AlphaZero / PUCT 和 MuZero / PUCT 已实现，Gumbel 仍属后续设计，网络规模、训练参数与正式实验方案由用户确定。
 
 ## 算法与搜索组合
 
 `algorithm` 决定搜索使用的状态转移、网络结构和训练方式；`root_search_algo` 与 `nonroot_search_algo` 分别决定根节点和非根节点的搜索策略。算法身份需要记录完整三元组，不能仅用一个“Gumbel”标签概括所有配置。
 
-| algorithm | root_search_algo | nonroot_search_algo | 目标能力 | 第一轮支持目标 |
+| algorithm | root_search_algo | nonroot_search_algo | 目标能力 | 当前状态 |
 |---|---|---|---|---|
 | alphazero | puct | puct | AlphaZero | 已实现 |
 | alphazero | gumbel | puct | Gumbel 根搜索 + PUCT 非根搜索 | 后续实现 |
 | alphazero | gumbel | gumbel | Gumbel 根搜索 + 改进策略非根搜索 | 后续实现 |
-| muzero | puct | puct | MuZero | 后续实现 |
+| muzero | puct | puct | MuZero | 已实现，见 [MuZero](muzero.md) |
 | muzero | gumbel | puct | Gumbel 根搜索 + PUCT 非根搜索 | 后续实现 |
 | muzero | gumbel | gumbel | Gumbel 根搜索 + 改进策略非根搜索 | 后续实现 |
 | 任一 | puct | gumbel | 本项目不允许的组合 | 始终拒绝 |
@@ -254,7 +254,7 @@ Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络�
 
 ### 公共边界
 
-| 边界 | AlphaZero | 后续 MuZero |
+| 边界 | AlphaZero | MuZero |
 |---|---|---|
 | 根输入 | 真实观测 | 真实观测经过 representation |
 | 树内状态 | 真实棋盘状态 | 学习得到的 latent state |
@@ -262,13 +262,15 @@ Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络�
 | 树内终局与 mask | 真实规则给出 | 按所移植 MuZero 的定义，不从真实棋盘偷取树内信息 |
 | 样本使用 | 单状态监督 | 连续动作序列与多步展开目标 |
 
-公共搜索执行器负责访问统计、并行、预算和回传调用；[SearchState / AlphaZeroState](../cpp/include/etazero/algorithm.h) 负责状态、转移、叶推理、奖励 / 折扣与玩家视角。数据服务保留完整真实轨迹；训练目标由算法构造器生成。第一轮只实现实际使用的 AlphaZero 适配层，不创建返回假值的 MuZero 类。
+当前 AlphaZero 搜索执行器负责访问统计、并行、预算和回传调用；[SearchState / AlphaZeroState](../cpp/include/etazero/algorithm.h) 负责真实状态、转移和叶推理。MuZero 使用独立的 latent 搜索与推理请求实现，按语义复用数学函数，不将 latent 塞入 AlphaZero 节点。数据服务保留真实轨迹，但 AlphaZero 的采样搜索数组压缩与单行训练视图不适用于 MuZero 连续展开。MuZero 为连续展开保留所有后续目标，具体行为见 [MuZero](muzero.md)。
 
 `SearchResult` 应区分实际动作、训练策略目标、根价值、访问统计和实际预算。Gumbel 接入后允许其训练目标与访问频率不同，不能把公共接口命名为“visit policy”后强制所有算法共用。
 
 ### MuZero
 
-后续实现优先核对现有 [MuZero V2 算法定义](/home/sky/RL/MuZero/MuZero_V2/docs/algorithm.md)、[网络](/home/sky/RL/MuZero/MuZero_V2/python/muzero/network.py)、[搜索](/home/sky/RL/MuZero/MuZero_V2/cpp/src/search.cpp) 和 [展开目标](/home/sky/RL/MuZero/MuZero_V2/python/muzero/replay.py)。该工程是特定的棋类 MuZero，区分其基础预设与增强预设，不把二者混在一起移植。
+网络、latent 搜索、组批、轨迹展开、完整运行链路及 KataGo 工程机制适用性统一维护在 [MuZero](muzero.md)。
+
+实现依据包括 [MuZero V2 算法定义](/home/sky/RL/MuZero/MuZero_V2/docs/algorithm.md)、[网络](/home/sky/RL/MuZero/MuZero_V2/python/muzero/network.py)、[搜索](/home/sky/RL/MuZero/MuZero_V2/cpp/src/search.cpp) 和 [展开目标](/home/sky/RL/MuZero/MuZero_V2/python/muzero/replay.py)。该工程是特定的棋类 MuZero，区分其基础预设与增强预设，不把二者混在一起移植。
 
 完整接入必须覆盖 representation、dynamics、prediction、初始与 recurrent 组批、latent 生命周期、搜索备份、展开长度、价值 / 策略目标、梯度缩放以及终局与展开末端处理。真实环境只负责实际动作执行和监督来源，不能在 latent 树内调用 AlphaZero 的棋规转移代替 dynamics。
 
