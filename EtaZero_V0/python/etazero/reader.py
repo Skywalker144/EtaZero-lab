@@ -1,7 +1,13 @@
-"""Bounded file prefetch with a checkpointable cursor and no discarded batch tails."""
+"""Whole file batches and consumed cursors.
+
+Gap-delaying repeat order adapted from KataGo training_data_generator.py (MIT).
+An immutable snapshot is one synchronous round dataset; switching datasets occurs
+at the next round. Checkpoints additionally retain the current file batch cursor.
+"""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import copy
+import random
 import queue
 import threading
 import numpy as np
@@ -10,7 +16,7 @@ from .schema import CONTRACT_ID, PLANES, GLOBALS, unpack_observations
 
 
 class BatchReader:
-    def __init__(self, snapshot, batch_size, prefetch_depth, seed, state=None):
+    def __init__(self,snapshot,batch_size,prefetch_depth,seed,state=None,no_repeat_files=False,split="train",shuffle_files=True):
         self.snapshot = Path(snapshot)
         if not (self.snapshot/'data').is_dir():
             from .shuffle import restore_snapshot
@@ -18,20 +24,37 @@ class BatchReader:
         self.manifest = load_json(self.snapshot/"manifest.json")
         if self.manifest["contract"] != CONTRACT_ID:
             raise ValueError("Snapshot contract mismatch")
-        self.files = self.manifest["files"]
-        if not self.files or sum(x["rows"] for x in self.files) != self.manifest["rows"]:
+        if split not in ('train','validation'):raise ValueError('Invalid reader split')
+        self.split=split;self.directory=self.snapshot/'data'
+        if split=='validation':self.directory=self.directory/'validation'
+        self.files=self.manifest['files' if split=='train' else 'validation_files']
+        total=self.manifest['rows' if split=='train' else 'validation_rows']
+        if not self.files or sum(x['rows'] for x in self.files)!=total:
             raise ValueError("Invalid snapshot manifest")
         self.batch_size, self.depth = batch_size, prefetch_depth
-        self.random = np.random.default_rng(seed)
-        self.epoch, self.index, self.offset = 0, 0, 0
-        self.order = self.random.permutation(len(self.files)).tolist()
+        self.no_repeat_files=no_repeat_files;self.shuffle_files=shuffle_files
+        self.random=random.Random(seed)
+        self.epoch=0;self.index=0;self.offset=0;self.used=[]
+        self.order=list(range(len(self.files)))
+        if shuffle_files:
+            self.random.shuffle(self.order)
+            # Source first-dir queue is uniformly interleaved with an empty old
+            # queue, drawing once per file, then served in reverse order.
+            for _ in self.order:self.random.random()
+            self.order.reverse()
+        self.usable_rows=sum(f['rows']//batch_size*batch_size for f in self.files)
+        if not self.usable_rows:raise ValueError('Snapshot has no complete per-file batch')
         if state:
-            if state["snapshot_id"] != self.manifest["id"]:
-                raise ValueError("Checkpoint data snapshot mismatch")
-            self.random.bit_generator.state = state["rng"]
-            self.epoch, self.index, self.offset, self.order = state["epoch"], state["index"], state["offset"], state["order"]
-            if sorted(self.order) != list(range(len(self.files))) or not 0 <= self.index <= len(self.order):
-                raise ValueError("Invalid checkpoint data order")
+            if state['shuffle_files']!=shuffle_files or state['split']!=split or state['snapshot_id']!=self.manifest['id'] or state['batch_size']!=batch_size or state['no_repeat_files']!=no_repeat_files:
+                raise ValueError('Checkpoint data snapshot/batch/repeat mode mismatch')
+            self.random.setstate(state['rng'])
+            self.epoch,self.index,self.offset,self.order,self.used=(state[k] for k in ('epoch','index','offset','order','used'))
+            if sorted(self.order)!=list(range(len(self.files))) or not 0<=self.index<=len(self.order) or self.used!=self.order[:self.index]:
+                raise ValueError('Invalid checkpoint data order')
+            if self.offset<0 or self.offset%batch_size or (self.index==len(self.order) and self.offset):
+                raise ValueError('Invalid checkpoint data cursor')
+            if self.index<len(self.order) and self.offset>self.files[self.order[self.index]]['rows']//batch_size*batch_size:
+                raise ValueError('Invalid checkpoint data cursor')
         self.executor = ThreadPoolExecutor(max_workers=max(1,prefetch_depth))
         self.pending = {}
 
@@ -39,21 +62,26 @@ class BatchReader:
         self.executor.shutdown(wait=True, cancel_futures=True)
 
     def state(self):
-        return {"snapshot_id": self.manifest["id"], "epoch": self.epoch, "index": self.index,
-                "offset": self.offset, "order": self.order[:], "rng": copy.deepcopy(self.random.bit_generator.state)}
+        return {"snapshot_id": self.manifest["id"], "split":self.split, "epoch": self.epoch, "index": self.index,
+                "offset":self.offset,"order":self.order[:],"used":self.used[:],"rng":self.random.getstate(),
+                "batch_size":self.batch_size,"no_repeat_files":self.no_repeat_files,"shuffle_files":self.shuffle_files}
 
     def _load(self, index):
         info = self.files[self.order[index]]
-        path = self.snapshot/"data"/info["path"]
+        path = self.directory/info["path"]
         if sha256(path) != info["sha256"]:
             raise ValueError(f"Snapshot file checksum mismatch: {path}")
         with np.load(path, allow_pickle=False) as file:
             arrays = {key: file[key] for key in file.files}
-        if set(arrays) != {"obs", "globals", "policy", "opponent_policy", "opponent_policy_weight", "value"} or len(arrays["value"]) != info["rows"]:
+        if set(arrays) != {"obs", "globals", "policy", "opponent_policy", "opponent_policy_weight", "value", "td_value", "full_game_weight", "q_values", "q_visits"} or len(arrays["value"]) != info["rows"]:
             raise ValueError(f"Invalid training view: {path}")
         canvas = self.manifest["canvas"]
         expected = {"obs": ((info["rows"],len(PLANES),(canvas*canvas+7)//8),np.uint8),
                     "globals": ((info["rows"],len(GLOBALS)),np.float32),
+                    "td_value": ((info["rows"],3,3),np.float32),
+                    "full_game_weight": ((info["rows"],),np.float32),
+                    "q_values": ((info['rows'],canvas*canvas),np.float32),
+                    "q_visits": ((info['rows'],canvas*canvas),np.float32),
                     "policy": ((info["rows"],canvas*canvas),np.float32),
                     "opponent_policy": ((info["rows"],canvas*canvas),np.float32),
                     "opponent_policy_weight": ((info["rows"],),np.float32),"value": ((info["rows"],3),np.float32)}
@@ -62,31 +90,37 @@ class BatchReader:
                 raise ValueError(f"Invalid training {key} layout: {path}")
         return arrays
 
-    def _current(self):
-        if self.index == len(self.order):
-            self.epoch += 1; self.index = self.offset = 0
-            self.order = self.random.permutation(len(self.files)).tolist()
-            self.pending.clear()
-        for i in range(self.index, min(len(self.order), self.index+self.depth+1)):
-            if i not in self.pending:
-                self.pending[i] = self.executor.submit(self._load, i)
-        return self.pending[self.index].result()
+    def _new_pass(self):
+        if self.no_repeat_files:
+            raise StopIteration('No-repeat snapshot exhausted; a new snapshot is required')
+        previous=self.used;count=len(previous);k=(count*2+1)//3
+        reservoir=previous[:k];order=[]
+        while k<count:
+            index=self.random.randrange(len(reservoir))
+            reservoir[index],reservoir[-1]=reservoir[-1],reservoir[index]
+            order.append(reservoir.pop());reservoir.append(previous[k]);k+=1
+        self.random.shuffle(reservoir);order.extend(reservoir)
+        self.order=order;self.used=[];self.index=self.offset=0;self.epoch+=1
+        self.pending.clear()
 
     def next(self):
-        parts, remaining = [], self.batch_size
-        while remaining:
-            arrays = self._current()
-            if not 0 <= self.offset < len(arrays["value"]):
-                raise ValueError("Invalid data cursor offset")
-            n = min(remaining, len(arrays["value"])-self.offset)
-            parts.append({k: a[self.offset:self.offset+n] for k,a in arrays.items()})
-            self.offset += n; remaining -= n
-            if self.offset == len(arrays["value"]):
-                self.pending.pop(self.index); self.index += 1; self.offset = 0
-        batch = dict(parts[0]) if len(parts)==1 else {k:np.concatenate([p[k] for p in parts]) for k in parts[0]}
-        # Keep prefetch and cross-file assembly compact; expand only this batch.
-        batch["obs"] = unpack_observations(batch["obs"],self.manifest["canvas"])
-        return batch
+        while True:
+            if self.index==len(self.order):self._new_pass()
+            info=self.files[self.order[self.index]]
+            usable=info['rows']//self.batch_size*self.batch_size
+            if self.offset==usable:
+                self.pending.pop(self.index,None);self.used.append(self.order[self.index])
+                self.index+=1;self.offset=0;continue
+            if not 0<=self.offset<usable:raise ValueError('Invalid data cursor offset')
+            for i in range(self.index,min(len(self.order),self.index+self.depth+1)):
+                if i not in self.pending:self.pending[i]=self.executor.submit(self._load,i)
+            arrays=self.pending[self.index].result()
+            begin=self.offset;self.offset+=self.batch_size
+            batch={k:v[begin:self.offset] for k,v in arrays.items()}
+            # Source drops each file's suffix. Never fill from another file or
+            # wrap a partly filled batch across passes/snapshots.
+            batch['obs']=unpack_observations(batch['obs'],self.manifest['canvas'])
+            return batch
 
 
 class BatchPrefetcher:
