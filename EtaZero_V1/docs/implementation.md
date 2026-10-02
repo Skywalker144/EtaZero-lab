@@ -84,6 +84,8 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
 
 派生配置在 `run.cfg` 的 `[run]` 中使用 `extends = baseline`，父目录名优先在所选配置的同级解析，找不到时在本版本 `configs/` 下解析，因此实验伞目录中的臂也可直接 `extends = baseline` 或 `minimal_test`。解析次序是父配置、当前配置、当前目录的 `*.cfg.local`；父目录本机覆盖不向子配置传播。继承循环、父目录缺失、未知/重复字段、错误文件归属、非法枚举与范围、非法组合或未实现能力，均在启动 worker 前失败。
 
+`run.run_dir` 可省略或留空，且不继承父配置。最终输出位置按 `--run-dir`、当前目录 `run.cfg.local`、当前目录 `run.cfg`、自动映射的优先级解析；本机覆盖中的空值恢复自动映射。默认将所选目录相对于本版本 `configs/` 的完整路径映射到 `data/`，例如 `configs/az_pcr/100v` → `data/az_pcr/100v/`。配置中的相对输出路径以本版本目录为基准，命令行中的相对输出路径以调用时工作目录为基准；最终路径解析符号链接并保存为绝对路径。`configs/` 外的配置必须显式指定输出位置，父配置中的输出位置不能满足这一要求。`check-config` 支持 `--run-dir` 并显示解析结果；同一最终路径的自动选择与显式指定生成相同配置身份。历史产物不自动迁移，恢复仍要求保存的生效配置一致。
+
 Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `config/effective.cfg`，C++ 不维护第二套默认值。观测、动作、模型输出与原始分片类型由 [schema.py](../python/etazero/schema.py) 定义，构建时生成 C++ 头文件，模型和数据记录契约内容校验身份。
 
 恢复要求生效配置一致，并核对 native 配置未被另外修改。当前不做任意配置热更新，不实现历史格式兼容层；正式实验条件由用户确定。
@@ -298,7 +300,7 @@ MuZero 的概览图增加第四行：逐展开步 loss 和三段模块的梯度�
 
 `MAX_ITERS`、`MAX_TIME_SECONDS`、`ARM_GPUS`、`SHARED_INIT` 可覆盖伞配置，`SHARED_INIT` 使用 true/false。`CONFIG_DIR` 或 `--config-dir` 选择伞目录，`DRY_RUN=1` 或 `--dry-run` 仅打印解析计划，不创建目录、初始化权重或启动任何任务。`--binary` 指定本版本已验证构建；`--work-dir` 指定调度产物目录，默认 `data/experiments/<伞目录名>_<路径摘要>/`。
 
-指定 GPU 槽位时，子进程的 `CUDA_VISIBLE_DEVICES` 设为该槽，CUDA devices 映射为 `cuda:0`，CPU devices 保留。每臂至多一个 selfplay device，多设备配置会明确拒绝；GPU 槽位不得重复。每臂 `run.run_dir` 为独立目录，重复、嵌套或包含调度目录的路径会在启动前拒绝。GPU 槽位仅控制本次 scheduler，不管理外部任务或保留宿主 GPU。
+指定 GPU 槽位时，子进程的 `CUDA_VISIBLE_DEVICES` 设为该槽，CUDA devices 映射为 `cuda:0`，CPU devices 保留。每臂至多一个 selfplay device，多设备配置会明确拒绝；GPU 槽位不得重复。每臂使用普通训练相同的输出目录解析；例如 `configs/az_pcr` 的各臂默认位于 `data/az_pcr/<臂名>/`。重复、嵌套或包含调度目录的路径会在启动前拒绝。生成给子进程的配置写入最终绝对输出路径，不按调度临时配置的位置重新映射。GPU 槽位仅控制本次 scheduler，不管理外部任务或保留宿主 GPU。
 
 共享初始化文件保存于调度目录 `.internal/initializations/`，按网络结构、seed 与契约分组并校验 SHA-256。它只携带模型参数及 buffers，各臂重新初始化 optimizer、计数和 RNG；random bootstrap 仍各自生成，不共享对局、回放或首轮训练后的模型。结构或种子不同的臂得到不同初始化；相同种子的随机对局可能相同，但产物与生命周期独立。`shared_init = false` 时各臂由自己的初始化路径启动。
 
