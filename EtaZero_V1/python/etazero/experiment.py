@@ -62,9 +62,7 @@ def experiment_plan(directory, environ=None, work_dir=None):
             devices['train'] = 'cpu' if devices['train'] == 'cpu' else 'cuda:0'
             devices['selfplay'] = 'cpu' if devices['selfplay'] == 'cpu' else 'cuda:0'
             validate(config)
-        destination = (ROOT/config['run']['run_dir']).resolve()
-        # Resolve symlinks before overlap checks and before writing the effective config.
-        config['run']['run_dir'] = str(destination)
+        destination = Path(config['run']['run_dir'])
         arms.append({'name': selected.name, 'config_dir': str(selected), 'run_dir': str(destination), 'config': config})
     if not arms:
         raise ValueError(f'No experiment arm directories with run.cfg in {directory}')
