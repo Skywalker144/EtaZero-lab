@@ -47,7 +47,85 @@ def test_default_profiles_select_b5c192nbt():
     for name in ('baseline','minimal_test'):
         c=load_config(ROOT/'configs'/name)
         assert c['network']['channels']==192 and c['network']['blocks']==5
-        assert set(c['network'])=={'canvas','channels','blocks'}
+        assert c['network']['architecture']=='nbt'
+        assert set(c['network'])=={'architecture','canvas','channels','blocks','predict_q_values'}
+
+
+def test_plain_source_preset_and_optimizer_roles():
+    c=load_config(ROOT/'configs/smoke_test')
+    c['network'].update(architecture='plain',channels=128,blocks=10)
+    validate(c)
+    model=make_network(c)
+    assert [b.pre.has_global_pool for b in model.blocks]==[False]*4+[True,False,False,True,False,False]
+    assert model.policy_head.out.weight.shape==(6,32,1,1)
+    assert model.value_head.hidden.weight.shape==(80,96)
+    assert len([m for m in model.modules() if isinstance(m,MaskedBatchNorm)])==1
+    assert model.trunk_norm.scale==pytest.approx(1/math.sqrt(11))
+    for i,block in enumerate(model.blocks):
+        assert block.pre.norm.scale==pytest.approx(1/math.sqrt(i+1))
+        assert block.post.norm.scale==1
+        local=96 if i in (4,7) else 128
+        assert block.post.conv.weight.shape==(128,local,3,3)
+    roles={id(p):g['group_name'] for g in parameter_groups(model) for p in g['params']}
+    assert len(roles)==len(list(model.parameters()))
+    assert roles[id(model.blocks[4].pre.conv.linear.weight)]=='normal'
+    assert roles[id(model.blocks[4].pre.conv.norm_global.weight)]=='normal_gamma'
+    assert roles[id(model.trunk_norm.weight)]=='output'
+
+
+@pytest.mark.parametrize('architecture,channels,blocks', [('plain',192,10),('plain',128,5),('transformer',192,4),('transformer',128,5),('unknown',128,10)])
+def test_reject_unimplemented_or_nonpreset_architecture(architecture,channels,blocks):
+    c=load_config(ROOT/'configs/smoke_test')
+    c['network'].update(architecture=architecture,channels=channels,blocks=blocks)
+    with pytest.raises(ValueError):
+        validate(c)
+    with pytest.raises(ValueError):
+        make_network(c)
+
+
+def test_transformer_bare_source_structure_initialization_and_roles():
+    from etazero.network import BiasMask,FixedScaleMask
+    from etazero.transformer import Attention,SwiGLU
+    c=load_config(ROOT/'configs/smoke_test')
+    c['network'].update(architecture='transformer',channels=192,blocks=5)
+    validate(c); model=make_network(c)
+    assert model.model_version==17 and model.norm_kind=='fixup'
+    assert isinstance(model.act,torch.nn.ReLU) and isinstance(model.trunk_norm,BiasMask)
+    assert not any(isinstance(m,MaskedBatchNorm) for m in model.modules())
+    assert model.policy_head.out.weight.shape==(6,32,1,1)
+    assert model.value_head.hidden.weight.shape==(64,96)
+    roles={id(p):g['group_name'] for g in parameter_groups(model) for p in g['params']}
+    for block in model.blocks:
+        assert isinstance(block.pre.norm,BiasMask)
+        assert isinstance(block.post.norm,FixedScaleMask)
+        assert block.post.conv.weight.count_nonzero()==0
+        assert [type(m) for m in block.inner]==[Attention,SwiGLU,Attention,SwiGLU]
+        assert roles[id(block.inner[0].q_proj.weight)]=='normal_attn'
+        assert roles[id(block.inner[1].input.weight)]=='normal'
+        assert roles[id(block.inner[0].norm.weight)]=='noreg'
+        assert roles[id(block.post.norm.weight)]=='normal_gamma'
+        x=torch.randn(2,192,6,6);mask=torch.ones(2,1,6,6)
+        torch.testing.assert_close(block(x,mask),x,rtol=0,atol=0)
+    assert len(roles)==len(list(model.parameters()))
+
+
+def test_transformer_attention_excludes_keys_with_manual_uniform_attention():
+    from etazero.transformer import Attention
+    layer=Attention(2)
+    with torch.no_grad():
+        layer.q_proj.weight.zero_();layer.k_proj.weight.zero_()
+        layer.v_proj.weight.copy_(torch.eye(96));layer.out_proj.weight.copy_(torch.eye(96))
+    x=torch.zeros(1,96,2,2);x[0,0,0,0]=2;x[0,1,0,1]=4;x[:,:,1,:]=100000
+    mask=torch.tensor([[[[1.,1.],[0.,0.]]]])
+    actual=layer(x,mask)
+    expected=torch.zeros_like(x)
+    expected[:,0]=1/math.sqrt(4/96+1e-6)
+    expected[:,1]=2/math.sqrt(16/96+1e-6)
+    torch.testing.assert_close(actual,expected,rtol=1e-6,atol=1e-6)
+    # Keys are excluded, while invalid queries may receive nonzero context; the
+    # trunk-final mask prevents those query outputs from reaching a head.
+    changed=x.clone();changed[:,:,1,:]=-123456
+    torch.testing.assert_close(layer(changed,mask),actual,rtol=0,atol=0)
 
 
 def test_global_and_value_pool_hand_calculated_negative_features():
@@ -106,7 +184,7 @@ def test_nbt_skip_paths_and_padding_invariance():
         obs=torch.zeros(2,5,6,6);obs[:,0,:5,:5]=1
         obs[:,1,2,2]=1;obs[:,2,1,2]=1
         obs[1,:,5,:]=1000;obs[1,:,:,5]=1000;obs[1,0,5,:]=0;obs[1,0,:,5]=0
-        p,v=model(obs,torch.zeros(2,4))
+        p,v=model(obs,torch.zeros(2,6))
         torch.testing.assert_close(p[0],p[1],rtol=0,atol=0)
         torch.testing.assert_close(v[0],v[1],rtol=0,atol=0)
         assert p[:, :, ~obs[0,0].flatten().bool()].eq(0).all()
