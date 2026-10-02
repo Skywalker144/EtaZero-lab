@@ -1,4 +1,5 @@
 #include "etazero/record.h"
+#include "etazero/random_evaluator.h"
 #include <iostream>
 #include <filesystem>
 #include <limits>
@@ -21,6 +22,11 @@ struct IdentityBackend : Backend {
         for(auto obs:inputs)result.push_back({std::vector<double>((obs->size()-GLOBAL_FEATURES)/INPUT_PLANES,(*obs)[0]),wdl((*obs)[0])});
         return result;
     }
+};
+struct GatedBackend : IdentityBackend {
+    std::atomic<bool>& ready;
+    explicit GatedBackend(std::atomic<bool>& gate):ready(gate) {}
+    void initialize() override {while(!ready.load())std::this_thread::yield();}
 };
 struct ConcurrentBackend : IdentityBackend {
     std::atomic<int>& entered;
@@ -93,7 +99,18 @@ void forbidden_case(std::initializer_list<std::pair<int,int>> points, int x,int 
     RenjuAnalyzer a;check(a.forbidden(b,y*15+x)==expected,"Renju reference case");
 }
 int main() {
+    check(quantize_policy({0.049,0.05,1})==std::vector<int16_t>({0,1,10}), "Scale before deterministic rounding");
+    check(quantize_policy({0.49,0.5,20})==std::vector<int16_t>({0,1,20}), "Keep raw weight scale above ten");
+    check(quantize_policy({1,30000,60000})==std::vector<int16_t>({1,15000,30000}), "Cap largest int16 target at 30000");
     try {
+        for(int missing : {0,1}) {
+            std::vector<std::unique_ptr<Backend>> invalid;
+            for(int i=0;i<2;++i)invalid.push_back(i==missing?nullptr:std::make_unique<IdentityBackend>());
+            bool rejected=false;
+            try {BatchEvaluator service(std::move(invalid),"invalid",5,1,1,0,0);}
+            catch(const std::runtime_error& error) {rejected=std::string(error.what())=="Null inference backend";}
+            check(rejected,"Null backend rejected before capability access or server startup");
+        }
         for(int threads : {1,4}) {
             BroadState position;
             Search capped({99,threads,1.5,1,0,1,true,100},42);
@@ -116,6 +133,20 @@ int main() {
             for(int a:{0,1,2,3,4,5,6,7,8,9,11,10,13,12,15,14,17,16,19,18,20,21,22,23,24})draw.play(a/5*7+a%5);
             check(draw.finished()&&draw.winner()==0,"Full-board draw");
         }
+        for(int size:{11,12,13,14,15})for(Rule rule:{Rule::FREESTYLE,Rule::STANDARD,Rule::RENJU}) {
+            Game black(size,15,rule);
+            for(int action:{0,15,1,17,3,19,4,21,5,23,2})black.play(action);
+            check(black.finished()==(rule!=Rule::STANDARD),"Mapped board size Black overline terminal");
+            check(black.winner()==(rule==Rule::FREESTYLE?1:rule==Rule::RENJU?-1:0),"Mapped board size overline outcome");
+            Game white(size,15,rule);
+            for(int action:{30,0,32,1,34,3,36,4,38,5,40,2})white.play(action);
+            check(white.winner()==(rule==Rule::STANDARD?0:-1),"Mapped board size White overline outcome");
+            Game five(size,15,rule);for(int action:{0,30,1,32,2,34,3,36,4})five.play(action);
+            check(five.finished() && five.winner()==1 && five.terminal_value()==-1,"Mapped board size exact-five terminal perspective");
+            auto obs=five.observation();
+            for(int y=0;y<15;++y)for(int x=0;x<15;++x)
+                check(obs[y*15+x]==(x<size && y<size),"Mapped board size canvas mask");
+        }
         forbidden_case({{6,7},{8,7},{7,6},{7,8}},7,7,true);
         forbidden_case({{5,7},{6,7},{8,7},{7,5},{7,6},{7,8}},7,7,true);
         forbidden_case({{1,0},{2,0},{0,1},{0,2}},0,0,false);
@@ -126,7 +157,22 @@ int main() {
         Game win(5,7,Rule::FREESTYLE);for(int a:{0,7,1,8,2,9,3,10})win.play(a);
         KnownEvaluator e(4,0.25);Search search(e,one,1);auto r=search.run(win,0);
         check(r.action==4&&r.value==0.625&&r.visits[4]==1&&e.calls==1,"One-ply win and terminal inference");
+        check(r.q_visits[4]==1 && r.q_values[4]==1,"Terminal winning Q pure W-L/current player");
+        check(r.q_visits[0]==0 && r.q_values[0]==0 && r.q_visits[6]==0,"Occupied/padding Q must be zero");
         Game renju(15,15,Rule::RENJU);for(int a:{111,0,113,2,97,4,127,6})renju.play(a);
+        // Renju forbidden points are submittable losing moves. A forced leaf
+        // ends exactly, skips NN, and backs up from the next player's +1 as -1.
+        KnownEvaluator forbidden_eval(112,0.25);Search forbidden_search(forbidden_eval,one,1);
+        auto losing=forbidden_search.run(renju,0);
+        check(renju.legal(112) && losing.action==112 && losing.visits[112]==1,
+              "Search legal domain retains forbidden losing action");
+        check(losing.value==-0.375 && forbidden_eval.calls==1,"Forbidden terminal backs up negative value without NN");
+        check(losing.q_visits[112]==1 && losing.q_values[112]==-1,"Forbidden terminal losing Q/current player");
+        Game terminal=renju;terminal.play(112);
+        check(terminal.finished() && terminal.winner()==-1 && terminal.reason()==2 && terminal.terminal_value()==1,
+              "Forbidden terminal value uses next player's perspective");
+        AlphaZeroState terminal_state(terminal,forbidden_eval);
+        check(terminal_state.terminal_value()==1,"AlphaZero adapter terminal perspective");
         for(int perspective:{1,-1}) {
             auto full=renju.observation(perspective), dropped=renju.observation(perspective,false);
             int area=225,g=INPUT_PLANES*area,plane=perspective==1?3:4;
@@ -147,6 +193,30 @@ int main() {
         check(rr.action==112&&rr.value==(-1+re.v)/2&&re.calls==1,"Forbidden loss perspective");
         Game empty(5,5,Rule::FREESTYLE);KnownEvaluator ve(0,0.5);Search vs(ve,one,3);auto vr=vs.run(empty,1);
         check(vr.value==0&&ve.calls==2,"Leaf value changes player perspective");
+        {
+            Game conditioned(5,5,Rule::RENJU);conditioned.set_pda(0.75,1);
+            auto own=conditioned.observation(1),opposite=conditioned.observation(-1);
+            RandomBackend backend(5,19);
+            auto batch=backend.evaluate({&own,&opposite});
+            auto reordered=backend.evaluate({&opposite,&own});
+            check(batch[0].logits==reordered[1].logits && batch[0].wdl==reordered[1].wdl &&
+                  batch[1].logits==reordered[0].logits && batch[1].wdl==reordered[0].wdl,
+                  "Fractional PDA random evaluation is independent of batch order");
+            check(batch[0].logits!=batch[1].logits,"PDA perspective conditions random evaluation");
+            auto adjacent=own;adjacent.back()=std::nextafter(adjacent.back(),1.0f);
+            check(backend.evaluate({&adjacent})[0].logits!=batch[0].logits,
+                  "Random evaluator preserves fractional global float precision");
+            for(const auto& e:batch) {
+                check(e.logits.size()==25,"Random policy shape");
+                for(double x:e.logits)check(std::isfinite(x),"Finite random policy");
+                check(std::abs(e.wdl[0]+e.wdl[1]+e.wdl[2]-1)<1e-12,"Normalized random WDL");
+            }
+            for(int feature:{0,static_cast<int>(own.size())-1}) {
+                auto invalid=own;invalid[feature]=feature==0?0.5f:std::numeric_limits<float>::infinity();
+                bool rejected=false;try{backend.evaluate({&invalid});}catch(const std::runtime_error&){rejected=true;}
+                check(rejected,"Random evaluator rejects invalid spatial and nonfinite global features");
+            }
+        }
         ArithmeticState state;Search generic(one,9);bool unsupported=false;
         try {generic.run(state,0);}catch(const std::runtime_error&){unsupported=true;}
         check(unsupported && generic.pending()==0,"WDL search rejects unsupported reward/discount adapters");
@@ -175,6 +245,18 @@ int main() {
         for(int i=0;i<2;++i)service_callers.emplace_back([&]{services.evaluate(empty.observation());++serviced;});
         for(auto& t:service_callers)t.join();services.finish();
         check(serviced==2 && services.rows_by_server[0]==1 && services.rows_by_server[1]==1,"Each service owns a concurrent backend");
+        // Keep the server unavailable while callers enqueue. forcePush must
+        // permit a batch larger than the nominal capacity, even at capacity=1.
+        std::atomic<bool> queue_ready{false};std::vector<std::unique_ptr<Backend>> gated;
+        gated.push_back(std::make_unique<GatedBackend>(queue_ready));
+        BatchEvaluator force_queue(std::move(gated),"force",5,8,1,100000,0);
+        std::vector<std::thread> force_callers;
+        for(int i=0;i<8;++i)force_callers.emplace_back([&]{force_queue.evaluate(empty.observation());});
+        auto queue_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+        while(force_queue.submitted<8 && std::chrono::steady_clock::now()<queue_deadline)std::this_thread::yield();
+        queue_ready=true;
+        for(auto& t:force_callers)t.join();force_queue.finish();
+        check(force_queue.requests==8 && force_queue.max_observed_batch>1,"forcePush does not enforce nominal queue capacity");
         std::vector<std::unique_ptr<Backend>> identity;identity.push_back(std::make_unique<IdentityBackend>());
         BatchEvaluator cache(std::move(identity),"m",5,1,2,0,1);
         auto obs=empty.observation();cache.evaluate(obs);cache.evaluate(obs);
@@ -201,7 +283,7 @@ int main() {
         record.id=0;record.seed=0;record.size=5;record.canvas=7;record.rule=Rule::FREESTYLE;
         for(int action:{0,7,1,8,2,9,3,10,4}) {
             Step s{};s.player=wg.player();s.action=action;s.simulations=1;s.temperature=1;s.observation=wg.observation();
-            s.policy.assign(49,0);s.visits.assign(49,0);s.policy[action]=1;s.visits[action]=1;
+            s.policy.assign(49,0);s.visits.assign(49,0);s.policy[action]=1;s.visits[action]=1;s.policy_target.assign(49,0);s.policy_target[action]=10;
             wg.play(action);s.reward=wg.finished()?wg.winner()*s.player:0;record.steps.push_back(std::move(s));
         }
         record.winner=wg.winner();record.reason=wg.reason();record.final_player=wg.player();record.final_observation=wg.observation();
