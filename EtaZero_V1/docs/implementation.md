@@ -195,7 +195,7 @@ games_i = max(1, ceil(deficit / rows_per_game))
 
 [learner](../python/etazero/training.py) 实现固定步数、batch 级 D4、SGD / AdamW、分组 LR/WD、warmup、范数自适应衰减、Lookahead 与 SWA；配置入口在 `train.cfg`，数学与适配边界见 [学习与数据使用](algorithms.md#学习与数据使用)。非有限 loss 或无法恢复的非有限梯度明确失败；FP16 缩放溢出按下述机制跳步，消费与成功更新分别计数。
 
-`training.compile` 将网络与完整损失联合交给 torch.compile / Inductor，使用 fullgraph 和静态 shape 捕获：learner 的 batch 大小与画布固定，各网络结构、尺寸与精度使用各自的图。超过重编译限制时明确失败，避免长运行静默退回 eager；首次 shape / 精度编译有额外耗时。选择 AdamW 时 CUDA 使用 fused 实现，CPU 使用普通实现；SGD 使用 momentum 0.9。编译和融合可能改变浮点归约顺序，属于显式执行条件，不能据此声称与旧 eager 路径逐位一致。SGD momentum 或 AdamW 的一阶／二阶矩与 step 随 checkpoint 保存并恢复。
+`training.compile` 将网络与完整损失联合交给 torch.compile / Inductor，使用 fullgraph 和静态 shape 捕获：learner 的 batch 大小与画布固定，各网络结构、尺寸与精度使用各自的图。超过重编译限制时明确失败，避免长运行静默退回 eager；首次 shape / 精度编译有额外耗时。公共包入口在导入 PyTorch 前设置持久缓存，默认 `${XDG_CACHE_HOME:-$HOME/.cache}/etazero/compile-v1/{inductor,triton}`，尊重已有 `TORCHINDUCTOR_CACHE_DIR` 和 `TRITON_CACHE_DIR`；run、autoexp、直接 Python 调用和子进程遵循同一默认值。缓存按需创建并跨运行复用；重建时停止相关进程后整体更换目录，不迁移已损坏缓存。选择 AdamW 时 CUDA 使用 fused 实现，CPU 使用普通实现；SGD 使用 momentum 0.9。编译和融合可能改变浮点归约顺序，属于显式执行条件，不能据此声称与旧 eager 路径逐位一致。SGD momentum 或 AdamW 的一阶／二阶矩与 step 随 checkpoint 保存并恢复。
 
 FP16 缩放溢出由 GradScaler 跳过当前 optimizer 更新并降低 scale，然后消费下一 batch，不保留图、不重试。当前 batch 的前向统计、随机流、reader 游标、样本与 Lookahead/SWA 时钟正常推进，成功更新数单独累计；每次溢出记录 `amp_overflow`，batch 日志记录 `amp_skipped`。训练 autocast 只影响主干，policy/value heads 和 loss 显式关闭 autocast 并使用 FP32。BF16 / FP32 的非有限梯度及非有限 loss 直接失败。
 
@@ -228,7 +228,13 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 
 日志由有界后台队列批量写入，最长每秒执行一次 fsync；checkpoint 的指标与提交事件先通过持久化屏障，随后更新 learner 指针，轮次状态提交也经过屏障。强制退出可能丢失尚未提交的日志尾部，已提交 checkpoint 的更新指标保持可追溯。
 
-训练预算和 Elo 使用 state 与逐轮指标中的 `elapsed_seconds`：仅累加成功提交轮从计划准备到绘图完成的墙钟，包含 bootstrap、自对弈、shuffle、训练和导出，排除初始化、启动恢复、暂停、排队和作废尝试。`max_seconds` 在轮次边界检查，可能超出一轮；不将最后模型假定为恰好位于预算点。日志 `active_seconds` 与 heartbeat 保留实际活动耗时作为审计信息，包含作废工作，不作训练比较横轴。阶段时间不累加线程耗时冒充墙钟。
+训练预算和 Elo 使用 state 与逐轮指标中的 `elapsed_seconds`：仅累加成功提交轮从计划准备到绘图完成、扣除 `torch.compile` 编译后的墙钟，包含 bootstrap、自对弈、shuffle、训练和导出，排除初始化、启动恢复、暂停、排队和作废尝试。
+
+计时读取 PyTorch 的 `calculate_time_spent()["total_wall_time"]` 累计计数，以每个阶段／轮次起止差值扣除互不重叠的前向捕获编译和惰性反向编译区间，覆盖缓存加载、验证图和后续重编译；不累加嵌套 backend／Triton 子计时，不跳过首个训练 batch，也不丢弃编译前的自对弈时间。该计数接口依赖当前 PyTorch 实现，升级时须验证前向、反向和重编译的扣时行为。`max_seconds` 在轮次边界检查，可能超出一轮；不将最后模型假定为恰好位于预算点。日志 `active_seconds` 与 heartbeat 保留实际活动耗时作为审计信息，包含作废工作，不作训练比较横轴。阶段时间不累加线程耗时冒充墙钟。
+
+`phase_end` 和逐轮 `logs/iterations/*.json` 分别记录 `wall_seconds`（原始墙钟）、`compile_seconds`（扣除的编译耗时）、`seconds`（净耗时），阶段性能图使用净耗时；逐轮指标与 session 记录 `timing_basis = committed_wall_excluding_compile`，session 另记录实际缓存路径。只有 state 原子提交后才计入累计时间，中断轮内 checkpoint 保留为归档证据，恢复入口使用上一完整轮 checkpoint 重跑。
+
+旧的已提交指标保持原样；缺少编译计时的历史轮次不能精确追溯扣时，混合口径续跑不能视为统一口径的等时间对照。
 
 ## 验收与限制
 
@@ -292,7 +298,7 @@ MuZero 的概览图增加第四行：逐展开步 loss 和三段模块的梯度�
 | 字段 | 语义 |
 |---|---|
 | `max_iteration` | 每臂累计完成训练轮数上限，0 不限 |
-| `max_seconds` | 每臂累计已提交完整轮次墙钟上限，0 不限；不含排队、暂停、启动恢复和作废轮次 |
+| `max_seconds` | 每臂累计已提交完整轮次净墙钟上限，0 不限；不含编译、排队、暂停、启动恢复和作废轮次 |
 | `arm_gpus` | GPU 编号或 GPU/MIG UUID 的逗号列表，每槽同时一个臂；空值串行使用各臂原有 devices |
 | `shared_init` | true/false；按网络结构和 seed 分组共享初始模型权重 |
 
