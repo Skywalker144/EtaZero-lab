@@ -144,11 +144,11 @@ class BrowserTests(unittest.TestCase):
             page.locator('h1').click()
             page.keyboard.press('a')
             page.wait_for_function("document.querySelector('#completed').textContent === '16' && !document.querySelector('#analyze').disabled")
-            page.locator('#model-filter').fill('no-matching-model')
-            self.assertTrue(page.locator('#new-game').is_disabled())
-            page.locator('#model-filter').fill('')
+            selected_run = page.locator('#run').input_value()
+            self.assertTrue(selected_run)
             page.locator('#refresh-models').click()
             page.wait_for_function("!document.querySelector('#refresh-models').disabled")
+            self.assertEqual(page.locator('#run').input_value(), selected_run)
             self.assertEqual(page.locator('#move-count').inner_text(), '第 1 手')
             # Failed requests must release the lock, then resync without losing the game.
             page.context.set_offline(True)
@@ -173,6 +173,42 @@ class BrowserTests(unittest.TestCase):
                 page.set_viewport_size({'width': width, 'height': 844})
                 self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), width)
             page.screenshot(path='/tmp/etazero-workbench-mobile.png', full_page=True)
+            self.assertEqual(errors, [])
+            browser.close()
+
+    def test_directory_and_generation_selection(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={'width': 1440, 'height': 900})
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(os.environ['ETAZERO_WEB_TEST_URL'])
+            page.wait_for_function("document.querySelector('#connection').textContent === '引擎已连接'")
+            catalog = page.request.get(os.environ['ETAZERO_WEB_TEST_URL'] + '/api/catalog').json()
+            before = page.request.get(os.environ['ETAZERO_WEB_TEST_URL'] + '/api/state').json()
+            self.assertEqual(page.locator('#run option').count(), len(catalog['runs']))
+            for run in catalog['runs']:
+                page.locator('#run').select_option(run['id'])
+                if not run['models']:
+                    self.assertTrue(page.locator('#new-game').is_disabled())
+                    self.assertIn('暂无', page.locator('#model').inner_text())
+                    continue
+                ids = page.locator('#model option').evaluate_all('options => options.map(option => option.value)')
+                self.assertEqual(ids, run['models'])
+                self.assertEqual(page.locator('#model').input_value(), run['default_model'])
+                if len(ids) > 1:
+                    page.locator('#model').select_option(ids[-1])
+                    manifest = next(m['manifest'] for m in catalog['models'] if m['id'] == ids[-1])
+                    self.assertIn(manifest['id'], page.locator('#model-info').text_content())
+                    page.locator('#refresh-models').click()
+                    page.wait_for_function("!document.querySelector('#refresh-models').disabled")
+                    self.assertEqual(page.locator('#model').input_value(), ids[-1])
+                    self.assertEqual(page.locator('#run').input_value(), run['id'])
+            after = page.request.get(os.environ['ETAZERO_WEB_TEST_URL'] + '/api/state').json()
+            self.assertEqual(after['game'], before['game'])
+            self.assertEqual(after['model'], before['model'])
             self.assertEqual(errors, [])
             browser.close()
 
