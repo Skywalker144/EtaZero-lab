@@ -6,11 +6,15 @@
 bash web/webui.sh
 ```
 
-脚本使用 Conda `pytorch`，增量构建 EtaZero V0，在 <http://127.0.0.1:8766> 提供单用户工作台。默认读取 `EtaZero_V0/configs/minimal_test/eval.cfg` 的继承配置，扫描 `EtaZero_V0/data/minimal_test` 中已发布的模型，优先选择 `models/current.json` 指向的权重。点击“创建棋局”加载模型；“刷新模型”重新扫描发布目录，无需重启服务，不改变当前棋局或已加载模型。
+脚本使用 Conda `pytorch`，按版本号各段数值选择最新的 `EtaZero_V*` 主线目录并增量构建，在 <http://127.0.0.1:8766> 提供单用户工作台。默认递归扫描该版本整个 `data/`，发现包含 `config/effective.json` 或 `models/` 的运行目录，包括实验伞目录下的嵌套运行。先选择“配置目录”，再选择“权重代数”；代数对应训练 iteration，按数值倒序排列，默认选择 `models/current.json` 指向的当前发布权重，没有发布指针时选择最新一代。尚未发布权重的目录显示“暂无权重”，不能创建棋局。存在可用的 `minimal_test` 时默认选中它，否则选择首个有权重的目录；`--model` 可指定初始选择。
+
+支持 AlphaZero 和 MuZero 已发布模型。运行路径相对于 `data/` 映射到同版本 `configs/`，加载对应 `eval.cfg` 及继承、本机和 `EVAL_*` 覆盖；找不到对应配置时，按模型算法使用 `baseline` 或 `muzero` 评估配置，默认棋盘尺寸取模型画布或保存的配置。`--config-dir` 可统一覆盖评估配置，须满足所选模型的搜索约束。MuZero 使用原生 latent 搜索，评估配置要求关闭图搜索和树复用、根对称数为 1。
+
+点击“创建棋局”加载模型；“刷新模型”重新扫描目录和权重，无需重启服务，保留当前选择、棋局和已加载模型。切换配置目录会填入该目录的默认棋盘、棋规和预算，新模型与评估配置在重开棋局后生效。
 
 ## 会话与局面研究
 
-桌面采用配置、棋盘、分析三栏。支持明暗主题、手数显示、键盘操作和窄屏布局；主题与手数偏好保存在浏览器。配置区支持按运行名、轮次或模型 ID 筛选模型，并查看 manifest、权重路径、SWA 信息与生效搜索配置。
+桌面采用配置、棋盘、分析三栏。支持明暗主题、手数显示、键盘操作和窄屏布局；主题与手数偏好保存在浏览器。配置区通过目录和代数两个下拉框选择模型，并查看 manifest、权重路径、SWA 信息与生效搜索配置。
 
 - **人机对弈**：选择执子方，AI 自动应手；人类执白时 AI 先行。“撤回”退至最近一次人类落子前，保留 AI 开局首手。
 - **局面研究**：手动交替落黑白棋，“分析”搜索当前方但不落子，“AI 单步”仅让当前方落一手。“撤回”只退一手。仍执行真实棋规，包括 Renju 黑棋禁手判负。
@@ -31,28 +35,30 @@ bash web/webui.sh
 - 网络先验在合法点归一化，包含全树 NN policy 温度，不含根温度 / 噪声；原始访问分布由 child visits 归一化，选择权重来自目标剪枝与 LCB。各图颜色分别按最大值线性缩放，数值为实际百分比。
 - “原始数据”提供最近一次分析的只读 JSON，便于核对原生返回值。
 
-模型在 C++ 进程中常驻，同一模型重开复用进程。加载时检查输入契约和 SHA-256；只读取已发布的 TorchScript 推理模型（包括发布时选用的 SWA），不读取训练 checkpoint。棋规与 PUCT 使用 V0 原生实现，每次搜索从新根开始；根访问上限最少为 2，包含一次初始根评估，并受评估配置其他停止条件约束。程序按指定设备运行，不自动回退到 CPU。
+模型在 C++ 进程中常驻，同一模型与评估配置重开复用进程。加载时检查输入契约和 SHA-256；只读取已发布的 TorchScript 推理模型（包括发布时选用的 SWA），不读取训练 checkpoint。棋规与搜索使用目标版本原生实现，每次搜索从新根开始；根访问上限最少为 2，包含一次初始根评估，并受评估配置其他停止条件约束。程序按指定设备运行，不自动回退到 CPU。
 
 ```bash
 # 指定模型：同目录必须包含 manifest.json。
-bash web/webui.sh --model EtaZero_V0/data/minimal_test/models/<模型目录>/model.pt
-# 扫描其他运行，或数据根目录下的全部运行。
-bash web/webui.sh --models-dir EtaZero_V0/data --port 8766
+bash web/webui.sh --model EtaZero_V1/data/muzero_minimal_test/models/<模型目录>/model.pt
+# 限定扫描到目标版本中的某个运行或实验伞目录。
+bash web/webui.sh --models-dir EtaZero_V1/data/muzero_minimal_test --port 8766
 # 独立评估配置，支持 EVAL_* 环境覆盖。
 EVAL_SEARCH_THREADS=8 EVAL_DEVICE=cuda:0 bash web/webui.sh
 ```
 
-实现入口：[server.py](server.py)、[app.py](app.py)、[engine.py](engine.py)、[原生 serve 命令](../EtaZero_V0/cpp/src/commands/main.cpp)、[界面](static/)。启动参数以 `python -m web.server --help` 为准。
+实现入口：[server.py](server.py)、[app.py](app.py)、[engine.py](engine.py)、[V1 原生 serve 命令](../EtaZero_V1/cpp/src/commands/main.cpp)、[界面](static/)。启动参数以 `python -m web.server --help` 为准。
 
 ## 验证
 
 真实 CUDA 模型检查，在仓库根目录执行：
 
 ```bash
-PYTHONPATH=EtaZero_V0/python:. \
-ETAZERO_WEB_TEST_MODEL="$PWD/EtaZero_V0/data/minimal_test/models/<模型目录>/model.pt" \
+PYTHONPATH=EtaZero_V1/python:. \
+ETAZERO_WEB_TEST_MODEL="$PWD/EtaZero_V1/data/muzero_minimal_test/models/<模型目录>/model.pt" \
 conda run --no-capture-output -n pytorch python -m unittest discover -s web/tests -p test_web.py -v
 ```
+
+不设置 `ETAZERO_WEB_TEST_MODEL` 时仍运行目录发现、代数排序、空目录、刷新和配置路由测试；真实模型测试支持 AlphaZero 或 MuZero，根据 manifest 自动选择评估配置。
 
 浏览器检查需要已有 Playwright 和 Chromium，会重开、回退并完成棋局，应对独立测试服务执行：
 
