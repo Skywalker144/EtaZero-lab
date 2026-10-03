@@ -1313,6 +1313,93 @@ def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
     assert load_json(root/'.internal/run.json') == info
 
 
+@pytest.mark.parametrize('algorithm',['alphazero','muzero'])
+def test_compiler_timing_and_sigint_rollback(tmp_path,gpu_config,monkeypatch,algorithm):
+    import etazero.runtime as runtime
+    from etazero.compiler import compilation_seconds
+    from etazero.experiment import arm_progress
+    if algorithm=='muzero':
+        from test_muzero_pipeline import small_config
+        c=small_config()
+    else:
+        c=copy.deepcopy(gpu_config)
+    c['training']['compile']=True
+    root=tmp_path/'run'
+    before_compile=compilation_seconds()
+    base=run_training(root,c,BINARY,max_iteration=1)
+    def verify_time(state):
+        rows=[load_json(p) for p in sorted((root/'logs/iterations').glob('*.json'))]
+        assert len(rows)==state['iteration']
+        assert state['elapsed_seconds']==pytest.approx(sum(r['seconds'] for r in rows))
+        for row in rows:
+            assert row['seconds']>0 and row['compile_seconds']>=0
+            assert row['wall_seconds']==pytest.approx(row['seconds']+row['compile_seconds'])
+        assert load_json(root/'models/current.json')['elapsed_seconds']==state['elapsed_seconds']
+        return rows
+    rows=verify_time(base)
+    measured=compilation_seconds()-before_compile
+    assert measured>0 and sum(r['compile_seconds'] for r in rows)==pytest.approx(measured,abs=.001)
+    assert rows[0]['compile_seconds']==0  # Bootstrap work is retained.
+    assert rows[1]['compile_seconds']>0
+    original=runtime.train_iteration
+    def interrupted(root,config,plan,checkpoint,log,stopping):
+        def signal_after_update(event,**fields):
+            log(event,**fields)
+            if event=='update':os.kill(os.getpid(),signal.SIGINT)
+        return original(root,config,plan,checkpoint,signal_after_update,stopping)
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime,'train_iteration',interrupted)
+        assert run_training(root,c,BINARY,resume=True,max_iteration=2)==base
+    pending=load_json(root/'.internal/iterations/000002/learner.json')['checkpoint']
+    assert pending['step']==1 and pending!=base['checkpoint']
+    assert load_json(root/'.internal/state.json')==base
+    assert not (root/'logs/iterations/000002.json').exists()
+    # Simulate a fresh interpreter's in-memory compiler cache on resume.
+    torch._dynamo.reset()
+    resumed=run_training(root,c,BINARY,resume=True,max_iteration=2)
+    rows=verify_time(resumed)
+    assert resumed['checkpoint']['total_steps']==8
+    assert rows[-1]['compile_seconds']>0
+    assert load_json(root/'.internal/iterations/000002/plan.json')['input_checkpoint']==base['checkpoint']
+    assert not (root/pending['path']).exists()
+    assert list((root/'.internal/discarded').glob('*/'+pending['path']))
+    assert rows[-1]['seconds']==pytest.approx(resumed['elapsed_seconds']-base['elapsed_seconds'])
+    events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
+    assert events[-1]['active_seconds']>resumed['elapsed_seconds']
+    train=[e for e in events if e['event']=='phase_end' and e['phase']=='train']
+    assert all(e['seconds']>0 and e['wall_seconds']>=e['seconds'] for e in train)
+    assert arm_progress({'name':'test','run_dir':str(root),'config':c},
+                      dict(max_iteration=0,max_seconds=resumed['elapsed_seconds']),None)=='complete'
+
+
+def test_compiler_timer_covers_lazy_backward_and_recompile(gpu_config):
+    from etazero.compiler import WorkTimer,compilation_seconds
+    from torch._dynamo.utils import calculate_time_spent
+    from torch._inductor import config as inductor_config
+    # Cold compilation makes lazy backward observable even on a warm machine.
+    with inductor_config.patch(force_disable_caches=True):
+        def objective(x):return (x.sin()*x).sum()
+        forward=torch.compile(objective,fullgraph=True,dynamic=False)
+        for size in (17,33):
+            x=torch.randn(size,device='cuda',requires_grad=True)
+            torch.cuda.synchronize()
+            before=calculate_time_spent()
+            timer=WorkTimer(True)
+            loss=forward(x)
+            after_forward=calculate_time_spent()
+            loss.backward();torch.cuda.synchronize()
+            after_backward=calculate_time_spent()
+            elapsed=timer.finish()
+            assert after_forward['entire_frame_compile']>before.get('entire_frame_compile',0)
+            assert after_backward['entire_backward_compile']>after_forward.get('entire_backward_compile',0)
+            assert elapsed['compile_seconds']==pytest.approx(after_backward['total_wall_time']-before['total_wall_time'])
+            assert elapsed['seconds']>0
+            torch.testing.assert_close(x.grad,x.detach().sin()+x.detach()*x.detach().cos())
+            warm_start=compilation_seconds()
+            forward(x).backward();torch.cuda.synchronize()
+            assert compilation_seconds()==warm_start
+
+
 def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monkeypatch):
     from etazero.arena import single_match, PairStore
     from etazero.elo import write_ratings
