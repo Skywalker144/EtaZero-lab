@@ -26,7 +26,7 @@ def main():
             sub.add_argument("--weights",type=Path)
             sub.add_argument("--iterations",type=int,
                              help="Total completed-iteration target; 0 means unlimited")
-            sub.add_argument("--max-seconds",type=float, help="Cumulative committed-iteration wall-time budget; 0 means unlimited")
+            sub.add_argument("--max-seconds",type=float, help="Cumulative committed-iteration wall time excluding compilation; 0 means unlimited")
             sub.add_argument("--plot",action="store_true", help="Also rebuild figures after the run returns")
         if name in ("evaluate","match"):
             sub.add_argument("--model")
