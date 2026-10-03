@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from .config import ROOT, csv, fingerprint, write_native, native_text
+from .compiler import WorkTimer
 from .data import Catalog
 from .native import NativeWorker
 from .export import export_model, verify_export
@@ -237,7 +238,10 @@ class Controller:
         self.source_id=source
         save_json(root/".internal/session.json",{"source_id":source,"started_utc":datetime.datetime.now(datetime.timezone.utc).isoformat()})
         self.journal("session_start",source_id=source,binary_sha256=sha256(self.binary),
-                     iteration_limit=self.max_iteration,active_seconds_limit=self.limit,**provenance())
+                     iteration_limit=self.max_iteration,elapsed_seconds_limit=self.limit,
+                     timing_basis='committed_wall_excluding_compile',
+                     compiler_cache={key:os.environ[key] for key in ('TORCHINDUCTOR_CACHE_DIR','TRITON_CACHE_DIR')},
+                     **provenance())
         if resume:
             info=load_json(root/".internal/run.json")
             if info["config_id"]!=self.config_id or info["config"]!=c:
@@ -286,7 +290,7 @@ class Controller:
         plotted=False
         while not self.stopping() and (not self.max_iteration or state["iteration"]<=self.max_iteration) and (not self.limit or state["elapsed_seconds"] < self.limit):
             plotted=False
-            started=time.monotonic()
+            timer=WorkTimer(c['training']['compile'])
             iteration=state["iteration"];directory=root/".internal/iterations"/f"{iteration:06d}";directory.mkdir(exist_ok=True)
             plan_path,status_path=directory/"plan.json",directory/"status.json"
             if plan_path.exists():
@@ -354,8 +358,10 @@ class Controller:
                 break
             from .plotting import run_history
             metrics=run_history(root, next_state)[-1]
-            next_state['elapsed_seconds']=state['elapsed_seconds']+time.monotonic()-started
-            metrics.update(elapsed_seconds=next_state['elapsed_seconds'], model=next_state['model'])
+            timing=timer.finish()
+            next_state['elapsed_seconds']=state['elapsed_seconds']+timing['seconds']
+            metrics.update(elapsed_seconds=next_state['elapsed_seconds'], model=next_state['model'],
+                           **timing, timing_basis='committed_wall_excluding_compile')
             save_json(root/'logs/iterations'/f'{iteration:06d}.json',metrics,immutable=True)
             self.state(next_state)
             state=next_state
@@ -381,9 +387,10 @@ class Controller:
         plot_run(self.root,state)
 
     def phase(self,name,iteration,function):
-        self.journal("phase_start",phase=name,iteration=iteration);start=time.monotonic()
+        self.journal("phase_start",phase=name,iteration=iteration)
+        timer=WorkTimer(self.config['training']['compile'])
         value=function()
-        self.journal("phase_end",phase=name,iteration=iteration,seconds=time.monotonic()-start)
+        self.journal("phase_end",phase=name,iteration=iteration,**timer.finish())
         return value
 
     def publish(self,model,elapsed_seconds):
