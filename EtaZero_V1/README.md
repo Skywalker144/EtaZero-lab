@@ -32,7 +32,7 @@ bootstrap 编号为 0，训练迭代从 1 编号，初始化 checkpoint 使用 0
 
 `baseline` 是完整配置的起点。`minimal_test` 继承 baseline，网络参数由 [net.cfg](configs/minimal_test/net.cfg) 指定，使用 11×11 棋盘、`replay.min_rows = 100000` 和 `training.train_steps = 500`，并使用独立输出目录；评估和比赛棋盘同步为 11×11。搜索预算及 reduced 最低访问数由 [selfplay.cfg](configs/minimal_test/selfplay.cfg) 明确覆盖；其他设置继承 baseline，包括编译、batch、规则权重和并行度。`smoke_test` 是自动化快速验收配置，使用 5/6 混合尺寸、三种规则及很小的数据和训练预算。baseline 与 minimal_test 开启 `training.compile`，首次使用某个 shape / 精度时会有编译耗时；smoke_test 关闭它。构建默认 CUDA 架构为 RTX 5090 的 12.0，其他目标可通过 `TORCH_CUDA_ARCH_LIST` 指定。设备由配置明确指定，不自动回退到 CPU；在隐藏 GPU 的托管沙箱中，CUDA 命令须在宿主设备可访问的执行环境运行。
 
-`muzero_minimal_test` 继承 [configs/muzero](configs/muzero/)，棋盘与画布、回放起点、每轮训练量和自对弈访问预算对齐 `minimal_test`；保留 MuZero 的三段 NBT、5 步展开、64 局并行及搜索限制，默认输出到 `data/muzero_minimal_test/`。评估和比赛棋盘均为 11×11，其他设置继承 MuZero 配置。启动方式：
+`muzero_minimal_test` 继承 [configs/muzero](configs/muzero/)，棋盘与画布、回放起点、每轮训练量和自对弈访问预算对齐 `minimal_test`；网络规模、5 步展开、并行局数及搜索限制继承 MuZero 配置，默认输出到 `data/muzero_minimal_test/`。评估和比赛棋盘均为 11×11，其他设置继承 MuZero 配置。启动方式：
 
 ```bash
 CONFIG_DIR=configs/muzero_minimal_test bash scripts/run.sh
