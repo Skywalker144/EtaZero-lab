@@ -32,6 +32,8 @@ bootstrap 编号为 0，训练迭代从 1 编号，初始化 checkpoint 使用 0
 
 `baseline` 是完整配置的起点。`minimal_test` 继承 baseline，网络参数由 [net.cfg](configs/minimal_test/net.cfg) 指定，使用 11×11 棋盘、`replay.min_rows = 100000` 和 `training.train_steps = 500`，并使用独立输出目录；评估和比赛棋盘同步为 11×11。搜索预算及 reduced 最低访问数由 [selfplay.cfg](configs/minimal_test/selfplay.cfg) 明确覆盖；其他设置继承 baseline，包括编译、batch、规则权重和并行度。`smoke_test` 是自动化快速验收配置，使用 5/6 混合尺寸、三种规则及很小的数据和训练预算。baseline 与 minimal_test 开启 `training.compile`，首次使用某个 shape / 精度时会有编译耗时；smoke_test 关闭它。构建默认 CUDA 架构为 RTX 5090 的 12.0，其他目标可通过 `TORCH_CUDA_ARCH_LIST` 指定。设备由配置明确指定，不自动回退到 CPU；在隐藏 GPU 的托管沙箱中，CUDA 命令须在宿主设备可访问的执行环境运行。
 
+所有 Python 入口统一默认使用 `${XDG_CACHE_HOME:-$HOME/.cache}/etazero/compile-v1/` 下的 `inductor/`、`triton/` 持久缓存，分别允许 `TORCHINDUCTOR_CACHE_DIR`、`TRITON_CACHE_DIR` 覆盖；重启复用缓存，不按实验臂重复创建。缓存需重建时，停止相关进程后整体更换目录，避免按文件年龄局部清理。
+
 `muzero_minimal_test` 继承 [configs/muzero](configs/muzero/)，棋盘与画布、回放起点、每轮训练量和自对弈访问预算对齐 `minimal_test`；网络规模、5 步展开、并行局数及搜索限制继承 MuZero 配置，默认输出到 `data/muzero_minimal_test/`。评估和比赛棋盘均为 11×11，其他设置继承 MuZero 配置。启动方式：
 
 ```bash
@@ -106,7 +108,11 @@ bash scripts/run.sh plot --run-dir data/my_check
 
 ## 等时间 Elo
 
-训练时间与 `autoexp` 预算采用已提交完整轮次的累计墙钟，包含该轮自对弈、shuffle、训练、导出和绘图，排除暂停、启动恢复和作废轮次；预算在整轮边界检查，可能超出一轮。原始日志的 `active_seconds` 仅作运行审计，不用作 Elo 横轴。
+训练时间与 `autoexp` 预算采用已提交完整轮次扣除编译后的累计墙钟，包含 bootstrap 及该轮自对弈、shuffle、训练、导出和绘图，排除 `torch.compile` 的前向／反向编译（含缓存加载与重编译）、暂停、启动恢复和作废轮次；编译前已完成的自对弈仍计时。预算在整轮边界检查，可能超出一轮。
+
+逐轮指标同时保存 `wall_seconds`、`compile_seconds`、净耗时 `seconds` 和累计 `elapsed_seconds`；阶段耗时图也扣除编译。中途 Ctrl+C 后从上一完整轮 checkpoint 重跑未提交轮，作废尝试不累计时间。
+
+历史已提交指标不追改，缺少编译耗时记录的旧结果不能精确换算到此口径。原始日志的 `active_seconds` 仅作运行审计，不用作 Elo 横轴。
 
 `eval.cfg` 与 `match.cfg` 独立于训练配置，修改它们不影响续训。baseline 默认 **500 根访问（500v）**、无根噪声，使用 Match profile 的温度、FPU、方差探索、目标剪枝与 LCB。smoke_test 显式使用 100v。不同 bot 的 Match 默认复用命中子树，相同模型身份双方每手清树；固定局面 eval 默认不复用。访问上限计入已有树统计，max_playouts 限制新增 playout，max_time 限制本手时间；计数与停止边界见 [搜索预算](docs/algorithms.md#puct-与搜索预算)。比赛使用 KataGomo 的随机 balance bot及按执色 policy init，保留 EtaZero 成对换色、逐局续测与联合 Elo 体系，详见 [评估与 Elo](docs/elo.md)。
 
