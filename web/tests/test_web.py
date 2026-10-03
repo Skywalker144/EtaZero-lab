@@ -1,30 +1,135 @@
 import json
 import os
 import subprocess
+import shutil
 import tempfile
 from pathlib import Path
 import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from threading import Thread
 
 from etazero.eval_config import load_evaluation_config
-from etazero.config import write_native
+from etazero.config import ROOT, write_native
 from etazero.evaluation import model_info
 from web.engine import Engine
 from web.app import App, Conflict
-from web.server import make_server
+from web.server import discover_catalog, discover_models, make_server
+from etazero.schema import CONTRACT_ID
 
 
 MODEL = os.environ.get('ETAZERO_WEB_TEST_MODEL')
-BINARY = Path(__file__).resolve().parents[2] / 'EtaZero_V0/build/etazero'
+BINARY = ROOT / 'build/etazero'
+
+
+class CatalogTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.data = self.root / 'data'
+        self.data.mkdir()
+        for name in ('baseline', 'minimal_test', 'muzero', 'muzero_minimal_test'):
+            shutil.copytree(ROOT / 'configs' / name, self.root / 'configs' / name)
+        self.patch = patch('web.server.ROOT', self.root)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.config = load_evaluation_config(ROOT / 'configs/minimal_test', environ={})
+
+    def publish(self, run, iteration, algorithm='alphazero', current=False):
+        root = self.data / run
+        relative = Path('models') / f'iteration_{iteration:06d}_test' / 'model.pt'
+        model = root / relative
+        model.parent.mkdir(parents=True)
+        model.touch()
+        info = dict(id=model.parent.name, contract=CONTRACT_ID, canvas=11, algorithm=algorithm,
+                    checkpoint=dict(iteration=iteration, step=500))
+        (model.parent / 'manifest.json').write_text(json.dumps(info))
+        if current:
+            (root / 'models/current.json').write_text(json.dumps(dict(model=dict(path=str(relative)))))
+        return model.resolve()
+
+    def test_nested_runs_generations_and_muzero_profile(self):
+        self.publish('sweep/100v', 2)
+        self.publish('sweep/100v', 10, current=True)
+        muzero = self.publish('muzero_minimal_test', 3, 'muzero', current=True)
+        # An unpublished staging export and discarded exports must not enter the catalog.
+        staging = self.data / 'sweep/100v/models/.tmp_export/model.pt'
+        staging.parent.mkdir(parents=True)
+        staging.touch()
+        self.publish('.internal/discarded', 99)
+        empty = self.data / 'empty/config'
+        empty.mkdir(parents=True)
+        (empty / 'effective.json').write_text(json.dumps(dict(agent=dict(algorithm='alphazero'))))
+        models, runs = discover_catalog(self.data)
+        self.assertEqual(len(models), 3)
+        self.assertEqual(len(runs), 3)
+        app = App(BINARY, models, self.config, 11, runs=runs)
+        self.addCleanup(app.close)
+        catalog = app.catalog()
+        az = next(run for run in catalog['runs'] if run['label'] == 'sweep/100v')
+        iterations = {m['id']: m['iteration'] for m in catalog['models']}
+        self.assertEqual([iterations[key] for key in az['models']], [10, 2])
+        self.assertEqual(iterations[az['default_model']], 10)
+        empty_run = next(run for run in catalog['runs'] if run['label'] == 'empty')
+        self.assertEqual(empty_run['models'], [])
+        self.assertIsNone(empty_run['default_model'])
+        mu = runs[str(muzero.parent.parent.parent)]
+        self.assertEqual(mu['evaluation']['board_size'], 11)
+        self.assertFalse(mu['evaluation']['use_graph_search'])
+        self.assertFalse(mu['evaluation']['reuse_tree'])
+        self.assertEqual(mu['evaluation']['root_num_symmetries_to_sample'], 1)
+
+    def test_empty_catalog_and_refresh_discovers_new_runs(self):
+        models, runs = discover_catalog(self.data)
+        app = App(BINARY, models, self.config, 11, runs=runs,
+                  discover_catalog=lambda: discover_catalog(self.data))
+        self.addCleanup(app.close)
+        self.assertEqual(app.catalog()['models'], [])
+        self.assertEqual(app.catalog()['runs'], [])
+        self.publish('new-run', 1)
+        app.perform('refresh', {})
+        self.assertIsNone(app.snapshot()['error'])
+        self.assertEqual(len(app.catalog()['runs']), 1)
+        self.assertEqual(app.snapshot()['catalog_revision'], 1)
+        self.assertIsNone(app.snapshot()['game'])
+
+    def test_explicit_model_and_evaluation_override(self):
+        model = self.publish('custom', 4, 'muzero')
+        self.publish('custom', 7, 'muzero', current=True)
+        self.publish('minimal_test', 2, current=True)
+        config_dir = self.root / 'configs/muzero_minimal_test'
+        models, runs = discover_catalog(self.data / 'other', model, config_dir)
+        self.assertIn(model, models.values())
+        self.assertEqual(runs[str(model.parent.parent.parent)]['config_dir'], str(config_dir))
+        self.assertEqual(runs[str(model.parent.parent.parent)]['evaluation']['board_size'], 11)
+        models, runs = discover_catalog(self.data, model, config_dir)
+        app = App(BINARY, models, self.config, 11, runs=runs)
+        self.addCleanup(app.close)
+        catalog = app.catalog()
+        selected_run = next(run for run in catalog['runs'] if run['id'] == catalog['default_run'])
+        self.assertEqual(selected_run['id'], str(model.parent.parent.parent))
+        self.assertEqual(app.models[selected_run['default_model']], model)
+        self.assertNotEqual(selected_run['default_model'], selected_run['current_model'])
+
+    def test_rejects_incompatible_models(self):
+        model = self.publish('bad', 1)
+        path = model.parent / 'manifest.json'
+        info = json.loads(path.read_text())
+        info['contract'] = 'wrong-contract'
+        path.write_text(json.dumps(info))
+        with self.assertRaisesRegex(ValueError, '契约'):
+            discover_models(self.data)
 
 
 @unittest.skipUnless(MODEL, 'Set ETAZERO_WEB_TEST_MODEL')
 class WebTests(unittest.TestCase):
     def setUp(self):
-        self.config = load_evaluation_config('configs/minimal_test', environ={
+        _, info = model_info(MODEL)
+        profile = 'muzero_minimal_test' if info.get('algorithm') == 'muzero' else 'minimal_test'
+        self.config = load_evaluation_config(ROOT / 'configs' / profile, environ={
             'EVAL_DEVICE': os.environ.get('ETAZERO_TEST_DEVICE', 'cuda:0'),
             'EVAL_VISITS': '16',
         })
@@ -49,7 +154,9 @@ class WebTests(unittest.TestCase):
             self.assertEqual(reply['analysis']['completed_visits'], 16)
             self.assertAlmostEqual(sum(reply['analysis']['wdl']), 1)
             self.assertAlmostEqual(reply['analysis']['root_value'], reply['analysis']['wdl'][0] - reply['analysis']['wdl'][2])
-            self.assertEqual(reply['analysis']['action'], reply['analysis']['candidates'][0]['action'])
+            # Temperature sampling can choose any point with positive selection weight.
+            self.assertIn(reply['analysis']['action'], {
+                candidate['action'] for candidate in reply['analysis']['candidates'] if candidate['selection_weight'] > 0})
             self.assertEqual(engine.command('undo 2')['state']['turn'], 0)
             with self.assertRaises(RuntimeError):
                 engine.command('play 25')
@@ -164,7 +271,8 @@ class WebTests(unittest.TestCase):
 
     def test_manual_analysis_branch_configuration_and_catalog_refresh(self):
         discovered = {'test': Path(MODEL)}
-        app = App(BINARY, discovered.copy(), self.config, 7, discover_models=lambda: discovered.copy())
+        app = App(BINARY, discovered.copy(), self.config, 7)
+        app.discover_catalog = lambda: (discovered.copy(), app.runs.copy())
 
         def perform(operation, **payload):
             app.submit(operation, dict(version=app.snapshot()['version'], **payload))
