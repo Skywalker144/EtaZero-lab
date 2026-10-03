@@ -8,6 +8,8 @@ CONFIG_DIR=configs/muzero bash scripts/run.sh
 
 该配置保留 baseline 的训练预算、优化器及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 搜索未实现，对应组合明确报错。
 
+展开后的训练行更大，名义训练分片大小由 [MuZero train.cfg](../configs/muzero/train.cfg) 覆盖；`muzero_minimal_test` 和 `raw_muzero` 继承同一设置。shuffle 保留 baseline 的 worker 数和总数组内存预算，按行大小规划有效桶大小。
+
 ## raw_muzero 配置
 
 [configs/raw_muzero](../configs/raw_muzero/) 继承 `muzero`，提供保留 NBT/WDL、对称推理及数据增强的基础 MuZero 对照：
