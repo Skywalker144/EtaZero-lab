@@ -79,6 +79,7 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
 def discover_models(models_dir: Path, model: Path | None = None) -> dict[str, Path]:
     # Publication stages use .tmp_* directories; offer only committed exports.
     paths = sorted(models_dir.glob('**/models/iteration_*/model.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
+    paths = [path for path in paths if not any(part.startswith('.') for part in path.relative_to(models_dir).parts)]
     models = {str(Path(models_dir.name) / path.relative_to(models_dir)): path.resolve() for path in paths}
     current = models_dir / 'models/current.json'
     if current.is_file():
@@ -92,21 +93,53 @@ def discover_models(models_dir: Path, model: Path | None = None) -> dict[str, Pa
             raise ValueError('指定的模型文件不存在')
         key = next((key for key, path in models.items() if path == selected), str(selected))
         models = {key: selected, **{key: path for key, path in models.items() if path != selected}}
-    if not models:
-        raise ValueError('未找到导出的模型，请用 --model 指定 TorchScript 模型')
     for path in models.values():
         info = load_json(path.parent / 'manifest.json')
         if info['contract'] != CONTRACT_ID or type(info['canvas']) is not int or not 5 <= info['canvas'] <= 25:
             raise ValueError(f'模型输入契约或棋盘尺寸不匹配：{path}')
+        if info.get('algorithm', 'alphazero') not in ('alphazero', 'muzero'):
+            raise ValueError(f'不支持的模型算法：{path}')
     return models
+
+
+def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Path | None = None):
+    models = discover_models(models_dir, model)
+    # A run may have saved its configuration but not yet published its first model.
+    roots = {path.parent.parent for path in models_dir.glob('**/config/effective.json')}
+    roots.update(path.parent for path in models_dir.glob('**/models') if path.is_dir())
+    roots = {path for path in roots if not any(part.startswith('.') for part in path.relative_to(models_dir).parts)}
+    roots.update(path.parent.parent.parent for path in models.values())
+    runs = {}
+    for root in sorted(roots):
+        root = root.resolve()
+        try:
+            label = str(root.relative_to((ROOT / 'data').resolve()))
+            mapped = ROOT / 'configs' / label
+        except ValueError:
+            label, mapped = root.name, None
+        paths = [path for path in models.values() if path.parent.parent.parent == root]
+        saved = root / 'config/effective.json'
+        info = load_json(paths[0].parent / 'manifest.json') if paths else {}
+        effective = load_json(saved) if saved.is_file() else {}
+        algorithm = info.get('algorithm', effective.get('agent', {}).get('algorithm', 'alphazero'))
+        source = config_dir or (mapped if mapped and (mapped / 'run.cfg').is_file() else
+                                ROOT / 'configs' / ('muzero' if algorithm == 'muzero' else 'baseline'))
+        config = load_evaluation_config(source)
+        if not config_dir and source != mapped:
+            config['evaluation']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))
+        runs[str(root)] = dict(id=str(root), label=label, path=str(root), algorithm=algorithm,
+                               config_dir=str(source.resolve()), evaluation=config['evaluation'])
+        if model and model.resolve().parent.parent.parent == root:
+            runs[str(root)]['selected_model'] = next(key for key, path in models.items() if path == model.resolve())
+    return models, runs
 
 
 def main():
     parser = argparse.ArgumentParser(description='EtaZero 开发工作台')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8766)
-    parser.add_argument('--config-dir', default=str(ROOT / 'configs/minimal_test'))
-    parser.add_argument('--models-dir', type=Path, default=ROOT / 'data/minimal_test')
+    parser.add_argument('--config-dir', type=Path, help='统一覆盖各配置目录的评估配置；默认使用对应配置')
+    parser.add_argument('--models-dir', type=Path, default=ROOT / 'data')
     parser.add_argument('--model', type=Path)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/etazero')
     args = parser.parse_args()
@@ -114,12 +147,12 @@ def main():
         parser.error('缺少 etazero，请先运行 web/webui.sh 构建')
     try:
         verify_build(args.binary)
-        models = discover_models(args.models_dir, args.model)
-        config = load_evaluation_config(args.config_dir)
+        models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
+        config = load_evaluation_config(args.config_dir or ROOT / 'configs/minimal_test')
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
     app = App(args.binary, models, config, config['evaluation']['board_size'],
-              discover_models=lambda: discover_models(args.models_dir, args.model))
+              runs=runs, discover_catalog=lambda: discover_catalog(args.models_dir, args.model, args.config_dir))
     server = make_server(app, args.host, args.port)
     print(f'EtaZero Web: http://{args.host}:{server.server_port}', flush=True)
     try:

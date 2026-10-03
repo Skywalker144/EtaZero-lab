@@ -213,7 +213,7 @@ function render() {
   const key = game ? [state.game_id, state.model, game.board_size, state.rule, state.human, state.visits, state.mode].join('|') : '';
   if (key !== formKey) {
     if (game) {
-      $('model-filter').value = '';
+      populateRuns(catalog.models.find(m => m.id === state.model)?.run);
       populateModels(state.model);
       $('size').value = game.board_size;
       $('rule').value = state.rule;
@@ -238,7 +238,7 @@ function render() {
   const activeModel = catalog.models.find(m => m.id === state.model);
   $('session-info').textContent = game ? `${activeModel?.label || state.model} · ${state.visits}v` : '模型常驻 · 每次搜索从新根开始';
   $('session-info').title = game ? state.model : '';
-  $('state-version').textContent = `单会话 · 状态 v${state.version} · ${catalog.device}`;
+  $('state-version').textContent = `单会话 · 状态 v${state.version} · ${state.evaluation?.device || selectedRun()?.evaluation.device || catalog.device}`;
   $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => (i % 2 === 0 ? 1 : -1) === state.human));
   $('analyze').disabled = $('step').disabled = busy || !game || game.finished || viewTurn !== null;
   $('retry').hidden = busy || state.mode !== 'play' || !game || game.finished || game.player === state.human;
@@ -281,10 +281,12 @@ function render() {
   $('next').disabled = $('live').disabled = viewTurn === null;
   $('branch').hidden = viewTurn === null;
   $('branch').disabled = busy;
-  const evaluation = {...catalog.evaluation, visits: state.game ? state.visits : catalog.default_visits, reuse_tree: false};
+  const evaluation = {...(state.evaluation || selectedRun()?.evaluation || catalog.evaluation), visits: Number($('visits').value), reuse_tree: false};
+  if (game) evaluation.visits = state.visits;
   if (game) { evaluation.board_size = game.board_size; evaluation.rule = state.rule; }
   if (evaluation.inference_precision === 'auto') evaluation.inference_precision = evaluation.device.startsWith('cuda:') ? 'float16' : 'float32';
   $('engine-config').textContent = JSON.stringify(evaluation, null, 2);
+  updateEngineInfo();
   renderSettingsNote();
   renderAnalysis();
 }
@@ -309,12 +311,23 @@ function renderStatus() {
   $('status').textContent = text;
   $('status').parentElement.classList.toggle('thinking', state.busy || pending);
 }
-function populateModels(selected = $('model').value || state?.model) {
-  const query = $('model-filter').value.trim().toLowerCase();
-  const filtered = catalog.models.filter(m => `${m.id} ${m.label}`.toLowerCase().includes(query));
-  $('model').replaceChildren(...filtered.map(m => new Option(m.label, m.id)));
-  if (filtered.some(m => m.id === selected)) $('model').value = selected;
-  $('model-count').textContent = `${filtered.length} / ${catalog.models.length}`;
+function selectedRun() { return catalog?.runs.find(run => run.id === $('run').value); }
+function populateRuns(selected = $('run').value || catalog.default_run) {
+  $('run').replaceChildren(...catalog.runs.map(run => new Option(`${run.label} · ${run.algorithm === 'muzero' ? 'MuZero' : 'AlphaZero'}${run.models.length ? '' : ' · 暂无权重'}`, run.id)));
+  if (catalog.runs.some(run => run.id === selected)) $('run').value = selected;
+  else if (catalog.default_run) $('run').value = catalog.default_run;
+}
+function populateModels(selected = $('model').value) {
+  const run = selectedRun();
+  const models = (run?.models || []).map(id => catalog.models.find(m => m.id === id));
+  const options = models.map(m => {
+    const duplicate = models.some(other => other.id !== m.id && other.iteration === m.iteration);
+    const detail = duplicate ? ` · ${m.manifest.id}` : '';
+    return new Option(`第 ${m.iteration} 代${m.id === run.current_model ? ' · 当前发布' : ''}${detail}`, m.id);
+  });
+  $('model').replaceChildren(...(options.length ? options : [new Option('暂无已发布权重', '')]));
+  $('model').value = models.some(m => m.id === selected) ? selected : run?.default_model || '';
+  $('model-count').textContent = `${models.length} 代`;
   updateSizes();
 }
 function updateSizes() {
@@ -322,24 +335,39 @@ function updateSizes() {
   for (const option of $('size').options) option.disabled = !model || Number(option.value) > model.canvas;
   if (model && Number($('size').value) > model.canvas) $('size').value = model.canvas;
   $('new-game').disabled = !model || !online || pending || Boolean(state?.busy);
-  $('model-summary').textContent = model ? `迭代 ${model.manifest.checkpoint.iteration} · ${model.manifest.weights || '—'} · 画布 ${model.canvas}² · 累计 ${(model.manifest.checkpoint.total_steps ?? 0).toLocaleString()} 步` : '无匹配模型';
+  $('model-summary').textContent = model ? `${model.manifest.algorithm === 'muzero' ? 'MuZero' : 'AlphaZero'} · 第 ${model.iteration} 代 · ${model.manifest.weights || '—'} · 画布 ${model.canvas}² · 累计 ${(model.manifest.checkpoint.total_steps ?? 0).toLocaleString()} 步` : '此配置目录暂无已发布权重';
   $('model-info').textContent = model ? JSON.stringify({file: model.path, ...model.manifest}, null, 2) : '';
 }
 async function loadCatalog() {
   const selected = $('model').value;
+  const run = $('run').value;
   const size = $('size').value;
   const first = !catalog;
   catalog = await api('/api/catalog');
   $('size').replaceChildren();
-  for (let value = 5; value <= Math.max(...catalog.models.map(m => m.canvas)); value++) $('size').add(new Option(`${value} × ${value}`, value));
+  for (let value = 5; value <= Math.max(catalog.default_size, ...catalog.models.map(m => m.canvas)); value++) $('size').add(new Option(`${value} × ${value}`, value));
   $('size').value = size || catalog.default_size;
   if (first) {
     $('visits').value = catalog.default_visits;
     $('rule').replaceChildren(...catalog.rules.map(rule => new Option(rules[rule], rule)));
     $('rule').value = catalog.default_rule;
   }
+  populateRuns(run || catalog.models.find(m => m.id === state?.model)?.run || catalog.default_run);
   populateModels(selected);
-  $('engine-info').textContent = `${catalog.device} · ${catalog.search_threads} search threads · VL ${catalog.virtual_loss}`;
+  if (first) applyRunDefaults();
+  $('version').textContent = catalog.version.replace('EtaZero_', '');
+  updateEngineInfo();
+}
+function updateEngineInfo() {
+  const c = state?.evaluation || selectedRun()?.evaluation || catalog.evaluation;
+  $('engine-info').textContent = `${c.device} · ${c.search_threads} search threads · VL ${c.virtual_loss}`;
+}
+function applyRunDefaults() {
+  const c = selectedRun()?.evaluation || catalog.evaluation;
+  $('size').value = c.board_size;
+  $('rule').value = c.rule;
+  $('visits').value = c.visits;
+  updateSizes();
 }
 function sessionSettings() {
   return {human: Number(document.querySelector('input[name="human"]:checked').value), visits: Number($('visits').value), mode: $('mode').value};
@@ -364,7 +392,7 @@ $('numbers').addEventListener('change', () => { $('board').classList.toggle('hid
 $('search-map-kind').addEventListener('change', renderHeatmaps);
 $('visited-only').addEventListener('change', renderCandidates);
 $('model').addEventListener('change', updateSizes);
-$('model-filter').addEventListener('input', () => populateModels());
+$('run').addEventListener('change', () => { populateModels(); applyRunDefaults(); updateEngineInfo(); render(); });
 for (const id of ['rule', 'size']) $(id).addEventListener('change', () => { if (!state?.game) render(); });
 document.querySelectorAll('[data-visits]').forEach(button => button.addEventListener('click', () => { $('visits').value = button.dataset.visits; renderSettingsNote(); }));
 $('first').addEventListener('click', () => navigate(0));

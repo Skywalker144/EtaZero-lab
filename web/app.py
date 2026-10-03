@@ -24,27 +24,50 @@ def integer(payload: dict, name: str, minimum: int, maximum: int) -> int:
 
 class App:
     def __init__(self, binary: Path, models: dict[str, Path], config: dict[str, Any], default_size: int,
-                 discover_models=None):
+                 runs=None, discover_catalog=None):
         self.binary, self.models, self.config = binary, models, config
         self.metadata = {key: load_json(path.parent / 'manifest.json') for key, path in models.items()}
         self.default_size = default_size
-        self.discover_models = discover_models
+        self.runs = runs if runs is not None else {
+            str(path.resolve().parent.parent.parent): dict(
+                id=str(path.resolve().parent.parent.parent), label=path.resolve().parent.parent.parent.name,
+                path=str(path.resolve().parent.parent.parent), algorithm=self.metadata[key].get('algorithm', 'alphazero'),
+                evaluation=deepcopy(config['evaluation'])) for key, path in models.items()}
+        self.discover_catalog = discover_catalog
         self.engine: Engine | None = None
         self.condition = Condition()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='etazero-game')
         self.closed = False
         self.state = dict(instance=uuid4().hex, version=0, catalog_revision=0, game_id=None, busy=False, phase='idle', game=None, analysis=None,
                           error=None, model=None, human=1, rule='freestyle',
-                          visits=config['evaluation']['visits'], mode='play', started_at=None)
+                          visits=config['evaluation']['visits'], mode='play', started_at=None, evaluation=None)
 
     def catalog(self) -> dict:
         c = self.config['evaluation']
         with self.condition:
-            models = [dict(id=key, label=f"{key.split('/models/')[0]} · 第 {info['checkpoint']['iteration']} 轮 · {info['canvas']}×{info['canvas']}",
+            models = [dict(id=key, run=str(self.models[key].resolve().parent.parent.parent),
+                           iteration=info['checkpoint']['iteration'],
+                           label=f"{self.models[key].parent.parent.parent.name} · 第 {info['checkpoint']['iteration']} 代 · {info.get('algorithm', 'alphazero')} · {info['canvas']}×{info['canvas']}",
                            canvas=info['canvas'], manifest=deepcopy(info), path=str(self.models[key]))
                       for key, info in self.metadata.items()]
-        return dict(models=models, rules=RULES, default_rule=c['rule'],
-                    default_size=min(self.default_size, models[0]['canvas']), default_visits=c['visits'],
+            runs = deepcopy(list(self.runs.values()))
+            for run in runs:
+                generations = sorted((m for m in models if m['run'] == run['id']),
+                                     key=lambda m: (m['iteration'], m['manifest']['checkpoint'].get('step', 0), m['id']), reverse=True)
+                current = Path(run['path']) / 'models/current.json'
+                preferred = None
+                if current.is_file():
+                    preferred = str((Path(run['path']) / load_json(current)['model']['path']).resolve())
+                run['models'] = [m['id'] for m in generations]
+                run['current_model'] = next((m['id'] for m in generations if m['path'] == preferred), None)
+                run['default_model'] = run.get('selected_model') or run['current_model'] or (generations[0]['id'] if generations else None)
+            available = [run for run in runs if run['models']]
+            default_run = next((run['id'] for run in available if run.get('selected_model')),
+                               next((run['id'] for run in available if run['label'] == 'minimal_test'),
+                                    available[0]['id'] if available else runs[0]['id'] if runs else None))
+        return dict(models=models, runs=runs, default_run=default_run, version=self.binary.parent.parent.name,
+                    rules=RULES, default_rule=c['rule'],
+                    default_size=self.default_size, default_visits=c['visits'],
                     search_threads=c['search_threads'], virtual_loss=c['virtual_loss'], device=c['device'],
                     evaluation=deepcopy(c))
 
@@ -112,8 +135,11 @@ class App:
         try:
             if operation == 'new':
                 selected = payload['model']
-                replacement = self.engine is None or self.engine.process.poll() is not None or selected != self.state['model']
-                engine = Engine(self.binary, self.models[selected], self.config) if replacement else self.engine
+                run = self.runs[str(self.models[selected].resolve().parent.parent.parent)]
+                config = {'evaluation': deepcopy(run['evaluation'])}
+                replacement = (self.engine is None or self.engine.process.poll() is not None or
+                               selected != self.state['model'] or config['evaluation'] != self.state['evaluation'])
+                engine = Engine(self.binary, self.models[selected], config) if replacement else self.engine
                 try:
                     if payload['size'] > engine.canvas:
                         raise ValueError(f'该模型最大支持 {engine.canvas}×{engine.canvas} 棋盘')
@@ -127,7 +153,7 @@ class App:
                     previous.close()
                 self.publish(game=reply['state'], game_id=uuid4().hex, analysis=None, model=selected,
                              human=payload['human'], rule=payload['rule'], visits=payload['visits'],
-                             mode=payload.get('mode', 'play'))
+                             mode=payload.get('mode', 'play'), evaluation=deepcopy(config['evaluation']) if replacement else self.state['evaluation'])
             elif operation == 'play':
                 reply = self.engine.command(f"play {payload['action']}")
                 self.publish(game=reply['state'], analysis=None)
@@ -145,15 +171,17 @@ class App:
             elif operation in ('analyze', 'step'):
                 reply = self.engine.command(f"{'analyze' if operation == 'analyze' else 'genmove'} {self.state['visits']}")
                 self.publish(game=reply['state'], analysis=reply['analysis'])
-            elif operation == 'refresh' and self.discover_models:
-                models = self.discover_models()
+            elif operation == 'refresh' and self.discover_catalog:
+                models, runs = self.discover_catalog()
                 metadata = {key: load_json(path.parent / 'manifest.json') for key, path in models.items()}
                 with self.condition:
                     # Keep the active model selectable even if its file was moved during this session.
                     active = self.state['model']
                     if active and active not in models:
                         models[active], metadata[active] = self.models[active], self.metadata[active]
-                    self.models, self.metadata = models, metadata
+                        root = str(self.models[active].resolve().parent.parent.parent)
+                        runs.setdefault(root, self.runs[root])
+                    self.models, self.metadata, self.runs = models, metadata, runs
                 self.publish(catalog_revision=self.state['catalog_revision'] + 1)
             game = self.state['game']
             if operation in ('new', 'play', 'retry') and self.state['mode'] == 'play' and game and not game['finished'] and game['player'] != self.state['human']:

@@ -11,7 +11,7 @@
 </head>
 <body>
   <header class="header">
-    <div class="brand">EtaZero <span>V0</span><h1>开发工作台</h1></div>
+    <div class="brand">EtaZero <span id="version"></span><h1>开发工作台</h1></div>
     <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">连接中</span><button id="theme" aria-label="切换明暗主题" title="切换明暗主题">明 / 暗</button></div>
   </header>
   <div id="error" class="error" role="alert" hidden></div>
@@ -19,8 +19,8 @@
     <aside class="setup panel" aria-label="模型与会话配置">
       <div class="panel-heading"><h2>会话配置</h2><button id="refresh-models" title="重新扫描已发布模型，不重启服务">刷新模型</button></div>
       <form id="settings">
-        <label class="field">筛选模型<input id="model-filter" type="search" placeholder="运行名 / 轮次 / 模型 ID" autocomplete="off"></label>
-        <label class="field">模型 <small id="model-count"></small><select id="model" required></select></label>
+        <label class="field">配置目录<select id="run" required></select></label>
+        <label class="field">权重代数 <small id="model-count"></small><select id="model" required></select></label>
         <div id="model-summary" class="model-summary"></div>
         <div class="field-row"><label class="field">棋盘<select id="size"></select></label><label class="field">棋规<select id="rule"></select></label></div>
         <label class="field">操作模式<select id="mode"><option value="play">人机对弈</option><option value="manual">局面研究 · 手动双方</option></select></label>
