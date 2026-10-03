@@ -26,6 +26,20 @@ CONFIG_DIR=configs/raw_muzero bash scripts/run.sh
 
 这是按本项目 NBT/WDL 和数据管线适配的 MuZero 对照，不是原论文或 MuZero_V2 的逐项复现；仍使用共用 PUCT 数学实现（包括探索项的 0.01 偏移）与既有落子温度调度。具体参数以配置文件为准。原有 `baseline` 和 `muzero` 未配置 `[muzero_training]` 时保留原训练目标与优化器行为。
 
+## 接近 MuZero_V2 的配置对照
+
+[configs/muzero_v2_baseline](../configs/muzero_v2_baseline/) 是仅通过配置接近 MuZero_V2 `exp_baseline` 的诊断对照。它保留 NBT 64 通道、2/2/0 主干和原有 heads，使用普通 AdamW（LR 0.001、weight decay 0.0003）、128 batch、每轮 1000 步、K=5；在 11×11 Renju 上关闭禁手特征 dropout，采用 V2 的温度、噪声与开局设置，关闭 PCR、Reduce Visits、side/fork/PDA 和额外价值回传加权。PCR 关闭是明确的对照差异：每手固定 200 visits，V2 原运行是 75% 的 80 visits cheap 搜索。
+
+参数按语义换算：V2 使用 `[0,1]` 价值选点，EtaZero 使用 `[-1,1]`，因此 PUCT 常数／log 系数为 2.5／2。V2 按完整轨迹行记账，EtaZero 按随机重复后的训练起点记账；关闭 PCR/Reduce Visits 后，各真实位置基础权重为 1，保留 150000 行窗口和 replay ratio 8。实际窗口边界、随机冷启动封顶和 surprise 随机重复仍有差异。
+
+该配置不是逐项复现：NBT/fson 和 16/16/32 heads 保留，V2 为 masked ResNet 和 64/64/48 heads；现有辅助损失开关不能独立关闭 TD/optimistic/error 并保留 soft/opponent policy；普通优化器模式不支持 V2 的 EMA，发布 raw 权重。主 policy 系数、终局对手策略监督、PUCT 访问偏移／剪枝／LCB、batch 共用 D4 和文件留出也保留各自实现。因此只用于排查配置因素，不能单凭其成败判定实现正确或错误。
+
+```bash
+CONFIG_DIR=configs/muzero_v2_baseline bash scripts/run.sh --max-seconds 1800 --plot
+```
+
+预算为完整提交轮次的累计墙钟（扣除编译），到轮末停止，可能超出一轮。观察学习时优先对齐更新次数和训练起点数；总 loss 包含不同的辅助项，不直接作跨实现效果指标。
+
 ## 网络与推理
 
 [网络](../python/etazero/muzero/network.py) 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。它不是 MuZero_V2 masked ResNet 的逐层复刻。
