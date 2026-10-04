@@ -39,3 +39,61 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 评分与区间沿用 MuZero_V2 的 [elo.py](../python/etazero/elo.py)：联合 Bradley–Terry 得分模型，和棋记半分，同时拟合共同先手优势；anchor 只规定相对 Elo 零点，不代表外部等级分。弱高斯正则防止全胜／全负导致无穷评分，强度随输出记录。95% 区间按配对分层、以同开局两局为单位 bootstrap；全胜配对会标记先验敏感性。区间条件于已选择的模型、开局与协议，不表示独立训练种子的不确定性。所有开局的两侧和整个赛程完整后才拟合。
 
 输出 `elo.json`、`elo.csv`、`elo.png`、`elo.svg`，并保存模型／配置／二进制身份、赛程、逐开局和逐局原始记录。`--fit-only` 从已有赛果重建评分，不启动 GPU 比赛。
+
+## 自动实验 Elo
+
+[scripts/autoelo.sh](../scripts/autoelo.sh) 使用 [autoelo.py](../python/etazero/autoelo.py) 规划时间采样与赛程，复用 arena 的 C++ 对战、逐局恢复、联合拟合和绘图。`autoexp` 在所有调度臂成功达到预算后默认运行；`exp.cfg` 的 `experiment.autoelo = false` 或 `AUTOELO=false` 可关闭。训练中断或失败时不启动 Elo。评估失败明确报错并单独保存状态，已完成训练不重跑；原命令重启会跳过完成训练并恢复评估。
+
+```bash
+# 在本版本目录执行：仅发现实际已训练的数据臂。
+CONFIG_DIR=configs/az_mz bash scripts/autoelo.sh --data data/az_mz --dry-run
+CONFIG_DIR=configs/az_mz bash scripts/autoelo.sh --data data/az_mz
+
+# 不传 --data 时使用伞目录所有配置臂及其真实 run_dir，缺测臂明确报错。
+CONFIG_DIR=configs/az_mz bash scripts/autoelo.sh
+
+# --output 指已有具体评估目录；不启动比赛或检查 native binary。
+bash scripts/autoelo.sh --fit-only --output data/az_mz/elo/<评估标识>
+```
+
+设置在伞目录 `elo.cfg` 的 `[elo]`；默认值以 [baseline/elo.cfg](../configs/baseline/elo.cfg) 为准，实验例子为 [az_mz/elo.cfg](../configs/az_mz/elo.cfg)。优先级为对应命令行参数 > `ELO_<字段大写>` 环境覆盖 > 伞目录 `elo.cfg.local` > 伞目录 `elo.cfg` > baseline 默认值。未知字段、非法百分比或局数、断开的比较图明确拒绝。
+
+| 字段 | 含义 |
+|---|---|
+| `points` | 每臂目标时间点数，目标为自身累计时间的 `1/points` 到 `100%` |
+| `neighbors` | 在已选模型序列上向前连接的近邻级数 |
+| `cross_time_fractions` | 相对于所有参与臂共同时间上限的跨臂对战位置，各臂取最近的已选模型；空值关闭 |
+| `final_cross` | 各臂最终模型是否两两比赛 |
+| `games_per_pair` | 每对总局数，必须为四的正倍数 |
+| `bootstrap_samples` | 成对开局 bootstrap 重采样次数 |
+| `anchor` | Elo 零点模型 ID；空值选择首臂最接近自身中期的已选模型 |
+| `pair_workers` | 同时运行的 C++ 模型对进程数 |
+
+时间采样使用已提交轮次的实际累计净墙钟，不按迭代数推算；最近模型重复则去重，最后模型强制保留。实际点数不足时显示真实数量，不伪造模型。跨臂和最终配对重复时只安排一次；全部赛果联合拟合，不先分别估计再平移，不约束曲线单调。
+
+所有模型共用伞目录 `match.cfg`，直接覆盖 baseline 比赛 profile，再应用伞目录 `match.cfg.local` 和 `MATCH_` 环境覆盖，不继承各臂的训练或比赛条件。局数由 `elo.games_per_pair` 控制。MuZero 要求关闭图搜索与子树复用、根对称数量为一，不兼容条件在启动前拒绝。[az_mz/match.cfg](../configs/az_mz/match.cfg) 给出混合 AZ/MZ 的统一协议。固定 visits 不等于相同思考时间，评估耗时不进入训练横轴。
+
+独立 `--data` 发现有已提交 state 的实际数据臂；autoexp 使用本次完整调度臂列表和真实输出路径，支持自定义 run_dir。autoexp 的 CUDA 比赛使用第一个训练 GPU 槽位，子进程通过 `CUDA_VISIBLE_DEVICES` 映射为 `cuda:0`；独立 autoelo 遵循比赛 device 与当前可见设备。
+
+默认结果根为数据伞目录的 `elo/`；配置臂输出分散在不同父目录时使用 controller 默认目录下的 `elo/`，也可用 `--output` 指定根目录。模型、赛程、采样、比赛条件、二进制或并行执行条件改变时创建独立评估子目录，旧原始结果不覆盖。局数改变也创建新评估。同一计划重跑只补缺失比赛，全部完成才拟合并原子更新 `elo/latest`，当前图入口为 `elo/latest/elo.png`。
+
+每套结果保存 `plan.json`、`manifest.json`、`resolved.cfg`、`status.json`，以及 `pairs/` 的开局、逐局赛果与 native 日志；失败不发布新的 latest。`invocations/` 保存每次调用的性能记录，恢复调用另存。
+
+## C++ 并行与性能观测
+
+Python 只规划、调度 native 进程和落盘；棋规、开局、搜索、对局和 GPU 组批推理均在 C++。先用多局并发产生独立请求，不把最大 batch 当作实际请求量。每对比赛的 `game_threads` 超过局数不会增加并发；可提高 `pair_workers` 同时运行多对，但每对加载双方模型服务，增加显存、CPU 和 CUDA 上下文成本。不同模型对进程目前不共享推理队列或权重。
+
+| 配置位置 | 参数 | 作用 |
+|---|---|---|
+| `elo.cfg` | `pair_workers` | 整个赛程同时运行的模型对数量 |
+| `match.cfg` | `game_threads` | 每对 C++ 并发局数，开局生成也使用此上限 |
+| `match.cfg` | `search_threads` | 每局树内搜索线程，可能改变并行搜索轨迹 |
+| `match.cfg` | `max_batch` | 每个模型服务的一批请求上限 |
+| `match.cfg` | `server_threads` | 每个模型的推理服务线程；过多服务可能分散 batch，MuZero latent 固定路由到创建它的服务 |
+| `match.cfg` | `batch_wait_us` | 填充 batch 的最大等待窗口 |
+| `match.cfg` | `cpu_threads` | LibTorch CPU 算子线程数，区别于对局和搜索线程 |
+| `match.cfg` | `queue_capacity` | 推理待处理队列配置，不是 batch 大小 |
+
+先保留单搜索线程和单推理服务，调节模型对及对局并发，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件；树内线程、随机 D4 请求调度与缓存可能影响赛果。
+
+C++ 每次输出 `match_stats`，记录包含模型加载、开局和对局的耗时、完成局数，以及双方请求数、batch 数、最大实际 batch、队列等待和缓存统计，保存在 `pairs/<配对>/performance/`。autoelo 每次调用的 `invocations/` 记录新增局数、总耗时、吞吐及 native 统计；总耗时包含比赛校验与恢复扫描、拟合和绘图，不等于纯 GPU 推理吞吐。
