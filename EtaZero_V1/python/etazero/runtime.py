@@ -23,6 +23,7 @@ from .export import export_model, verify_export
 from .shuffle import build_snapshot, desired_window, prune_derived
 from .storage import atomic_write, load_json, save_json, sha256, sync_directory
 from .training import initialize, train_iteration, prune_checkpoints
+from .build import verify_build
 
 
 class Journal:
@@ -141,17 +142,6 @@ def source_snapshot(root):
         atomic_write(destination,write,immutable=True)
         save_json(destination.with_suffix(".json"),{"id":identity,"files":manifest},immutable=True)
     return identity
-
-
-def verify_build(binary):
-    binary=Path(binary)
-    manifest=load_json(binary.parent/"build_manifest.json")
-    if not manifest["with_torch"] or sha256(binary)!=manifest["binary_sha256"]:
-        raise ValueError("Native executable differs from its build manifest; rebuild before running")
-    for path,checksum in manifest["sources"].items():
-        if sha256(ROOT/path)!=checksum:
-            raise ValueError(f"Native build is stale for {path}; run scripts/build.sh")
-    return manifest["binary_sha256"]
 
 
 def provenance():
