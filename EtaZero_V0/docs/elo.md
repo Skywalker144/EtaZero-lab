@@ -6,11 +6,11 @@
 
 [evaluation 配置](../configs/baseline/eval.cfg) 和 [比赛配置](../configs/baseline/match.cfg) 只沿 `run.cfg` 的 extends 继承链读取自身文件与叶子目录的 `.local`。训练文件、训练环境变量和另一个评估文件不会覆盖它们，修改评估条件不改变训练配置身份。可使用 `EVAL_VISITS=100`、`MATCH_VISITS=100` 等前缀环境覆盖；开局字段使用 `MATCH_OPENING_` 前缀。字段校验集中在 [eval_config.py](../python/etazero/eval_config.py)。
 
-baseline 搜索预算为 500v，smoke_test 显式覆盖为 100v；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 eval 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；详细边界和严格并行发放与来源的差异见 [搜索预算](algorithms.md#puct-与搜索预算)。
+根访问上限由所选评估／比赛配置指定；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 eval 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；详细边界和严格并行发放与来源的差异见 [搜索预算](algorithms.md#puct-与搜索预算)。
 
 NN 单朝向默认随机 D4，cache 命中复用首次 canonical 输出，根多对称绕 cache。落子温度使用来源 Match profile 的半衰期调度；policy target 不乘落子温度。eval/match 的 `inference_precision=auto` 在本实现指定 CUDA 时使用 FP16、指定 CPU 时使用 FP32，结果记录实际精度，显式 FP32 保留。网络缓存、终局节点和根集成使 NN 请求数不等于 visits。
 
-评估和比赛均无训练根噪声，默认零落子温度、单搜索线程；并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用 EtaZero LibTorch 后端，不宣称复制 KataGo 的全部比赛功能或数值行为。
+评估和比赛均无训练根噪声；落子温度和搜索线程数由各自配置指定。零温度时，并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用 EtaZero LibTorch 后端，不宣称复制 KataGo 的全部比赛功能或数值行为。
 
 ## 比赛与续测
 
