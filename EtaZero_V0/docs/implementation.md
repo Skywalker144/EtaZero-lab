@@ -6,7 +6,7 @@
 
 主要并行架构与训练数据管线参考 KataGo：对局线程共享 evaluator、多推理服务、NN 缓存、原子搜索统计与 mutex pool、有界后台写盘、二进制观测打包、NPZ 文件边界、power-law 回放窗口、随机分桶再桶内洗牌与 multi-wave，以及训练文件预取。源码提交、入口和校验值见 [reference_sources.json](../reference_sources.json)，许可证与改编范围见 [THIRD_PARTY.md](../THIRD_PARTY.md)。平衡开局直接参考 KataGomo；冷启动记账、Renju 与 TorchScript / LibTorch 边界另参考现有 MuZero_V2。
 
-当前采用逐轮编排：固定训练量，按 replay ratio 规划 selfplay。KataGo 的同步脚本同样顺序执行阶段，但 learner 使用额度桶、no-repeat-files 和 epoch/subepoch；当前固定轮协议具有独立的repeat/no-repeat文件消费控制，不引入来源的训练额度桶，也没有常驻异步阶段推进或局内换网。已实现工程机制、确认差异及验证范围见 [E01—E26 工程审查](../../EtaZero.md#engineering-audit) 与 [实施计划](../../plan.md)。Go 专有监督的映射和辅助 heads 见算法文档，不能由执行架构推定支持范围。共享架构不表示已有相同的吞吐、后端优化或训练效果。
+当前采用逐轮编排：固定训练量，按 replay ratio 规划 selfplay。KataGo 的同步脚本同样顺序执行阶段，但 learner 使用额度桶、no-repeat-files 和 epoch/subepoch；当前固定轮协议具有独立的repeat/no-repeat文件消费控制，不引入来源的训练额度桶，也没有常驻异步阶段推进或局内换网。本版本的来源对照及历史验收证据见 [E01—E26 核查记录](../../EtaZero.md#engineering-audit) 与 [实施记录](../../plan.md)。Go 专有监督的映射和辅助 heads 见算法文档，不能由执行架构推定支持范围。共享架构不表示已有相同的吞吐、后端优化或训练效果。
 
 ## 执行架构
 
@@ -22,7 +22,7 @@ flowchart LR
     H --> D[不可变训练快照]
     D --> T[固定训练步数]
     T --> K[完整 checkpoint]
-    K --> E[导出与 Python/C++ 校验]
+    K --> E[导出并记录模型身份]
     E --> M[原子发布模型]
     M --> C
 ```
@@ -141,7 +141,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 两阶段shuffle对保留行独立均匀分桶，再按固定计划的桶数和每桶文件数输出：`B=max(1,round(approx_rows_per_wave/bucket_rows))`，`F=bucket_rows/training_shard_rows`，要求整除；真实桶内按 `floor(j·N/F)` 等分。training_shard_rows是名义大小，真实文件可更大、更小或空，不根据实际桶大小重新决定F。所有字段共同排列。source的均匀排列＋multinomial桶计数与该随机分配分布相同；这里使用可重建的独立SeedSequence流，不宣称来源os.urandom序列相同。初次采样、wave内scatter和merge分别使用含partition/stage/wave/group/bucket的命名空间，跨桶任务不复用流。
 
-来源shuffle CLI默认 `min_rows=250000,p=1,a=1`，K必填，group80000、输出70000、桶默认等于输出；`selfplay/shuffle.sh` 显式使用 `p=.65,a=.4,K=20000000`，普通分支MD5留出1%，SKIP_VALIDATE分支全作train。`synchronous_loop.sh` 还覆盖m100000、s50000、K600000并设置SKIP_VALIDATE=1。EtaZero的窗口、保留目标与本机shuffle资源参数以 [train.cfg](../configs/baseline/train.cfg) 为准；当前baseline窗口采用 [KataGomo shuffle profile](/home/sky/RL/SkyZero/KataGomo/python/shuffle.sh:49) 的 `min_rows=150000,p=0.8,a=0.3`，保留目标K为20000000，默认启用验证（`skip_validation=false`）。shuffle为12进程、16384MiB数组内存预算，group/bucket/名义训练分片均65536行、waves=1。同步示例中的train bucket/no-repeat/训练数量不是本地固定轮预算的来源默认。
+来源shuffle CLI默认 `min_rows=250000,p=1,a=1`，K必填，group80000、输出70000、桶默认等于输出；`selfplay/shuffle.sh` 显式使用 `p=.65,a=.4,K=20000000`，普通分支MD5留出1%，SKIP_VALIDATE分支全作train。`synchronous_loop.sh` 还覆盖m100000、s50000、K600000并设置SKIP_VALIDATE=1。EtaZero的窗口、保留目标与本机shuffle资源参数以 [train.cfg](../configs/baseline/train.cfg) 为准；项目配置可参考 [KataGomo shuffle profile](/home/sky/RL/SkyZero/KataGomo/python/shuffle.sh:49)，具体窗口、验证开关和资源数值由所选配置确定。同步示例中的train bucket/no-repeat/训练数量不是本地固定轮预算的来源默认。
 首次消费原始分片时完成 SHA-256 与全轨迹验证，然后在 `.internal/training_views/` 保存 DEFLATE level 1 压缩的紧凑训练视图和来源证书。后续 shuffle 校验缓存哈希；原始文件大小或 mtime 变化时重新核对来源哈希，避免窗口内反复解压和逐步轨迹验证。原始分片遵循不可变约定，缓存不代替原始轨迹；损坏缓存明确报错。已离开当前窗口的视图在本轮提交后回收。
 
 `shuffle.waves > 1` 先在输入组中完成一次采样，将保留的每行独立均匀分配到一个 wave，再逐 wave 执行两阶段 shuffle；第二阶段不重复采样，完成后立即删除该 wave 的临时文件。额外 I/O 换取更低的同时存活分桶文件数量，不改变已选样本集合。
@@ -160,7 +160,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 后台batch队列和CUDA上传stream有界。每batch携带消费游标，包括文件order、已结束文件、文件/行位置、pass、RNG、repeat模式、split与batch大小；checkpoint取已消费游标，包含AMP skip。源generator在pop文件时记用过，本地额外保留文件内游标以恢复后续完整batch。未消费的预取可丢弃重读。两个pinned槽通过event防止DMA覆盖，record_stream保证GPU生命周期。
 
-baseline默认启用验证；`training.skip_validation = true` 可选择同步来源SKIP_VALIDATE分支。启用时MD5原始文件basename的前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation；目录和模型代次不影响所属分区。writer以独立OS随机流生成64位十六进制basename，不消耗game RNG。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest持久记录源文件分区与全部输出hash。验证payload位于同一个原子data目录的validation子目录，回收及重建同时覆盖两个分区。
+`training.skip_validation` 控制验证；true 对应同步来源 SKIP_VALIDATE 分支。启用时MD5原始文件basename的前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation；目录和模型代次不影响所属分区。writer以独立OS随机流生成64位十六进制basename，不消耗game RNG。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest持久记录源文件分区与全部输出hash。验证payload位于同一个原子data目录的validation子目录，回收及重建同时覆盖两个分区。
 
 每轮训练结束、最终checkpoint之前，validation用当前raw模型eval/no_grad读取每文件完整batch，默认按文件名排序；`randomize_validation_files`可随机文件顺序。验证始终随机D4，即使训练D4关闭；采用独立随机流，保持训练RNG不受验证影响。AMP精度及FP32 heads沿训练设置，启用compile时单独生成eval图。`max_validation_samples=0`不设上限，正值在完整batch使总数超过上限后停止，沿来源允许一batch超额。验证不推进optimizer、Lookahead、SWA、训练样本或成功更新计数，不修改BN统计；无完整validation batch时明确记录samples=0，不捏造loss。事件记录样本均值loss、batch数量和D4计数。此验证不是棋力评估。
 ## 固定训练量与自对弈产量
@@ -230,7 +230,7 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 
 ## 验收与限制
 
-`tests/test_*.py` 是 pytest 自动发现的 Python 测试，`cpp/tests/` 是 CTest 使用的原生测试；`tests/reference/check_*.py` 是手动运行的来源对照检查，不随普通 pytest 自动执行。来源检查读取本地 KataGo / KataGomo 源码，多数会核对 `reference_sources.json` 中固定的 commit 和 SHA256；链接生产库或运行 `build/` 下测试程序的检查须先执行 `scripts/build.sh`。构建、训练、调度与性能测量入口保留在 `scripts/`。
+`tests/fixtures/configs/` 是固定的测试输入，独立于用户运行配置；配置解析测试据此构造父子目录、覆盖项和实验臂。它们不随 `configs/` 的调参、重命名或实验增删同步更新。`tests/test_*.py` 是 pytest 自动发现的 Python 测试，`cpp/tests/` 是 CTest 使用的原生测试；`tests/reference/check_*.py` 是手动运行的来源对照检查，不随普通 pytest 自动执行。来源检查读取本地 KataGo / KataGomo 源码，多数会核对 `reference_sources.json` 中固定的 commit 和 SHA256；链接生产库或运行 `build/` 下测试程序的检查须先执行 `scripts/build.sh`。构建、训练、调度与性能测量入口保留在 `scripts/`。
 
 | 来源对照检查 | 范围 |
 |---|---|
@@ -303,5 +303,3 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 调度目录公开 `configs/<臂名>/` 的解析配置与 `logs/<臂名>.runner.log`，内部身份、计划、状态与锁位于 `.internal/`。恢复时重新检查 run 生效配置和初始权重校验值，根据持久化 state 及累计已提交轮次时间 跳过已达预算的臂，否则恢复。臂配置、成员、输出目录和 shared_init 必须与调度身份一致；可以提高统一预算或调整 GPU 槽位，改变实验条件使用新配置和新产物目录。并发启动同一伞目录会被锁拒绝。
 
 SIGINT/SIGTERM 停止排队，转发到运行中的 Python controller，由 controller 关闭 native worker，尚未整轮提交的产物保留待下次启动归档。调度器返回 130；中断臂下次从上一个完整轮重跑。某臂失败或意外在预算完成前退出时，调度器停止其他臂并报错，不将失败记作完成。状态文件仅是可查看的调度记录，完成判断以实际运行证据为准。
-
-当前能力与对齐范围分别维护：上述行为以现有代码/配置为准；[57项对齐目标](../../EtaZero.md#alignment-targets)列出已确定的来源profile、网络版本、五子棋监督和验收范围。用户保留同步逐轮固定训练量与产样规划，不引入KataGo训练桶；方棋盘/规则沿现有env，VCN暂不纳入。v15辅助输出与三项搜索修正已接入；PDA/side、reanalysis及hint/early/game fork已接入。网络可选择NBT、独立plain（b10c128-fson-mish）或Transformer（bare b5c192h3nbttfrs/v17/fixup）；配置验证、架构参数组、训练和导出通过同一入口，baseline仍使用NBT。Transformer选择NCHW/SDPA及来源融合SwiGLU，编译时保留NCHW布局，具体数值与性能边界见[输入与网络](algorithms.md#观测动作与网络)。v17可选纯W−L Q仅在Transformer通过`network.predict_q_values`启用，baseline关闭；来源node visits、逐行随机量化及loss见[学习与数据使用](algorithms.md#学习与数据使用)。
