@@ -35,15 +35,17 @@ bash web/webui.sh
 - 候选表包含全部合法点的网络先验、原始访问数、访问占比、选择权重；支持点击表头排序、仅看已访问点、点击点位在棋盘定位。星号表示本次搜索选出的建议点，不保证是先验或选择权重最大值（落子含配置温度）。
 - 策略对照显示同一搜索前局面的网络先验与访问分布 / 选择权重；主棋盘也可叠加这些数值。棋盘与分析不匹配时不叠加，并显示提示，避免将旧分布画在新局面上。
 - 网络先验在合法点归一化，包含全树 NN policy 温度，不含根温度 / 噪声；原始访问分布由 child visits 归一化，选择权重来自目标剪枝与 LCB。各图颜色分别按最大值线性缩放，数值为实际百分比。
+- **网络输出**：并排展示普通策略、对手策略、长期 optimistic 和短期 optimistic 四个头，支持概率 / 原始 logits 和统一 / 独立色阶，悬停显示精确值，点击定位局面；每图显示最高概率点、分布熵（nats）与已落子位置的概率质量。两个 soft 头不展示。对手策略从当前局面预测对手下一手，不交换执子；optimistic 是训练加权策略，不是逐点胜率。
+- 四头来自搜索前局面的额外一次固定朝向推理，复用常驻模型和生效推理精度；不使用搜索温度、optimism 混合、噪声或对称集成。概率采用温度 1、在整个有效棋盘归一化（包含已落子位置，排除 padding），与合法点上的搜索先验口径不同。此诊断推理不计入搜索耗时与 NN 请求 / 批次，响应延迟包含它；AlphaZero 与 MuZero 均展示真实棋盘根局面的输出，不展示 latent 搜索子局面。
 - “原始数据”提供最近一次分析的只读 JSON，便于核对原生返回值。
 
 模型在 C++ 进程中常驻，同一模型与评估配置重开复用进程。加载时检查输入契约和 SHA-256；只读取已发布的 TorchScript 推理模型（包括发布时选用的 SWA），不读取训练 checkpoint。棋规与搜索使用目标版本原生实现，每次搜索从新根开始；根访问上限最少为 2，包含一次初始根评估，并受评估配置其他停止条件约束。程序按指定设备运行，不自动回退到 CPU。
 
 ```bash
 # 指定模型：同目录必须包含 manifest.json。
-bash web/webui.sh --model EtaZero_V1/data/muzero_minimal_test/models/<模型目录>/model.pt
+bash web/webui.sh --model "EtaZero_V1/data/<运行目录>/models/<模型目录>/model.pt"
 # 限定扫描到目标版本中的某个运行或实验伞目录。
-bash web/webui.sh --models-dir EtaZero_V1/data/muzero_minimal_test --port 8766
+bash web/webui.sh --models-dir "EtaZero_V1/data/<运行目录>" --port 8766
 # 独立评估配置，支持 EVAL_* 环境覆盖。
 EVAL_SEARCH_THREADS=8 EVAL_DEVICE=cuda:0 bash web/webui.sh
 ```
@@ -56,7 +58,7 @@ EVAL_SEARCH_THREADS=8 EVAL_DEVICE=cuda:0 bash web/webui.sh
 
 ```bash
 PYTHONPATH=EtaZero_V1/python:. \
-ETAZERO_WEB_TEST_MODEL="$PWD/EtaZero_V1/data/muzero_minimal_test/models/<模型目录>/model.pt" \
+ETAZERO_WEB_TEST_MODEL="$PWD/EtaZero_V1/data/<运行目录>/models/<模型目录>/model.pt" \
 conda run --no-capture-output -n pytorch python -m unittest discover -s web/tests -p test_web.py -v
 ```
 
