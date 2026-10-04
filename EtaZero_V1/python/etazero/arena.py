@@ -8,7 +8,8 @@ import math
 from pathlib import Path
 import subprocess
 import sys
-from threading import Thread
+from threading import Event, Thread
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import ROOT, native_text
 from .eval_config import load_evaluation_config
@@ -49,15 +50,22 @@ def save_manifest(path: Path, manifest: dict) -> None:
     write_json(path, manifest)
 
 
-def discover_players(root: Path, stride: int) -> list[Player]:
+def discover_players(root: Path, stride: int = 1, *, points: int | None = None,
+                     arms: list[tuple[str, Path]] | None = None) -> list[Player]:
     if stride < 1:
         raise ValueError('Stride must be positive')
     players = []
-    arms = [root] if (root/'.internal/state.json').is_file() else sorted(root.iterdir())
-    for arm in arms:
+    if points is not None and points < 1:
+        raise ValueError('Points must be positive')
+    if arms is None:
+        paths = [root] if (root/'.internal/state.json').is_file() else sorted(root.iterdir())
+        arms = [(p.name, p) for p in paths if (p/'.internal/state.json').is_file()]
+    if len({name for name, _ in arms}) != len(arms):
+        raise ValueError('Duplicate arm names')
+    for name, arm in arms:
         state_path = arm/'.internal/state.json'
         if not state_path.is_file():
-            continue
+            raise ValueError(f'Arm has no committed state: {arm}')
         state = json.loads(state_path.read_text())
         previous = 0
         rows = []
@@ -73,24 +81,36 @@ def discover_players(root: Path, stride: int) -> list[Player]:
         if previous != state['elapsed_seconds']:
             raise ValueError(f'Committed time does not match state: {arm}')
         if not rows:
-            continue
+            raise ValueError(f'Arm has no committed models: {arm}')
+        if points is not None:
+            # Targets are 10%,20%,...,100% for points=10. Break ties towards
+            # the earlier checkpoint and deduplicate sparse/uneven histories.
+            selected = {min(range(len(rows)), key=lambda i: abs(rows[i]['elapsed_seconds'] -
+                        rows[-1]['elapsed_seconds'] * fraction / points))
+                        for fraction in range(1, points+1)}
+            selected.add(len(rows)-1)
+            rows = [row for i, row in enumerate(rows) if i in selected]
         for row in rows:
             number = row['iteration']
-            if number not in (rows[0]['iteration'], rows[-1]['iteration']) and number % stride:
+            if points is None and number not in (rows[0]['iteration'], rows[-1]['iteration']) and number % stride:
                 continue
             model, info = model_info(arm/row['model']['path'])
             if info != row['model']:
                 raise ValueError(f'Model differs from committed record: {model}')
-            players.append(Player(f'{arm.name}:{number:08d}', arm.name, number, row['elapsed_seconds'],
+            players.append(Player(f'{name}:{number:08d}', name, number, row['elapsed_seconds'],
                                   str(model), info['sha256']))
     if len(players) < 2:
         raise ValueError('Need at least two committed models')
     return players
 
 
-def build_schedule(players: list[Player], neighbors: int) -> list[tuple[str, str]]:
+def build_schedule(players: list[Player], neighbors: int, *,
+                   cross_time_fractions: tuple[float, ...] | None = None,
+                   final_cross: bool = False) -> list[tuple[str, str]]:
     if neighbors < 1:
         raise ValueError('Neighbors must be positive')
+    if not players or len({p.id for p in players}) != len(players):
+        raise ValueError('Need uniquely identified players')
     arms = {}
     for player in players:
         arms.setdefault(player.arm, []).append(player)
@@ -100,14 +120,26 @@ def build_schedule(players: list[Player], neighbors: int) -> list[tuple[str, str
         for i, player in enumerate(rows):
             for other in rows[max(0, i-neighbors):i]:
                 edges.add(tuple(sorted((player.id, other.id))))
+    if cross_time_fractions is not None and any(not math.isfinite(f) or not 0 < f <= 1
+                                               for f in cross_time_fractions):
+        raise ValueError('Cross time fractions must be in (0,1]')
+    horizon = min(rows[-1].seconds for rows in arms.values())
     for a, b in combinations(arms.values(), 2):
-        horizon = min(a[-1].seconds, b[-1].seconds)
-        for source, target in ((a, b), (b, a)):
-            for player in source:
-                if player.seconds > horizon:
-                    continue
-                other = min(target, key=lambda p: abs(p.seconds - player.seconds))
-                edges.add(tuple(sorted((player.id, other.id))))
+        if cross_time_fractions is None:
+            pair_horizon = min(a[-1].seconds, b[-1].seconds)
+            for source, target in ((a, b), (b, a)):
+                for player in source:
+                    if player.seconds > pair_horizon:
+                        continue
+                    other = min(target, key=lambda p: abs(p.seconds - player.seconds))
+                    edges.add(tuple(sorted((player.id, other.id))))
+        else:
+            for fraction in cross_time_fractions:
+                left = min(a, key=lambda p: abs(p.seconds - horizon*fraction))
+                right = min(b, key=lambda p: abs(p.seconds - horizon*fraction))
+                edges.add(tuple(sorted((left.id, right.id))))
+        if final_cross:
+            edges.add(tuple(sorted((a[-1].id, b[-1].id))))
     reached = {players[0].id}
     while True:
         before = len(reached)
@@ -129,6 +161,10 @@ class PairStore:
         self.total = games
 
     def accept(self, event: dict) -> None:
+        if event['type'] == 'match_stats':
+            # Each invocation (including a resumed partial pair) is retained.
+            write_json(self.directory/'performance'/f'{identity(event)}.json', event)
+            return
         kind, index = event['type'], event['id']
         if type(index) is not int or index < 0:
             raise ValueError('Invalid event ID')
@@ -187,7 +223,10 @@ class PairStore:
         return rows
 
 
-def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], store: PairStore, seed: int) -> None:
+def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], store: PairStore,
+                 seed: int, cancel: Event | None = None, environ: dict | None = None) -> None:
+    if cancel is not None and cancel.is_set():
+        return
     completed = len(store.games())
     tasks = store.tasks(seed)
     if not tasks:
@@ -206,14 +245,24 @@ def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], sto
                                    '--model-b', b.model, '--model-b-id', model_info(b.model)[1]['id'],
                                    '--device', profile['device'], '--size', str(profile['board_size']),
                                    '--rule', profile['rule'], '--tasks', str(task_path)],
-                                   stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True)
+                                   stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True,
+                                   env=environ)
+        done = Event()
+        def watch_cancel():
+            while not done.wait(0.1):
+                if cancel.is_set():
+                    stop_process(process)
+                    return
+        watcher = Thread(target=watch_cancel) if cancel is not None else None
+        if watcher is not None:
+            watcher.start()
         try:
             for line in process.stdout:
                 event = json.loads(line)
                 store.accept(event)
                 if event['type'] == 'game':
                     completed += 1
-                    print(f"  games={completed}/{store.total}", flush=True)
+                    print(f"  {a.id} vs {b.id} games={completed}/{store.total}", flush=True)
             code = process.wait()
             if code:
                 raise RuntimeError(f'Match exited {code}: {store.directory / "native.log"}')
@@ -226,6 +275,9 @@ def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], sto
             finally:
                 process.stdout.close()
                 stopper.join()
+                done.set()
+                if watcher is not None:
+                    watcher.join()
     if store.tasks(seed):
         raise RuntimeError('Match exited without completing its assignments')
 
@@ -250,12 +302,47 @@ def native_config(config, players):
         if info['sha256'] != player.sha256:
             raise ValueError(f'Model changed: {player.model}')
         canvases.add(info['canvas'])
+        if info.get('algorithm') == 'muzero' and (config['match']['reuse_tree'] or
+                config['match']['use_graph_search'] or config['match']['root_num_symmetries_to_sample'] != 1):
+            raise ValueError('MuZero matches require reuse_tree=false, use_graph_search=false, '
+                             'root_num_symmetries_to_sample=1')
     if len(canvases) != 1:
         raise ValueError('All evaluated models must have the same canvas')
     canvas = canvases.pop()
     if config['match']['board_size'] > canvas:
         raise ValueError('Match board exceeds model canvas')
     return {**config, 'network': {'canvas': canvas}}
+
+
+def run_arena(output: Path, manifest: dict, binary: Path, samples: int,
+              pair_workers: int = 1, environ: dict | None = None) -> dict:
+    """Bounded concurrent C++ matches; cancel and flush all children on failure."""
+    if pair_workers < 1:
+        raise ValueError('Pair workers must be positive')
+    players = [Player(**p) for p in manifest['players']]
+    native = native_config(manifest['config'], players)
+    with run_lock(output/'arena.lock'):
+        save_manifest(output/'manifest.json', manifest)
+        config_path = output/'resolved.cfg'
+        config_path.write_text(native_text(native))
+        by_id = {p.id: p for p in players}
+        cancel = Event()
+        executor = ThreadPoolExecutor(max_workers=pair_workers)
+        try:
+            futures = []
+            for pair in manifest['pairs']:
+                store = PairStore(output/'pairs'/pair['id'], manifest['games_per_pair'])
+                seed = (manifest['config']['match']['seed'] + int(pair['id'][:16], 16)) % (1 << 64)
+                futures.append(executor.submit(execute_pair, binary, config_path,
+                               tuple(by_id[p] for p in pair['players']), store, seed, cancel, environ))
+            for count, future in enumerate(as_completed(futures), 1):
+                future.result()
+                print(f'completed pairs={count}/{len(futures)}', flush=True)
+        finally:
+            cancel.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+        from .elo import write_ratings
+        return write_ratings(output, samples)
 
 
 def single_match(config, binary, model_a, model_b, output, games=None):
@@ -326,19 +413,7 @@ def main():
         print(json.dumps(manifest, indent=2))
         return
     install_signals()
-    with run_lock(output / 'arena.lock'):
-        path = output / 'manifest.json'
-        save_manifest(path, manifest)
-        config_path = output / 'resolved.cfg'
-        config_path.write_text(native_text(native_config(config, players)))
-        by_id = {p.id: p for p in players}
-        for index, pair in enumerate(manifest['pairs']):
-            print(f"pair={index+1}/{len(schedule)} {' vs '.join(pair['players'])}", flush=True)
-            store = PairStore(output / 'pairs' / pair['id'], args.games)
-            seed = (config['match']['seed'] + int(pair['id'][:16], 16)) % (1 << 64)
-            execute_pair(binary, config_path, tuple(by_id[p] for p in pair['players']), store, seed)
-        from .elo import write_ratings
-        write_ratings(output, args.bootstrap_samples)
+    run_arena(output, manifest, binary, args.bootstrap_samples)
 
 
 if __name__ == '__main__':
