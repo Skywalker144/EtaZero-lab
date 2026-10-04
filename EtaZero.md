@@ -1,4 +1,6 @@
-# EtaZero 算法与训练核查表
+# EtaZero V0 算法与训练核查记录
+
+本文记录 2026-10-02 的 V0 对齐工作和验收证据。配置数值及结论仅适用于所记录的源码与运行快照，不是 V1 的当前参数、开发规则或验收证明；各版本当前能力以该版本文档和代码为准。
 
 本表覆盖57项算法及26项工程条目，逐行记录实现、参数、边界、调用链和实际证据。[第10批核查](EtaZero_V0/data/validation_batch10_final_20261002/manifest.json)对应其保存的源码快照；当前源码变更按受影响条目重新验证，不沿用历史快照的整体验收结论。S23按用户要求暂缓，未实现、未对齐，不计通过；400/70为用户明确保留的预算差异。运行通过不代表训练效果或来源端到端性能一致。
 
@@ -337,7 +339,7 @@ KataGo / KataGomo 的 HEAD 分别与计划固定的 commit 一致，两者工作
 
 <a id="alignment-profiles"></a>
 
-### 当前baseline profile
+### V0 核查时的 baseline profile
 
 SP是主局数据生产；E/M是固定局面eval及Match的搜索profile。Match还经过开局、执色和tree reuse调用，eval对给定局面直接搜索。下表按当前[baseline配置](EtaZero_V0/configs/baseline/)记录实际参数。SP机制参照[mainb18][KG-SP]+SETUP_FOR_OTHER，E/M参照[match_example][KG-MATCH]+SETUP_FOR_MATCH；预算、reduced最低访问数、SP半衰参数、side概率及replay窗口的当前差异单列。来源注释里的示例值不覆盖[加载器][KG-SETUP]。五子棋开局单独取GM，不能用Go面积/komi公式替代。
 
