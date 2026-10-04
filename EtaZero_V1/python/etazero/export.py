@@ -66,7 +66,8 @@ def export_model(run_dir, config, checkpoint):
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
             "path":str(Path("models")/checkpoint["id"]/"model.pt"),"sha256":sha256(stage/"model.pt"),
             'inference_precision':config['inference']['inference_precision'],'backend':'libtorch',
-            'normalization':'masked_fixup_bias' if model.norm_kind=='fixup' else 'precomputed_inv_std'}
+            'normalization': {'fixup': 'masked_fixup_bias', 'fixscaleonenorm': 'precomputed_inv_std',
+                              'masked_layernorm': 'masked_layernorm'}[model.norm_kind]}
     if config['agent']['algorithm'] == 'muzero':
         info['algorithm'] = 'muzero'
         info['muzero_config'] = config['muzero']
