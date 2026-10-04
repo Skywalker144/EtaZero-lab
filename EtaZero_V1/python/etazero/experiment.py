@@ -16,9 +16,10 @@ from .config import ROOT, FILES, FIELDS, boolean, fingerprint, load_config, vali
 from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sha256
 
-EXP_FIELDS = {'max_iteration': int, 'max_seconds': float, 'arm_gpus': str, 'shared_init': boolean}
+EXP_FIELDS = {'max_iteration': int, 'max_seconds': float, 'arm_gpus': str, 'shared_init': boolean,
+              'autoelo': boolean}
 ENV_FIELDS = {'MAX_ITERS': 'max_iteration', 'MAX_TIME_SECONDS': 'max_seconds',
-              'ARM_GPUS': 'arm_gpus', 'SHARED_INIT': 'shared_init'}
+              'ARM_GPUS': 'arm_gpus', 'SHARED_INIT': 'shared_init', 'AUTOELO': 'autoelo'}
 
 
 def experiment_plan(directory, environ=None, work_dir=None):
@@ -29,9 +30,11 @@ def experiment_plan(directory, environ=None, work_dir=None):
     directory = directory.resolve()
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     parser.read_string((directory/'exp.cfg').read_text())
-    if parser.defaults() or parser.sections() != ['experiment'] or set(parser['experiment']) != set(EXP_FIELDS):
+    required = set(EXP_FIELDS) - {'autoelo'}
+    if (parser.defaults() or parser.sections() != ['experiment'] or
+            not required <= set(parser['experiment']) or set(parser['experiment']) - set(EXP_FIELDS)):
         raise ValueError('exp.cfg requires exactly [experiment] and '+', '.join(EXP_FIELDS))
-    raw = dict(parser['experiment'])
+    raw = {'autoelo': 'true', **dict(parser['experiment'])}
     for source, target in ENV_FIELDS.items():
         if source in env:
             raw[target] = env[source]
@@ -273,14 +276,50 @@ def run_experiment(plan, binary):
         identity = {'umbrella': plan['umbrella'], 'arms': plan['arms'], 'shared_init': plan['settings']['shared_init']}
         manifest = work/'.internal/identity.json'
         if manifest.exists():
-            if load_json(manifest) != identity:
-                raise ValueError('Experiment arms or shared initialization changed; use a new experiment directory')
+            previous = load_json(manifest)
+            if any(previous[key] != identity[key] for key in ('umbrella', 'shared_init')):
+                raise ValueError('Experiment umbrella or shared initialization changed; use a new experiment directory')
+            current_arms = {arm['name']: arm for arm in identity['arms']}
+            for arm in previous['arms']:
+                if current_arms.get(arm['name']) != arm:
+                    raise ValueError(f'Existing experiment arm changed or was removed: {arm["name"]}; '
+                                     'use a new experiment directory')
+            if previous != identity:
+                # Append new arms under the scheduler lock, retaining all existing definitions.
+                save_json(manifest, identity)
         else:
             save_json(manifest, identity, immutable=True)
         initializations = prepare_initializations(work, plan['arms']) if identity['shared_init'] else {}
         save_json(work/'.internal/plan.json', {**plan, 'initializations': initializations,
                                              'binary_sha256': sha256(binary)})
-        return Scheduler(work, plan, binary, initializations).run()
+        code = Scheduler(work, plan, binary, initializations).run()
+        if code == 0 and plan['settings']['autoelo']:
+            # Keep the controller lock through evaluation. Failures are distinct
+            # from training completion and cannot cause completed arms to rerun.
+            from .autoelo import autoelo_plan, run_autoelo
+            from .process import install_signals
+            status = work/'.internal/elo_status.json'
+            save_json(status, {'status': 'planning'})
+            try:
+                evaluation = autoelo_plan(plan['umbrella'], binary, arms=plan['arms'], gpu=plan['slots'][0])
+                print('autoelo: '+json.dumps(evaluation['summary']), flush=True)
+                save_json(status, {'status': 'running', 'output': evaluation['output']})
+                handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+                try:
+                    install_signals()
+                    run_autoelo(evaluation, binary)
+                finally:
+                    for sig, handler in handlers.items():
+                        signal.signal(sig, handler)
+                save_json(status, {'status': 'complete', 'output': evaluation['output']})
+            except BaseException as error:
+                save_json(status, {'status': 'interrupted' if isinstance(error, KeyboardInterrupt)
+                          else 'failed', 'error': str(error), 'training': 'complete'})
+                print(f'Training complete; autoelo did not complete: {error}', file=sys.stderr, flush=True)
+                if isinstance(error, KeyboardInterrupt):
+                    return 130
+                raise
+        return code
 
 
 def main():
@@ -294,6 +333,12 @@ def main():
         parser.error('Set CONFIG_DIR or --config-dir to an experiment umbrella')
     plan = experiment_plan(args.config_dir, work_dir=args.work_dir)
     if args.dry_run:
+        if plan['settings']['autoelo']:
+            from .autoelo import load_elo_config
+            from .eval_config import load_evaluation_config
+            plan['elo'] = {'settings': load_elo_config(plan['umbrella']),
+                           'config': load_evaluation_config(plan['umbrella'], match=True, umbrella=True),
+                           'schedule': 'Discovered after every scheduled arm has completed'}
         print(json.dumps(plan, indent=2)); return 0
     return run_experiment(plan, args.binary.resolve())
 
