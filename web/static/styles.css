@@ -123,6 +123,10 @@ tr.selected {background:var(--tint)}
 tr:hover {background:var(--subtle)}
 .chosen {color:var(--accent);font-weight:600}
 .heatmap-pair {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.network-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.network-head-name {font-size:9px;color:var(--muted);overflow-wrap:anywhere;min-height:28px}
+.network-summary {font-size:10px;color:var(--muted);line-height:1.6;margin:7px 0 0}
+.network-cell .heat-stone {width:38%;box-shadow:0 0 0 1px #927b59}
 .heatmap-heading {display:flex;align-items:center;justify-content:space-between;gap:3px;min-height:38px;font-size:10px}
 .heatmap-heading select {min-width:0;min-height:25px;font-size:10px;padding:2px}.heatmap-heading>span {font-size:9px;color:var(--muted)}
 .heat-grid {display:grid;gap:1px}.heat-axis {display:grid;place-items:center;min-height:13px;font-size:8px;color:var(--muted)}
