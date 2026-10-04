@@ -1,12 +1,12 @@
-# 运行框架与 AlphaZero 实现
+# 运行框架与数据链路
 
-当前实现第一轮 AlphaZero 训练框架，算法语义见 [algorithms.md](algorithms.md)。MuZero / Gumbel 尚未实现，配置检查会拒绝这些选择。
+本文说明 AlphaZero 与 MuZero 共用的逐轮运行管理和数据基础设施。下述真实棋盘搜索与单状态数据布局属于 AlphaZero；MuZero 的独立 latent 推理、序列布局和训练差异见 [MuZero](muzero.md)。算法语义见 [algorithms.md](algorithms.md)，Gumbel 尚未实现。
 
 ## 参考来源与边界
 
 主要并行架构与训练数据管线参考 KataGo：对局线程共享 evaluator、多推理服务、NN 缓存、原子搜索统计与 mutex pool、有界后台写盘、二进制观测打包、NPZ 文件边界、power-law 回放窗口、随机分桶再桶内洗牌与 multi-wave，以及训练文件预取。源码提交、入口和校验值见 [reference_sources.json](../reference_sources.json)，许可证与改编范围见 [THIRD_PARTY.md](../THIRD_PARTY.md)。平衡开局直接参考 KataGomo；冷启动记账、Renju 与 TorchScript / LibTorch 边界另参考现有 MuZero_V2。
 
-当前采用逐轮编排：固定训练量，按 replay ratio 规划 selfplay。KataGo 的同步脚本同样顺序执行阶段，但 learner 使用额度桶、no-repeat-files 和 epoch/subepoch；当前固定轮协议具有独立的repeat/no-repeat文件消费控制，不引入来源的训练额度桶，也没有常驻异步阶段推进或局内换网。已实现工程机制、确认差异及验证范围见 [E01—E26 工程审查](../../EtaZero.md#engineering-audit) 与 [实施计划](../../plan.md)。Go 专有监督的映射和辅助 heads 见算法文档，不能由执行架构推定支持范围。共享架构不表示已有相同的吞吐、后端优化或训练效果。
+当前采用逐轮编排：固定训练量，按 replay ratio 规划 selfplay。KataGo 的同步脚本同样顺序执行阶段，但 learner 使用额度桶、no-repeat-files 和 epoch/subepoch；当前固定轮协议具有独立的repeat/no-repeat文件消费控制，不引入来源的训练额度桶，也没有常驻异步阶段推进或局内换网。V0 的历史来源对照及验收证据见 [E01—E26 核查记录](../../EtaZero.md#engineering-audit) 与 [实施记录](../../plan.md)，不作为 V1 当前实现或新增能力的验收结论。Go 专有监督的映射和辅助 heads 见算法文档，不能由执行架构推定支持范围。共享架构不表示已有相同的吞吐、后端优化或训练效果。
 
 ## 执行架构
 
@@ -22,7 +22,7 @@ flowchart LR
     H --> D[不可变训练快照]
     D --> T[固定训练步数]
     T --> K[完整 checkpoint]
-    K --> E[导出与 Python/C++ 校验]
+    K --> E[导出并记录模型身份]
     E --> M[原子发布模型]
     M --> C
 ```
@@ -47,7 +47,7 @@ SP 的 `inference.inference_precision` 明确选择 FP32 或 FP16 autocast，bas
 
 NN 缓存采用有界直接映射表与分段锁，保存不可变原始主/短期 optimistic logits、WDL 概率及误差标准差。键比较变换前五个二进制空间平面的全部位、六个全局浮点特征的原始字节、NN policy 温度及有效 optimism，朝向不入键，包含棋盘尺寸、Renju 执色、棋规和禁手特征开关；哈希只用于选槽，碰撞不会返回其他输入的结果。模型与精度由 evaluator 生命周期隔离。`inference.cache_entries = 0` 显式关闭缓存，空间输入必须为二进制，全局特征允许 Renju 黑方的 -1。缓存不合并同时在途的相同请求，也不缓存根噪声或搜索策略。optimism 使用精确 double 字节分键，无辅助能力时归零；根/叶条件刷新及标准差到统计权重的转换见 [搜索修正](algorithms.md#误差加权optimistic-policy-与-noise-pruning)。Backend 声明的辅助能力须与实际输出一致，多服务必须使用同一能力契约。原生 evaluate 同时输出 network_sample_weight、network_value_stdev、search_weight 和 search_weight_sq，用于区分访问数和加权统计。
 
-公共搜索遍历通过 [SearchState](../cpp/include/etazero/algorithm.h) 获得状态复制、动作域、转移、叶评估、终局值、奖励、折扣与视角转换。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用五子棋规则。支持图共享的状态还须提供包含 continuation 与 NN 输入条件的完整 `graph_key`；不支持时明确拒绝。未来 latent 状态可从同一边界接入，当前没有 MuZero 占位类。
+公共搜索遍历通过 [SearchState](../cpp/include/etazero/algorithm.h) 获得状态复制、动作域、转移、叶评估、终局值、奖励、折扣与视角转换。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用五子棋规则。支持图共享的状态还须提供包含 continuation 与 NN 输入条件的完整 `graph_key`；不支持时明确拒绝。MuZero 使用独立 latent 搜索实现，按实际语义复用数学函数，见 [MuZero](muzero.md#网络与推理)。
 
 ### 轮次与设备
 
@@ -84,7 +84,7 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
 
 派生配置在 `run.cfg` 的 `[run]` 中使用 `extends = baseline`，父目录名优先在所选配置的同级解析，找不到时在本版本 `configs/` 下解析，因此实验伞目录中的臂也可直接 `extends = baseline` 或 `minimal_test`。解析次序是父配置、当前配置、当前目录的 `*.cfg.local`；父目录本机覆盖不向子配置传播。继承循环、父目录缺失、未知/重复字段、错误文件归属、非法枚举与范围、非法组合或未实现能力，均在启动 worker 前失败。
 
-`run.run_dir` 可省略或留空，且不继承父配置。最终输出位置按 `--run-dir`、当前目录 `run.cfg.local`、当前目录 `run.cfg`、自动映射的优先级解析；本机覆盖中的空值恢复自动映射。默认将所选目录相对于本版本 `configs/` 的完整路径映射到 `data/`，例如 `configs/az_pcr/100v` → `data/az_pcr/100v/`。配置中的相对输出路径以本版本目录为基准，命令行中的相对输出路径以调用时工作目录为基准；最终路径解析符号链接并保存为绝对路径。`configs/` 外的配置必须显式指定输出位置，父配置中的输出位置不能满足这一要求。`check-config` 支持 `--run-dir` 并显示解析结果；同一最终路径的自动选择与显式指定生成相同配置身份。历史产物不自动迁移，恢复仍要求保存的生效配置一致。
+`run.run_dir` 可省略或留空，且不继承父配置。最终输出位置按 `--run-dir`、当前目录 `run.cfg.local`、当前目录 `run.cfg`、自动映射的优先级解析；本机覆盖中的空值恢复自动映射。默认将所选目录相对于本版本 `configs/` 的完整路径映射到 `data/`，例如 `configs/<伞目录>/<臂名>` → `data/<伞目录>/<臂名>/`。配置中的相对输出路径以本版本目录为基准，命令行中的相对输出路径以调用时工作目录为基准；最终路径解析符号链接并保存为绝对路径。`configs/` 外的配置必须显式指定输出位置，父配置中的输出位置不能满足这一要求。`check-config` 支持 `--run-dir` 并显示解析结果；同一最终路径的自动选择与显式指定生成相同配置身份。历史产物不自动迁移，恢复仍要求保存的生效配置一致。
 
 Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `config/effective.cfg`，C++ 不维护第二套默认值。观测、动作、模型输出与原始分片类型由 [schema.py](../python/etazero/schema.py) 定义，构建时生成 C++ 头文件，模型和数据记录契约内容校验身份。
 
@@ -143,7 +143,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 两阶段shuffle对保留行独立均匀分桶，再按固定计划的桶数和每桶文件数输出：`B=max(1,round(approx_rows_per_wave/bucket_rows))`，`F=bucket_rows/training_shard_rows`，要求整除；真实桶内按 `floor(j·N/F)` 等分。training_shard_rows是名义大小，真实文件可更大、更小或空，不根据实际桶大小重新决定F。所有字段共同排列。source的均匀排列＋multinomial桶计数与该随机分配分布相同；这里使用可重建的独立SeedSequence流，不宣称来源os.urandom序列相同。初次采样、wave内scatter和merge分别使用含partition/stage/wave/group/bucket的命名空间，跨桶任务不复用流。
 
-来源shuffle CLI默认 `min_rows=250000,p=1,a=1`，K必填，group80000、输出70000、桶默认等于输出；`selfplay/shuffle.sh` 显式使用 `p=.65,a=.4,K=20000000`，普通分支MD5留出1%，SKIP_VALIDATE分支全作train。`synchronous_loop.sh` 还覆盖m100000、s50000、K600000并设置SKIP_VALIDATE=1。EtaZero的窗口、保留目标与本机shuffle资源参数以 [train.cfg](../configs/baseline/train.cfg) 为准；当前baseline窗口采用 [KataGomo shuffle profile](/home/sky/RL/SkyZero/KataGomo/python/shuffle.sh:49) 的 `min_rows=150000,p=0.8,a=0.3`，保留目标K为20000000，默认启用验证（`skip_validation=false`）。shuffle为12进程、16384MiB数组内存预算，group/bucket/名义训练分片均65536行、waves=1。同步示例中的train bucket/no-repeat/训练数量不是本地固定轮预算的来源默认。
+来源shuffle CLI默认 `min_rows=250000,p=1,a=1`，K必填，group80000、输出70000、桶默认等于输出；`selfplay/shuffle.sh` 显式使用 `p=.65,a=.4,K=20000000`，普通分支MD5留出1%，SKIP_VALIDATE分支全作train。`synchronous_loop.sh` 还覆盖m100000、s50000、K600000并设置SKIP_VALIDATE=1。EtaZero的窗口、保留目标与本机shuffle资源参数以 [train.cfg](../configs/baseline/train.cfg) 为准；项目配置可参考 [KataGomo shuffle profile](/home/sky/RL/SkyZero/KataGomo/python/shuffle.sh:49)，具体窗口、验证开关和资源数值由所选配置确定。同步示例中的train bucket/no-repeat/训练数量不是本地固定轮预算的来源默认。
 首次消费原始分片时完成 SHA-256 与全轨迹验证，然后在 `.internal/training_views/` 保存 DEFLATE level 1 压缩的紧凑训练视图和来源证书。后续 shuffle 校验缓存哈希；原始文件大小或 mtime 变化时重新核对来源哈希，避免窗口内反复解压和逐步轨迹验证。原始分片遵循不可变约定，缓存不代替原始轨迹；损坏缓存明确报错。已离开当前窗口的视图在本轮提交后回收。
 
 `shuffle.waves > 1` 先在输入组中完成一次采样，将保留的每行独立均匀分配到一个 wave，再逐 wave 执行两阶段 shuffle；第二阶段不重复采样，完成后立即删除该 wave 的临时文件。额外 I/O 换取更低的同时存活分桶文件数量，不改变已选样本集合。
@@ -162,7 +162,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 后台batch队列和CUDA上传stream有界。每batch携带消费游标，包括文件order、已结束文件、文件/行位置、pass、RNG、repeat模式、split与batch大小；checkpoint取已消费游标，包含AMP skip。源generator在pop文件时记用过，本地额外保留文件内游标以恢复后续完整batch。未消费的预取可丢弃重读。两个pinned槽通过event防止DMA覆盖，record_stream保证GPU生命周期。
 
-baseline默认启用验证；`training.skip_validation = true` 可选择同步来源SKIP_VALIDATE分支。启用时MD5原始文件basename的前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation；目录和模型代次不影响所属分区。writer以独立OS随机流生成64位十六进制basename，不消耗game RNG。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest持久记录源文件分区与全部输出hash。验证payload位于同一个原子data目录的validation子目录，回收及重建同时覆盖两个分区。
+`training.skip_validation` 控制验证；true 对应同步来源 SKIP_VALIDATE 分支。启用时MD5原始文件basename的前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation；目录和模型代次不影响所属分区。writer以独立OS随机流生成64位十六进制basename，不消耗game RNG。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest持久记录源文件分区与全部输出hash。验证payload位于同一个原子data目录的validation子目录，回收及重建同时覆盖两个分区。
 
 每轮训练结束、最终checkpoint之前，validation用当前raw模型eval/no_grad读取每文件完整batch，默认按文件名排序；`randomize_validation_files`可随机文件顺序。验证始终随机D4，即使训练D4关闭；采用独立随机流，保持训练RNG不受验证影响。AMP精度及FP32 heads沿训练设置，启用compile时单独生成eval图。`max_validation_samples=0`不设上限，正值在完整batch使总数超过上限后停止，沿来源允许一batch超额。验证不推进optimizer、Lookahead、SWA、训练样本或成功更新计数，不修改BN统计；无完整validation batch时明确记录samples=0，不捏造loss。事件记录样本均值loss、batch数量和D4计数。此验证不是棋力评估。
 ## 固定训练量与自对弈产量
@@ -238,7 +238,7 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 
 ## 验收与限制
 
-`tests/test_*.py` 是 pytest 自动发现的 Python 测试，`cpp/tests/` 是 CTest 使用的原生测试；`tests/reference/check_*.py` 是手动运行的来源对照检查，不随普通 pytest 自动执行。来源检查读取本地 KataGo / KataGomo 源码，多数会核对 `reference_sources.json` 中固定的 commit 和 SHA256；链接生产库或运行 `build/` 下测试程序的检查须先执行 `scripts/build.sh`。构建、训练、调度与性能测量入口保留在 `scripts/`。
+`tests/fixtures/configs/` 是固定的测试输入，独立于用户运行配置；配置解析测试据此构造父子目录、覆盖项和实验臂。它们不随 `configs/` 的调参、重命名或实验增删同步更新。`tests/test_*.py` 是 pytest 自动发现的 Python 测试，`cpp/tests/` 是 CTest 使用的原生测试；`tests/reference/check_*.py` 是手动运行的来源对照检查，不随普通 pytest 自动执行。来源检查读取本地 KataGo / KataGomo 源码，多数会核对 `reference_sources.json` 中固定的 commit 和 SHA256；链接生产库或运行 `build/` 下测试程序的检查须先执行 `scripts/build.sh`。构建、训练、调度与性能测量入口保留在 `scripts/`。
 
 | 来源对照检查 | 范围 |
 |---|---|
@@ -285,7 +285,7 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 
 `logs/performance.png` 单独显示各阶段已完成尝试的累计 wall seconds、有效行／自对弈秒、已提交训练样本／训练秒，以及 NN 平均 batch、每请求排队微秒和缓存命中率。训练耗时包含对象创建、数据等待、计算和 checkpoint 等开销。没有完成事件的中断阶段缺少耗时，不进入分母；当前未完成训练轮次也不显示吞吐，因此这些图不能直接作为完整跨中断端到端性能比较。推理计数按 iteration、attempt、worker 去重。bootstrap 使用 random evaluator，未发生网络组批时相关面板无值。
 
-MuZero 的概览图增加第四行：逐展开步 loss 和三段模块的梯度范数，标题相应标识 MuZero。更新日志的 `step_losses` 保存第 0 至 K 步带监督权重的前向损失（不乘仅作用于反向的 `1/K`），`grad_norms` 保存 representation/dynamics/prediction 的 AMP 反缩放后、裁剪前 L2 范数除以 batch size。每轮按已提交且含对应指标的更新取均值，模块梯度排除 AMP 跳步；缺测不参与分母。逐步图显示最新轮次与已测轮次均值，模块梯度沿轮次显示。旧日志和 bootstrap 显示缺测面板，不从总量反推。该采集不额外反传，不改变 loss 或梯度缩放。详见 [MuZero 训练诊断图](muzero.md#训练诊断图)。
+MuZero 的概览图增加第四行：逐展开步 loss 和三段模块的梯度范数，标题相应标识 MuZero。更新日志的 `step_losses` 保存第 0 至 K 步带监督权重的前向损失（不乘仅作用于反向的 `1/K`），`grad_norms` 保存 representation/dynamics/prediction 的 AMP 反缩放后、裁剪前平均 loss 梯度 L2 范数：总和反传时除以 batch size，均值反传时直接记录。每轮按已提交且含对应指标的更新取均值，模块梯度排除 AMP 跳步；缺测不参与分母。逐步图显示最新轮次与已测轮次均值，模块梯度沿轮次显示。旧日志和 bootstrap 显示缺测面板，不从总量反推。该采集不额外反传，不改变 loss 或梯度缩放。详见 [MuZero 训练诊断图](muzero.md#训练诊断图)。
 
 每轮在 state 提交前先 flush 日志并准备三张 PNG，将绘图耗时计入本轮；controller 正常返回和重启时可从已提交 state 重建；绘图不修改 checkpoint、数据或随机流。`bash scripts/run.sh plot --run-dir <实验目录>` 可手动重建，`--plot` 保留为返回后的显式重绘选项。绘图异常会明确报错，已提交训练状态保留，重启可重建。
 
@@ -307,12 +307,10 @@ MuZero 的概览图增加第四行：逐展开步 loss 和三段模块的梯度�
 
 `MAX_ITERS`、`MAX_TIME_SECONDS`、`ARM_GPUS`、`SHARED_INIT`、`AUTOELO` 可覆盖伞配置，后两项使用 true/false。`CONFIG_DIR` 或 `--config-dir` 选择伞目录，`DRY_RUN=1` 或 `--dry-run` 仅打印训练和评估配置计划，不创建目录、初始化权重或启动任何任务；历史模型采样在训练完成后确定。`--binary` 指定本版本已验证构建；`--work-dir` 指定调度产物目录，默认 `data/experiments/<伞目录名>_<路径摘要>/`。自动 Elo 的采样、赛程、C++ 并行配置、独立入口和结果恢复见 [自动实验 Elo](elo.md#自动实验-elo)；评估阶段状态单独保存于调度目录 `.internal/elo_status.json`，失败保留训练完成状态并明确报错。
 
-指定 GPU 槽位时，子进程的 `CUDA_VISIBLE_DEVICES` 设为该槽，CUDA devices 映射为 `cuda:0`，CPU devices 保留。每臂至多一个 selfplay device，多设备配置会明确拒绝；GPU 槽位不得重复。每臂使用普通训练相同的输出目录解析；例如 `configs/az_pcr` 的各臂默认位于 `data/az_pcr/<臂名>/`。重复、嵌套或包含调度目录的路径会在启动前拒绝。生成给子进程的配置写入最终绝对输出路径，不按调度临时配置的位置重新映射。GPU 槽位仅控制本次 scheduler，不管理外部任务或保留宿主 GPU。
+指定 GPU 槽位时，子进程的 `CUDA_VISIBLE_DEVICES` 设为该槽，CUDA devices 映射为 `cuda:0`，CPU devices 保留。每臂至多一个 selfplay device，多设备配置会明确拒绝；GPU 槽位不得重复。每臂使用普通训练相同的输出目录解析；例如 `configs/<伞目录>` 的各臂默认位于 `data/<伞目录>/<臂名>/`。重复、嵌套或包含调度目录的路径会在启动前拒绝。生成给子进程的配置写入最终绝对输出路径，不按调度临时配置的位置重新映射。GPU 槽位仅控制本次 scheduler，不管理外部任务或保留宿主 GPU。
 
 共享初始化文件保存于调度目录 `.internal/initializations/`，按网络结构、seed 与契约分组并校验 SHA-256。它只携带模型参数及 buffers，各臂重新初始化 optimizer、计数和 RNG；random bootstrap 仍各自生成，不共享对局、回放或首轮训练后的模型。结构或种子不同的臂得到不同初始化；相同种子的随机对局可能相同，但产物与生命周期独立。`shared_init = false` 时各臂由自己的初始化路径启动。
 
 调度目录公开 `configs/<臂名>/` 的解析配置与 `logs/<臂名>.runner.log`，内部身份、计划、状态与锁位于 `.internal/`。可以在同一实验伞目录新增含 `run.cfg` 的直接子目录，再运行原命令：已达累计时间或轮数预算的臂跳过，未达预算的原有臂恢复，新臂从头训练。新增臂按网络结构和 seed 复用已有共享初始化，或生成自己的初始化组。恢复时重新检查 run 生效配置和初始权重校验值，完成判断使用持久化 state 及累计已提交轮次时间。原有臂的配置、输出目录和成员身份，以及伞目录和 shared_init 必须保持一致，不能修改或删除已登记的臂；可以提高统一预算或调整 GPU 槽位，改变实验条件使用新配置和新产物目录。并发启动同一伞目录会被锁拒绝。
 
 SIGINT/SIGTERM 停止排队，转发到运行中的 Python controller，由 controller 关闭 native worker，尚未整轮提交的产物保留待下次启动归档。调度器返回 130；中断臂下次从上一个完整轮重跑。某臂失败或意外在预算完成前退出时，调度器停止其他臂并报错，不将失败记作完成。状态文件仅是可查看的调度记录，完成判断以实际运行证据为准。
-
-当前能力与对齐范围分别维护：上述行为以现有代码/配置为准；[57项对齐目标](../../EtaZero.md#alignment-targets)列出已确定的来源profile、网络版本、五子棋监督和验收范围。用户保留同步逐轮固定训练量与产样规划，不引入KataGo训练桶；方棋盘/规则沿现有env，VCN暂不纳入。v15辅助输出与三项搜索修正已接入；PDA/side、reanalysis及hint/early/game fork已接入。网络可选择NBT、独立plain（b10c128-fson-mish）或Transformer（bare b5c192h3nbttfrs/v17/fixup）；配置验证、架构参数组、训练和导出通过同一入口，baseline仍使用NBT。Transformer选择NCHW/SDPA及来源融合SwiGLU，编译时保留NCHW布局，具体数值与性能边界见[输入与网络](algorithms.md#观测动作与网络)。v17可选纯W−L Q仅在Transformer通过`network.predict_q_values`启用，baseline关闭；来源node visits、逐行随机量化及loss见[学习与数据使用](algorithms.md#学习与数据使用)。
