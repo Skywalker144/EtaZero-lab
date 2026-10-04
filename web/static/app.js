@@ -454,17 +454,12 @@ document.addEventListener('keydown', event => {
   if (id && !$(id).disabled && !$(id).hidden) { event.preventDefault(); $(id).click(); }
 });
 function savePreferences() {
-  try { localStorage.setItem('etazero-ui', JSON.stringify({theme: document.documentElement.dataset.theme, numbers: $('numbers').checked})); } catch { /* Browser storage is optional. */ }
+  try { localStorage.setItem('etazero-ui', JSON.stringify({theme: document.documentElement.dataset.themePreference, numbers: $('numbers').checked})); } catch { /* Browser storage is optional. */ }
 }
 try {
   const preferences = JSON.parse(localStorage.getItem('etazero-ui') || '{}');
-  document.documentElement.dataset.theme = preferences.theme === 'dark' ? 'dark' : 'light';
   $('numbers').checked = preferences.numbers !== false;
 } catch { /* Use defaults when storage is unavailable. */ }
-$('theme').addEventListener('click', () => {
-  document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  savePreferences();
-});
 setInterval(renderStatus, 200);
 async function start() {
   for (;;) {
