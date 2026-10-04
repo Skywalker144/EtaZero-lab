@@ -18,6 +18,8 @@
 #include <torch/torch.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/core/InferenceMode.h>
+#include <ATen/autocast_mode.h>
 using namespace etazero;
 namespace {
 static_assert(std::atomic<bool>::is_always_lock_free, "Signal stop flag must be lock-free");
@@ -101,7 +103,8 @@ template<class T> void array(std::ostream& out, const std::vector<T>& values) {
     out << '['; bool first = true;
     for (auto x : values) { if (!first) out << ','; out << x; first = false; } out << ']';
 }
-std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false) {
+std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false,
+                                          torch::jit::Module* web_model = nullptr) {
     std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "evaluate" ? "evaluation" : mode;
     int batch = c.integer(prefix+".max_batch"), canvas = c.integer("network.canvas");
     std::vector<std::unique_ptr<Backend>> backends;
@@ -122,6 +125,7 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         if(metadata->elements().size()==4)algorithm=metadata->elements()[2].toStringRef();
         else if(metadata->elements().size()==2)algorithm="alphazero";
         else throw std::runtime_error("Unknown model metadata");
+        if(web_model)*web_model=*detected_model; // Share immutable weights with Web-only diagnostics.
     }
     if(algorithm=="muzero") {
         std::vector<std::unique_ptr<muzero::Backend>> models;
@@ -374,7 +378,50 @@ void web_state(const Game& game,const std::vector<int>& moves) {
              <<",\"reason\":"<<game.reason()<<",\"board\":";
     array(std::cout,game.board().cells);std::cout<<",\"moves\":";array(std::cout,moves);std::cout<<'}';
 }
-void web_analysis(const SearchResult& result,const Game& game,double seconds,uint64_t requests,uint64_t batches) {
+struct WebPolicyPlanes {
+    torch::Tensor logits, probabilities;
+    std::string precision;
+};
+WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,const std::string& device_name,std::string precision) {
+    c10::InferenceMode inference_guard;
+    torch::Device device(device_name);c10::cuda::OptionalCUDAGuard device_guard;
+    if(device.is_cuda())device_guard.set_device(device);
+    if(precision=="auto")precision=device.is_cuda()?"float16":"float32";
+    struct AutocastGuard {
+        bool enabled=at::autocast::is_autocast_enabled(at::kCUDA);
+        at::ScalarType dtype=at::autocast::get_autocast_dtype(at::kCUDA);
+        explicit AutocastGuard(bool use) {
+            at::autocast::set_autocast_dtype(at::kCUDA,at::kHalf);
+            at::autocast::set_autocast_enabled(at::kCUDA,use);
+        }
+        ~AutocastGuard() {
+            at::autocast::clear_cache();at::autocast::set_autocast_enabled(at::kCUDA,enabled);
+            at::autocast::set_autocast_dtype(at::kCUDA,dtype);
+        }
+    } autocast(precision=="float16");
+    auto observation=game.observation();const int canvas=game.canvas(),area=game.actions(),size=game.size();
+    auto obs=torch::from_blob(observation.data(),{1,INPUT_PLANES,canvas,canvas},torch::kFloat32).to(device);
+    auto globals=torch::from_blob(observation.data()+INPUT_PLANES*area,{1,GLOBAL_FEATURES},torch::kFloat32).to(device);
+    auto network=model.attr("model").toModule();
+    auto metadata=model.get_method("metadata")({}).toTuple();
+    c10::IValue output;
+    if(metadata->elements().size()==4) {
+        auto hidden=network.attr("representation").toModule().forward({obs,globals});
+        output=network.attr("prediction").toModule().forward({hidden});
+    } else output=network.get_method("forward_all")({obs,globals});
+    auto logits=output.toTuple()->elements()[0].toTensor();
+    if(logits.dim()!=3 || logits.size(0)!=1 || logits.size(1)<6 || logits.size(2)!=area)
+        throw std::runtime_error("Web policy output shape mismatch");
+    // Match the training domain: all on-board points, INCLUDING occupied cells.
+    // Canonical orientation, temperature 1, without search optimism/noise/ensemble.
+    logits=logits[0].narrow(0,0,6).reshape({6,canvas,canvas}).narrow(1,0,size).narrow(2,0,size)
+        .to(torch::kFloat32).contiguous().reshape({6,size*size});
+    if(!torch::isfinite(logits).all().item<bool>())throw std::runtime_error("Nonfinite Web policy logits");
+    auto probabilities=torch::softmax(logits,1).to(torch::kCPU).contiguous();
+    return {logits.to(torch::kCPU).contiguous(),probabilities,precision};
+}
+void web_analysis(const SearchResult& result,const Game& game,double seconds,uint64_t requests,uint64_t batches,
+                  const WebPolicyPlanes& planes) {
     std::vector<int> candidates;
     int64_t total=0;
     for(int a=0;a<game.actions();++a)if(game.legal(a)){candidates.push_back(a);total+=result.visits[a];}
@@ -394,10 +441,22 @@ void web_analysis(const SearchResult& result,const Game& game,double seconds,uin
                  <<",\"network_prior\":"<<result.network_policy[a]<<",\"visit_policy\":"<<double(result.visits[a])/total
                  <<",\"selection_weight\":"<<result.move_policy[a]<<'}';
     }
-    std::cout<<"]}";
+    std::cout<<"],\"network_planes\":{\"precision\":"<<quote(planes.precision)<<",\"heads\":[";
+    const int count=game.size()*game.size();
+    const std::array<int,4> displayed_heads{0,1,4,5};
+    const std::array<std::string,4> names{"policy","opponent_policy","long_optimistic_policy","short_optimistic_policy"};
+    for(size_t i=0;i<displayed_heads.size();++i) {
+        int head=displayed_heads[i];if(i)std::cout<<',';
+        auto logits=planes.logits.data_ptr<float>()+head*count;
+        auto probabilities=planes.probabilities.data_ptr<float>()+head*count;
+        std::cout<<"{\"name\":"<<quote(names[i])<<",\"logits\":";array(std::cout,std::vector<float>(logits,logits+count));
+        std::cout<<",\"probabilities\":";array(std::cout,std::vector<float>(probabilities,probabilities+count));std::cout<<'}';
+    }
+    std::cout<<"]}}";
 }
 int serve(const Args& a,const Config& c) {
-    auto eval=evaluator(a,c,"evaluate");
+    torch::jit::Module web_model;
+    auto eval=evaluator(a,c,"evaluate",false,&web_model);
     auto search_owner=search_for(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
     std::optional<Game> game;
     std::vector<int> played;
@@ -437,11 +496,12 @@ int serve(const Args& a,const Config& c) {
                 if(stop_requested)break;
                 if(result.action<0)throw std::runtime_error("Search has no move: zero playout budget");
                 double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+                auto planes=web_policy_planes(web_model,before,a.get("device"),c.text("evaluation.inference_precision"));
                 if(words[0]=="genmove") {
                     game->play(result.action);played.push_back(result.action/canvas*game->size()+result.action%canvas);
                 }
                 std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played);std::cout<<",\"analysis\":";
-                web_analysis(result,before,seconds,eval->requests.load()-requests,eval->batches.load()-batches);
+                web_analysis(result,before,seconds,eval->requests.load()-requests,eval->batches.load()-batches,planes);
                 std::cout<<"}\n"<<std::flush;continue;
             } else if(!(words[0]=="state" && words.size()==1))throw std::runtime_error("Unknown command or arguments");
             std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played);std::cout<<"}\n"<<std::flush;
