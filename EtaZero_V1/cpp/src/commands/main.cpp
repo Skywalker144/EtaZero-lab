@@ -452,6 +452,8 @@ int serve(const Args& a,const Config& c) {
     eval->finish();return 0;
 }
 int match(const Args& a,const Config& c) {
+    auto match_start=std::chrono::steady_clock::now();
+    std::atomic<int> completed_games{0};
     const bool same_bot=a.get("model-id")==a.get("model-b-id");
     if(same_bot && a.get("model")!=a.get("model-b"))throw std::runtime_error("Match model identity collision");
     auto ea=evaluator(a,c,"match"),eb=evaluator(a,c,"match",true);
@@ -543,8 +545,20 @@ int match(const Args& a,const Config& c) {
         if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
         row<<",\"same_bot\":"<<(same_bot?"true":"false")<<",\"inference_precision\":"<<quote(precision)<<",\"moves\":";write_moves(row,actions);row<<'}';
         std::lock_guard<std::mutex> lock(output);std::cout<<row.str()<<std::endl;
+        ++completed_games;
     });
-    ea->finish();eb->finish();return stop_requested?130:0;
+    ea->finish();eb->finish();
+    auto inference_stats=[](InferenceService& service) {
+        std::cout<<"{\"requests\":"<<service.requests.load()<<",\"batches\":"<<service.batches.load()
+                 <<",\"max_batch\":"<<service.max_observed_batch.load()
+                 <<",\"queue_wait_us\":"<<service.wait_microseconds.load()
+                 <<",\"submitted\":"<<service.submitted.load()<<",\"cache_hits\":"<<service.cache_hits.load()<<'}';
+    };
+    std::cout<<std::setprecision(17)<<"{\"type\":\"match_stats\",\"games\":"<<completed_games.load()
+             <<",\"seconds\":"<<std::chrono::duration<double>(std::chrono::steady_clock::now()-match_start).count()
+             <<",\"inference_a\":";inference_stats(*ea);
+    std::cout<<",\"inference_b\":";inference_stats(*eb);std::cout<<'}'<<std::endl;
+    return stop_requested?130:0;
 }
 }
 int main(int argc,char** argv) {
