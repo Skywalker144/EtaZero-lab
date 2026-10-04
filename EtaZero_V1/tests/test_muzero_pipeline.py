@@ -69,9 +69,16 @@ def test_config_inherits_baseline_and_disables_invalid_tree_features(tmp_path):
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
 @pytest.mark.parametrize('compiled', [False, True])
-def test_cuda_complete_pipeline_and_resume(tmp_path, compiled):
+@pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
+def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture):
     torch.set_num_threads(1); torch._dynamo.reset()
     c = small_config(); c['training']['compile'] = compiled
+    c['network']['architecture'] = architecture
+    if architecture == 'resnet':
+        c['muzero_training'] = dict(auxiliary_losses=True, katago_optimizer=False,
+                                    learning_rate=.001, weight_decay=.0003)
+        c['optimizer']['kind'] = 'adamw'
+    validate(c)
     c['network']['predict_q_values'] = True
     root = tmp_path/'run'
     state = run_training(root, c, ROOT/'build/etazero', max_iteration=2)
@@ -96,7 +103,9 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled):
     assert absorbing > 0 and cheap > 0
     assert run_training(root, c, ROOT/'build/etazero', resume=True, max_iteration=2) == state
     assert all(sha256(p) == digest for p, digest in files.items())
-    assert load_json(root/Path(state['model']['path']).parent/'manifest.json')['algorithm'] == 'muzero'
+    manifest = load_json(root/Path(state['model']['path']).parent/'manifest.json')
+    assert manifest['algorithm'] == 'muzero'
+    assert manifest['normalization'] == ('masked_layernorm' if architecture == 'resnet' else 'precomputed_inv_std')
     # Same start rows, absorbing-action RNG, optimizer and normalization state
     # must lead to the identical next updates after a mid-round interruption.
     from test_gpu import assert_compiled_partial_resume
