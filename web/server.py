@@ -1,13 +1,15 @@
 import argparse
 import json
 import mimetypes
+from threading import Thread
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from etazero.config import ROOT
 from etazero.eval_config import load_evaluation_config
-from etazero.runtime import verify_build
+from etazero.build import verify_build
 from etazero.schema import CONTRACT_ID
 from etazero.storage import load_json
 from .app import App, Conflict
@@ -46,7 +48,7 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
                 return self.json(200, app.snapshot(since))
             if url.path == '/api/catalog':
                 return self.json(200, app.catalog())
-            files = {'/': 'index.html', '/app.js': 'app.js', '/styles.css': 'styles.css'}
+            files = {'/': 'index.html', '/app.js': 'app.js', '/theme.js': 'theme.js', '/styles.css': 'styles.css'}
             if url.path in files:
                 path = STATIC / files[url.path]
                 return self.send(200, path.read_bytes(), (mimetypes.guess_type(path)[0] or 'text/plain') + '; charset=utf-8')
@@ -134,7 +136,7 @@ def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Pa
     return models, runs
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description='EtaZero 开发工作台')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8766)
@@ -142,7 +144,8 @@ def main():
     parser.add_argument('--models-dir', type=Path, default=ROOT / 'data')
     parser.add_argument('--model', type=Path)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/etazero')
-    args = parser.parse_args()
+    parser.add_argument('--no-open', action='store_true', help='不自动打开浏览器')
+    args = parser.parse_args(argv)
     if not args.binary.is_file():
         parser.error('缺少 etazero，请先运行 web/webui.sh 构建')
     try:
@@ -154,7 +157,13 @@ def main():
     app = App(args.binary, models, config, config['evaluation']['board_size'],
               runs=runs, discover_catalog=lambda: discover_catalog(args.models_dir, args.model, args.config_dir))
     server = make_server(app, args.host, args.port)
-    print(f'EtaZero Web: http://{args.host}:{server.server_port}', flush=True)
+    browser_host = '127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host
+    if ':' in browser_host:
+        browser_host = f'[{browser_host}]'
+    url = f'http://{browser_host}:{server.server_port}'
+    print(f'EtaZero Web: {url}', flush=True)
+    if not args.no_open:
+        Thread(target=open_browser, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -162,6 +171,15 @@ def main():
     finally:
         server.server_close()
         app.close()
+
+
+def open_browser(url):
+    try:
+        if webbrowser.open(url, new=2):
+            return
+    except webbrowser.Error:
+        pass
+    print(f'未能自动打开浏览器，请手动访问 {url}', flush=True)
 
 
 if __name__ == '__main__':
