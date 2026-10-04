@@ -1,4 +1,5 @@
 """MuZero component checks, independent of the gated selfplay/learner runtime."""
+from config_samples import CONFIGS
 import copy
 from dataclasses import replace
 import json
@@ -132,7 +133,7 @@ def test_optimizer_roles_and_no_alpha_runtime_fallback(dimensions):
     model.extra = torch.nn.Parameter(torch.ones(1))
     with pytest.raises(ValueError, match='every model parameter'):
         parameter_groups(model)
-    config = load_config(ROOT / 'configs/smoke_test')
+    config = load_config(CONFIGS / 'smoke_test')
     config['agent']['algorithm'] = 'muzero'
     with pytest.raises(ValueError, match='explicit muzero and unroll'):
         validate(config)
@@ -168,7 +169,7 @@ def update(model, optimizer, optimization, device):
 
 @pytest.mark.parametrize('kind', ['sgd', 'adamw'])
 def test_component_update_state_restore_next_update(tmp_path, dimensions, kind):
-    config = load_config(ROOT / 'configs/smoke_test')
+    config = load_config(CONFIGS / 'smoke_test')
     config['optimizer']['kind'] = kind
     config['training']['batch_size'] = 2
     torch.manual_seed(19)
@@ -241,7 +242,7 @@ def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precis
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Requires host CUDA')
 @pytest.mark.parametrize('amp', [False, True])
 def test_cuda_unroll_gradients(dimensions, amp):
-    config = load_config(ROOT / 'configs/smoke_test')
+    config = load_config(CONFIGS / 'smoke_test')
     config['training']['batch_size'] = 2
     model = MuZeroNet(replace(dimensions, predict_q_values=True)).cuda().train()
     optimizer = optimizer_for(model, config)

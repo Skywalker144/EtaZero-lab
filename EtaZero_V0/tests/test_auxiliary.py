@@ -1,4 +1,5 @@
 """Independent finite-trajectory, gradient, validity and storage contract checks."""
+from config_samples import CONFIGS
 import copy
 from pathlib import Path
 import json
@@ -103,7 +104,7 @@ def test_side_has_own_search_value_and_no_complete_game_targets():
 
 def test_all_heads_and_inference_contract():
     from etazero.config import ROOT,load_config
-    c=load_config(ROOT/'configs/smoke_test')
+    c=load_config(CONFIGS / 'smoke_test')
     model=make_network(c)
     obs=torch.zeros(2,5,6,6);obs[:,0,:5,:5]=1
     globals=torch.zeros(2,6)
@@ -142,7 +143,7 @@ def test_native_side_writer_catalog_shuffle_reader_roundtrip(tmp_path):
     try:
         catalog.scan({1:'model'})
         assert catalog.counts(10)==(11,1,11.)
-        c=load_config(ROOT/'configs/smoke_test')
+        c=load_config(CONFIGS / 'smoke_test')
         c['replay'].update(min_rows=11,keep_target_rows='all')
         c['shuffle'].update(bucket_rows=11,training_shard_rows=11)
         info=build_snapshot(tmp_path,1,catalog.entries(),c)
@@ -265,7 +266,7 @@ def test_reanalysis_outcome_gate_reaches_loss_gradients(use_outcome,disable):
 
 def test_sampling_configuration_source_defaults_and_reanalysis_required_parameters(tmp_path,config):
     from etazero.config import load_config,ROOT,validate
-    assert load_config(ROOT/'configs/baseline')['pda']==dict(normal_asymmetric_playout_prob=.01,max_asymmetric_ratio=8)
+    assert load_config(CONFIGS / 'baseline')['pda']==dict(normal_asymmetric_playout_prob=.01,max_asymmetric_ratio=8)
     assert config['pda']['normal_asymmetric_playout_prob']==0
     # Project sampling rates are intentional experiment settings, independent
     # of the source algorithm's defaults.
@@ -303,7 +304,7 @@ def test_hint_and_fork_raw_prefix_contract():
 
 def test_hint_game_fork_defaults_bounds_and_input_identity(tmp_path):
     from etazero.config import load_config,validate,fingerprint
-    baseline=load_config(Path(__file__).resolve().parents[1]/'configs/baseline')
+    baseline=load_config(CONFIGS / 'baseline')
     assert baseline['hint_positions']['hint_positions_prob']==0
     assert baseline['game_forks']==dict(early_fork_game_prob=.04,fork_game_prob=.01,
         early_fork_game_expected_move_prop=.025,fork_game_min_choices=3,early_fork_game_max_choices=12,fork_game_max_choices=36)

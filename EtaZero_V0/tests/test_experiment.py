@@ -1,3 +1,4 @@
+from config_samples import CONFIGS
 import copy
 import json
 from pathlib import Path
@@ -48,7 +49,7 @@ def test_plan_is_read_only_and_resolves_inheritance(tmp_path):
 
 
 def test_shared_weights_group_by_network_seed_and_verify_payload(tmp_path):
-    config = load_config(ROOT/'configs/smoke_test')
+    config = load_config(CONFIGS / 'smoke_test')
     alternate = copy.deepcopy(config); alternate['optimizer']['lr_scale'] *= 2
     different_seed = copy.deepcopy(config); different_seed['run']['seed'] += 1
     arms = [{'name': name, 'config': c} for name, c in [('a', config), ('b', alternate), ('c', different_seed)]]

@@ -1,4 +1,5 @@
 """Output paths follow the selected config, independent of inheritance and launch cwd."""
+from config_samples import CONFIGS
 from pathlib import Path
 import shutil
 
@@ -10,14 +11,14 @@ from etazero.experiment import experiment_plan, write_arm_config
 
 @pytest.fixture
 def version(tmp_path,monkeypatch):
-    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    shutil.copytree(CONFIGS,tmp_path/'configs')
     monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     return tmp_path
 
 
 @pytest.mark.parametrize('name',[
     'baseline','minimal_test','smoke_test','muzero','raw_muzero',
-    'az_pcr/100v','az_pcr/200v','autoexp_example/arm_a',
+    'sweep/arm_a','sweep/arm_b','autoexp_example/arm_a',
 ])
 def test_default_output_mirrors_full_config_path(version,name,monkeypatch):
     caller=version/'caller';caller.mkdir();monkeypatch.chdir(caller)
@@ -77,12 +78,12 @@ def test_symlinks_are_resolved_before_arm_overlap_checks(version):
 
 
 def test_experiment_arms_match_standalone_paths_and_survive_relocation(version):
-    directory=version/'configs/az_pcr'
+    directory=version/'configs/sweep'
     plan=experiment_plan(directory,environ={},work_dir=version/'work')
-    assert len(plan['arms'])==5
+    assert [arm['name'] for arm in plan['arms']] == ['arm_a', 'arm_b']
     for arm in plan['arms']:
         standalone=load_config(Path(arm['config_dir']))
-        assert arm['run_dir']==str(version/'data/az_pcr'/arm['name'])
+        assert arm['run_dir']==str(version/'data/sweep'/arm['name'])
         assert arm['config']==standalone
         resolved=version/'generated'/arm['name']
         write_arm_config(arm['config'],resolved)

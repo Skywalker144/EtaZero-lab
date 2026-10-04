@@ -1,4 +1,5 @@
 """Real-CUDA integration checks. Enable only in an execution context with host device access."""
+from config_samples import CONFIGS
 import copy
 import json
 import os
@@ -49,7 +50,7 @@ def assert_preserved(root, files):
 def gpu_config():
     assert torch.cuda.is_available(),"GPU tests require actual host CUDA access"
     torch.set_num_threads(1)
-    return load_config(ROOT/"configs"/"smoke_test")
+    return load_config(CONFIGS/"smoke_test")
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +61,7 @@ def pipeline(tmp_path_factory,gpu_config):
 
 
 def test_script_starts_and_auto_resumes_training(tmp_path):
-    configs=tmp_path/"configs";shutil.copytree(ROOT/"configs",configs)
+    configs=tmp_path/"configs";shutil.copytree(CONFIGS,configs)
     root=tmp_path/"selfplay"/"smoke_test"
     selected=configs/"smoke_test"
     (selected/"run.cfg").write_text(f"[run]\nextends = baseline\nrun_dir = {root}\nmax_iteration = 1\ncpu_threads = 1\n")
@@ -84,7 +85,7 @@ def test_script_starts_and_auto_resumes_training(tmp_path):
 
 
 def test_unlimited_iterations_stop_and_auto_resume(tmp_path):
-    configs=tmp_path/"configs";shutil.copytree(ROOT/"configs",configs)
+    configs=tmp_path/"configs";shutil.copytree(CONFIGS,configs)
     root=tmp_path/"run"
     selected=configs/"smoke_test"
     (selected/"run.cfg").write_text(f"[run]\nextends = baseline\nrun_dir = {root}\nmax_iteration = 0\ncpu_threads = 1\n")
@@ -131,12 +132,12 @@ def test_unlimited_iterations_stop_and_auto_resume(tmp_path):
 
 def test_default_nested_run_directory_and_explicit_resume(tmp_path,monkeypatch,gpu_config):
     from etazero.__main__ import main
-    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    shutil.copytree(CONFIGS,tmp_path/'configs')
     selected=tmp_path/'configs/experiment/100v';selected.mkdir(parents=True)
     (selected/'run.cfg').write_text('[run]\nextends=smoke_test\n')
     monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     caller=tmp_path/'caller';caller.mkdir();monkeypatch.chdir(caller)
-    command=['etazero','run','--config-dir',str(selected)]
+    command=['etazero','run','--config-dir',str(selected),'--binary',str(BINARY)]
     monkeypatch.setattr(sys,'argv',command+['--iterations','1'])
     main()
     root=tmp_path/'data/experiment/100v'
@@ -354,7 +355,7 @@ def test_checkpoint_retention_resume_history_and_old_model(tmp_path,gpu_config):
     assert run_history(tmp_path)==history
     assert (tmp_path/'training.png').stat().st_size>0
     old_model=tmp_path/statuses[0]['model']['path']
-    _,evaluation=evaluate(load_evaluation_config(ROOT/'configs/smoke_test'),BINARY,
+    _,evaluation=evaluate(load_evaluation_config(CONFIGS / 'smoke_test'),BINARY,
                           tmp_path,model=old_model,size=5,rule='renju')
     assert evaluation['result']['root_visits']==100
     resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=4)
@@ -440,11 +441,11 @@ def test_native_parity_all_sizes_rules_and_match(pipeline,gpu_config):
             np.testing.assert_allclose(native["raw_logits"],p[0,0].cpu(),rtol=2e-4,atol=2e-5)
             np.testing.assert_allclose(native["raw_wdl"],v[0].float().softmax(0).cpu(),rtol=2e-4,atol=2e-5)
     model_b=root/load_json(root/".internal/iterations"/"000001"/"status.json")["model"]["path"]
-    _,result=evaluate(load_evaluation_config(ROOT/"configs/smoke_test",match=True),BINARY,root,model_b=model_b,size=5,rule="renju",games=4)
+    _,result=evaluate(load_evaluation_config(CONFIGS / 'smoke_test',match=True),BINARY,root,model_b=model_b,size=5,rule="renju",games=4)
     assert result["result"]["complete"] and len(result["result"]["games"])==4
     assert {g["winner"] for g in result["result"]["games"]}<={-1,0,1}
     assert all(set(g["root_visits"])=={100} for g in result["result"]["games"])
-    _,result=evaluate(load_evaluation_config(ROOT/"configs/smoke_test"),BINARY,root,size=5,rule="freestyle",moves="0,5,1,6,2,7,3,8,4")
+    _,result=evaluate(load_evaluation_config(CONFIGS / 'smoke_test'),BINARY,root,size=5,rule="freestyle",moves="0,5,1,6,2,7,3,8,4")
     assert result["result"]["terminal"] and result["result"]["value"]==-1
 
 
@@ -468,7 +469,7 @@ def test_root_d4_probabilities_and_policy_temperatures(pipeline,gpu_config):
             values.append(value.float().softmax(1))
     expected_policy=torch.stack(policies).mean(0)[0].cpu().numpy()
     expected_wdl=torch.stack(values).mean(0)[0].cpu().numpy()
-    config=load_evaluation_config(ROOT/'configs/smoke_test')
+    config=load_evaluation_config(CONFIGS / 'smoke_test')
     config['evaluation'].update(root_num_symmetries_to_sample=8,nn_policy_temperature=1.7,
                                root_policy_temperature_early=2,root_policy_temperature=1.5,
                                temperature_halflife=7,temperature_early=0.8,temperature=0.1)
@@ -493,7 +494,7 @@ def test_single_d4_root_only_and_inference_precision(tmp_path,pipeline,gpu_confi
     tensor=torch.from_numpy(obs).unsqueeze(0).cuda();global_tensor=torch.from_numpy(globals).unsqueeze(0).cuda()
     legal=((obs[0]>0)&(obs[1]==0)&(obs[2]==0)).flatten()
     crop=[y*canvas+x for y in range(5) for x in range(5)]
-    config=load_evaluation_config(ROOT/'configs/smoke_test')
+    config=load_evaluation_config(CONFIGS / 'smoke_test')
     config['evaluation'].update(visits=1,max_playouts=1,inference_precision=precision,nn_randomize=False)
     for symmetry in (0,1,5,7):
         config['evaluation']['nn_symmetry']=symmetry
@@ -524,7 +525,7 @@ def test_match_same_bot_clear_and_different_bot_reuse(tmp_path,pipeline):
     from etazero.arena import single_match
     root,state=pipeline;a=root/state['model']['path']
     b=root/load_json(root/'logs/iterations/000001.json')['model']['path']
-    config=load_evaluation_config(ROOT/'configs/smoke_test',True)
+    config=load_evaluation_config(CONFIGS / 'smoke_test',True)
     config['match'].update(inference_precision='auto',search_threads=4,server_threads=2)
     _,same=single_match(config,BINARY,a,a,tmp_path/'same')
     assert len(same)==4
@@ -556,7 +557,7 @@ class LeafFailureModel(torch.nn.Module):
 def test_real_cuda_parallel_leaf_failure_releases_waiters(tmp_path,gpu_config):
     canvas=gpu_config['network']['canvas'];model=tmp_path/'failure.pt'
     torch.jit.script(LeafFailureModel(canvas).cuda().eval()).save(str(model))
-    config=load_evaluation_config(ROOT/'configs/smoke_test')
+    config=load_evaluation_config(CONFIGS / 'smoke_test')
     config['evaluation'].update(search_threads=8,server_threads=2,cache_entries=0)
     native={**config,'network':{'canvas':canvas}};write_native(native,tmp_path/'effective.cfg')
     command=[str(BINARY),'evaluate','--config',str(tmp_path/'effective.cfg'),'--model',str(model),
@@ -838,7 +839,7 @@ def test_stage_failure_recovery(tmp_path,gpu_config,monkeypatch,phase):
 
 
 def test_forced_process_kill_during_training(tmp_path,gpu_config):
-    configs=tmp_path/"configs";shutil.copytree(ROOT/"configs",configs)
+    configs=tmp_path/"configs";shutil.copytree(CONFIGS,configs)
     (configs/"smoke_test"/"train.cfg.local").write_text("[training]\ntrain_steps=100\ncheckpoint_every=2\nreplay_ratio=8\n")
     root=tmp_path/"run";c=load_config(configs/"smoke_test",run_dir=root)
     env=os.environ.copy();env["PYTHONPATH"]=str(ROOT/"python")
@@ -935,7 +936,7 @@ def test_multiple_servers_fp16_packed_waves_and_prefetch(tmp_path,gpu_config):
     assert services and all(len(e["rows_by_server"])==2 for e in services)
     assert any(min(e["rows_by_server"])>0 for e in services if e["iteration"]>=2)
     assert all(e["requests"]+e["cache_hits"]==e["submitted"] for e in services)
-    evaluation_config=load_evaluation_config(ROOT/'configs/smoke_test',environ={
+    evaluation_config=load_evaluation_config(CONFIGS / 'smoke_test',environ={
         'EVAL_SERVER_THREADS':'2','EVAL_INFERENCE_PRECISION':'float16','EVAL_CACHE_ENTRIES':'64'})
     _,evaluation=evaluate(evaluation_config,BINARY,root,size=5,rule="freestyle",moves="0,5,1")
     assert evaluation['result']['inference_precision']=='float16'
@@ -1404,12 +1405,12 @@ def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monke
     from etazero.arena import single_match, PairStore
     from etazero.elo import write_ratings
     root,state=pipeline
-    ec=load_evaluation_config(ROOT/'configs/smoke_test')
+    ec=load_evaluation_config(CONFIGS / 'smoke_test')
     _,result=evaluate(ec,BINARY,root,size=5,rule='renju',moves='0,6')
     assert result['result']['root_visits']==100
     assert result['result']['simulations']==99 and sum(result['result']['visits'])==99
     assert 0<=result['result']['action']<25 and len(result['result']['policy'])==25
-    mc=load_evaluation_config(ROOT/'configs/smoke_test',True)
+    mc=load_evaluation_config(CONFIGS / 'smoke_test',True)
     a=root/state['model']['path']
     b=root/load_json(root/'logs/iterations/000001.json')['model']['path']
     output=tmp_path/'match'
@@ -1438,7 +1439,7 @@ def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monke
     # CLI discovery uses committed history and preserves result identity on restart.
     out=tmp_path/'elo_history'
     command=['bash',str(ROOT/'scripts/run.sh'),'arena','--data',str(root),'--output',str(out),
-             '--config-dir',str(ROOT/'configs/smoke_test'),'--games','4','--bootstrap-samples','10']
+             '--config-dir',str(CONFIGS / 'smoke_test'),'--games','4','--bootstrap-samples','10']
     first=subprocess.run(command,env={**os.environ,'PYTHONPATH':str(ROOT/'python')},text=True,capture_output=True,timeout=120)
     assert first.returncode==0,first.stdout+first.stderr
     hashes={p:sha256(p) for p in (out/'pairs').rglob('*.json')}
@@ -1608,7 +1609,7 @@ def test_match_opening_uses_both_models_by_source_roles(tmp_path,gpu_config):
         model=tmp_path/(name+'.pt')
         torch.jit.script(OpeningChoiceModel(canvas,ascending,value_logit).cuda().eval()).save(str(model))
         paths.append(model)
-    c=load_evaluation_config(ROOT/'configs/smoke_test',True,environ={})
+    c=load_evaluation_config(CONFIGS / 'smoke_test',True,environ={})
     c['match'].update(visits=2,game_threads=1,nn_randomize=False,cache_entries=0,inference_precision='float32')
     c['opening'].update(policy_init=True,policy_init_mean=20,policy_temperature=1,rejection_probability=0)
     write_native({**c,'network':{'canvas':canvas}},tmp_path/'effective.cfg')
@@ -1759,7 +1760,7 @@ class DiamondCudaModel(torch.nn.Module):
 def test_graph_real_cuda_shared_nodes_leak_and_cache(tmp_path,gpu_config):
     canvas=gpu_config['network']['canvas'];model=tmp_path/'diamond.pt'
     torch.jit.script(DiamondCudaModel(canvas).cuda().eval()).save(str(model))
-    config=load_evaluation_config(ROOT/'configs/smoke_test')
+    config=load_evaluation_config(CONFIGS / 'smoke_test')
     config['evaluation'].update(visits=500,search_threads=1,server_threads=1,cache_entries=0,
         nn_randomize=False,nn_symmetry=0,root_num_symmetries_to_sample=1,inference_precision='float32')
     cases={}
@@ -1799,7 +1800,7 @@ def test_graph_real_cuda_shared_nodes_leak_and_cache(tmp_path,gpu_config):
 def test_graph_shared_cuda_failure_releases_all_parents(tmp_path,gpu_config):
     canvas=gpu_config['network']['canvas'];model=tmp_path/'shared_failure.pt'
     torch.jit.script(DiamondCudaModel(canvas,4).cuda().eval()).save(str(model))
-    config=load_evaluation_config(ROOT/'configs/smoke_test')
+    config=load_evaluation_config(CONFIGS / 'smoke_test')
     config['evaluation'].update(visits=500,search_threads=8,server_threads=2,cache_entries=0,
         nn_randomize=False,nn_symmetry=0,root_num_symmetries_to_sample=1,use_graph_search=True)
     native={**config,'network':{'canvas':canvas}};write_native(native,tmp_path/'effective.cfg')
@@ -1834,7 +1835,7 @@ def test_cuda_search_corrections_logits_error_and_terminal_stats(tmp_path,gpu_co
     canvas=gpu_config['network']['canvas'];models={}
     for error in (0.,.5,2.):
         path=tmp_path/f'error_{error}.pt';torch.jit.script(SearchCorrectionsCudaModel(canvas,error).cuda().eval()).save(str(path));models[error]=path
-    config=load_evaluation_config(ROOT/'configs/smoke_test');config['evaluation'].update(visits=1,max_playouts=1,
+    config=load_evaluation_config(CONFIGS / 'smoke_test');config['evaluation'].update(visits=1,max_playouts=1,
         inference_precision='float32',nn_randomize=False,nn_symmetry=0,search_threads=1,server_threads=1,nn_policy_temperature=1.7)
     cases={}
     def run(name,c,error=.5,moves=''):
@@ -1955,7 +1956,7 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
     # Fresh one-visit roots isolate actual conditional NN values from terminal
     # outcomes in deeper search, using both side-to-move signs and neutral input.
     evaluations=[]
-    e=load_evaluation_config(ROOT/'configs/smoke_test')
+    e=load_evaluation_config(CONFIGS / 'smoke_test')
     e['evaluation'].update(visits=1,inference_precision='float32',nn_randomize=False)
     for d,moves in ((0,''),(1,''),(1,'0'),(3,''),(3,'0')):
         e['evaluation']['playout_doubling_advantage']=d

@@ -1,4 +1,5 @@
 """Independent normalization properties and MuZero ResNet configuration guards."""
+from config_samples import CONFIGS
 import copy
 from dataclasses import replace
 
@@ -46,13 +47,13 @@ def test_resnet_is_independent_of_other_batch_rows_and_train_eval_mode():
 
 
 def test_resnet_guards_optimizer_and_initialization_identity():
-    c = load_config(ROOT/'configs/az_mz/mz_resnet_b2c128')
+    c = load_config(CONFIGS / 'resnet')
     nbt = copy.deepcopy(c); nbt['network']['architecture'] = 'nbt'
     assert initialization_key(c) != initialization_key(nbt)
     invalid = copy.deepcopy(c); invalid['muzero_training']['katago_optimizer'] = True
     with pytest.raises(ValueError, match='katago_optimizer=false'):
         validate(invalid)
-    invalid = load_config(ROOT/'configs/baseline'); invalid['network']['architecture'] = 'resnet'
+    invalid = load_config(CONFIGS / 'baseline'); invalid['network']['architecture'] = 'resnet'
     with pytest.raises(ValueError, match='Unsupported network architecture'):
         validate(invalid)
     with pytest.raises(ValueError, match='architecture must be'):

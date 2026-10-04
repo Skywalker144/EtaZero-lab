@@ -43,7 +43,7 @@ def check():
             if swa:expected.add('swa_model')
             assert keys==expected
             assert renames[-1]==('/independent/checkpoint.tmp','/independent/checkpoint')
-    config=load_config(ROOT/'configs/smoke_test');config['devices']['train']='cpu'
+    config=load_config(ROOT / 'tests/fixtures/configs/smoke_test', run_dir='/tmp/etazero_reference_sample');config['devices']['train']='cpu'
     model=make_network(config);optimizer=optimizer_for(model,config);optimization=Optimization(model,config,optimizer)
     optimization.begin_round();optimization.after_step(successful=False)
     scaler=torch.amp.GradScaler('cuda',enabled=False)

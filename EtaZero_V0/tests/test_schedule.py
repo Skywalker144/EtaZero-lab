@@ -1,4 +1,5 @@
 """Fixed-round production quota and independent round/segment/learner clocks."""
+from config_samples import CONFIGS
 import copy
 from types import SimpleNamespace
 import numpy as np
@@ -22,7 +23,7 @@ def controller(config,rows=100,games=1):
 
 
 def test_postbootstrap_backfills_entire_quota_using_actual_short_games():
-    c=load_config(ROOT/'configs/smoke_test');c['replay']['min_rows']=32;driver=controller(c);quotas=[]
+    c=load_config(CONFIGS / 'smoke_test');c['replay']['min_rows']=32;driver=controller(c);quotas=[]
     def launch(plan,games):
         quotas.append(games);driver.catalog.rows+=games*3;driver.catalog.games+=games;driver.catalog.round_games+=games
     driver.launch=launch;driver.produce(dict(iteration=2,target_rows=150))
@@ -34,7 +35,7 @@ def test_postbootstrap_backfills_entire_quota_using_actual_short_games():
 
 
 def test_surplus_carry_over_minimum_game_and_no_progress():
-    c=load_config(ROOT/'configs/smoke_test');driver=controller(c,200,20);quotas=[]
+    c=load_config(CONFIGS / 'smoke_test');driver=controller(c,200,20);quotas=[]
     def launch(plan,games):
         quotas.append(games);driver.catalog.rows+=games*9;driver.catalog.games+=games;driver.catalog.round_games+=games
     driver.launch=launch;driver.produce(dict(iteration=2,target_rows=150))
@@ -49,7 +50,7 @@ def test_surplus_carry_over_minimum_game_and_no_progress():
 
 
 def test_completed_zero_row_games_do_not_abort_quota_backfill():
-    c=load_config(ROOT/'configs/smoke_test');driver=controller(c,100,20);quotas=[]
+    c=load_config(CONFIGS / 'smoke_test');driver=controller(c,100,20);quotas=[]
     def launch(plan,games):
         quotas.append(games)
         driver.catalog.games+=games;driver.catalog.round_games+=games
@@ -60,7 +61,7 @@ def test_completed_zero_row_games_do_not_abort_quota_backfill():
 
 
 def test_cold_anchor_fixed_consumption_quota_and_random_id_are_separate():
-    c=load_config(ROOT/'configs/baseline');assert c['training']['sub_epochs']==1
+    c=load_config(CONFIGS / 'baseline');assert c['training']['sub_epochs']==1
     state=dict(iteration=2,model={'id':'net'},checkpoint={'id':'trained'},target_rows=300123,replay_origin_rows=300123)
     for i in range(2,8):
         state['iteration']=i;plan=iteration_plan(state,c)
@@ -79,12 +80,12 @@ def test_local_segment_boundaries_are_nonempty_and_keep_exact_fixed_budget():
     assert subepoch_ends(7,3)==[2,4,7]
     for steps,n in [(0,1),(2,0),(2,3)]:
         with pytest.raises(ValueError):subepoch_ends(steps,n)
-    c=load_config(ROOT/'configs/smoke_test');c['training']['sub_epochs']=5
+    c=load_config(CONFIGS / 'smoke_test');c['training']['sub_epochs']=5
     with pytest.raises(ValueError,match='sub_epochs'):validate(c)
 
 
 def test_segment_reset_preserves_fast_slow_swa_norm_and_round_lr_clocks():
-    c=load_config(ROOT/'configs/smoke_test');c['optimizer'].update(lookahead_k=3,swa_period_samples=16,norm_only_at_print=False,norm_interval=5)
+    c=load_config(CONFIGS / 'smoke_test');c['optimizer'].update(lookahead_k=3,swa_period_samples=16,norm_only_at_print=False,norm_interval=5)
     model,optimizer,o=small_optimization(c);o.begin_round();calls=[];configure=o.configure
     def track():calls.append(o.round_batches);configure()
     o.configure=track

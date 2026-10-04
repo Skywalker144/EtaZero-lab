@@ -128,7 +128,7 @@ def source_outputs(source, obs, globals):
 
 def check_architecture(architecture, device, mc, mp, amp='off', compiled=False, predict_q_values=False):
     preset = {'plain':'b10c128-fson-mish','nbt':'b5c192nbt-fson-mish','transformer':'b5c192h3nbttfrs'}[architecture]
-    config = load_config(ROOT / 'configs/smoke_test')
+    config = load_config(ROOT / 'tests/fixtures/configs/smoke_test', run_dir='/tmp/etazero_reference_sample')
     config['network'].update(architecture=architecture, canvas=15,
                              channels=128 if architecture == 'plain' else 192,
                              blocks=10 if architecture == 'plain' else 5)

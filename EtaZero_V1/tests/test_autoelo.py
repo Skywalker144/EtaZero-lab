@@ -1,3 +1,4 @@
+from config_samples import CONFIGS
 from pathlib import Path
 import sys
 import threading
@@ -77,11 +78,11 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
                       {'cross_time_fractions': 'nan'}, {'cross_time_fractions': '.3,.3'}]:
         with pytest.raises(ValueError):
             load_elo_config(tmp_path, environ={}, overrides=overrides)
-    training = load_config(ROOT/'configs/az_mz/mz')
+    training = load_config(CONFIGS / 'muzero')
     (tmp_path/'match.cfg').write_text('[match]\ngame_threads=20\nreuse_tree=false\nuse_graph_search=false\n')
     match = load_evaluation_config(tmp_path, match=True, umbrella=True, environ={})
     assert match['match']['game_threads'] == 20 and not match['match']['reuse_tree']
-    assert load_config(ROOT/'configs/az_mz/mz') == training
+    assert load_config(CONFIGS / 'muzero') == training
     (tmp_path/'match.cfg').write_text('[match]\nunknown=1\n')
     with pytest.raises(ValueError, match='Unknown evaluation key'):
         load_evaluation_config(tmp_path, match=True, umbrella=True, environ={})

@@ -1,4 +1,5 @@
 """Raw MuZero loss, ordinary optimizer, sampling and recovery semantics."""
+from config_samples import CONFIGS
 import copy
 import json
 import math
@@ -16,7 +17,7 @@ from etazero.optimization import optimizer_for, optimization_for, inference_weig
 
 def test_raw_profile_and_shuffle_budget():
     from etazero.shuffle import resource_plan
-    c = load_config(ROOT/'configs/raw_muzero')
+    c = load_config(CONFIGS / 'raw_muzero')
     assert c['training']['d4_augmentation'] and c['symmetry']['nn_randomize']
     assert not c['fpu']['use_fpu'] and not c['lcb']['use_lcb']
     assert not c['policy_target']['policy_target_pruning']
@@ -30,7 +31,7 @@ def test_raw_profile_and_shuffle_budget():
     assert c['replay']['min_rows'] == c['replay']['max_rows']
     assert resource_plan(150000, c['writer']['shard_rows'], 10, c)['bucket_rows'] >= 8192
     for match in (False, True):
-        search = load_evaluation_config(ROOT/'configs/raw_muzero', match=match)['match' if match else 'evaluation']
+        search = load_evaluation_config(CONFIGS / 'raw_muzero', match=match)['match' if match else 'evaluation']
         for key in ('use_fpu', 'use_lcb', 'policy_target_pruning', 'use_uncertainty', 'use_noise_pruning',
                     'policy_optimism', 'root_policy_optimism', 'value_weight_exponent', 'chosen_move_prune'):
             assert not search[key]
@@ -53,7 +54,7 @@ def test_basic_loss_hand_calculation_and_auxiliary_independence():
             return self.policy, self.value, self.td, self.error
 
     model = Prediction()
-    f = TrainingForward(model, load_config(ROOT/'configs/raw_muzero'))
+    f = TrainingForward(model, load_config(CONFIGS / 'raw_muzero'))
     obs = torch.ones(2, 5, 2, 2); obs[1, 0, 1, :] = 0
     # Weighted batch mean: row 1 has four actions, row 2 has two.
     policy = torch.tensor([[[1., 0, 0, 0]], [[0., 1, 0, 0]]])
@@ -74,7 +75,7 @@ def test_basic_loss_hand_calculation_and_auxiliary_independence():
 
 @pytest.mark.parametrize('kind', ['adamw', 'sgd'])
 def test_plain_optimizer_matches_torch_and_resumes(kind):
-    c = load_config(ROOT/'configs/raw_muzero'); c['optimizer']['kind'] = kind
+    c = load_config(CONFIGS / 'raw_muzero'); c['optimizer']['kind'] = kind
     model = torch.nn.Linear(2, 1); reference = copy.deepcopy(model)
     opt = optimizer_for(model, c); control = optimization_for(model, c, opt)
     options = dict(lr=.001, weight_decay=.0003)
@@ -104,7 +105,7 @@ def test_plain_optimizer_matches_torch_and_resumes(kind):
 
 def small_raw_config():
     from test_muzero_pipeline import small_config
-    c = load_config(ROOT/'configs/raw_muzero'); small = small_config()
+    c = load_config(CONFIGS / 'raw_muzero'); small = small_config()
     for section in ('network', 'muzero', 'unroll', 'environment', 'devices', 'parallelism', 'selfplay', 'writer', 'shuffle'):
         c[section] = small[section]
     for key in ('train_steps', 'batch_size', 'checkpoint_every', 'compile', 'skip_validation', 'prefetch_depth', 'replay_ratio'):

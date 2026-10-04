@@ -1,4 +1,5 @@
 """MuZero sequence semantics and native/CUDA end-to-end acceptance."""
+from config_samples import CONFIGS
 import os
 import json
 import shutil
@@ -33,8 +34,8 @@ def assert_diagnostics(root, config):
 
 
 def small_config():
-    c = load_config(ROOT/'configs/smoke_test')
-    defaults = load_config(ROOT/'configs/muzero')
+    c = load_config(CONFIGS / 'smoke_test')
+    defaults = load_config(CONFIGS / 'muzero')
     c['agent'] = defaults['agent']
     c['muzero'] = dict(latent_channels=16, dynamics_channels=24, dynamics_blocks=1,
                        prediction_channels=24, prediction_blocks=1)
@@ -49,8 +50,8 @@ def small_config():
 
 
 def test_config_inherits_baseline_and_disables_invalid_tree_features(tmp_path):
-    c = load_config(ROOT/'configs/muzero')
-    base = load_config(ROOT/'configs/baseline')
+    c = load_config(CONFIGS / 'muzero')
+    base = load_config(CONFIGS / 'baseline')
     assert c['training']['train_steps'] == base['training']['train_steps']
     assert c['value_weighting'] == base['value_weighting']
     from etazero.experiment import initialization_key, write_arm_config
@@ -112,7 +113,7 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture):
     assert_compiled_partial_resume(tmp_path, root, c)
     from etazero.evaluation import evaluate
     from etazero.eval_config import load_evaluation_config
-    evaluation = load_evaluation_config(ROOT/'configs/muzero')
+    evaluation = load_evaluation_config(CONFIGS / 'muzero')
     evaluation['evaluation'].update(visits=12, search_threads=2)
     _, result = evaluate(evaluation, ROOT/'build/etazero', root, size=5, rule='renju', moves='0,5')
     assert result['result']['root_visits'] == 12 and result['result']['initial_visits'] == 0
@@ -258,10 +259,10 @@ def test_cuda_amp_pipeline_and_mixed_match(tmp_path, amp):
     assert_diagnostics(root,c)
     assert state['checkpoint']['optimizer_steps'] > 0
     alpha=tmp_path/'alphazero'; alpha.mkdir()
-    ac=load_config(ROOT/'configs/smoke_test'); write_native(ac,alpha/'config/effective.cfg')
+    ac=load_config(CONFIGS / 'smoke_test'); write_native(ac,alpha/'config/effective.cfg')
     initial=initialize(alpha,ac)
     model=export_model(alpha,ac,initial)
-    match=load_evaluation_config(ROOT/'configs/muzero',match=True)
+    match=load_evaluation_config(CONFIGS / 'muzero',match=True)
     match['match'].update(visits=9,game_threads=2,search_threads=2,max_batch=8,
                           inference_precision='float16')
     _, result=evaluate(match,ROOT/'build/etazero',root,model_b=alpha/model['path'],

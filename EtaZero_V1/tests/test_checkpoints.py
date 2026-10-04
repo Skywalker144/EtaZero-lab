@@ -1,4 +1,5 @@
 """Checkpoint retention preserves committed metrics and unfinished-round recovery."""
+from config_samples import CONFIGS
 import json
 from pathlib import Path
 import pytest
@@ -104,7 +105,7 @@ def test_partial_deletion_can_be_retried(checkpoint_run, monkeypatch):
 
 
 def test_checkpoint_keep_must_be_positive():
-    config = load_config(ROOT/'configs/smoke_test')
+    config = load_config(CONFIGS / 'smoke_test')
     config['training']['checkpoint_keep'] = 0
     with pytest.raises(ValueError, match='checkpoint_keep'):
         validate(config)

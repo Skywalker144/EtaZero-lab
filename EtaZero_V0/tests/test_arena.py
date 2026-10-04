@@ -1,3 +1,4 @@
+from config_samples import CONFIGS
 import copy
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ from etazero.schema import CONTRACT_ID
 
 
 def test_eval_profiles_are_independent(tmp_path):
-    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    shutil.copytree(CONFIGS,tmp_path/'configs')
     selected=tmp_path/'configs/smoke_test'
     before=load_config(selected)
     (selected/'eval.cfg.local').write_text('[evaluation]\nvisits = 71\n')
@@ -33,7 +34,7 @@ def test_eval_profiles_are_independent(tmp_path):
     for field,value in [('VISITS','0'),('BOARD_SIZE','4'),('RULE','oops'),('OPENING_PROBABILITY','0'),
                         ('ROOT_NUM_SYMMETRIES_TO_SAMPLE','9'),('NN_POLICY_TEMPERATURE','0'),
                         ('ROOT_POLICY_TEMPERATURE','0'),('TEMPERATURE_HALFLIFE','0'),('TEMPERATURE_ONLY_BELOW_PROB','1.1')]:
-        with pytest.raises(ValueError):load_evaluation_config(ROOT/'configs/baseline',True,environ={'MATCH_'+field:value})
+        with pytest.raises(ValueError):load_evaluation_config(CONFIGS / 'baseline',True,environ={'MATCH_'+field:value})
 
 
 def test_manifest_and_partial_pair_resume(tmp_path):
@@ -95,7 +96,7 @@ def test_rollback_preserves_committed_data_and_archives_uncommitted_time(tmp_pat
 
 def test_cli_requires_explicit_model_source():
     import subprocess
-    result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'evaluate','--config-dir',str(ROOT/'configs/smoke_test')],
+    result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'evaluate','--config-dir',str(CONFIGS / 'smoke_test')],
                           text=True,capture_output=True)
     assert result.returncode!=0 and 'requires --model or --run-dir' in result.stderr
     help_result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'--help'],text=True,capture_output=True)

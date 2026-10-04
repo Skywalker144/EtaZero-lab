@@ -1,3 +1,4 @@
+from config_samples import CONFIGS
 from collections import Counter
 import copy
 import json
@@ -21,7 +22,7 @@ from etazero.storage import save_npz, save_json, sha256
 
 @pytest.fixture
 def config():
-    return load_config(ROOT/"configs"/"smoke_test")
+    return load_config(CONFIGS/"smoke_test")
 
 
 def winning_record(rule=0):
@@ -91,7 +92,7 @@ def compact_search(a):
 def test_configuration_inheritance_and_fail_fast(tmp_path,config):
     assert config['network']['canvas']==6 and config['optimizer']['kind']=='sgd'
     assert config['training']['d4_augmentation']
-    shutil.copytree(ROOT/"configs",tmp_path/"configs")
+    shutil.copytree(CONFIGS,tmp_path/"configs")
     current=tmp_path/"configs"/"smoke_test"
     (current/"train.cfg.local").write_text("[training]\ntrain_steps=7\n")
     assert load_config(current)["training"]["train_steps"]==7
@@ -105,18 +106,20 @@ def test_configuration_inheritance_and_fail_fast(tmp_path,config):
 
 
 def test_script_config_environment_and_explicit_override(tmp_path):
-    env={**os.environ,"CONFIG_DIR":"configs/smoke_test"}
-    command=["bash",str(ROOT/"scripts"/"run.sh"),"check-config"]
-    result=subprocess.run(command,cwd=tmp_path,env=env,text=True,capture_output=True,check=True)
-    selected=json.loads(result.stdout)["config"]
-    assert selected["network"]["canvas"]==6
-    assert selected["run"]["run_dir"]=="data/smoke_test"
-    result=subprocess.run(command+["--config-dir","configs/baseline"],cwd=tmp_path,
-                          env=env,text=True,capture_output=True,check=True)
-    selected=json.loads(result.stdout)["config"]
-    assert selected["network"]["canvas"]==15
-    assert selected["run"]["run_dir"]=="data/baseline"
-    assert selected["run"]["max_iteration"]==0
+    smoke = CONFIGS / 'smoke_test'
+    baseline = CONFIGS / 'baseline'
+    env = {**os.environ, 'CONFIG_DIR': str(smoke)}
+    command = ['bash', str(ROOT / 'scripts/run.sh'), 'check-config']
+    result = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True, check=True)
+    selected = json.loads(result.stdout)['config']
+    assert selected['network']['canvas'] == 6
+    assert selected['run']['run_dir'] == 'data/smoke_test'
+    result = subprocess.run(command + ['--config-dir', str(baseline)], cwd=tmp_path,
+                            env=env, text=True, capture_output=True, check=True)
+    selected = json.loads(result.stdout)['config']
+    assert selected['network']['canvas'] == 15
+    assert selected['run']['run_dir'] == 'data/baseline'
+    assert selected['run']['max_iteration'] == 0
 
 
 def test_auto_resume_rejects_unknown_data_and_weights(tmp_path,config):
@@ -351,9 +354,9 @@ def test_katago_window_hand_values(config):
 
 
 def test_replay_configuration_has_source_window_extensions(tmp_path):
-    baseline=load_config(ROOT/'configs'/'baseline')
+    baseline=load_config(CONFIGS/'baseline')
     assert set(baseline['replay'])=={'min_rows','taper_exponent','expand_per_row','keep_target_rows','taper_scale','add_to_data_rows','max_rows'}
-    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    shutil.copytree(CONFIGS,tmp_path/'configs')
     selected=tmp_path/'configs'/'smoke_test'
     local=selected/'train.cfg.local'
     local.write_text('[replay]\nkeep_target_rows=all\n')
@@ -779,27 +782,27 @@ def test_search_enhancement_validation(config,section,key,value):
     with pytest.raises(ValueError):validate(config)
 
 
-def test_reduce_visits_config_inheritance_and_independent_pcr(config):
-    baseline=load_config(ROOT/'configs/baseline')
-    assert baseline['reduce_visits']['reduce_visits']
-    assert baseline['reduce_visits']['reduce_visits_threshold']==0.9
-    assert baseline['reduce_visits']['reduce_visits_threshold_lookback']==3
-    assert baseline['reduce_visits']['reduced_visits_min']==50
-    assert baseline['reduce_visits']['reduced_visits_weight']==0.1
-    assert load_config(ROOT/'configs/minimal_test')['reduce_visits']['reduced_visits_min']==20
-    assert config['reduce_visits']['reduced_visits_min']==2
+def test_reduce_visits_config_inheritance_and_independent_pcr(tmp_path, config):
+    selected = tmp_path / 'child'
+    selected.mkdir()
+    (selected / 'run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path / "run"}\n')
+    (selected / 'selfplay.cfg').write_text('[reduce_visits]\nreduce_visits_threshold=.7\nreduced_visits_min=3\n[search]\nfull_search_visits=8\ncheap_search_visits=4\n')
+    inherited = load_config(selected)
+    assert inherited['reduce_visits']['reduce_visits_threshold'] == .7
+    assert inherited['reduce_visits']['reduced_visits_min'] == 3
+    assert inherited['search']['cheap_search_visits'] == 4
     # These cases are valid; the two cap paths are alternatives, not stacked limits.
     config['search']['cheap_search_visits']=4
     config['reduce_visits'].update(reduced_visits_min=8,reduce_visits_threshold=0,reduced_visits_weight=0)
     validate(config)
     from etazero.eval_config import load_evaluation_config
-    assert 'reduce_visits' not in load_evaluation_config(ROOT/'configs/smoke_test')['evaluation']
-    assert 'reduce_visits' not in load_evaluation_config(ROOT/'configs/smoke_test',True)['match']
+    assert 'reduce_visits' not in load_evaluation_config(CONFIGS / 'smoke_test')['evaluation']
+    assert 'reduce_visits' not in load_evaluation_config(CONFIGS / 'smoke_test',True)['match']
 
 
-def test_source_search_profiles_and_independent_precision(config):
+def test_explicit_search_samples_and_independent_precision(config):
     from etazero.eval_config import load_evaluation_config, validate_evaluation
-    baseline=load_config(ROOT/'configs/baseline')
+    baseline=load_config(CONFIGS / 'baseline')
     assert (baseline['search']['full_search_visits'],baseline['search']['cheap_search_visits'])==(400,70)
     assert baseline['puct']==dict(c_puct=1.05,c_puct_log=0.28,c_puct_base=500,
                                  c_puct_stdev_prior=0.4,c_puct_stdev_prior_weight=2,
@@ -811,7 +814,7 @@ def test_source_search_profiles_and_independent_precision(config):
     assert baseline['inference']['inference_precision']=='float16' and baseline['training']['amp']=='off'
     assert baseline['symmetry']['nn_randomize'] and baseline['symmetry']['root_num_symmetries_to_sample']==4
     for match in (False,True):
-        profile=load_evaluation_config(ROOT/'configs/baseline',match)
+        profile=load_evaluation_config(CONFIGS / 'baseline',match)
         c=profile['match' if match else 'evaluation']
         assert (c['visits'],c['c_puct'],c['c_puct_log'],c['c_puct_stdev_scale'])==(500,1,0.45,0.85)
         assert (c['c_puct_stdev_prior'],c['c_puct_stdev_prior_weight'],c['value_weight_exponent'])==(0.4,2,0.25)
@@ -858,7 +861,7 @@ def test_output_row_forbidden_dropout_repeats_and_domains(config):
 def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path):
     from etazero.eval_config import load_evaluation_config
     import shutil
-    shutil.copytree(ROOT/'configs',tmp_path/'configs')
+    shutil.copytree(CONFIGS,tmp_path/'configs')
     base=tmp_path/'configs/baseline'
     selfplay=base/'selfplay.cfg'
     selfplay.write_text(selfplay.read_text().replace('\npolicy_init_mean = 6\n','\n').replace('\npolicy_temperature = 1.6\n','\n'))
@@ -877,16 +880,16 @@ def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path):
         with pytest.raises(ValueError):load_config(base)
 
 
-def test_graph_profiles_validation_and_environment_override(config):
+def test_graph_configuration_bounds_and_environment_override(config):
     from etazero.eval_config import load_evaluation_config,validate_evaluation
-    assert load_config(ROOT/'configs/baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0)
+    assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0)
     for match in (False,True):
         group='match' if match else 'evaluation';prefix='MATCH_' if match else 'EVAL_'
         for leak in (0,0.5,1):
-            c=load_evaluation_config(ROOT/'configs/smoke_test',match,environ={prefix+'USE_GRAPH_SEARCH':'false',prefix+'GRAPH_SEARCH_CATCH_UP_LEAK_PROB':str(leak)})
+            c=load_evaluation_config(CONFIGS / 'smoke_test',match,environ={prefix+'USE_GRAPH_SEARCH':'false',prefix+'GRAPH_SEARCH_CATCH_UP_LEAK_PROB':str(leak)})
             assert c[group]['use_graph_search'] is False and c[group]['graph_search_catch_up_leak_prob']==leak
         for leak in (-0.1,1.1,float('nan'),float('inf')):
-            c=load_evaluation_config(ROOT/'configs/smoke_test',match)
+            c=load_evaluation_config(CONFIGS / 'smoke_test',match)
             c[group]['graph_search_catch_up_leak_prob']=leak
             with pytest.raises(ValueError):validate_evaluation(c,match)
     for leak in (0,0.5,1):
@@ -896,7 +899,7 @@ def test_graph_profiles_validation_and_environment_override(config):
         with pytest.raises(ValueError):validate(config)
 
 
-def test_search_correction_profiles_and_bounds(config):
+def test_search_correction_samples_and_bounds(config):
     from etazero.eval_config import load_evaluation_config,validate_evaluation
     assert config['uncertainty']==dict(use_uncertainty=False,uncertainty_coeff=.25,uncertainty_exponent=1,uncertainty_max_weight=8)
     assert config['optimistic_policy']==dict(policy_optimism=0,root_policy_optimism=0)
@@ -905,10 +908,10 @@ def test_search_correction_profiles_and_bounds(config):
             'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50)}
     for match in (False,True):
         group='match' if match else 'evaluation';prefix='MATCH_' if match else 'EVAL_'
-        c=load_evaluation_config(ROOT/'configs/smoke_test',match)
+        c=load_evaluation_config(CONFIGS / 'smoke_test',match)
         assert c[group]['use_uncertainty'] and c[group]['use_noise_pruning']
         assert c[group]['root_policy_optimism']==.2 and c[group]['policy_optimism']==1
-        overridden=load_evaluation_config(ROOT/'configs/smoke_test',match,environ={prefix+'USE_UNCERTAINTY':'false',prefix+'USE_NOISE_PRUNING':'false',prefix+'ROOT_POLICY_OPTIMISM':'0'})
+        overridden=load_evaluation_config(CONFIGS / 'smoke_test',match,environ={prefix+'USE_UNCERTAINTY':'false',prefix+'USE_NOISE_PRUNING':'false',prefix+'ROOT_POLICY_OPTIMISM':'0'})
         assert not overridden[group]['use_uncertainty'] and not overridden[group]['use_noise_pruning'] and overridden[group]['root_policy_optimism']==0
         for key,(low,high) in bounds.items():
             original=c[group][key]

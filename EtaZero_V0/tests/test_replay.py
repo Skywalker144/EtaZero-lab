@@ -1,4 +1,5 @@
 """Source replay semantics, complete-file row IDs, holdout and immutable rebuild."""
+from config_samples import CONFIGS
 import copy
 import hashlib
 import json
@@ -79,7 +80,7 @@ def test_repeat_gap_order_retains_each_file_and_drops_tails(tmp_path):
 
 
 def test_capped_random_and_actual_mtime_window_range():
-    c=load_config(ROOT/'configs/smoke_test');r=c['replay'];r.update(min_rows=100,taper_exponent=1,expand_per_row=1)
+    c=load_config(CONFIGS / 'smoke_test');r=c['replay'];r.update(min_rows=100,taper_exponent=1,expand_per_row=1)
     entries=[{'path':'newrandom','metadata':{'model_id':'random:1','rows':180,'iteration_id':0,'created_ns':0},'mtime_ns':30},
              {'path':'oldpost','metadata':{'model_id':'model','rows':70,'iteration_id':9,'created_ns':900},'mtime_ns':10},
              {'path':'recentpost','metadata':{'model_id':'model','rows':20,'iteration_id':1,'created_ns':1},'mtime_ns':20}]
@@ -110,7 +111,7 @@ def holdout_entries(root,copies=12):
 
 
 def test_validation_md5_holdout_shared_probability_across_snapshots_and_rebuild(tmp_path):
-    c=load_config(ROOT/'configs/smoke_test');c['training']['skip_validation']=False
+    c=load_config(CONFIGS / 'smoke_test');c['training']['skip_validation']=False
     c['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=108)
     c['shuffle'].update(group_rows=18,bucket_rows=16,training_shard_rows=8,waves=3)
     entries=holdout_entries(tmp_path);all_train=set();all_val=set()
@@ -153,7 +154,7 @@ def test_catalog_refreshes_mtime_and_rejects_changed_known_raw(tmp_path):
 
 
 def test_validation_raw_eval_d4_cap_and_training_state_unchanged(tmp_path):
-    c=load_config(ROOT/'configs/smoke_test');c['training'].update(skip_validation=False,d4_augmentation=False,max_validation_samples=8)
+    c=load_config(CONFIGS / 'smoke_test');c['training'].update(skip_validation=False,d4_augmentation=False,max_validation_samples=8)
     snapshot=id_snapshot(tmp_path,[17,9],True)
     # IDs identify synthetic rows, but are not valid numerical Q targets.
     for info in json.loads((snapshot/'manifest.json').read_text())['validation_files']:

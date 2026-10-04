@@ -1,4 +1,5 @@
 """NBT structure, masking and global-context semantics."""
+from config_samples import CONFIGS
 import math
 
 import pytest
@@ -13,7 +14,7 @@ from etazero.symmetry import apply_symmetry
 @pytest.mark.parametrize('channels,mid,head,hidden', [(24,12,8,16), (64,32,16,32),
                                                    (192,96,32,80), (256,128,48,112), (384,192,64,160)])
 def test_scaled_nbt_and_optimizer_coverage(channels,mid,head,hidden):
-    c=load_config(ROOT/'configs/smoke_test')
+    c=load_config(CONFIGS / 'smoke_test')
     c['network'].update(channels=channels,blocks=5)
     model=make_network(c)
     assert network_widths(channels)==dict(mid=mid,gpool=head,policy=head,value=head,value_hidden=hidden)
@@ -38,21 +39,13 @@ def test_scaled_nbt_and_optimizer_coverage(channels,mid,head,hidden):
 
 @pytest.mark.parametrize('channels',[8,22,25,193])
 def test_reject_unsupported_nbt_width(channels):
-    c=load_config(ROOT/'configs/smoke_test');c['network']['channels']=channels
+    c=load_config(CONFIGS / 'smoke_test');c['network']['channels']=channels
     with pytest.raises(ValueError,match='even and >= 24'):
         validate(c)
 
 
-def test_default_profiles_select_b5c192nbt():
-    for name in ('baseline','minimal_test'):
-        c=load_config(ROOT/'configs'/name)
-        assert c['network']['channels']==192 and c['network']['blocks']==5
-        assert c['network']['architecture']=='nbt'
-        assert set(c['network'])=={'architecture','canvas','channels','blocks','predict_q_values'}
-
-
 def test_plain_source_preset_and_optimizer_roles():
-    c=load_config(ROOT/'configs/smoke_test')
+    c=load_config(CONFIGS / 'smoke_test')
     c['network'].update(architecture='plain',channels=128,blocks=10)
     validate(c)
     model=make_network(c)
@@ -75,7 +68,7 @@ def test_plain_source_preset_and_optimizer_roles():
 
 @pytest.mark.parametrize('architecture,channels,blocks', [('plain',192,10),('plain',128,5),('transformer',192,4),('transformer',128,5),('unknown',128,10)])
 def test_reject_unimplemented_or_nonpreset_architecture(architecture,channels,blocks):
-    c=load_config(ROOT/'configs/smoke_test')
+    c=load_config(CONFIGS / 'smoke_test')
     c['network'].update(architecture=architecture,channels=channels,blocks=blocks)
     with pytest.raises(ValueError):
         validate(c)
@@ -86,7 +79,7 @@ def test_reject_unimplemented_or_nonpreset_architecture(architecture,channels,bl
 def test_transformer_bare_source_structure_initialization_and_roles():
     from etazero.network import BiasMask,FixedScaleMask
     from etazero.transformer import Attention,SwiGLU
-    c=load_config(ROOT/'configs/smoke_test')
+    c=load_config(CONFIGS / 'smoke_test')
     c['network'].update(architecture='transformer',channels=192,blocks=5)
     validate(c); model=make_network(c)
     assert model.model_version==17 and model.norm_kind=='fixup'
@@ -169,7 +162,7 @@ def test_global_max_gradient_uses_first_tie_and_excludes_padding():
 
 
 def test_nbt_skip_paths_and_padding_invariance():
-    c=load_config(ROOT/'configs/smoke_test');c['network']['blocks']=2
+    c=load_config(CONFIGS / 'smoke_test');c['network']['blocks']=2
     model=make_network(c).eval()
     block=model.blocks[0]
     x=torch.randn(2,24,6,6);mask=torch.ones(2,1,6,6)

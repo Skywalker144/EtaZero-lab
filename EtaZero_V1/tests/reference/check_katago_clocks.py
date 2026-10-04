@@ -27,7 +27,7 @@ def main():
     reset_code=compile(ast.Module(body=[copy.deepcopy(reset)],type_ignores=[]),str(path),'exec');finish_code=compile(ast.Module(body=[copy.deepcopy(finish)],type_ignores=[]),str(path),'exec')
     cases=0
     for steps,nsegments,k,alpha,start_samples,period in itertools.product([7,17,53],[1,3],[2,6],[.5,1.],[0,199999976,200000008],[8,32]):
-        config=load_config(ROOT/'configs/smoke_test');config['training'].update(train_steps=steps,sub_epochs=nsegments)
+        config=load_config(ROOT / 'tests/fixtures/configs/smoke_test', run_dir='/tmp/etazero_reference_sample');config['training'].update(train_steps=steps,sub_epochs=nsegments)
         config['optimizer'].update(lookahead_k=k,lookahead_alpha=alpha,swa_period_samples=period,norm_interval=10000)
         model,optimizer,o=small_optimization(config);o.consumed_samples=start_samples;o.begin_round()
         original=copy.deepcopy(model);source_optimizer=torch.optim.SGD(original.parameters(),lr=1)

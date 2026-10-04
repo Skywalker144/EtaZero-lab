@@ -1,3 +1,4 @@
+from config_samples import CONFIGS
 import copy
 import math
 
@@ -12,7 +13,7 @@ from etazero.symmetry import apply_symmetry, augment_batch
 
 @pytest.fixture
 def config():
-    return load_config(ROOT / 'configs/smoke_test')
+    return load_config(CONFIGS / 'smoke_test')
 
 
 @pytest.mark.parametrize('symmetry,expected', [

@@ -17,7 +17,7 @@ from etazero.evaluation import model_info
 from web.engine import Engine
 from web.app import App, Conflict
 from web.server import discover_catalog, discover_models, make_server
-from etazero.schema import CONTRACT_ID
+from etazero.schema import CONTRACT_ID, POLICY_HEADS
 
 
 MODEL = os.environ.get('ETAZERO_WEB_TEST_MODEL')
@@ -32,11 +32,11 @@ class CatalogTests(unittest.TestCase):
         self.data = self.root / 'data'
         self.data.mkdir()
         for name in ('baseline', 'minimal_test', 'muzero', 'muzero_minimal_test'):
-            shutil.copytree(ROOT / 'configs' / name, self.root / 'configs' / name)
+            shutil.copytree(ROOT / 'tests/fixtures/configs' / name, self.root / 'configs' / name)
         self.patch = patch('web.server.ROOT', self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.config = load_evaluation_config(ROOT / 'configs/minimal_test', environ={})
+        self.config = load_evaluation_config(ROOT / 'tests/fixtures/configs' / 'minimal_test', environ={})
 
     def publish(self, run, iteration, algorithm='alphazero', current=False):
         root = self.data / run
@@ -129,10 +129,44 @@ class WebTests(unittest.TestCase):
     def setUp(self):
         _, info = model_info(MODEL)
         profile = 'muzero_minimal_test' if info.get('algorithm') == 'muzero' else 'minimal_test'
-        self.config = load_evaluation_config(ROOT / 'configs' / profile, environ={
+        self.config = load_evaluation_config(ROOT / 'tests/fixtures/configs' / profile, environ={
             'EVAL_DEVICE': os.environ.get('ETAZERO_TEST_DEVICE', 'cuda:0'),
             'EVAL_VISITS': '16',
         })
+
+    def test_network_planes_match_published_model(self):
+        import torch
+        from etazero.export import example_inputs
+
+        model, info = model_info(MODEL)
+        device = self.config['evaluation']['device']
+        precision = self.config['evaluation']['inference_precision']
+        half = precision == 'float16' or (precision == 'auto' and device.startswith('cuda'))
+        module = torch.jit.load(str(model), map_location=device).eval()
+        with Engine(BINARY, Path(MODEL), self.config) as engine:
+            engine.command('new 5 renju')
+            engine.command('play 12')
+            engine.command('play 0')
+            analysis = engine.command('analyze 16')['analysis']
+        obs, globals = example_inputs(info['canvas'], 5, 'renju', [12 // 5 * info['canvas'] + 12 % 5, 0])
+        obs = torch.as_tensor(obs[None], device=device)
+        globals = torch.as_tensor(globals[None], device=device)
+        with torch.inference_mode(), torch.autocast('cuda', dtype=torch.float16, enabled=half):
+            if info.get('algorithm') == 'muzero':
+                hidden = module.model.representation(obs, globals)
+                logits = module.model.prediction(hidden)[0]
+            else:
+                logits = module.model.forward_all(obs, globals)[0]
+        logits = logits[0].reshape(-1, info['canvas'], info['canvas'])[:, :5, :5].float().reshape(-1, 25)
+        heads = analysis['network_planes']['heads']
+        self.assertEqual([head['name'] for head in heads], [POLICY_HEADS[i] for i in (0, 1, 4, 5)])
+        self.assertEqual(analysis['network_planes']['precision'], 'float16' if half else 'float32')
+        for head, index in zip(heads, (0, 1, 4, 5)):
+            self.assertEqual(len(head['logits']), 25)
+            torch.testing.assert_close(torch.tensor(head['logits']), logits[index].cpu(), rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(torch.tensor(head['probabilities']), logits[index].softmax(0).cpu(), rtol=1e-4, atol=1e-6)
+            self.assertAlmostEqual(sum(head['probabilities']), 1, places=6)
+            self.assertGreater(head['probabilities'][12], 0)  # Occupied points stay in the NN domain.
 
     def test_persistent_engine_and_rules(self):
         with Engine(BINARY, Path(MODEL), self.config) as engine:

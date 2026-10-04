@@ -34,7 +34,7 @@ def main():
     source=module(kg/'python/shuffle.py','source_shuffle');generator=module(kg/paths[1],'source_generator')
     sys.path.insert(0,str(kg/'python'))
     from katago.train import data_processing_pytorch,modelconfigs
-    c=load_config(ROOT/'configs/smoke_test');r=c['replay'];formula=groups=plans=orders=batches=0
+    c=load_config(ROOT / 'tests/fixtures/configs/smoke_test', run_dir='/tmp/etazero_reference_sample');r=c['replay'];formula=groups=plans=orders=batches=0
     for minimum,p,a,scale,offset,maximum,extra in itertools.product([9,100,250000],[.3,.65,1,1.4],[0,.4,1],
                     [0,13,300000],[-1.5,0,123.75],['all',500000],[0,1,1000,20000000]):
         r.update(min_rows=minimum,taper_exponent=p,expand_per_row=a,taper_scale=scale,add_to_data_rows=offset,max_rows=maximum)
