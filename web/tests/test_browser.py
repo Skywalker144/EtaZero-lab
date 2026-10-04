@@ -1,5 +1,60 @@
 import os
 import unittest
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+class ThemeTests(unittest.TestCase):
+    def test_system_theme_and_saved_override(self):
+        from playwright.sync_api import sync_playwright
+
+        static = Path(__file__).resolve().parents[1] / 'static'
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(color_scheme='dark')
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+
+            def serve(route):
+                path = urlsplit(route.request.url).path
+                files = {'/': 'index.html', '/app.js': 'app.js', '/theme.js': 'theme.js', '/styles.css': 'styles.css'}
+                if path in files:
+                    route.fulfill(path=str(static / files[path]))
+                else:
+                    route.fulfill(status=503, json={'error': '测试未连接模型服务'})
+
+            page.route('http://etazero.test/**', serve)
+            page.goto('http://etazero.test/')
+            self.assertEqual(page.locator('#theme').input_value(), 'system')
+            self.assertEqual(page.locator('html').get_attribute('data-theme'), 'dark')
+            self.assertEqual(page.evaluate("getComputedStyle(document.documentElement).colorScheme"), 'dark')
+            page.locator('#numbers').uncheck()
+            page.reload()
+            self.assertFalse(page.locator('#numbers').is_checked())
+            self.assertEqual(page.locator('#theme').input_value(), 'system')
+            page.emulate_media(color_scheme='light')
+            page.wait_for_function("document.documentElement.dataset.theme === 'light'")
+            page.locator('#theme').select_option('dark')
+            page.reload()
+            self.assertEqual(page.locator('#theme').input_value(), 'dark')
+            self.assertEqual(page.locator('html').get_attribute('data-theme'), 'dark')
+            page.emulate_media(color_scheme='dark')
+            page.locator('#theme').select_option('light')
+            self.assertEqual(page.locator('html').get_attribute('data-theme'), 'light')
+            page.locator('#theme').select_option('system')
+            self.assertEqual(page.locator('html').get_attribute('data-theme'), 'dark')
+            page.reload()
+            page.emulate_media(color_scheme='light')
+            page.wait_for_function("document.documentElement.dataset.theme === 'light'")
+            page.set_viewport_size({'width': 390, 'height': 844})
+            self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'))
+            page.evaluate("localStorage.setItem('etazero-ui', 'invalid json')")
+            page.emulate_media(color_scheme='dark')
+            page.reload()
+            self.assertEqual(page.locator('#theme').input_value(), 'system')
+            self.assertEqual(page.locator('html').get_attribute('data-theme'), 'dark')
+            self.assertEqual(errors, [])
+            browser.close()
 
 
 @unittest.skipUnless(os.environ.get('ETAZERO_WEB_TEST_URL'), 'Set ETAZERO_WEB_TEST_URL')
@@ -162,7 +217,7 @@ class BrowserTests(unittest.TestCase):
             page.wait_for_function("!document.querySelector('#analyze').disabled && document.querySelector('#error').hidden")
             page.screenshot(path='/tmp/etazero-workbench-light.png', full_page=True)
             self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'))
-            page.locator('#theme').click()
+            page.locator('#theme').select_option('dark')
             page.locator('#numbers').uncheck()
             page.reload()
             page.wait_for_function("document.querySelector('#move-count').textContent === '第 1 手'")
