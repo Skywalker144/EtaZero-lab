@@ -7,6 +7,10 @@ let formKey = '', viewTurn = null, highlight = null, catalogRevision = -1;
 let sortField = 'selection_weight', sortDirection = -1;
 let analysisKey = null;
 let historyKey = '';
+const networkHeads = [
+  ['普通策略', 'policy'], ['对手策略', 'opponent_policy'],
+  ['长期 optimistic', 'long_optimistic_policy'], ['短期 optimistic', 'short_optimistic_policy'],
+];
 
 function coordinate(action, size) { return columns[action % size] + (size - Math.floor(action / size)); }
 function percent(value, digits = 1) { return (value * 100).toFixed(digits); }
@@ -160,6 +164,57 @@ function renderHeatmaps() {
   renderHeatmap('prior-map', 'network_prior', 'prior-max', analysis);
   renderHeatmap('search-map', $('search-map-kind').value, 'search-max', analysis);
 }
+function renderNetworkMaps() {
+  const analysis = state?.analysis;
+  const planes = analysis?.network_planes;
+  $('network-empty').hidden = Boolean(planes);
+  $('network-data').hidden = !planes;
+  $('network-maps').replaceChildren();
+  if (!planes) return;
+  const size = analysis.board_size;
+  const kind = $('network-kind').value;
+  const probabilities = kind === 'probabilities';
+  const common = $('network-common-scale').checked;
+  const all = planes.heads.flatMap(head => head[kind]);
+  const minimum = probabilities ? 0 : Math.min(...all);
+  const maximum = Math.max(...all);
+  const format = value => probabilities ? `${(value * 100).toFixed(2)}%` : value.toFixed(3);
+  $('network-position').textContent = `第 ${analysis.turn + 1} 手落子前 · 输入执${analysis.player === 1 ? '黑' : '白'} · ${planes.precision}`;
+  $('network-detail').textContent = '悬停 / 聚焦查看各点概率与 logits；点击定位到搜索前局面。';
+  planes.heads.forEach((head, index) => {
+    const values = head[kind];
+    const low = common ? minimum : probabilities ? 0 : Math.min(...values);
+    const high = common ? maximum : Math.max(...values);
+    const [label, name] = networkHeads.find(([, name]) => name === head.name);
+    let html = '<span></span>';
+    for (let x = 0; x < size; x++) html += `<span class="heat-axis">${columns[x]}</span>`;
+    for (let y = 0; y < size; y++) {
+      html += `<span class="heat-axis">${size - y}</span>`;
+      for (let x = 0; x < size; x++) {
+        const action = y * size + x, value = values[action], stone = analysis.board[action];
+        const ratio = high > low ? (value - low) / (high - low) : 0;
+        const color = `hsl(${160 - 125 * ratio} 55% ${94 - 38 * ratio}%)`;
+        const detail = `${label} · ${coordinate(action, size)} · 概率 ${(head.probabilities[action] * 100).toFixed(4)}% · logit ${head.logits[action].toFixed(5)}` +
+          (stone ? ` · 已有${stone === 1 ? '黑' : '白'}棋（仍参与网络归一化）` : '');
+        const number = probabilities ? (value * 100).toFixed(1) : value.toFixed(1);
+        html += `<div class="heat-cell network-cell" data-action="${action}" data-value="${value}" data-detail="${detail}" role="img" aria-label="${detail}" title="${detail}" tabindex="0" style="background:${color}">${stone ? `<i class="heat-stone ${stone === 1 ? 'black' : 'white'}"></i>` : `<span>${number}</span>`}</div>`;
+      }
+    }
+    let best = 0, entropy = 0, occupied = 0;
+    head.probabilities.forEach((p, action) => {
+      if (p > head.probabilities[best]) best = action;
+      if (p > 0) entropy -= p * Math.log(p);
+      if (analysis.board[action]) occupied += p;
+    });
+    const section = document.createElement('section');
+    section.dataset.head = name;
+    section.innerHTML = `<div class="heatmap-heading"><h3>${label}</h3><span>${index + 1} / ${networkHeads.length}</span></div><div class="network-head-name mono">${name}</div>` +
+      `<div class="heat-grid ${size > 15 ? 'dense' : ''}" role="group" aria-label="${label}热力图" style="grid-template-columns:16px repeat(${size},minmax(0,1fr))">${html}</div>` +
+      `<div class="heat-legend"><span>${format(low)}</span><i></i><span>${format(high)}</span></div>` +
+      `<p class="network-summary">最高 ${coordinate(best, size)} ${(head.probabilities[best] * 100).toFixed(2)}%<br>熵 ${entropy.toFixed(2)} nats · 已落子质量 ${(occupied * 100).toFixed(2)}%</p>`;
+    $('network-maps').append(section);
+  });
+}
 function renderCandidates() {
   const analysis = state?.analysis;
   $('candidates').replaceChildren();
@@ -187,7 +242,7 @@ function renderAnalysis() {
   $('analysis-empty').hidden = Boolean(a);
   $('analysis-data').hidden = !a;
   $('analysis-move').textContent = a ? `第 ${a.turn + 1} 手前 · ${a.player === 1 ? '黑' : '白'}方` : '—';
-  if (!a) { analysisKey = null; renderHeatmaps(); return; }
+  if (!a) { analysisKey = null; renderHeatmaps(); renderNetworkMaps(); return; }
   $('analysis-context').textContent = samePosition(state.game, a) ? '当前局面分析' : `历史分析 · 搜索后已落子`;
   const key = JSON.stringify(a);
   if (key !== analysisKey) {
@@ -202,6 +257,7 @@ function renderAnalysis() {
     $('inference-metrics').textContent = `NN 请求 ${a.requests} · 批次 ${a.batches} · 平均批量 ${a.batches ? (a.requests / a.batches).toFixed(2) : '—'}`;
     $('raw-analysis').textContent = JSON.stringify(a, null, 2);
     renderHeatmaps();
+    renderNetworkMaps();
     analysisKey = key;
   }
   renderCandidates();
@@ -390,6 +446,8 @@ $('refresh-models').addEventListener('click', () => command('refresh'));
 $('branch').addEventListener('click', () => { if (viewTurn !== null) command('branch', {turn: viewTurn}); });
 $('numbers').addEventListener('change', () => { $('board').classList.toggle('hide-numbers', !$('numbers').checked); savePreferences(); });
 $('search-map-kind').addEventListener('change', renderHeatmaps);
+$('network-kind').addEventListener('change', renderNetworkMaps);
+$('network-common-scale').addEventListener('change', renderNetworkMaps);
 $('visited-only').addEventListener('change', renderCandidates);
 $('model').addEventListener('change', updateSizes);
 $('run').addEventListener('change', () => { populateModels(); applyRunDefaults(); updateEngineInfo(); render(); });
@@ -422,7 +480,12 @@ for (const eventName of ['mouseover', 'focusin']) {
     const cell = event.target.closest('[data-detail]');
     if (cell) $('heatmap-detail').textContent = cell.dataset.detail;
   });
+  $('network-data').addEventListener(eventName, event => {
+    const cell = event.target.closest('[data-detail]');
+    if (cell) $('network-detail').textContent = cell.dataset.detail;
+  });
 }
+$('network-data').addEventListener('click', event => { const cell = event.target.closest('[data-action]'); if (cell) selectCandidate(Number(cell.dataset.action)); });
 $('heatmap-data').addEventListener('click', event => { const cell = event.target.closest('[data-action]'); if (cell) selectCandidate(Number(cell.dataset.action)); });
 document.querySelectorAll('[data-sort]').forEach(button => button.addEventListener('click', () => {
   sortDirection = sortField === button.dataset.sort ? -sortDirection : button.dataset.sort === 'action' ? 1 : -1;
