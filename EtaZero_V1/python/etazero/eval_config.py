@@ -14,7 +14,7 @@ SEARCH = dict(playout_doubling_advantage=float,playout_doubling_advantage_player
               lcb_stdevs=float, min_visit_prop_for_lcb=float, policy_target_pruning=boolean, **SEARCH_PARAMETERS)
 
 
-def load_evaluation_config(directory, match=False, environ=None):
+def load_evaluation_config(directory, match=False, environ=None, *, umbrella=False):
     directory = Path(directory)
     if not directory.is_absolute() and not directory.exists():
         directory = ROOT/directory
@@ -56,7 +56,13 @@ def load_evaluation_config(directory, match=False, environ=None):
                 target = ROOT/'configs'/parent
             inherit(target, ancestors+[current])
         read(current)
-    inherit(directory, [])
+    if umbrella:
+        # An experiment umbrella has no run.cfg. Its one shared profile overlays
+        # baseline directly, independently of all arm training configurations.
+        read(ROOT/'configs/baseline')
+        read(directory)
+    else:
+        inherit(directory, [])
     read(directory, True)
     env = os.environ if environ is None else environ
     prefix = 'MATCH_' if match else 'EVAL_'
