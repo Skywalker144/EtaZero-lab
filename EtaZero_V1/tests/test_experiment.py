@@ -10,7 +10,7 @@ import pytest
 import torch
 from etazero.config import ROOT, load_config
 from etazero.experiment import (experiment_plan, initialization_key, prepare_initializations,
-                                arm_progress, write_arm_config, Scheduler)
+                                arm_progress, write_arm_config, run_experiment, Scheduler)
 from etazero.plotting import (run_history, training_figure, loss_figure, performance_figure,
                              journal_events, METRICS)
 from etazero.storage import save_json, load_json, sha256
@@ -18,7 +18,7 @@ from etazero.storage import save_json, load_json, sha256
 
 def umbrella(tmp_path):
     directory = tmp_path/'umbrella'; directory.mkdir()
-    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_seconds = 0\narm_gpus = 0\nshared_init = true\n')
+    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_seconds = 0\narm_gpus = 0\nshared_init = true\nautoelo = false\n')
     for name in ('a', 'b'):
         arm = directory/name; arm.mkdir()
         (arm/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {tmp_path/name}\n')
@@ -184,6 +184,96 @@ def test_budget_completion_requires_matching_run(tmp_path):
     arm['config']['run']['seed'] += 1
     with pytest.raises(ValueError, match='configuration differs'):
         arm_progress(arm, plan['settings'])
+
+
+@pytest.mark.parametrize('shared_init', [True, False])
+@pytest.mark.parametrize('budget', ['iterations', 'seconds'])
+def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monkeypatch, capsys,
+                                                               shared_init, budget):
+    from etazero.config import fingerprint
+    directory = umbrella(tmp_path)
+    env = {'SHARED_INIT': str(shared_init).lower()}
+    if budget == 'seconds':
+        env.update(MAX_ITERS='0', MAX_TIME_SECONDS='10')
+    work = tmp_path/'work'
+    binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
+    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    started = []
+
+    def finish_arm(scheduler, arm, slot, gpu):
+        # Exercise the real scheduler and on-disk resume checks without training.
+        started.append(arm['name'])
+        origin = scheduler.initializations.get(arm['name'])
+        origin = {k: origin[k] for k in ('path', 'sha256')} if origin else None
+        root = Path(arm['run_dir'])
+        save_json(root/'.internal/run.json', {'config': arm['config'],
+                  'config_id': fingerprint(arm['config']), 'weights_initialization': origin})
+        save_json(root/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
+        scheduler.states[arm['name']] = {'status': 'complete'}
+
+    monkeypatch.setattr(Scheduler, 'start', finish_arm)
+    first = experiment_plan(directory, environ=env, work_dir=work)
+    assert run_experiment(first, binary) == 0
+    assert started == ['a', 'b']
+    old_identity = load_json(work/'.internal/identity.json')
+    old_origins = load_json(work/'.internal/plan.json')['initializations']
+    old_payloads = {v['path']: Path(v['path']).read_bytes() for v in old_origins.values()}
+    complete_state = (tmp_path/'a/.internal/state.json').read_bytes()
+    # b was interrupted below the budget; a has already reached it.
+    save_json(tmp_path/'b/.internal/state.json', {'iteration': 2, 'elapsed_seconds': 5})
+    seed = first['arms'][0]['config']['run']['seed']+1
+    for name, arm_seed in [('0_new', None), ('c', seed)]:
+        arm_dir = directory/name; arm_dir.mkdir()
+        extra = f'seed = {arm_seed}\n' if arm_seed is not None else ''
+        (arm_dir/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {tmp_path/name}\n'+extra)
+    started.clear(); capsys.readouterr()
+    expanded = experiment_plan(directory, environ=env, work_dir=work)
+    assert run_experiment(expanded, binary) == 0
+    assert started == ['0_new', 'b', 'c']
+    assert 'skipped completed a' in capsys.readouterr().out
+    assert (tmp_path/'a/.internal/state.json').read_bytes() == complete_state
+    identity = load_json(work/'.internal/identity.json')
+    assert [a['name'] for a in identity['arms']] == ['0_new', 'a', 'b', 'c']
+    assert [a for a in identity['arms'] if a['name'] in {'a', 'b'}] == old_identity['arms']
+    origins = load_json(work/'.internal/plan.json')['initializations']
+    if shared_init:
+        assert origins['a'] == origins['b'] == origins['0_new'] == old_origins['a']
+        assert origins['c'] != origins['a']
+    else:
+        assert origins == {}
+    assert all(Path(path).read_bytes() == payload for path, payload in old_payloads.items())
+    assert all(s['status'] == 'complete' for s in load_json(work/'.internal/status.json')['arms'].values())
+    started.clear()
+    assert run_experiment(expanded, binary) == 0
+    assert started == []
+
+
+@pytest.mark.parametrize('change', ['config', 'run_dir', 'removed', 'shared_init', 'umbrella'])
+def test_experiment_rejects_existing_identity_changes(tmp_path, monkeypatch, change):
+    directory = umbrella(tmp_path)
+    work = tmp_path/'work'
+    binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
+    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    calls = []
+    monkeypatch.setattr(Scheduler, 'run', lambda _: calls.append(True) or 0)
+    plan = experiment_plan(directory, environ={}, work_dir=work)
+    assert run_experiment(plan, binary) == 0
+    manifest = work/'.internal/identity.json'
+    original = manifest.read_bytes()
+    if change == 'config':
+        plan['arms'][0]['config']['run']['seed'] += 1
+    elif change == 'run_dir':
+        plan['arms'][0]['run_dir'] = str(tmp_path/'other')
+    elif change == 'removed':
+        plan['arms'].pop(0)
+    elif change == 'shared_init':
+        plan['settings']['shared_init'] = False
+    else:
+        plan['umbrella'] = str(tmp_path/'other')
+    with pytest.raises(ValueError, match='changed|removed'):
+        run_experiment(plan, binary)
+    assert calls == [True]
+    assert manifest.read_bytes() == original
 
 
 def test_scheduler_failure_interrupts_other_running_arms(tmp_path, monkeypatch):
