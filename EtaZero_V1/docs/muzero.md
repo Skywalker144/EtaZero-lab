@@ -8,59 +8,19 @@ CONFIG_DIR=configs/muzero bash scripts/run.sh
 
 该配置保留 baseline 的训练预算、优化器及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 搜索未实现，对应组合明确报错。
 
-展开后的训练行更大，名义训练分片大小由 [MuZero train.cfg](../configs/muzero/train.cfg) 覆盖；`muzero_minimal_test` 和 `raw_muzero` 继承同一设置。shuffle 保留 baseline 的 worker 数和总数组内存预算，按行大小规划有效桶大小。
+展开后的训练行更大，名义训练分片大小由 [MuZero train.cfg](../configs/muzero/train.cfg) 覆盖；派生配置按配置继承规则读取这些字段。shuffle 保留 baseline 的 worker 数和总数组内存预算，按行大小规划有效桶大小。
 
-## raw_muzero 配置
+## 训练目标与优化器
 
-[configs/raw_muzero](../configs/raw_muzero/) 继承 `muzero`，提供保留 NBT/WDL、对称推理及数据增强的基础 MuZero 对照：
+`[muzero_training] auxiliary_losses=false` 只计算主 policy CE 和终局 WDL CE，系数均为 1。辅助输出结构保留，损失不读取对手、soft、TD、optimistic、误差或 Q 输出；此模式禁止开启 `predict_q_values`。搜索是否使用辅助预测由各自开关独立控制。
 
-```bash
-CONFIG_DIR=configs/raw_muzero bash scripts/run.sh
-```
+`katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）或 AdamW，学习率与统一 weight decay 由 `[muzero_training]` 指定。它使用 batch 均值反传，不启用 KataGo 分组 LR、自适应衰减、warmup、Lookahead 或 SWA；`gradient_clip=0` 表示不裁剪，发布当前训练权重。checkpoint 仍保存优化器、scaler、计数和 RNG。
 
-- 搜索关闭 LCB、FPU、Forced Playout、Policy Target Pruning、Playout Cap Randomization、Reduce Visits、价值偏好加权、PUCT 标准差修正、optimistic policy、uncertainty 和 noise pruning。`chosen_move_prune/subtract` 同时置零，避免它们独立影响带噪声根的价值回传。eval/match 同步关闭相应增强。
-- 自博弈关闭平衡开局、policy init、surprise 采样权重、PDA、side、fork、hint 和 reanalysis。每手用完整搜索预算，以原始访问分布作 policy target；普通 Dirichlet 根噪声保留，policy-shaped Dirichlet 关闭。回放采用固定窗口并保留窗口内全部行，仍沿用现有文件边界、shuffle、验证留出和 replay ratio 调度。
-- 保留随机 D4 树朝向、训练 D4、输入特征与禁手特征 dropout、混合棋盘尺寸、落子温度调度、三段 NBT 与 WDL。根对称次数仍为 1，这是当前 latent 实现限制。比赛使用既有成对平衡开局协议，属于评估条件，自博弈不使用它。
-- `[muzero_training] auxiliary_losses=false` 仅计算主 policy CE 和终局 WDL CE，系数均为 1；对手、soft、TD、optimistic、误差及 Q 辅助监督关闭。prediction 的辅助输出结构保留，损失不读取它们，搜索也不使用它们；日志中这些分量为零。此模式禁止开启 `predict_q_values`。
-- `katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）或 AdamW；学习率与统一 weight decay 由 `[muzero_training]` 指定。无分组 LR、自适应衰减、warmup、Lookahead 或 SWA；反传使用 batch 均值，`gradient_clip=0` 表示不裁剪。导出当前训练权重，checkpoint 仍保存优化器、scaler、计数和 RNG，支持恢复。
-
-这是按本项目 NBT/WDL 和数据管线适配的 MuZero 对照，不是原论文或 MuZero_V2 的逐项复现；仍使用共用 PUCT 数学实现（包括探索项的 0.01 偏移）与既有落子温度调度。具体参数以配置文件为准。原有 `baseline` 和 `muzero` 未配置 `[muzero_training]` 时保留原训练目标与优化器行为。
-
-## 接近 MuZero_V2 的配置对照
-
-[configs/muzero_v2_baseline](../configs/muzero_v2_baseline/) 是仅通过配置接近 MuZero_V2 `exp_baseline` 的诊断对照。它保留 NBT 64 通道、2/2/0 主干和原有 heads，使用普通 AdamW（LR 0.001、weight decay 0.0003）、128 batch、每轮 1000 步、K=5；在 11×11 Renju 上关闭禁手特征 dropout，采用 V2 的温度、噪声与开局设置，关闭 PCR、Reduce Visits、side/fork/PDA 和额外价值回传加权。PCR 关闭是明确的对照差异：每手固定 200 visits，V2 原运行是 75% 的 80 visits cheap 搜索。
-
-参数按语义换算：V2 使用 `[0,1]` 价值选点，EtaZero 使用 `[-1,1]`，因此 PUCT 常数／log 系数为 2.5／2。V2 按完整轨迹行记账，EtaZero 按随机重复后的训练起点记账；关闭 PCR/Reduce Visits 后，各真实位置基础权重为 1，保留 150000 行窗口和 replay ratio 8。实际窗口边界、随机冷启动封顶和 surprise 随机重复仍有差异。
-
-该配置不是逐项复现：NBT/fson 和 16/16/32 heads 保留，V2 为 masked ResNet 和 64/64/48 heads；现有辅助损失开关不能独立关闭 TD/optimistic/error 并保留 soft/opponent policy；普通优化器模式不支持 V2 的 EMA，发布 raw 权重。主 policy 系数、终局对手策略监督、PUCT 访问偏移／剪枝／LCB、batch 共用 D4 和文件留出也保留各自实现。因此只用于排查配置因素，不能单凭其成败判定实现正确或错误。
-
-```bash
-CONFIG_DIR=configs/muzero_v2_baseline bash scripts/run.sh --max-seconds 1800 --plot
-```
-
-预算为完整提交轮次的累计墙钟（扣除编译），到轮末停止，可能超出一轮。观察学习时优先对齐更新次数和训练起点数；总 loss 包含不同的辅助项，不直接作跨实现效果指标。
-
-## 网络对照配置
-
-`configs/az_mz/` 提供两个继承 `mz_nodropout` 的网络对照，普通 AdamW、禁手 dropout=0、混合棋盘、搜索和训练预算均保持相同：
-
-- [mz_nbt_b2c128](../configs/az_mz/mz_nbt_b2c128/)：128 通道，representation/dynamics/prediction 为 2/2/0 个 NBT 块。
-- [mz_resnet_b2c128](../configs/az_mz/mz_resnet_b2c128/)：同样的通道数与块数，`network.architecture=resnet`；主干采用 MuZero_V2 的每块两个全宽 3×3 卷积、逐样本 masked normalization 和 SiLU。
-
-两者保留相同 EtaZero heads、head 宽度规则和完整辅助损失。稠密网保留来源的默认卷积初始化，representation 输入适配为 EtaZero 的五平面卷积加六全局量线性投影；主干归一化按每个样本的全部通道和有效格点计算均值与方差，FP32 归约，不维护 BatchNorm 统计。prediction 不额外加入来源没有的末端归一化。稠密网目前要求 `muzero_training.katago_optimizer=false`，不套用 NBT/fson 参数分组。
-
-这是主干及其归一化、激活、初始化组合的对照，不是只换卷积拓扑，也不是 MuZero_V2 整套网络复现。相同通道数、块数不意味着相同参数量或计算量；NBT 的一个外层块还包含两个内部残差块。运行分别保存到 `data/az_mz/<配置名>/`，不复用旧训练目录。可独立启动：
-
-```bash
-CONFIG_DIR=configs/az_mz/mz_nbt_b2c128 bash scripts/run.sh
-CONFIG_DIR=configs/az_mz/mz_resnet_b2c128 bash scripts/run.sh
-```
-
-`configs/az_mz` 的自动实验调度也会发现这两个实验臂，并沿用其 `exp.cfg` 预算。
+没有配置 `[muzero_training]` 时使用共用辅助损失及 KataGo 优化器机制。关闭某组训练增强不会自动关闭搜索、采样或评估增强；这些属于独立条件。该能力不意味着逐项复现原论文或 MuZero_V2。
 
 ## 网络与推理
 
-[网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用上述 MuZero_V2 主干适配。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。
+[网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用 MuZero_V2 的两层全宽 3×3 残差块、逐样本 masked normalization 与 SiLU。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。ResNet 的归一化对每个样本的所有通道和有效格点进行 FP32 归约，不维护 BatchNorm 统计，卷积保留来源的默认初始化；prediction 不额外加入末端归一化。ResNet 要求 `katago_optimizer=false`，不套用 NBT/fson 参数分组。相同通道数与块数不保证相同参数量或计算量。
 
 - representation 接收现有五空间平面和六全局特征，包含棋规、执色、禁手特征与 PDA 条件。
 - latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。FP16 推理仍在 FP32 做归一化。
@@ -84,7 +44,7 @@ WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、�
 value_weight_exponent = 0
 ```
 
-`0` 关闭按子树价值偏好的额外加权；正数开启，指数越大偏好越强。`muzero` 当前继承 baseline 的值，留待实验选择。这个开关不同时关闭 uncertainty、noise pruning 或 LCB；在无噪声根且 uncertainty/noise pruning 等备份修正关闭时，指数 0 的普通树回传退化为逐次预测样本的算术平均。eval/match 对应字段位于各自的 `[evaluation]` / `[match]`。
+`0` 关闭按子树价值偏好的额外加权；正数开启，指数越大偏好越强。指数由所选配置确定。这个开关不同时关闭 uncertainty、noise pruning 或 LCB；在无噪声根且 uncertainty/noise pruning 等备份修正关闭时，指数 0 的普通树回传退化为逐次预测样本的算术平均。eval/match 对应字段位于各自的 `[evaluation]` / `[match]`。
 
 PUCT/FPU、根噪声、温度、forced playout、目标剪枝、LCB、optimistic policy、uncertainty 和 noise pruning 可按配置使用，共用纯数学函数。LCB 只是搜索启发式，短期误差 head 也不代表 dynamics 模型误差或随深度增加的不确定性；这些增强项对 MuZero 的效果需要独立实验。
 
