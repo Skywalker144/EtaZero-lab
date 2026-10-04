@@ -12,6 +12,15 @@ are defined separately and reuse EtaZero's fson schedule. The independent native
 backend implements initial/recurrent inference and device-local latent ownership;
 AlphaZero's cache, batching and graph-search code is not transplanted into it.
 
+`python/etazero/muzero/resnet.py` adapts the same pinned MuZero_V2 source's
+MaskedNorm, two-convolution dense ResBlock, SiLU stem and residual trunks.
+`tests/reference/check_muzero_network.py` also checks dense trunk and recurrent
+forward/backward parity. The input keeps EtaZero's separate global projection;
+heads, head width rules and losses stay native. Dense convolutions retain the
+source's PyTorch default initialization; masked normalization explicitly uses
+FP32 reductions under autocast and has no running statistics. This is a trunk
+adaptation, not a port of MuZero_V2's policy/value heads or consistency loss.
+
 The native hint loader links the selected environment's OpenSSL Crypto library
 to verify SHA-256 over the exact bytes it parses. OpenSSL is a build dependency;
 no cryptographic implementation is copied into EtaZero.
