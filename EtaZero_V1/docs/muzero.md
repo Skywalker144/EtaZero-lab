@@ -40,16 +40,34 @@ CONFIG_DIR=configs/muzero_v2_baseline bash scripts/run.sh --max-seconds 1800 --p
 
 预算为完整提交轮次的累计墙钟（扣除编译），到轮末停止，可能超出一轮。观察学习时优先对齐更新次数和训练起点数；总 loss 包含不同的辅助项，不直接作跨实现效果指标。
 
+## 网络对照配置
+
+`configs/az_mz/` 提供两个继承 `mz_nodropout` 的网络对照，普通 AdamW、禁手 dropout=0、混合棋盘、搜索和训练预算均保持相同：
+
+- [mz_nbt_b2c128](../configs/az_mz/mz_nbt_b2c128/)：128 通道，representation/dynamics/prediction 为 2/2/0 个 NBT 块。
+- [mz_resnet_b2c128](../configs/az_mz/mz_resnet_b2c128/)：同样的通道数与块数，`network.architecture=resnet`；主干采用 MuZero_V2 的每块两个全宽 3×3 卷积、逐样本 masked normalization 和 SiLU。
+
+两者保留相同 EtaZero heads、head 宽度规则和完整辅助损失。稠密网保留来源的默认卷积初始化，representation 输入适配为 EtaZero 的五平面卷积加六全局量线性投影；主干归一化按每个样本的全部通道和有效格点计算均值与方差，FP32 归约，不维护 BatchNorm 统计。prediction 不额外加入来源没有的末端归一化。稠密网目前要求 `muzero_training.katago_optimizer=false`，不套用 NBT/fson 参数分组。
+
+这是主干及其归一化、激活、初始化组合的对照，不是只换卷积拓扑，也不是 MuZero_V2 整套网络复现。相同通道数、块数不意味着相同参数量或计算量；NBT 的一个外层块还包含两个内部残差块。运行分别保存到 `data/az_mz/<配置名>/`，不复用旧训练目录。可独立启动：
+
+```bash
+CONFIG_DIR=configs/az_mz/mz_nbt_b2c128 bash scripts/run.sh
+CONFIG_DIR=configs/az_mz/mz_resnet_b2c128 bash scripts/run.sh
+```
+
+`configs/az_mz` 的自动实验调度也会发现这两个实验臂，并沿用其 `exp.cfg` 预算。
+
 ## 网络与推理
 
-[网络](../python/etazero/muzero/network.py) 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。它不是 MuZero_V2 masked ResNet 的逐层复刻。
+[网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用上述 MuZero_V2 主干适配。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。
 
 - representation 接收现有五空间平面和六全局特征，包含棋规、执色、禁手特征与 PDA 条件。
 - latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。FP16 推理仍在 FP32 做归一化。
 - dynamics 只接收 latent 和 int64 `[B]` 画布动作，以 one-hot 动作平面生成下一状态；不接收未来观测、占用、禁手或真实终局。
-- prediction 复用完整 EtaZero heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero NBT 支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
+- prediction 复用完整 EtaZero heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero 两种主干均支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
 
-WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、无 reward loss，搜索折扣为 1，相邻边翻转价值符号、交换 W/L。训练 heads 和 loss 为 FP32；导出副本把三段末端 BatchNorm 转为预计算归一化。`initial(obs, globals)` / `recurrent(latent, action)` 返回 latent、普通策略 logits、WDL logits、short optimistic logits 和误差标准差。模型元数据独立标识算法与 latent 宽度，导入权重校验完整三段配置。
+WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、无 reward loss，搜索折扣为 1，相邻边翻转价值符号、交换 W/L。训练 heads 和 loss 为 FP32；NBT 导出副本把三段末端 BatchNorm 转为预计算归一化，ResNet 保留逐样本动态归一化。`initial(obs, globals)` / `recurrent(latent, action)` 返回 latent、普通策略 logits、WDL logits、short optimistic logits 和误差标准差。模型元数据独立标识算法与 latent 宽度，导入权重校验架构及完整三段配置。
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
@@ -84,7 +102,7 @@ PUCT/FPU、根噪声、温度、forced playout、目标剪枝、LCB、optimistic
 
 [learner](../python/etazero/muzero/training.py) 采用来源中的梯度边界：根 loss 梯度系数 1，未来各步为 `1/K`；第二次及以后 dynamics 前按 `unroll.hidden_gradient_scale` 缩放 hidden 梯度，首次 representation→dynamics 不缩放。前向 loss 日志记录未缩放的各步损失和，反向系数不改变日志值。KataGo 优化器模式保留 batch 总和反传，普通优化器模式使用 batch 均值；consumed samples 计真实起点，不能当作展开状态数与 AlphaZero 比较。
 
-编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。三段采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW、Lookahead、SWA、AMP、checkpoint 和验证调度。representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组。
+编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。NBT 的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW、Lookahead 和 SWA；representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组。普通优化模式对两种主干使用统一 LR/weight decay，不使用上述分组、Lookahead 或 SWA。两种主干均接入 AMP、checkpoint 和验证调度。
 
 ## KataGo 工程机制的适用边界
 
