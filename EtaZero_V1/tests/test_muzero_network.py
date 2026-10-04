@@ -63,8 +63,9 @@ def test_invalid_dimensions(dimensions, changes):
 
 
 @pytest.mark.parametrize('q', [False, True])
-def test_independent_trunks_complete_heads_and_mask(dimensions, q):
-    c = replace(dimensions, predict_q_values=q)
+@pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
+def test_independent_trunks_complete_heads_and_mask(dimensions, q, architecture):
+    c = replace(dimensions, predict_q_values=q, architecture=architecture)
     model = MuZeroNet(c).eval()
     assert isinstance(model.prediction.policy_head, PolicyHead)
     assert isinstance(model.prediction.value_head, ValueHead)
@@ -95,8 +96,9 @@ def test_independent_trunks_complete_heads_and_mask(dimensions, q):
 
 
 @pytest.mark.parametrize('q', [False, True])
-def test_scripted_initial_and_recurrent_roundtrip(tmp_path, dimensions, q):
-    model = MuZeroNet(replace(dimensions, predict_q_values=q)).eval()
+@pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
+def test_scripted_initial_and_recurrent_roundtrip(tmp_path, dimensions, q, architecture):
+    model = MuZeroNet(replace(dimensions, predict_q_values=q, architecture=architecture)).eval()
     inference = inference_network(model)
     scripted = torch.jit.script(inference)
     path = tmp_path / 'model.pt'; scripted.save(str(path))
@@ -189,18 +191,20 @@ def test_component_update_state_restore_next_update(tmp_path, dimensions, kind):
 
 
 @pytest.mark.parametrize('device,precision', [('cpu', 'float32'), ('cuda:0', 'float32'), ('cuda:0', 'float16')])
-def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precision):
+@pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
+def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precision, architecture):
     if device.startswith('cuda') and os.environ.get('ETAZERO_GPU_TESTS') != '1':
         pytest.skip('Enable ETAZERO_GPU_TESTS=1 with host CUDA access')
     binary = ROOT / 'build/muzero_inference_probe'
     if not binary.exists():
         pytest.skip('Build the native MuZero inference probe first')
-    model = MuZeroNet(dimensions).to(device).eval()
+    model = MuZeroNet(replace(dimensions, architecture=architecture)).to(device).eval()
     # Nontrivial BN buffers ensure all three export conversions are exercised.
     with torch.no_grad():
-        for part in (model.representation, model.dynamics, model.prediction):
-            part.trunk.norm.running_mean.uniform_(-.3, .3)
-            part.trunk.norm.running_std.uniform_(.5, 1.5)
+        if architecture == 'nbt':
+            for part in (model.representation, model.dynamics, model.prediction):
+                part.trunk.norm.running_mean.uniform_(-.3, .3)
+                part.trunk.norm.running_std.uniform_(.5, 1.5)
     inference = inference_network(model)
     path = tmp_path / 'model.pt'; torch.jit.script(inference).save(str(path))
     result = subprocess.run([str(binary), str(path), device, precision], capture_output=True, text=True, check=True)
@@ -221,7 +225,17 @@ def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precis
                                                atol=3e-3 if precision == 'float16' else 2e-5)
             if step < 3:
                 prediction = inference.recurrent(hidden, torch.tensor([step + 1, step + 7], device=device))
-    assert actual[1] == actual[4]
+    if architecture == 'nbt':
+        assert actual[1] == actual[4]
+    else:
+        # JIT profiling can fuse dynamic norm reductions after the first call.
+        # Parent reuse must preserve predictions within inference precision;
+        # unlike precomputed NBT normalization, bitwise identity is not expected.
+        for first, repeated in zip(actual[1], actual[4]):
+            for key in first:
+                np.testing.assert_allclose(first[key], repeated[key],
+                                           rtol=3e-3 if precision == 'float16' else 2e-4,
+                                           atol=3e-3 if precision == 'float16' else 2e-5)
 
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Requires host CUDA')
