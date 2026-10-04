@@ -11,6 +11,8 @@ from ..optimization import group_settings, model_norms
 
 
 def parameter_groups(model):
+    if model.architecture != 'nbt':
+        raise ValueError('KataGo parameter groups require the MuZero NBT architecture')
     groups = {name: [] for name in ('input', 'normal', 'normal_gamma', 'noreg', 'output', 'output_noreg')}
     input_layers = {model.representation.stem, model.representation.linear_global, model.dynamics.stem}
     output_layers = set(model.prediction.policy_head.modules()) | set(model.prediction.value_head.modules())
