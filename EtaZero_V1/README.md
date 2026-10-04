@@ -34,6 +34,8 @@ bootstrap 编号为 0，训练迭代从 1 编号，初始化 checkpoint 使用 0
 
 所有 Python 入口统一默认使用 `${XDG_CACHE_HOME:-$HOME/.cache}/etazero/compile-v1/` 下的 `inductor/`、`triton/` 持久缓存，分别允许 `TORCHINDUCTOR_CACHE_DIR`、`TRITON_CACHE_DIR` 覆盖；重启复用缓存，不按实验臂重复创建。缓存需重建时，停止相关进程后整体更换目录，避免按文件年龄局部清理。
 
+MuZero 的 [网络对照](docs/muzero.md#网络对照配置) 提供 128 通道、2/2/0 的 [NBT](configs/az_mz/mz_nbt_b2c128/) 和 [MuZero_V2 稠密残差主干](configs/az_mz/mz_resnet_b2c128/)；两者保留相同 EtaZero heads、辅助损失、普通 AdamW 与无禁手 dropout 的实验条件。
+
 `muzero_minimal_test` 继承 [configs/muzero](configs/muzero/)，棋盘与画布、回放起点、每轮训练量和自对弈访问预算对齐 `minimal_test`；网络规模、5 步展开、并行局数及搜索限制继承 MuZero 配置，默认输出到 `data/muzero_minimal_test/`。评估和比赛棋盘均为 11×11，其他设置继承 MuZero 配置。启动方式：
 
 ```bash
@@ -81,7 +83,9 @@ CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh
 ```
 
-`autoexp.sh` 从实验伞目录的 `exp.cfg` 读取统一预算和 GPU 槽位，发现包含 `run.cfg` 的直接子目录作为实验臂。每臂配置继承、输出目录解析、产物和恢复遵循普通训练规则；运行 `configs/az_pcr` 时，各臂默认保存到 `data/az_pcr/100v/`、`data/az_pcr/200v/` 等目录，`--dry-run` 列出最终路径。调度产物另存于 `work_dir`。已达预算的臂跳过，其他臂排队恢复；失败停止排队并通知其他 controller 安全保存退出。`shared_init` 按网络结构与种子共享初始权重，各臂独立生成 bootstrap 数据。调度用法、环境覆盖与恢复边界见 [自动实验](docs/implementation.md#自动实验)。
+`autoexp.sh` 从实验伞目录的 `exp.cfg` 读取统一预算和 GPU 槽位，发现包含 `run.cfg` 的直接子目录作为实验臂。每臂配置继承、输出目录解析、产物和恢复遵循普通训练规则；运行 `configs/az_pcr` 时，各臂默认保存到 `data/az_pcr/100v/`、`data/az_pcr/200v/` 等目录，`--dry-run` 列出最终路径。调度产物另存于 `work_dir`。可新增配置后重跑原命令：已达预算的臂跳过，未达预算的臂排队恢复，新臂从头训练；失败停止排队并通知其他 controller 安全保存退出。`shared_init` 按网络结构与种子共享初始权重，各臂独立生成 bootstrap 数据。调度用法、环境覆盖与恢复边界见 [自动实验](docs/implementation.md#自动实验)。
+
+所有调度臂完成后默认运行 `autoelo`，按累计训练时间选历史模型、安排组内近邻与多个时间位置的跨臂对战，并统一拟合 Elo；`exp.cfg` 的 `autoelo = false` 或 `AUTOELO=false` 可关闭。伞目录 `elo.cfg` 控制采样、赛程和模型对并发，`match.cfg` 控制统一比赛条件与 C++ 多局、搜索、GPU batch 并行。已有数据可用 `CONFIG_DIR=configs/az_mz bash scripts/autoelo.sh --data data/az_mz` 独立续测，增加 `--dry-run` 只查看计划；结果入口为 `data/az_mz/elo/latest/elo.png`。配置、恢复、执行条件与性能统计见 [自动实验 Elo](docs/elo.md#自动实验-elo)。
 
 ## 续训与评估
 
