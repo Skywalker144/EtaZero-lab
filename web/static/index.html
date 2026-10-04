@@ -62,7 +62,17 @@
         <div class="wdl-bar" aria-hidden="true"><i id="wdl-win"></i><i id="wdl-draw"></i><i id="wdl-loss"></i></div>
         <p id="wdl" class="mono metric-note"></p><p id="network-wdl" class="mono metric-note muted"></p>
         <div id="inference-metrics" class="inference-metrics mono"></div>
-        <div class="tabs" role="tablist" aria-label="分析视图"><button id="tab-candidates" role="tab" aria-controls="candidates-view" aria-selected="true" data-tab="candidates-view">候选点</button><button id="tab-heatmaps" role="tab" aria-controls="heatmaps-view" aria-selected="false" data-tab="heatmaps-view" tabindex="-1">策略对照</button><button id="tab-raw" role="tab" aria-controls="raw-view" aria-selected="false" data-tab="raw-view" tabindex="-1">原始数据</button></div>
+        <div class="tabs" role="tablist" aria-label="分析视图"><button id="tab-candidates" role="tab" aria-controls="candidates-view" aria-selected="true" data-tab="candidates-view">候选点</button><button id="tab-network" role="tab" aria-controls="network-view" aria-selected="false" data-tab="network-view" tabindex="-1">网络输出</button><button id="tab-heatmaps" role="tab" aria-controls="heatmaps-view" aria-selected="false" data-tab="heatmaps-view" tabindex="-1">策略对照</button><button id="tab-raw" role="tab" aria-controls="raw-view" aria-selected="false" data-tab="raw-view" tabindex="-1">原始数据</button></div>
+        <section id="network-view" role="tabpanel" aria-labelledby="tab-network" hidden>
+          <p id="network-empty" class="muted">等待网络输出</p>
+          <div id="network-data" hidden>
+            <div id="network-position" class="muted"></div>
+            <div class="table-toolbar"><label class="overlay-label">显示<select id="network-kind"><option value="probabilities">概率 %</option><option value="logits">原始 logits</option></select></label><label class="check"><input id="network-common-scale" type="checkbox" checked> 统一色阶</label></div>
+            <div id="network-maps" class="network-grid"></div>
+            <p id="network-detail" class="heatmap-detail" aria-live="polite"></p>
+            <p class="muted">同一次固定朝向推理，温度 1。概率包含棋盘上已落子位置，与搜索先验的归一化范围不同。对手策略从当前局面预测对手下一手，未交换执子；optimistic 策略不表示点位胜率。</p>
+          </div>
+        </section>
         <section id="candidates-view" role="tabpanel" aria-labelledby="tab-candidates">
           <div class="table-toolbar"><span id="candidate-count" class="muted"></span><label class="check"><input id="visited-only" type="checkbox"> 仅已访问</label></div>
           <div class="table-scroll"><table><thead><tr><th><button data-sort="action">点位</button></th><th><button data-sort="network_prior">先验 %</button></th><th><button data-sort="visits">访问</button></th><th><button data-sort="visit_policy">访问 %</button></th><th aria-sort="descending"><button data-sort="selection_weight">选择 % ↓</button></th></tr></thead><tbody id="candidates"></tbody></table></div>
