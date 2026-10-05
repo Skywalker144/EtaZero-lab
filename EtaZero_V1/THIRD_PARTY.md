@@ -4,6 +4,8 @@
 
 KataGo copyright and MIT terms are retained in [licenses/KataGo.txt](licenses/KataGo.txt), and KataGomo terms in [licenses/KataGomo.txt](licenses/KataGomo.txt). These notices also cover the corresponding KataGo-derived modules inspected through SkyZero. Runtime semantics are maintained in the algorithm and implementation documents; this file records attribution and adaptation scope.
 
+MiniZero's small-span latent normalization guard is adapted from `scale_hidden_state` at revision `394b2e483d00cb658d5a24ccca297f864c3280c7`. Its Apache-2.0 license and RLG Lab copyright notice are retained in [licenses/MiniZero.txt](licenses/MiniZero.txt); EtaZero retains FP32 masked reductions and implements the guard without an in-place update.
+
 | Adaptation | Source | EtaZero scope |
 |---|---|---|
 | Parallel selfplay and inference | KataGo game threads, NN services, caches and synchronization | `cpp/src/selfplay/`, `inference/`, `search/`; shared batching, pooled synchronization, tiered child statistics and reusable worker resources |
@@ -22,7 +24,7 @@ KataGo copyright and MIT terms are retained in [licenses/KataGo.txt](licenses/Ka
 | Runtime, scheduling and plotting | MuZero_V2 runtime/layout references; SkyZero V7.19/V8.1 umbrella and GPU scheduling | Complete-round publication, cold-start quota, deterministic random evaluator, weight-only shared initialization and local scheduling; no claim of asynchronous/distributed parity |
 | Evaluation and Elo | MuZero_V2 arena/Elo/match; KataGo match profiles and root-visit convention | Paired openings, per-game resume, joint fit and bootstrap; EtaZero model identities, manifests and native search replace the source execution path |
 | Web workbench | User's MuZero `web/`, V2 `engine.py` and `eval_main.cpp` | Repository-level `web/` and native `serve`; persistent session protocol, published-model validation and canvas-aware search diagnostics |
-| MuZero normalization and gradient boundaries | MuZero_V2 `network.py` | `python/etazero/muzero/network.py`; FP32 masked min/max normalization and gradient scaling |
+| MuZero normalization and gradient boundaries | MuZero_V2 `network.py`; MiniZero `muzero_network.py` | `python/etazero/muzero/network.py`; FP32 masked min/max normalization with MiniZero's `1e-5` small-span guard, and MuZero_V2 gradient scaling |
 | MuZero dense residual trunk | MuZero_V2 masked ResNet | `python/etazero/muzero/resnet.py`; masked per-sample normalization, SiLU and two-convolution residual blocks; EtaZero retains its own inputs and heads |
 | MuZero sequence training | MuZero_V2 replay and training | `python/etazero/muzero/data.py`, `training.py`; unroll, absorbing-state and gradient boundaries adapted to EtaZero row multiplicity, side masks and optimizer modes |
 | Latent inference and search | MuZero_V2 initial/recurrent boundary; EtaZero search math | `cpp/src/muzero/`; independent device-local latent ownership, batching and search; not a claim of complete V2 search parity |
