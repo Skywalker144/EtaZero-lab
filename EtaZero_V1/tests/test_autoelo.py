@@ -8,6 +8,8 @@ import pytest
 
 from etazero.arena import Player, PairStore, build_schedule, discover_players, execute_pair, identity, run_arena
 from etazero.autoelo import autoelo_plan, load_elo_config, publish_latest
+from etazero.autoelo import run_autoelo
+from etazero.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pairs
 from etazero.config import ROOT, load_config
 from etazero.eval_config import load_evaluation_config
 from etazero.experiment import experiment_plan, run_experiment, Scheduler
@@ -19,7 +21,7 @@ def history(root, times, algorithm=None):
     save_json(root/'logs/iterations/000000.json', {'iteration': 0, 'elapsed_seconds': 0, 'model': None})
     for i, seconds in enumerate(times, 1):
         model = root/'models'/str(i)/'model.pt'
-        model.parent.mkdir(parents=True)
+        model.parent.mkdir(parents=True, exist_ok=True)
         model.write_bytes(f'{root.name}:{i}'.encode())
         info = {'id': str(i), 'path': str(model.relative_to(root)), 'sha256': sha256(model),
                 'canvas': 15, 'contract': CONTRACT_ID}
@@ -31,51 +33,202 @@ def history(root, times, algorithm=None):
     save_json(root/'.internal/state.json', {'iteration': len(times)+1, 'elapsed_seconds': times[-1]})
 
 
-def test_time_sampling_uses_actual_seconds_and_pins_last(tmp_path):
-    history(tmp_path/'a', [1, 2, 3, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100])
-    players = discover_players(tmp_path, points=10)
-    assert [p.seconds for p in players] == list(range(10, 101, 10))
-    # Fewer unique models are reported honestly; do not fabricate missing points.
+def test_explicit_arm_names_required_models_and_missing_history(tmp_path):
+    history(tmp_path/'a', [1, 20, 100])
     history(tmp_path/'b', [1, 100])
-    assert len([p for p in discover_players(tmp_path, points=10) if p.arm == 'b']) == 2
-    explicit = discover_players(tmp_path, points=1, arms=[('custom-name', tmp_path/'a'), ('b', tmp_path/'b')])
-    assert [(p.arm, p.seconds) for p in explicit] == [('custom-name', 100), ('b', 100)]
+    players = discover_players(tmp_path, stride=4, include_first=False,
+                               arms=[('custom-name', tmp_path/'a'), ('b', tmp_path/'b')],
+                               required_ids=('custom-name:00000002',))
+    assert [(p.arm, p.seconds) for p in players] == [('custom-name', 20), ('custom-name', 100), ('b', 100)]
     with pytest.raises(ValueError, match='no committed state'):
-        discover_players(tmp_path, points=10, arms=[('missing', tmp_path/'missing')])
+        discover_players(tmp_path, arms=[('missing', tmp_path/'missing')])
 
 
-def test_two_level_neighbors_three_bridges_and_final_pairs():
-    players = [Player(f'{arm}:{i}', arm, i, i*10, '', '')
-               for arm in ('a', 'b', 'c') for i in range(1, 11)]
-    schedule = build_schedule(players, 2, cross_time_fractions=(.3, .6, .9), final_cross=True)
-    assert len(schedule) == 63
-    assert ('a:1', 'a:3') in schedule and ('a:1', 'a:4') not in schedule
-    for i in (3, 6, 9, 10):
-        assert (f'a:{i}', f'b:{i}') in schedule
-        assert (f'a:{i}', f'c:{i}') in schedule
-        assert (f'b:{i}', f'c:{i}') in schedule
-    assert len(build_schedule(players, 2, cross_time_fractions=(1,), final_cross=True)) == 54
-    with pytest.raises(ValueError, match='connected'):
-        build_schedule(players, 2, cross_time_fractions=(), final_cross=False)
+def test_fixed_iteration_sampling_and_bridges_survive_extension_and_new_arm(tmp_path):
+    history(tmp_path/'a', list(range(1, 28)))
+    history(tmp_path/'b', list(range(1, 28)))
+    players = discover_players(tmp_path, stride=8, include_first=False)
+    assert [p.iteration for p in players if p.arm == 'a'] == [8, 16, 24, 27]
+    edges = build_schedule(players, 2, cross_seconds=10, stride=8, final_cross=True)
+    assert ('a:00000008', 'b:00000008') in edges
+    # The 20-second target ties 16 and 24; choose the earlier checkpoint.
+    assert ('a:00000016', 'b:00000016') in edges
+    history(tmp_path/'a', list(range(1, 44)))
+    history(tmp_path/'b', list(range(1, 44)))
+    history(tmp_path/'c', [1, 2])
+    players = discover_players(tmp_path, stride=8, include_first=False)
+    assert [p.iteration for p in players if p.arm == 'a'] == [8, 16, 24, 32, 40, 43]
+    extended = build_schedule(players, 2, cross_seconds=10, stride=8, final_cross=True)
+    stable = [edge for edge in edges if not any(p.endswith('00000027') for p in edge)]
+    assert set(stable) <= set(extended)
+    assert ('a:00000043', 'c:00000002') in extended
 
 
-def test_bridge_times_use_all_arms_common_horizon():
-    players = [Player(f'{arm}:{i}', arm, i, i*scale, '', '')
-               for arm, scale in [('a', 10), ('b', 10), ('c', 5)] for i in range(1, 11)]
-    schedule = build_schedule(players, 1, cross_time_fractions=(.6,), final_cross=False)
-    assert ('a:3', 'b:3') in schedule
-    assert ('a:3', 'c:6') in schedule
-    assert ('a:6', 'b:6') not in schedule
+def complete_fake_pair(manifest, pair, directory, limit=None):
+    store = PairStore(directory, limit or manifest['games_per_pair'])
+    for task in store.tasks(pair_seed(manifest, pair)):
+        if task['moves'] is None:
+            store.accept(dict(type='opening', id=task['id'], generator=task['generator'],
+                              seed=task['seed'], moves=[12], value=0))
+        for color in (0, 1):
+            if task['mask'] & (1 << color):
+                store.accept(dict(type='game', id=task['id']*2+color,
+                                  opening_id=task['id'], black_a=color == 0,
+                                  winner=0, moves=[12, 13], seconds=1))
+
+
+def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path, monkeypatch):
+    config = tmp_path/'config'; config.mkdir()
+    (config/'elo.cfg').write_text('[elo]\nstride=8\ncross_seconds=1000\ngames_per_pair=4\nbootstrap_samples=2\n')
+    (config/'match.cfg').write_text('[match]\ndevice=cpu\n')
+    data = tmp_path/'data'
+    for arm in ('b', 'c'):
+        history(data/arm, list(range(1, 17)))
+    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    calls = []
+    def native(output, manifest, binary, samples, workers, env):
+        for pair in manifest['pairs']:
+            directory = output/'pairs'/pair['id']
+            calls.extend((pair['id'], task['id']) for task in
+                         PairStore(directory, manifest['games_per_pair']).tasks(pair_seed(manifest, pair)))
+            complete_fake_pair(manifest, pair, directory)
+        from etazero.elo import write_ratings
+        return write_ratings(output, samples)
+    monkeypatch.setattr('etazero.autoelo.run_arena', native)
+    # The test native still publishes the same snapshot contract as run_arena.
+    def publish_and_run(output, manifest, *args):
+        save_json(output/'manifest.json', manifest)
+        return native(output, manifest, *args)
+    monkeypatch.setattr('etazero.autoelo.run_arena', publish_and_run)
+    def run(**overrides):
+        plan = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides=overrides)
+        calls.clear()
+        run_autoelo(plan, tmp_path/'binary')
+        perf = load_json(next((Path(plan['output'])/'invocations').glob('*.json')))
+        return plan, list(calls), perf
+    first, tasks, perf = run()
+    assert len(tasks) == 6 and perf['new_games'] == 12
+    # A new alphabetically earlier arm must not replace the persisted anchor.
+    history(data/'a', list(range(1, 17)))
+    second, tasks, perf = run()
+    assert second['manifest']['anchor'] == first['manifest']['anchor']
+    assert len(tasks) == 6 and perf['reused_games'] == 12 and perf['new_games'] == 12
+    third, tasks, perf = run(games_per_pair='8')
+    assert len(tasks) == 12 and perf['reused_games'] == 24 and perf['new_games'] == 24
+    _, tasks, _ = run(games_per_pair='8')
+    assert tasks == []
+    # Smaller schedules read only the requested prefix of the larger cache.
+    plan = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides={'games_per_pair':'4'})
+    assert prepare_pairs(Path(plan['base']), Path(plan['output']), plan['manifest']) == 24
+    for arm in ('a', 'b', 'c'):
+        history(data/arm, list(range(1, 25)))
+    extended, tasks, perf = run()
+    assert extended['manifest']['anchor'] == first['manifest']['anchor']
+    assert perf['reused_games'] == 12 and perf['new_games'] == 36
+    assert len(tasks) == 18
+    off_grid = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides={'stride':'10'})
+    assert first['manifest']['anchor'] in {p['id'] for p in off_grid['manifest']['players']}
+
+
+def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path):
+    manifest = {'players': [{'id':'a','sha256':'aa'}, {'id':'b','sha256':'bb'}],
+                'config': {'match': {'seed':1, 'visits':100, 'games':4}},
+                'binary_sha256':'bin', 'execution': {'pair_workers':1},
+                'source_sha256': {'eval_config.py':'compiler', 'elo.py':'fit'}}
+    pair = {'id':identity(('a','b')), 'players':['a','b']}
+    import copy
+    original = pair_identity(manifest, pair)
+    other = copy.deepcopy(manifest)
+    other.update(anchor='b', sampling={'stride':32}, games_per_pair=40)
+    other['config']['match']['games'] = 40
+    other['source_sha256']['elo.py'] = 'new-fit'
+    other['players'][0].update(model='/moved/model.pt', seconds=1000)
+    assert pair_identity(other, pair) == original
+    for group, key, value in [('config', 'visits', 200), ('execution', 'pair_workers', 2),
+                               ('source_sha256', 'eval_config.py', 'changed')]:
+        changed = copy.deepcopy(manifest)
+        target = changed[group]['match'] if group == 'config' else changed[group]
+        target[key] = value
+        assert pair_identity(changed, pair) != original
+    changed = copy.deepcopy(manifest); changed['binary_sha256'] = 'new-bin'
+    assert pair_identity(changed, pair) != original
+    changed = copy.deepcopy(manifest); changed['players'][0]['sha256'] = 'new-model'
+    assert pair_identity(changed, pair) != original
+
+
+def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_path):
+    manifest = {'players':[{'id':'a','sha256':'aa'}, {'id':'b','sha256':'bb'}],
+                'config':{'match':{'seed':1}}, 'binary_sha256':'bin', 'games_per_pair':4}
+    pair = {'id':identity(('a','b')), 'players':['a','b']}
+    manifest['pairs'] = [pair]
+    old = tmp_path/'old'; directory = old/'pairs'/pair['id']
+    save_json(old/'manifest.json', manifest)
+    store = PairStore(directory, 4); task = store.tasks(pair_seed(manifest, pair))[0]
+    store.accept(dict(type='opening', id=0, generator=0, seed=task['seed'], moves=[12], value=0))
+    store.accept(dict(type='game', id=0, opening_id=0, black_a=True, winner=0, moves=[12,13], seconds=1))
+    output = tmp_path/'new'
+    assert prepare_pairs(tmp_path, output, manifest) == 1
+    pending = PairStore(output/'pairs'/pair['id'],4).tasks(pair_seed(manifest,pair))
+    assert pending[0]['mask'] == 2 and pending[0]['moves'] == [12]
+    complete_fake_pair(manifest, pair, output/'pairs'/pair['id'])
+    retain_pairs(tmp_path, output, manifest)
+    # Completing the other side propagates the original trial lineage.
+    assert prepare_pairs(tmp_path, tmp_path/'third', manifest) == 4
+    conflicting = tmp_path/'zz-rerun'
+    save_json(conflicting/'manifest.json', manifest)
+    complete_fake_pair(manifest, pair, conflicting/'pairs'/pair['id'])
+    p = conflicting/'pairs'/pair['id']/'games/00000000.json'
+    game = load_json(p); game['winner'] = 1; save_json(p,game)
+    assert prepare_pairs(tmp_path, tmp_path/'fourth', manifest) == 4
+    assert load_json(tmp_path/'fourth'/'pairs'/pair['id']/'games/00000000.json')['winner'] == 0
+
+
+def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_path, monkeypatch):
+    config = tmp_path/'config'; config.mkdir()
+    (config/'elo.cfg').write_text('[elo]\nstride=8\ngames_per_pair=4\nbootstrap_samples=2\n')
+    (config/'match.cfg').write_text('[match]\ndevice=cpu\n')
+    data = tmp_path/'data'
+    for arm in ('a','b'):
+        history(data/arm, list(range(1,9)))
+    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    plan = autoelo_plan(config, tmp_path/'binary', data=data, environ={})
+    base, output = Path(plan['base']), Path(plan['output'])
+    previous = base/'previous'; previous.mkdir(parents=True)
+    publish_latest(base, previous)
+    def fail(output, manifest, *_):
+        save_json(output/'manifest.json', manifest)
+        pair = manifest['pairs'][0]
+        store = PairStore(output/'pairs'/pair['id'],4)
+        task = store.tasks(pair_seed(manifest,pair))[0]
+        store.accept(dict(type='opening',id=0,generator=0,seed=task['seed'],moves=[12],value=0))
+        store.accept(dict(type='game',id=0,opening_id=0,black_a=True,winner=0,moves=[12,13],seconds=1))
+        raise RuntimeError('interrupted native')
+    monkeypatch.setattr('etazero.autoelo.run_arena', fail)
+    with pytest.raises(RuntimeError,match='interrupted native'):
+        run_autoelo(plan,tmp_path/'binary')
+    assert load_json(output/'status.json')['status'] == 'failed'
+    assert (base/'latest').resolve() == previous
+    assert len(list((base/'pair_cache').glob('*/games/*.json'))) == 1
+    def recover(output, manifest, binary, samples, *_):
+        for pair in manifest['pairs']:
+            complete_fake_pair(manifest,pair,output/'pairs'/pair['id'])
+        from etazero.elo import write_ratings
+        return write_ratings(output,samples)
+    monkeypatch.setattr('etazero.autoelo.run_arena',recover)
+    run_autoelo(plan,tmp_path/'binary')
+    assert (base/'latest').resolve() == output
+    performance = load_json(Path(load_json(output/'status.json')['performance']))
+    assert performance['reused_games'] == 1 and performance['new_games'] == 3
 
 
 def test_shared_profiles_are_independent_and_strict(tmp_path):
-    (tmp_path/'elo.cfg').write_text('[elo]\npoints=4\npair_workers=2\n')
-    (tmp_path/'elo.cfg.local').write_text('[elo]\npoints=5\n')
-    assert load_elo_config(tmp_path, environ={})['points'] == 5
-    assert load_elo_config(tmp_path, environ={'ELO_POINTS': '6'})['points'] == 6
-    assert load_elo_config(tmp_path, environ={'ELO_POINTS': '6'}, overrides={'points': '7'})['points'] == 7
-    for overrides in [{'games_per_pair': '6'}, {'points': '0'}, {'pair_workers': '0'},
-                      {'cross_time_fractions': 'nan'}, {'cross_time_fractions': '.3,.3'}]:
+    (tmp_path/'elo.cfg').write_text('[elo]\nstride=4\npair_workers=2\n')
+    (tmp_path/'elo.cfg.local').write_text('[elo]\nstride=5\n')
+    assert load_elo_config(tmp_path, environ={})['stride'] == 5
+    assert load_elo_config(tmp_path, environ={'ELO_STRIDE': '6'})['stride'] == 6
+    assert load_elo_config(tmp_path, environ={'ELO_STRIDE': '6'}, overrides={'stride': '7'})['stride'] == 7
+    for overrides in [{'games_per_pair': '6'}, {'stride': '0'}, {'pair_workers': '0'},
+                      {'cross_seconds': 'nan'}, {'cross_seconds': '0'}]:
         with pytest.raises(ValueError):
             load_elo_config(tmp_path, environ={}, overrides=overrides)
     training = load_config(CONFIGS / 'muzero')
@@ -90,7 +243,7 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
 
 def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
-    (config/'elo.cfg').write_text('[elo]\npoints=3\n')
+    (config/'elo.cfg').write_text('[elo]\nstride=1\n')
     (config/'match.cfg').write_text('[match]\nreuse_tree=false\nuse_graph_search=false\ncache_entries=0\n')
     (config/'untrained').mkdir()
     (config/'untrained/run.cfg').write_text('[run]\nextends=baseline\n')

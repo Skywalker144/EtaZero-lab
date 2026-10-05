@@ -50,13 +50,12 @@ def save_manifest(path: Path, manifest: dict) -> None:
     write_json(path, manifest)
 
 
-def discover_players(root: Path, stride: int = 1, *, points: int | None = None,
-                     arms: list[tuple[str, Path]] | None = None) -> list[Player]:
+def discover_players(root: Path, stride: int = 1, *,
+                     arms: list[tuple[str, Path]] | None = None,
+                     include_first: bool = True, required_ids: tuple[str, ...] = ()) -> list[Player]:
     if stride < 1:
         raise ValueError('Stride must be positive')
     players = []
-    if points is not None and points < 1:
-        raise ValueError('Points must be positive')
     if arms is None:
         paths = [root] if (root/'.internal/state.json').is_file() else sorted(root.iterdir())
         arms = [(p.name, p) for p in paths if (p/'.internal/state.json').is_file()]
@@ -82,17 +81,11 @@ def discover_players(root: Path, stride: int = 1, *, points: int | None = None,
             raise ValueError(f'Committed time does not match state: {arm}')
         if not rows:
             raise ValueError(f'Arm has no committed models: {arm}')
-        if points is not None:
-            # Targets are 10%,20%,...,100% for points=10. Break ties towards
-            # the earlier checkpoint and deduplicate sparse/uneven histories.
-            selected = {min(range(len(rows)), key=lambda i: abs(rows[i]['elapsed_seconds'] -
-                        rows[-1]['elapsed_seconds'] * fraction / points))
-                        for fraction in range(1, points+1)}
-            selected.add(len(rows)-1)
-            rows = [row for i, row in enumerate(rows) if i in selected]
         for row in rows:
             number = row['iteration']
-            if points is None and number not in (rows[0]['iteration'], rows[-1]['iteration']) and number % stride:
+            if (number != rows[-1]['iteration'] and number % stride
+                    and not (include_first and number == rows[0]['iteration'])
+                    and f'{name}:{number:08d}' not in required_ids):
                 continue
             model, info = model_info(arm/row['model']['path'])
             if info != row['model']:
@@ -105,12 +98,14 @@ def discover_players(root: Path, stride: int = 1, *, points: int | None = None,
 
 
 def build_schedule(players: list[Player], neighbors: int, *,
-                   cross_time_fractions: tuple[float, ...] | None = None,
-                   final_cross: bool = False) -> list[tuple[str, str]]:
+                   final_cross: bool = False, cross_seconds: float | None = None,
+                   stride: int = 1) -> list[tuple[str, str]]:
     if neighbors < 1:
         raise ValueError('Neighbors must be positive')
     if not players or len({p.id for p in players}) != len(players):
         raise ValueError('Need uniquely identified players')
+    if cross_seconds is not None and (not math.isfinite(cross_seconds) or cross_seconds <= 0 or stride < 1):
+        raise ValueError('Cross seconds and stride must be positive')
     arms = {}
     for player in players:
         arms.setdefault(player.arm, []).append(player)
@@ -120,12 +115,20 @@ def build_schedule(players: list[Player], neighbors: int, *,
         for i, player in enumerate(rows):
             for other in rows[max(0, i-neighbors):i]:
                 edges.add(tuple(sorted((player.id, other.id))))
-    if cross_time_fractions is not None and any(not math.isfinite(f) or not 0 < f <= 1
-                                               for f in cross_time_fractions):
-        raise ValueError('Cross time fractions must be in (0,1]')
-    horizon = min(rows[-1].seconds for rows in arms.values())
     for a, b in combinations(arms.values(), 2):
-        if cross_time_fractions is None:
+        if cross_seconds is not None:
+            # Only regular checkpoints participate in fixed-time bridges. Once
+            # both histories bracket a target, extending them cannot move it.
+            stable_a = [p for p in a if p.iteration % stride == 0]
+            stable_b = [p for p in b if p.iteration % stride == 0]
+            if stable_a and stable_b:
+                pair_horizon = min(stable_a[-1].seconds, stable_b[-1].seconds)
+                for index in range(1, math.floor(pair_horizon / cross_seconds)+1):
+                    target = index * cross_seconds
+                    left = min(stable_a, key=lambda p: abs(p.seconds-target))
+                    right = min(stable_b, key=lambda p: abs(p.seconds-target))
+                    edges.add(tuple(sorted((left.id, right.id))))
+        else:
             pair_horizon = min(a[-1].seconds, b[-1].seconds)
             for source, target in ((a, b), (b, a)):
                 for player in source:
@@ -133,11 +136,6 @@ def build_schedule(players: list[Player], neighbors: int, *,
                         continue
                     other = min(target, key=lambda p: abs(p.seconds - player.seconds))
                     edges.add(tuple(sorted((player.id, other.id))))
-        else:
-            for fraction in cross_time_fractions:
-                left = min(a, key=lambda p: abs(p.seconds - horizon*fraction))
-                right = min(b, key=lambda p: abs(p.seconds - horizon*fraction))
-                edges.add(tuple(sorted((left.id, right.id))))
         if final_cross:
             edges.add(tuple(sorted((a[-1].id, b[-1].id))))
     reached = {players[0].id}
