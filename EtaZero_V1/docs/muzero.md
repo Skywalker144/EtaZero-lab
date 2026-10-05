@@ -23,7 +23,7 @@ CONFIG_DIR=configs/muzero bash scripts/run.sh
 [网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用 MuZero_V2 的两层全宽 3×3 残差块、逐样本 masked normalization 与 SiLU。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。ResNet 的归一化对每个样本的所有通道和有效格点进行 FP32 归约，不维护 BatchNorm 统计，卷积保留来源的默认初始化；prediction 不额外加入末端归一化。ResNet 要求 `katago_optimizer=false`，不套用 NBT/fson 参数分组。相同通道数与块数不保证相同参数量或计算量。
 
 - representation 接收现有五空间平面和六全局特征，包含棋规、执色、禁手特征与 PDA 条件。
-- latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。FP16 推理仍在 FP32 做归一化。
+- latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。采用 MiniZero 的极小跨度保护：当 `max-min < 1e-5` 时，分母为 `max-min+1e-5`，否则使用原跨度。输出保持在 `[0,1]` 内，极小跨度时最大值可小于 1；该规则同时用于 representation、dynamics、训练和导出推理。FP16 推理仍在 FP32 做归一化。
 - dynamics 只接收 latent 和 int64 `[B]` 画布动作，以 one-hot 动作平面生成下一状态；不接收未来观测、占用、禁手或真实终局。
 - prediction 复用完整 EtaZero heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero 两种主干均支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
 
