@@ -47,6 +47,32 @@ def test_normalization_hand_calculated_and_constant():
     assert hidden.grad[:, :, :, -1].eq(0).all()
 
 
+@pytest.mark.parametrize('device', ['cpu', 'cuda'])
+@pytest.mark.parametrize('span', [0., 2e-12, 5e-6, 1e-5, 2e-5])
+def test_normalization_small_span_values_and_gradients(device, span):
+    if device == 'cuda' and os.environ.get('ETAZERO_GPU_TESTS') != '1':
+        pytest.skip('Requires host CUDA')
+    hidden = torch.tensor([[[[0., span / 4., span, 1e6]]]],
+                          device=device, requires_grad=True)
+    mask = torch.tensor([[[[1., 1., 1., 0.]]]], device=device)
+    denominator = span + 1e-5 if span < 1e-5 else span
+    expected = torch.tensor([[[[0., span / (4. * denominator),
+                               span / denominator, 0.]]]], device=device)
+    actual = normalize_hidden_state(hidden, mask)
+    torch.testing.assert_close(actual, expected)
+    assert actual.dtype == torch.float32
+    actual[0, 0, 0, 1].backward()
+    assert torch.isfinite(hidden.grad).all()
+    assert hidden.grad[0, 0, 0, -1] == 0
+    assert hidden.grad.abs().max() <= 1e5
+    if span:
+        # Analytic derivative of (x1 - x0) / (x2 - x0 + epsilon).
+        expected_grad = torch.tensor([[[[-1. / denominator + span / (4. * denominator**2),
+                                         1. / denominator,
+                                         -span / (4. * denominator**2), 0.]]]], device=device)
+        torch.testing.assert_close(hidden.grad, expected_grad)
+
+
 def test_gradient_scaling_is_identity_and_scales_only_backward():
     x = torch.tensor([2., -3.], requires_grad=True)
     output = scale_gradient(x, .25)
