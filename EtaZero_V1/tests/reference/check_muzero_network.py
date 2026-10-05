@@ -1,4 +1,4 @@
-"""Compare normalization, gradients and dense trunks to pinned MuZero_V2 bodies."""
+"""Check MuZero_V2 parity and the intentional MiniZero constant-span adaptation."""
 import ast
 import hashlib
 import json
@@ -81,7 +81,7 @@ def main():
     exec(compile(selected, str(Path(reference['root']) / relative), 'exec'), namespace)
     torch.set_num_threads(1)
     torch.manual_seed(151)
-    cases = 0
+    normal_cases = constant_cases = 0
     for channels in (1, 7, 24):
         for size in (5, 6):
             for constant in (False, True):
@@ -96,15 +96,22 @@ def main():
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                     weights = torch.randn_like(actual)
                     (actual * weights).sum().backward(); (expected * weights).sum().backward()
-                    torch.testing.assert_close(x.grad, y.grad, rtol=0, atol=0)
-                    cases += 1
+                    if constant:
+                        # MiniZero's zero-span denominator is 1e-5, versus V2's 1.
+                        torch.testing.assert_close(x.grad * 1e-5, y.grad, rtol=1e-5, atol=1e-6)
+                        constant_cases += 1
+                    else:
+                        torch.testing.assert_close(x.grad, y.grad, rtol=0, atol=0)
+                        normal_cases += 1
     for factor in (0., .5, 1., .2):
         x = torch.randn(13, requires_grad=True); y = x.detach().clone().requires_grad_()
         actual = scale_gradient(x, factor); expected = namespace['scale_gradient'](y, factor)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         actual.square().sum().backward(); expected.square().sum().backward()
         torch.testing.assert_close(x.grad, y.grad, rtol=0, atol=0)
-    print(f'MuZero_V2: {cases} normalization forward/backward cases and 4 gradient scales passed')
+    print(f'MuZero_V2: {normal_cases} normal-span forward/backward parity cases, '
+          f'{constant_cases} constant forward parity / MiniZero gradient adaptations, '
+          'and 4 gradient scales passed')
     check_resnet(namespace)
 
 
