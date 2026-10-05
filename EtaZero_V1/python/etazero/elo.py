@@ -142,15 +142,17 @@ def write_ratings(output: Path, samples: int = 300) -> dict:
     arms = defaultdict(list)
     for row in result['ratings']:
         arms[row['arm']].append(row)
-    colors = ('#2764A5', '#C27B19', '#A34473', '#667C3E', '#696969')
-    markers = ('o', 's', '^', 'D', 'v')
+    # Distinct hues first; avoid adjacent dark/light variants of one hue.
+    colors = ('#0072B2', '#E68600', '#009E73', '#7B2CBF', '#D62728',
+              '#222222', '#00A6B2', '#CC3A8C', '#8C564B', '#A38B00')
+    markers = ('o', 's', '^', 'D', 'v', 'P', 'X', '<', '>', 'h')
     for index, (arm, rows) in enumerate(sorted(arms.items())):
         rows.sort(key=lambda r: r['seconds'])
         hours = [r['seconds'] / 3600 for r in rows]
         line, = axis.plot(hours, [r['elo'] for r in rows], marker=markers[index % len(markers)],
                           color=colors[index % len(colors)], markersize=4, label=arm)
         axis.fill_between(hours, [r['lower'] for r in rows], [r['upper'] for r in rows],
-                          color=line.get_color(), alpha=0.16)
+                          color=line.get_color(), alpha=0.08)
     config = manifest['config']['match']
     axis.set(xlabel='Cumulative committed training wall time (hours)',
              ylabel=f"Relative Elo ({manifest['anchor']} = 0)",
