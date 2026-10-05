@@ -42,7 +42,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 
 ## 自动实验 Elo
 
-[scripts/autoelo.sh](../scripts/autoelo.sh) 使用 [autoelo.py](../python/etazero/autoelo.py) 规划时间采样与赛程，复用 arena 的 C++ 对战、逐局恢复、联合拟合和绘图。`autoexp` 在所有调度臂成功达到预算后默认运行；`exp.cfg` 的 `experiment.autoelo = false` 或 `AUTOELO=false` 可关闭。训练中断或失败时不启动 Elo。评估失败明确报错并单独保存状态，已完成训练不重跑；原命令重启会跳过完成训练并恢复评估。
+[scripts/autoelo.sh](../scripts/autoelo.sh) 使用 [autoelo.py](../python/etazero/autoelo.py) 规划固定轮次采样与增量赛程，复用 arena 的 C++ 对战、逐局恢复、联合拟合和绘图。`autoexp` 在所有调度臂成功达到预算后默认运行；`exp.cfg` 的 `experiment.autoelo = false` 或 `AUTOELO=false` 可关闭。训练中断或失败时不启动 Elo。评估失败明确报错并单独保存状态，已完成训练不重跑；原命令重启会跳过完成训练并恢复评估。
 
 ```bash
 # 在本版本目录执行：仅发现实际已训练的数据臂。
@@ -60,22 +60,28 @@ bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估�
 
 | 字段 | 含义 |
 |---|---|
-| `points` | 每臂目标时间点数，目标为自身累计时间的 `1/points` 到 `100%` |
+| `stride` | 每隔固定 iteration 选择一个模型，另保留当前最后模型 |
 | `neighbors` | 在已选模型序列上向前连接的近邻级数 |
-| `cross_time_fractions` | 相对于所有参与臂共同时间上限的跨臂对战位置，各臂取最近的已选模型；空值关闭 |
+| `cross_seconds` | 跨臂固定累计训练时间间隔，单位秒；在双方固定轮次模型覆盖的时间内取最近模型 |
 | `final_cross` | 各臂最终模型是否两两比赛 |
 | `games_per_pair` | 每对总局数，必须为四的正倍数 |
 | `bootstrap_samples` | 成对开局 bootstrap 重采样次数 |
-| `anchor` | Elo 零点模型 ID；空值选择首臂最接近自身中期的已选模型 |
+| `anchor` | Elo 零点模型 ID；空值复用结果根的 `anchor.json`，首次选择首臂最早的采样模型 |
 | `pair_workers` | 同时运行的 C++ 模型对进程数 |
 
-时间采样使用已提交轮次的实际累计净墙钟，不按迭代数推算；最近模型重复则去重，最后模型强制保留。实际点数不足时显示真实数量，不伪造模型。跨臂和最终配对重复时只安排一次；全部赛果联合拟合，不先分别估计再平移，不约束曲线单调。
+采样选择 iteration 为 `stride` 整倍数的已提交模型，最后模型强制保留且去重；横轴仍使用模型所属轮次实际累计净墙钟，不按迭代数推算。延长训练后，旧临时末点退出当前采样，其原始比赛保留。固定 anchor 即使不在新采样网格上也保留，模型内容改变或参考臂缺失明确拒绝；显式 anchor 可改变本次图的零点，不重写默认固定参考。
+
+组内按已选模型连接 `neighbors` 级近邻。跨臂按 `cross_seconds` 的整数倍选点，仅使用固定轮次模型，并要求每对臂的固定模型时间覆盖目标；最近距离相同时选择更早模型。每对臂独立确定覆盖范围，新增臂不改变其他臂的时间配对。临时末点不参与固定时间配对，`final_cross` 单独安排当前最终模型两两比赛。配对重复时只安排一次；比较图必须连通。全部赛果联合重新拟合，不先分别估计再平移，不约束曲线单调；增加数据后旧模型的 Elo 与区间可能变化。
 
 所有模型共用伞目录 `match.cfg`，直接覆盖 baseline 比赛 profile，再应用伞目录 `match.cfg.local` 和 `MATCH_` 环境覆盖，不继承各臂的训练或比赛条件。局数由 `elo.games_per_pair` 控制。MuZero 要求关闭图搜索与子树复用、根对称数量为一，不兼容条件在启动前拒绝。混合 AZ/MZ 时须在共享比赛配置中满足这些约束。固定 visits 不等于相同思考时间，评估耗时不进入训练横轴。
 
 独立 `--data` 发现有已提交 state 的实际数据臂；autoexp 使用本次完整调度臂列表和真实输出路径，支持自定义 run_dir。autoexp 的 CUDA 比赛使用第一个训练 GPU 槽位，子进程通过 `CUDA_VISIBLE_DEVICES` 映射为 `cuda:0`；独立 autoelo 遵循比赛 device 与当前可见设备。
 
-默认结果根为数据伞目录的 `elo/`；配置臂输出分散在不同父目录时使用 controller 默认目录下的 `elo/`，也可用 `--output` 指定根目录。模型、赛程、采样、比赛条件、二进制或并行执行条件改变时创建独立评估子目录，旧原始结果不覆盖。局数改变也创建新评估。同一计划重跑只补缺失比赛，全部完成才拟合并原子更新 `elo/latest`，当前图入口为 `elo/latest/elo.png`。
+默认结果根为数据伞目录的 `elo/`；配置臂输出分散在不同父目录时使用 controller 默认目录下的 `elo/`，也可用 `--output` 指定根目录。模型、赛程、采样、比赛条件、二进制或并行执行条件改变时创建独立评估子目录，旧原始结果不覆盖。局数改变也创建新评估。`pair_cache/` 按模型对身份保存原始开局和逐局记录，各结果子目录保存独立快照；新增臂、延长训练、改变采样或拟合设置时，匹配的比赛直接复用。提高 `games_per_pair` 只补后续开局；降低局数时只读取所需前缀。
+
+缓存身份包含有序双方模型 ID 与内容校验值、实际比赛种子、比赛与开局配置（不含目标局数）、native binary、比赛配置转换源码以及并行执行条件。模型路径、训练时间、完整赛程、anchor、采样和 Elo 拟合源码不决定比赛身份。改变 visits、精度、开局、搜索／组批参数或对战二进制等条件时重新比赛。历史评估目录中身份一致的对局自动导入，独立重跑同一模型对时每个开局只采用一个试验来源，不叠加重复赛果或混合两次试验的换色对局。中断时已完成开局和逐局记录也进入缓存，恢复只补缺失的一侧。
+
+每次调用显示 `reused_games`，性能记录保存复用局数和新增局数。全部完成才拟合并原子更新 `elo/latest`，当前图入口为 `elo/latest/elo.png`。
 
 每套结果保存 `plan.json`、`manifest.json`、`resolved.cfg`、`status.json`，以及 `pairs/` 的开局、逐局赛果与 native 日志；失败不发布新的 latest。`invocations/` 保存每次调用的性能记录，恢复调用另存。
 
