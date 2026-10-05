@@ -1,4 +1,12 @@
 {
+  "MiniZero": {
+    "repository": "https://github.com/rlglab/minizero",
+    "commit": "394b2e483d00cb658d5a24ccca297f864c3280c7",
+    "sha256": {
+      "minizero/network/py/muzero_network.py": "6816d072a71d7eb54128b09d57724a5aab9d96428e80faced6209fb865cb2232",
+      "LICENSE": "4974455b3117070339506dd6ab4d30709edb7a7e70133297b4ee1323d7be264a"
+    }
+  },
   "KataGo": {
     "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
     "root": "/home/sky/RL/SkyZero/KataGo",
