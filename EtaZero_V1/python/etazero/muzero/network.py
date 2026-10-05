@@ -4,7 +4,8 @@ The final latent channel is the immutable board mask, not an occupancy mask.
 Dynamics consumes only latent and a canvas-coordinate action. All predictions
 describe the player to move at that latent step; search must flip W/L on edges.
 No reward, terminal predictor, real-board transition or future observation is used.
-Masked min/max normalization follows the pinned MuZero_V2 implementation.
+Masked min/max normalization adapts MuZero_V2 with MiniZero's small-span guard
+(Apache-2.0, attribution and pinned source in THIRD_PARTY.md).
 """
 import copy
 from dataclasses import dataclass
@@ -54,12 +55,13 @@ class NetworkConfig:
 
 
 def normalize_hidden_state(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """FP32 per-sample min/max over channels and valid cells; constant -> zero."""
+    """FP32 masked per-sample min/max, with MiniZero's small-span protection."""
     x = hidden.float()
     minimum = x.masked_fill(mask == 0, float('inf')).amin([1, 2, 3], keepdim=True)
     maximum = x.masked_fill(mask == 0, float('-inf')).amax([1, 2, 3], keepdim=True)
     span = maximum - minimum
-    denominator = torch.where(span > 0, span, torch.ones_like(span))
+    # MiniZero adds epsilon only to small spans; ordinary ranges stay unchanged.
+    denominator = torch.where(span < 1e-5, span + 1e-5, span)
     return ((x - minimum) / denominator).masked_fill(mask == 0, 0)
 
 
