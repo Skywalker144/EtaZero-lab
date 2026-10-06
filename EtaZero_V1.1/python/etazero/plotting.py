@@ -134,7 +134,7 @@ def run_history(run_dir, state=None):
     return [history[k] for k in sorted(history)]
 
 
-def _series(axis, series, logarithmic=False, legend_columns=1, linestyles=None):
+def _series(axis, series, logarithmic=False, legend_columns=1, show_markers=None):
     import numpy as np
     positive = True
     for index, (label, color, x, y) in enumerate(series):
@@ -142,9 +142,11 @@ def _series(axis, series, logarithmic=False, legend_columns=1, linestyles=None):
         if not np.isfinite(values).any():
             continue
         positive &= bool((values[np.isfinite(values)] > 0).all())
+        mark = (show_markers is None or show_markers[index]) and (
+            len(values) == 1 or not np.isfinite(values).all())
         axis.plot(x, values, color=color, linewidth=1.7,
-                  marker='o' if len(values) == 1 or not np.isfinite(values).all() else None, markersize=3,
-                  linestyle=linestyles[index] if linestyles else '-', label=label)
+                  marker='o' if mark else None, markersize=3,
+                  linestyle='-', label=label)
     if axis.lines:
         if logarithmic and positive:
             axis.set_yscale('log')
@@ -275,7 +277,7 @@ def loss_figure(history):
             val = [r.get('validation', {}).get(key, float('nan')) for r in trained]
             x = [r['iteration'] for r in trained]
             _series(axis, [('Train', BLUE, x, train), ('Validation', RED, x, val)],
-                    logarithmic=True, linestyles=('-', '--'))
+                    logarithmic=True, show_markers=(True, False))
             axis.set_xlim(0, max(1.25, max(x, default=1)*1.025))
         figure.supxlabel(
             'Train: round mean over committed consumed batches; validation: raw model at round end.\n'
