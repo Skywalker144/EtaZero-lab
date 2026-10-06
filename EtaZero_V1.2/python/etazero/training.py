@@ -7,12 +7,12 @@ import random
 import uuid
 import numpy as np
 import torch
-from .config import fingerprint
+from .config import resume_config
 from .network import make_network, TrainingForward
 from .optimization import optimization_for, optimizer_for
 from .reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
 from .schema import CONTRACT_ID
-from .storage import atomic_write, load_json, save_json, sha256, sync_directory
+from .storage import atomic_write, load_json, save_json, sync_directory
 from .symmetry import augment_batch
 
 
@@ -42,8 +42,8 @@ def forward_batch(forward, tensors):
             'value', 'td_value', 'full_game_weight', 'q_values', 'q_visits')
     if 'actions' in tensors:
         keys += ('actions', 'step_weights', 'sequence_mask')
-        return forward(*(tensors[key] for key in keys))
-    return forward(*(tensors[key] for key in keys)), None
+        return forward(*(tensors.get(key) for key in keys))
+    return forward(*(tensors.get(key) for key in keys)), None
 
 
 def augment_training_batch(tensors, symmetry):
@@ -78,10 +78,8 @@ def restore_rng(state):
 
 def load_checkpoint(run_dir, reference, config, device="cpu"):
     path = Path(run_dir)/reference["path"]
-    if sha256(path) != reference["sha256"]:
-        raise ValueError(f"Checkpoint checksum mismatch: {path}")
     value = torch.load(path, map_location=device, weights_only=False)
-    if (value["contract"] != CONTRACT_ID or value["config_id"] != fingerprint(config) or
+    if (value["contract"] != CONTRACT_ID or value["resume_config"] != resume_config(config) or
             value["id"] != reference["id"] or value["network_config"] != config["network"]):
         raise ValueError("Checkpoint identity/configuration mismatch")
     check_model_identity(value, config)
@@ -89,67 +87,60 @@ def load_checkpoint(run_dir, reference, config, device="cpu"):
 
 
 def commit_checkpoint(run_dir, config, model, optimizer, scaler, iteration, step, total_steps,
-                      reader_state, parent, updates, optimization):
+                      reader_state, optimization):
     identity = f"iteration_{iteration:06d}_step_{step:08d}_{uuid.uuid4().hex}"
     path = Path("checkpoints")/(identity+".pt")
-    value = {"id": identity, "contract": CONTRACT_ID, "config_id": fingerprint(config),
+    value = {"id": identity, "contract": CONTRACT_ID, "resume_config": resume_config(config),
              **model_identity(config), "model": model.state_dict(), "optimizer": optimizer.state_dict(),
              "optimization": optimization.state_dict(), "scaler": scaler.state_dict(), "rng": rng_state(), "reader": reader_state,
              "iteration": iteration, "step": step, "total_steps": total_steps,
-             "total_samples": optimization.consumed_samples, "optimizer_steps": optimization.optimizer_steps, "parent": parent,
-             "committed_updates": updates,
+             "total_samples": optimization.consumed_samples, "optimizer_steps": optimization.optimizer_steps,
              "source_id":load_json(Path(run_dir)/".internal/session.json")["source_id"] if (Path(run_dir)/".internal/session.json").exists() else None}
     atomic_write(Path(run_dir)/path, lambda p: torch.save(value,p), immutable=True)
-    reference = {"id": identity, "path": str(path), "sha256": sha256(Path(run_dir)/path),
-                 "iteration": iteration, "step": step, "total_steps": total_steps, "total_samples": value["total_samples"], "optimizer_steps": value["optimizer_steps"]}
-    save_json((Path(run_dir)/path).with_suffix(".json"), {**reference,"parent":parent,"committed_updates":updates}, immutable=True)
+    reference = {"id": identity, "path": str(path), "iteration": iteration, "step": step, "total_steps": total_steps, "total_samples": value["total_samples"], "optimizer_steps": value["optimizer_steps"]}
+    index_path = Path(run_dir)/'.internal/checkpoints.json'
+    index = load_json(index_path) if index_path.exists() else []
+    save_json(index_path, index + [reference])
     return reference
 
 
 def prune_checkpoints(run_dir, keep):
-    """Prune committed payloads only; JSON lineage and inference models stay intact."""
+    """Prune registered completed-round payloads using the bounded live index."""
     if keep < 1:
         raise ValueError("checkpoint_keep must be positive")
     root = Path(run_dir)
-    # Read the durable authority rather than accepting a candidate round state.
-    state = load_json(root/".internal/state.json")
-    if state["iteration"] == 0 or state["checkpoint"] is None:
+    state = load_json(root/'.internal/state.json')
+    if state['checkpoint'] is None:
         return []
-    reference = state["checkpoint"]
-    seen, rounds, retained, payloads = set(), set(), set(), []
-    previous_iteration = state["iteration"]
-    while reference:
-        relative = Path(reference["path"])
-        iteration = reference["iteration"]
-        if relative.parent != Path("checkpoints") or relative.suffix != ".pt":
-            raise ValueError(f"Invalid checkpoint path: {relative}")
-        if reference["id"] in seen:
-            raise ValueError("Checkpoint lineage contains a cycle")
-        if not 0 <= iteration <= previous_iteration or iteration >= state["iteration"]:
-            raise ValueError("Checkpoint lineage contains an uncommitted or unordered round")
-        seen.add(reference["id"])
-        previous_iteration = iteration
-        path = root/relative
-        sidecar = load_json(path.with_suffix(".json"))
-        if any(sidecar.get(key) != value for key, value in reference.items()):
-            raise ValueError(f"Checkpoint metadata differs from its reference: {relative}")
-        # The first checkpoint encountered for each round is its final one.
-        if iteration not in rounds:
-            rounds.add(iteration)
-            if len(rounds) <= keep:
-                if not path.is_file():
-                    raise FileNotFoundError(f"Retained checkpoint is missing: {path}")
-                retained.add(path)
-        payloads.append(path)
-        reference = sidecar["parent"]
-    # Validate the whole chain before deleting; interrupted deletion is retryable.
+    index_path = root/'.internal/checkpoints.json'
+    index = load_json(index_path)
+    if state['checkpoint'] not in index:
+        raise ValueError('Committed checkpoint is absent from the live index')
+    latest = {}
+    for reference in index:
+        relative = Path(reference['path'])
+        if (relative.parent != Path('checkpoints') or relative.suffix != '.pt'
+                or relative.stem != reference['id']):
+            raise ValueError(f'Invalid checkpoint path: {relative}')
+        if reference['iteration'] < state['iteration']:
+            latest[reference['iteration']] = reference
+    # The authority is the final checkpoint selected by state, even if a
+    # previous process saved another payload before dying at a pointer write.
+    latest[state['checkpoint']['iteration']] = state['checkpoint']
+    retained = {r['id'] for _,r in sorted(latest.items(),reverse=True)[:keep]}
+    retained.update(r['id'] for r in index if r['iteration'] >= state['iteration'])
+    for reference in index:
+        if reference['id'] in retained and not (root/reference['path']).is_file():
+            raise FileNotFoundError(f"Retained checkpoint is missing: {reference['path']}")
     removed = []
-    for path in payloads:
-        if path not in retained and path.exists():
-            path.unlink()
-            removed.append(str(path.relative_to(root)))
+    for reference in index:
+        if reference['id'] not in retained:
+            path = root/reference['path']
+            if path.exists():
+                path.unlink(); removed.append(reference['path'])
     if removed:
-        sync_directory(root/"checkpoints")
+        sync_directory(root/'checkpoints')
+    save_json(index_path, [r for r in index if r['id'] in retained])
     return removed
 
 
@@ -167,7 +158,7 @@ def initialize(run_dir, config, weights=None):
     optimizer = optimizer_for(model,config)
     optimization = optimization_for(model, config, optimizer)
     scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
-    reference = commit_checkpoint(run_dir,config,model,optimizer,scaler,0,0,0,None,None,[],optimization)
+    reference = commit_checkpoint(run_dir,config,model,optimizer,scaler,0,0,0,None,optimization)
     del optimization,model,optimizer,scaler
     gc.collect()
     if device.type == "cuda":
@@ -205,7 +196,8 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
             while True:
                 try:batch=reader.next()
                 except StopIteration:break
-                tensors={k:torch.from_numpy(a).float().to(device) for k,a in batch.items()}
+                tensors={k:torch.from_numpy(a).to(device=device,dtype=torch.int64 if k=='actions' else torch.float32)
+                         for k,a in batch.items()}
                 symmetry=symmetries.randrange(8);draws[symmetry]+=1
                 tensors=augment_training_batch(tensors,symmetry) # Always on for validation.
                 context=torch.autocast('cuda',dtype=torch.float16 if amp=='float16' else torch.bfloat16) if amp!='off' else contextlib.nullcontext()
@@ -229,7 +221,7 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
 
 
 def subepoch_ends(steps,segments):
-    """Even, nonempty integer segments within the fixed consumed-batch budget."""
+    """Even, nonempty integer segments within the actual consumed-batch budget."""
     if not 1<=segments<=steps:raise ValueError('Subepochs require at least one consumed batch each')
     return [(i+1)*steps//segments for i in range(segments)]
 
@@ -238,6 +230,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     root, iteration = Path(run_dir), plan["iteration"]
     progress_path = root/".internal/iterations"/f"{iteration:06d}"/"learner.json"
     progress = load_json(progress_path) if progress_path.exists() else None
+    if progress and progress['snapshot_id'] != plan['snapshot_id']:
+        raise ValueError('Learner checkpoint snapshot differs from the iteration plan')
     reference = progress["checkpoint"] if progress else base
     device = device_check(config["devices"]["train"])
     checkpoint = load_checkpoint(root,reference,config,device)
@@ -264,9 +258,9 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     scaler.load_state_dict(checkpoint["scaler"])
     restore_rng(checkpoint["rng"])
     reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
-                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,no_repeat_files=config["training"]["no_repeat_files"])
+                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,no_repeat_files=True)
     step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
-    ends=subepoch_ends(plan['train_steps'],config['training']['sub_epochs'])
+    ends=subepoch_ends(plan['train_steps'],min(config['training']['sub_epochs'],plan['train_steps']))
     if not progress:
         optimization.begin_round()
     if optimization.consumed_samples != total * plan["batch_size"] or optimization.round_batches != step:
@@ -278,12 +272,11 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     amp = config["training"]["amp"]
     if device.type != "cuda" and amp != "off":
         raise ValueError("AMP training requires a CUDA device")
-    if config['training']['no_repeat_files']:
-        remaining=sum(reader.files[i]['rows']//plan['batch_size'] for i in reader.order[reader.index:])-reader.offset//plan['batch_size']
-        if remaining<plan['train_steps']-step:
-            reader.close()
-            raise ValueError('No-repeat snapshot has insufficient complete file batches for the fixed round budget')
-    updates = []
+    remaining=sum(reader.files[i]['rows']//plan['batch_size'] for i in reader.order[reader.index:])-reader.offset//plan['batch_size']
+    if remaining<plan['train_steps']-step:
+        reader.close()
+        raise ValueError('Single-pass snapshot has insufficient complete file batches for the actual round budget')
+    unsaved = False
     consumed_state = reader.state()
     prepared=BatchPrefetcher(reader,config['training']['prefetch_depth'])
     prefetch = None
@@ -304,7 +297,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             else:
                 batch,consumed_state = prepared.next();tensors = {}
                 for key,array in batch.items():
-                    tensor = torch.from_numpy(array).float()
+                    tensor = torch.from_numpy(array).to(dtype=torch.int64 if key=='actions' else torch.float32)
                     if device.type == "cuda":
                         tensor = tensor.pin_memory()
                     tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
@@ -318,31 +311,41 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             with context:
                 components,step_losses=forward_batch(forward,tensors)
             loss,pl,opl,spl,sopl,vl=components[:6]
-            if not torch.isfinite(loss):
-                raise FloatingPointError(f"Nonfinite loss at iteration {iteration}, step {step+1}")
             optimizer.zero_grad(set_to_none=True)
-            scale_before = scaler.get_scale()
-            if scale_before <= 0 or not math.isfinite(scale_before):
-                raise FloatingPointError("Invalid AMP loss scale")
             scaler.scale(loss * optimization.backward_scale).backward()
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.get_total_norm([p.grad for p in parameters if p.grad is not None])
             module_norms={}
-            for name,params in module_parameters.items():
+            detailed = step == 0 or (step+1) % config['optimizer']['norm_interval'] == 0 or step+1 == plan['train_steps']
+            for name,params in module_parameters.items() if detailed else ():
                 gradients=[p.grad for p in params if p.grad is not None]
                 module_norms[name]=(torch.nn.utils.get_total_norm(gradients) if gradients else grad_norm.new_zeros(())) / optimization.backward_scale
-            finite_norm = bool(torch.isfinite(grad_norm))
+            # Losses, norms and unroll diagnostics share one device-to-host
+            # transfer. Reuse these values for both checks and journal metrics.
+            diagnostics_tensors = [] if step_losses is None else list(step_losses.unbind())
+            # Reuse GradScaler's unscale check rather than synchronizing twice
+            # through get_scale(). These accessors are verified by CUDA tests.
+            amp_status = ([scaler._get_scale_async(),
+                           sum(scaler._found_inf_per_device(optimizer).values())]
+                          if scaler.is_enabled() else [])
+            values = torch.stack([x.detach() for x in components] +
+                                 [grad_norm / optimization.backward_scale] +
+                                 list(module_norms.values()) + diagnostics_tensors + amp_status).tolist()
+            if not all(math.isfinite(v) for v in values[:len(components)]):
+                raise FloatingPointError(f"Nonfinite loss at iteration {iteration}, step {step+1}")
+            finite_norm = math.isfinite(values[len(components)])
+            scale_before, found_inf = values[-2:] if amp_status else (1., 0.)
+            if scale_before <= 0 or not math.isfinite(scale_before):
+                raise FloatingPointError("Invalid AMP loss scale")
+            skipped = found_inf != 0
             if finite_norm:
                 torch.nn.utils.clip_grads_with_norm_(parameters, optimization.gradient_cap(config['training']['gradient_clip']), grad_norm)
             elif not scaler.is_enabled():
                 raise FloatingPointError(f"Nonfinite gradients at iteration {iteration}, step {step+1}")
-            elif all(bool(torch.isfinite(p.grad).all()) for p in parameters if p.grad is not None):
+            elif not skipped:
                 raise FloatingPointError("Nonfinite gradient norm despite finite unscaled gradients")
             scaler.step(optimizer)
             scaler.update()
-            skipped = scaler.get_scale() < scale_before
-            if not finite_norm and not skipped:
-                raise FloatingPointError("Nonfinite gradients without an AMP skipped update")
             if skipped:
                 log("amp_overflow", iteration=iteration, step=step+1,
                     scale_before=scale_before, scale_after=scaler.get_scale(), skipped=True)
@@ -350,15 +353,16 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             step += 1; total += 1
             if step == plan['train_steps']:
                 optimization.finish_round()
-            update = uuid.uuid4().hex; updates.append(update)
-            values=torch.stack([x.detach() for x in components]+[grad_norm / optimization.backward_scale]+list(module_norms.values())).tolist()
+            unsaved = True
             diagnostics={}
             if step_losses is not None:
-                diagnostics={'step_losses':step_losses.tolist(),
-                             'grad_norms':dict(zip(module_norms,values[len(components)+1:]))}
+                start=len(components)+1
+                diagnostics={'step_losses':values[start+len(module_norms):start+len(module_norms)+len(diagnostics_tensors)]}
+                if module_norms:
+                    diagnostics['grad_norms']=dict(zip(module_norms,values[start:start+len(module_norms)]))
             loss_names=LOSS_NAMES
             if model.predict_q_values:loss_names+=('q_winloss_loss',)
-            log('update',iteration=iteration,step=step,total_steps=total,update_id=update,
+            log('update',iteration=iteration,step=step,total_steps=total,
                 optimizer_steps=optimization.optimizer_steps,total_samples=optimization.consumed_samples,
                 subepoch=optimization.subepoch,subepoch_batches=optimization.subepoch_batches,
                 **dict(zip((*loss_names,'grad_norm'),values)),amp_skipped=skipped,
@@ -369,16 +373,16 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             if step==plan['train_steps']:
                 validate_epoch(reader.snapshot,model,forward,config,iteration,device,log)
             if step % config["training"]["checkpoint_every"] == 0 or step == plan["train_steps"] or stopping():
-                reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,reference,updates,optimization)
-                log("checkpoint",iteration=iteration,checkpoint=reference,committed_updates=updates)
+                reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization)
+                log("checkpoint",iteration=iteration,checkpoint=reference)
                 if hasattr(log,'flush'):
                     log.flush()
                 save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
-                updates = []
+                unsaved = False
         # Commit consumed batches, including scaler skips, at a normal stop.
-        if updates:
-            reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,reference,updates,optimization)
-            log("checkpoint",iteration=iteration,checkpoint=reference,committed_updates=updates)
+        if unsaved:
+            reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization)
+            log("checkpoint",iteration=iteration,checkpoint=reference)
             if hasattr(log,'flush'):
                 log.flush()
             save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
