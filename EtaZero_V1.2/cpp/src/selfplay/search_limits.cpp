@@ -5,12 +5,13 @@
 namespace etazero {
 namespace {
 void validate(const SelfplaySearchConfig& c) {
-    if(c.max_playouts<0 || c.full_visits<2 || c.cheap_visits<2 || c.cheap_visits>c.full_visits ||
+    if(c.max_playouts<0 || c.full_visits<2 ||
        !std::isfinite(c.cheap_probability) || c.cheap_probability<0 || c.cheap_probability>1 ||
-       !std::isfinite(c.cheap_target_weight) || c.cheap_target_weight<0 || c.cheap_target_weight>1 ||
-       !std::isfinite(c.reduce_threshold) || c.reduce_threshold<0 || c.reduce_threshold>0.999999 ||
-       c.reduce_lookback<1 || c.reduce_lookback>1000 || c.reduced_visits_min<2 || c.reduced_visits_min>c.full_visits ||
-       !std::isfinite(c.reduced_visits_weight) || c.reduced_visits_weight<0 || c.reduced_visits_weight>1)
+       (c.cheap_probability>0 && (c.cheap_visits<2 || c.cheap_visits>c.full_visits ||
+        !std::isfinite(c.cheap_target_weight) || c.cheap_target_weight<0 || c.cheap_target_weight>1)) ||
+       (c.reduce_visits && (!std::isfinite(c.reduce_threshold) || c.reduce_threshold<0 || c.reduce_threshold>0.999999 ||
+        c.reduce_lookback<1 || c.reduce_lookback>1000 || c.reduced_visits_min<2 || c.reduced_visits_min>c.full_visits ||
+        !std::isfinite(c.reduced_visits_weight) || c.reduced_visits_weight<0 || c.reduced_visits_weight>1)))
         throw std::runtime_error("Invalid selfplay PCR / Reduce Visits settings");
 }
 }
