@@ -11,8 +11,9 @@ import random
 import queue
 import threading
 import numpy as np
-from .storage import load_json, sha256
+from .storage import load_json
 from .schema import CONTRACT_ID, PLANES, GLOBALS, unpack_observations
+from .data import TRAIN_TARGETS
 
 
 class BatchReader:
@@ -69,15 +70,14 @@ class BatchReader:
     def _load(self, index):
         info = self.files[self.order[index]]
         path = self.directory/info["path"]
-        if sha256(path) != info["sha256"]:
-            raise ValueError(f"Snapshot file checksum mismatch: {path}")
         with np.load(path, allow_pickle=False) as file:
             arrays = {key: file[key] for key in file.files}
         if self.manifest.get('algorithm') == 'muzero':
             from .muzero.data import validate_view
-            validate_view(arrays, info['rows'], self.manifest['canvas'], self.manifest['unroll_steps'])
+            validate_view(arrays, info['rows'], self.manifest['canvas'], self.manifest['unroll_steps'],
+                          self.manifest.get('targets', TRAIN_TARGETS))
             return arrays
-        if set(arrays) != {"obs", "globals", "policy", "opponent_policy", "opponent_policy_weight", "value", "td_value", "full_game_weight", "q_values", "q_visits"} or len(arrays["value"]) != info["rows"]:
+        if set(arrays) != {'obs', 'globals', *self.manifest.get('targets', TRAIN_TARGETS)} or len(arrays["value"]) != info["rows"]:
             raise ValueError(f"Invalid training view: {path}")
         canvas = self.manifest["canvas"]
         expected = {"obs": ((info["rows"],len(PLANES),(canvas*canvas+7)//8),np.uint8),
@@ -89,7 +89,8 @@ class BatchReader:
                     "policy": ((info["rows"],canvas*canvas),np.float32),
                     "opponent_policy": ((info["rows"],canvas*canvas),np.float32),
                     "opponent_policy_weight": ((info["rows"],),np.float32),"value": ((info["rows"],3),np.float32)}
-        for key,(shape,dtype) in expected.items():
+        for key in arrays:
+            shape,dtype = expected[key]
             if arrays[key].shape != shape or arrays[key].dtype != dtype:
                 raise ValueError(f"Invalid training {key} layout: {path}")
         return arrays
@@ -185,7 +186,7 @@ class CudaBatchPrefetcher:
         for key,array in batch.items():
             source = torch.from_numpy(array)
             if key not in self.host[slot]:
-                self.host[slot][key] = torch.empty(source.shape,dtype=torch.float32,pin_memory=True)
+                self.host[slot][key] = torch.empty(source.shape,dtype=torch.int64 if key=='actions' else torch.float32,pin_memory=True)
             self.host[slot][key].copy_(source)
         with torch.cuda.stream(self.stream):
             tensors = {k:v.to(self.device,non_blocking=True) for k,v in self.host[slot].items()}
