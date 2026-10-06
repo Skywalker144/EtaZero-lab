@@ -345,7 +345,8 @@ def test_checkpoint_retention_resume_history_and_old_model(tmp_path,gpu_config):
     assert set((tmp_path/'checkpoints').glob('*.pt'))==expected
     assert not (tmp_path/statuses[0]['checkpoint']['path']).exists()
     sidecars={p:sha256(p) for p in (tmp_path/'checkpoints').glob('*.json')}
-    assert len(sidecars)==7  # Initialization plus two checkpoints per training round.
+    assert not sidecars
+    assert len(load_json(tmp_path/'.internal/checkpoints.json'))==2
     history=run_history(tmp_path)
     assert [row['steps'] for row in history if row['iteration']>0]==[4,4,4]
     models={p:sha256(p) for p in (tmp_path/'models').rglob('model.pt')}
@@ -550,8 +551,11 @@ class LeafFailureModel(torch.nn.Module):
         return self.canvas,self.contract
 
     def forward(self,x,globals):
-        torch._assert(x[:,1:3].sum()==0,'injected CUDA leaf failure')
-        return x[:,0].flatten(1)*0,x[:,0].flatten(1)[:,:3]*0,x[:,0].flatten(1)*0,x[:,0].sum((1,2))*0
+        # A device-side failure remains data dependent under CUDA Graph replay.
+        # A Python/TorchScript assert would synchronize the CPU during capture.
+        failed=(x[:,1:3].sum((1,2,3))>0).unsqueeze(1)
+        value=torch.where(failed,float('nan'),x[:,0].flatten(1)[:,:3]*0)
+        return x[:,0].flatten(1)*0,value,x[:,0].flatten(1)*0,x[:,0].sum((1,2))*0
 
 
 def test_real_cuda_parallel_leaf_failure_releases_waiters(tmp_path,gpu_config):
@@ -564,7 +568,7 @@ def test_real_cuda_parallel_leaf_failure_releases_waiters(tmp_path,gpu_config):
              '--model-id','leaf-failure','--device','cuda:0','--size','5','--rule','freestyle']
     result=subprocess.run(command,text=True,capture_output=True,timeout=30)
     (tmp_path/'stdout.log').write_text(result.stdout);(tmp_path/'stderr.log').write_text(result.stderr)
-    assert result.returncode==1 and 'injected CUDA leaf failure' in result.stderr
+    assert result.returncode==1 and 'Invalid leaf WDL' in result.stderr
     assert 'leaked pending visits' not in result.stderr
 
 
@@ -573,6 +577,7 @@ def test_learner_resume_matches_uninterrupted_updates(tmp_path,pipeline,gpu_conf
     plan=load_json(root/".internal/iterations"/"000001"/"plan.json")
     status=load_json(root/".internal/iterations"/"000001"/"status.json")
     plan["snapshot_id"]=status["snapshot_id"]
+    plan['train_steps']=status['train_steps']
     base=plan["input_checkpoint"]
     dirs=[tmp_path/"full",tmp_path/"resumed"]
     for dest in dirs:
@@ -593,7 +598,7 @@ def test_learner_resume_matches_uninterrupted_updates(tmp_path,pipeline,gpu_conf
         midway=load_checkpoint(dirs[1],partial,gpu_config)
         assert midway['optimization']['lookahead_counter']==1
         resumed,done=train_iteration(dirs[1],gpu_config,plan,base,log)
-        assert done and resumed["total_steps"]==4
+        assert done and resumed["total_steps"]==plan['train_steps']
         a=load_checkpoint(dirs[0],full,gpu_config);b=load_checkpoint(dirs[1],resumed,gpu_config)
         for key in a["model"]:
             torch.testing.assert_close(a["model"][key],b["model"][key],rtol=0,atol=0)
@@ -672,7 +677,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeyp
         scaler=torch.amp.GradScaler("cuda",init_scale=2**32)
         restore_rng(saved["rng"])
         optimization=Optimization(model,c,optimizer,saved['optimization'])
-        base=commit_checkpoint(tmp_path,c,model,optimizer,scaler,0,0,0,None,base,[],optimization)
+        base=commit_checkpoint(tmp_path,c,model,optimizer,scaler,0,0,0,None,optimization)
         del optimization,model,optimizer,scaler,saved
     forwards=[];events=[]
     original=make_network
@@ -749,7 +754,7 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
         optimization=Optimization(model,c,optimizer,saved['optimization'])
         scaler=torch.amp.GradScaler('cuda',init_scale=1)
         restore_rng(saved['rng'])
-        bases.append(commit_checkpoint(dest,c,model,optimizer,scaler,0,0,0,None,base,[],optimization))
+        bases.append(commit_checkpoint(dest,c,model,optimizer,scaler,0,0,0,None,optimization))
     original=make_network
     inject={'remaining':1}
     def instrumented(config):
@@ -829,7 +834,9 @@ def test_stage_failure_recovery(tmp_path,gpu_config,monkeypatch,phase):
     if progress.exists():
         checkpoint=load_json(progress)["checkpoint"]
     state=run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)
-    assert state["checkpoint"]["total_steps"]==8 and state["target_rows"]==pytest.approx(state["replay_origin_rows"]+0.032)
+    statuses=[load_json(tmp_path/'.internal/iterations'/f'{i:06d}'/'status.json') for i in (1,2)]
+    assert state['checkpoint']['total_steps']==sum(s['train_steps'] for s in statuses)
+    assert state['target_rows']==pytest.approx(state['replay_origin_rows']+0.032)
     assert sha256(tmp_path/".internal/iterations"/"000001"/"plan.json")==plan_hash
     assert_preserved(tmp_path,shards)
     assert list((tmp_path/"selfplay"/"iteration_000002").rglob("*.npz"))
@@ -866,7 +873,8 @@ def test_forced_process_kill_during_training(tmp_path,gpu_config):
     plan_hash=sha256(root/".internal/iterations"/"000001"/"plan.json")
     raw={p:sha256(p) for p in (root/"selfplay").rglob("*.npz")}
     state=run_training(root,c,BINARY,resume=True,max_iteration=1)
-    assert state["checkpoint"]["step"]==100 and state["checkpoint"]["total_samples"]==800
+    budget=load_json(root/'.internal/iterations/000001/status.json')
+    assert state['checkpoint']['step']==budget['train_steps'] and state['checkpoint']['total_samples']==budget['train_steps']*8
     assert state["target_rows"]==state["replay_origin_rows"] and sha256(root/".internal/iterations"/"000001"/"plan.json")==plan_hash
     assert_preserved(root,raw)
     assert not (root/persisted["path"]).exists()
@@ -982,20 +990,23 @@ def test_compiled_training_resume(tmp_path,pipeline,gpu_config,amp):
 
 
 def assert_compiled_partial_resume(tmp_path,root,c):
-    # CUDA convolution backward may choose nondeterministic kernels at these
-    # full preset widths. Exact recovery is audited with deterministic kernels,
-    # as in the eager recovery test, without altering production execution.
+    # Deterministic kernels can still differ in rounding when Inductor selects
+    # another convolution layout for a newly constructed compiled model. Pin
+    # NCHW for this exact-state audit, independently of production compilation.
+    from torch._inductor import config as compiler_config
     deterministic=torch.are_deterministic_algorithms_enabled()
     torch.use_deterministic_algorithms(True)
     try:
-        _assert_compiled_partial_resume(tmp_path,root,c)
+        with compiler_config.patch(layout_optimization=False):
+            _assert_compiled_partial_resume(tmp_path,root,c)
     finally:
         torch.use_deterministic_algorithms(deterministic)
 
 
 def _assert_compiled_partial_resume(tmp_path,root,c):
     plan=load_json(root/'.internal/iterations'/'000001'/'plan.json')
-    plan['snapshot_id']=load_json(root/'.internal/iterations'/'000001'/'status.json')['snapshot_id']
+    status=load_json(root/'.internal/iterations'/'000001'/'status.json')
+    plan.update(snapshot_id=status['snapshot_id'],train_steps=status['train_steps'])
     destinations=[tmp_path/'full',tmp_path/'resumed']
     bases=[]
     for destination in destinations:
@@ -1069,8 +1080,9 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
                     layer.weight.uniform_(-0.5,0.5);layer.bias.uniform_(-0.2,0.2)
         optimizer=optimizer_for(model,c)
         checkpoint=commit_checkpoint(tmp_path,c,model,optimizer,
-                                     torch.amp.GradScaler('cuda',enabled=False),0,0,0,None,None,[],
+                                     torch.amp.GradScaler('cuda',enabled=False),0,0,0,None,
                                      Optimization(model,c,optimizer))
+        checkpoint_digest=sha256(tmp_path/checkpoint['path'])
         info=export_model(tmp_path,c,checkpoint)
         # Numerical parity belongs to this independent test, not model publication.
         inference=inference_network(model)
@@ -1087,7 +1099,46 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
     assert verify_export(tmp_path,info,c['network']['canvas'])==info
     assert info['normalization']==('masked_fixup_bias' if architecture=='transformer' else 'precomputed_inv_std')
     assert info['inference_precision']==precision
-    assert sha256(tmp_path/checkpoint['path'])==checkpoint['sha256']
+    assert sha256(tmp_path/checkpoint['path'])==checkpoint_digest
+
+
+@pytest.mark.parametrize('precision',['float32','float16'])
+@pytest.mark.parametrize('architecture,predict_q_values',[('nbt',False),('plain',False),('transformer',False),('transformer',True)])
+def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_config,precision,architecture,predict_q_values):
+    c=copy.deepcopy(gpu_config)
+    c['network'].update(architecture=architecture,canvas=6,channels=128 if architecture=='plain' else 192,
+                        blocks=10 if architecture=='plain' else 5,predict_q_values=predict_q_values)
+    torch.manual_seed(63)
+    model=make_network(c).cuda().eval()
+    with torch.no_grad():
+        for layer in model.modules():
+            if isinstance(layer,MaskedBatchNorm):
+                layer.running_mean.uniform_(-.3,.3);layer.running_std.uniform_(.5,1.5)
+                layer.weight.uniform_(-.2,.2);layer.bias.uniform_(-.1,.1)
+        if architecture=='transformer':
+            from etazero.network import init_weights
+            for block in model.blocks:
+                init_weights(block.post.conv.weight,.3,activation='relu')
+    scripted=torch.jit.script(inference_network(model))
+    path=tmp_path/'model.pt';scripted.save(str(path))
+    result=subprocess.run([str(ROOT/'build/inference_probe'),str(path),'cuda:0',precision],
+                          capture_output=True,text=True,timeout=60)
+    assert result.returncode==0,result.stderr
+    actual=json.loads(result.stdout)
+    spatial=torch.zeros(5,5,6,6,device='cuda');globals=torch.zeros(5,6,device='cuda')
+    for i in range(5):
+        size=5+i%2;spatial[i,0,:size,:size]=1
+        spatial[i,1,0,i]=1;spatial[i,2,1,i]=1
+        globals[i]=torch.tensor([i%2,i%3==0,-1 if i%3==0 else 0,i%3==0,i%2,.25*i],device='cuda')
+    with torch.inference_mode(),torch.autocast('cuda',enabled=precision=='float16',dtype=torch.float16):
+        for turn,n in enumerate((1,3,5,2,1,4,3)):
+            indices=[(turn+i)%5 for i in range(n)]
+            # Compare the profiled TorchScript path used by Graph capture.
+            for _ in range(3):scripted(spatial[indices],globals[indices])
+            logits,values,optimistic,error=scripted(spatial[indices],globals[indices])
+            expected=torch.cat((logits.float(),values.float().softmax(1),optimistic.float(),error.float().unsqueeze(1)),1).cpu().numpy()
+            tolerance=3e-3 if precision=='float16' else 3e-5
+            np.testing.assert_allclose(actual[turn],expected,rtol=tolerance,atol=tolerance)
 
 
 def test_persistent_native_protocol_and_signal(tmp_path,pipeline,gpu_config):
@@ -1139,9 +1190,10 @@ def test_snapshot_retention_and_restore(tmp_path,gpu_config):
         assert len(reader.next()['value'])==8
     finally:reader.close()
     assert raw=={p:sha256(p) for p in raw}
-    assert state['checkpoint']['total_steps']==12
+    assert state['checkpoint']['total_steps']==sum(s['train_steps'] for s in statuses)
     resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=4)
-    assert resumed['checkpoint']['total_steps']==16
+    fourth=load_json(tmp_path/'.internal/iterations/000004/status.json')
+    assert resumed['checkpoint']['total_steps']==state['checkpoint']['total_steps']+fourth['train_steps']
 
 
 def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeypatch):
@@ -1178,8 +1230,9 @@ def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeyp
     origin=load_json(root/'.internal/state.json')['replay_origin_rows']
     assert origin>=150
     state=run_training(root,c,BINARY,resume=True,max_iteration=3)
-    assert state['replay_origin_rows']==origin and state['target_rows']==origin+8
-    assert state['checkpoint']['total_steps']==12
+    assert state['replay_origin_rows']==origin
+    statuses=[load_json(root/'.internal/iterations'/f'{i:06d}'/'status.json') for i in (1,2,3)]
+    assert state['checkpoint']['total_steps']==sum(s['train_steps'] for s in statuses)
     bootstrap=set();balanced=0
     for path in (root/'selfplay').rglob('*.npz'):
         a=read_raw(path);m=metadata(a)
@@ -1194,7 +1247,7 @@ def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeyp
             balanced+=int((starts==0).sum())
     assert len(bootstrap)==2 and balanced>=2
     assert_preserved(root,bootstrap_before)
-    assert all(not p.exists() for p in bootstrap_before)
+    assert all(p.exists() for p in bootstrap_before)
     catalog=Catalog(root,state['run_id'],runtime.fingerprint(c))
     try:
         assert catalog.iteration_counts(0)[1]==2
@@ -1210,7 +1263,8 @@ def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeyp
         catalog.close()
     plans={i:load_json(root/'.internal/iterations'/f'{i:06d}'/'plan.json') for i in range(4)}
     assert plans[0]['train_steps']==0 and plans[1]['target_rows']==150
-    assert plans[2]['target_rows']==origin+4 and plans[3]['target_rows']==origin+8
+    assert plans[2]['target_rows']==origin+4 and plans[3]['target_rows']==plans[3]['start_rows']+4
+    assert state['target_rows']==plans[3]['target_rows']
     hashes={p:sha256(p) for p in (root/'selfplay').rglob('*.npz')}
     assert run_training(root,c,BINARY,max_iteration=3)==state
     assert hashes=={p:sha256(p) for p in (root/'selfplay').rglob('*.npz')}
@@ -1294,7 +1348,7 @@ def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     state = load_json(root/'.internal/state.json')
     assert state['iteration'] == 2 and state['checkpoint']['total_steps'] == 200
     assert not (root/old['path']).exists()
-    assert_preserved(root,{root/old['path']:old_hash})
+    assert old['id'] not in {r['id'] for r in load_json(root/'.internal/checkpoints.json')}
     from etazero.plotting import run_history
     assert run_history(root)[-1]['steps'] == 200
     assert (root/'training.png').is_file()
@@ -1322,7 +1376,7 @@ def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
 
 
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
-def test_compiler_timing_and_sigint_rollback(tmp_path,gpu_config,monkeypatch,algorithm):
+def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch,algorithm):
     import etazero.runtime as runtime
     from etazero.compiler import compilation_seconds
     from etazero.experiment import arm_progress
@@ -1370,7 +1424,7 @@ def test_compiler_timing_and_sigint_rollback(tmp_path,gpu_config,monkeypatch,alg
     assert rows[-1]['compile_seconds']>0
     assert load_json(root/'.internal/iterations/000002/plan.json')['input_checkpoint']==base['checkpoint']
     assert not (root/pending['path']).exists()
-    assert list((root/'.internal/discarded').glob('*/'+pending['path']))
+    assert pending['id'] not in {r['id'] for r in load_json(root/'.internal/checkpoints.json')}
     assert rows[-1]['seconds']==pytest.approx(resumed['elapsed_seconds']-base['elapsed_seconds'])
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
     assert events[-1]['active_seconds']>resumed['elapsed_seconds']
@@ -1756,11 +1810,11 @@ class DiamondCudaModel(torch.nn.Module):
         return self.canvas,self.contract
 
     def forward(self,x,globals):
-        if self.fail_after>=0:
-            torch._assert(torch.all(x[:,1:3].sum((1,2,3))<self.fail_after),'injected CUDA shared graph failure')
         black=(x[:,1].sum((1,2))==x[:,2].sum((1,2))).unsqueeze(1)
         policy=torch.where(black,self.black.unsqueeze(0),self.white.unsqueeze(0))
         value=torch.zeros((x.shape[0],3),device=x.device,dtype=x.dtype)
+        if self.fail_after>=0:
+            value=torch.where((x[:,1:3].sum((1,2,3))>=self.fail_after).unsqueeze(1),float('nan'),value)
         return policy,value,policy,x[:,0].sum((1,2))*0+.5
 
 
@@ -1815,7 +1869,7 @@ def test_graph_shared_cuda_failure_releases_all_parents(tmp_path,gpu_config):
              '--model-id','shared-failure','--device','cuda:0','--size','5','--rule','renju']
     result=subprocess.run(command,text=True,capture_output=True,timeout=30)
     (tmp_path/'stdout.log').write_text(result.stdout);(tmp_path/'stderr.log').write_text(result.stderr)
-    assert result.returncode==1 and 'injected CUDA shared graph failure' in result.stderr
+    assert result.returncode==1 and 'Invalid leaf WDL' in result.stderr
     assert 'leaked pending visits' not in result.stderr
 
 
@@ -2154,14 +2208,14 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
     (root/'validation.json').write_text(json.dumps(dict(games=games,checkpoint=reference,export=info,events=events),indent=2))
 
 
-@pytest.mark.parametrize('architecture,amp,compile_enabled,no_repeat',[
-    ('nbt','off',False,False),('nbt','float16',False,True),
-    ('nbt','bfloat16',True,True),('transformer','bfloat16',True,True)])
-def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_config,architecture,amp,compile_enabled,no_repeat):
+@pytest.mark.parametrize('architecture,amp,compile_enabled',[
+    ('nbt','off',False),('nbt','float16',False),
+    ('nbt','bfloat16',True),('transformer','bfloat16',True)])
+def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_config,architecture,amp,compile_enabled):
     from test_replay import holdout_entries
     from etazero.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config);c['training'].update(skip_validation=False,d4_augmentation=False,max_validation_samples=8,
-                                                    train_steps=4,amp=amp,compile=compile_enabled,no_repeat_files=no_repeat)
+                                                    train_steps=4,amp=amp,compile=compile_enabled)
     if architecture=='transformer':c['network'].update(architecture='transformer',channels=192,blocks=5,predict_q_values=True)
     c['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows='all')
     root=tmp_path/'run';entries=holdout_entries(root);snapshot=build_snapshot(root,1,entries,c)
@@ -2173,7 +2227,7 @@ def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_
     assert sum(val[0]['symmetry_counts'])==2 and val[0]['symmetry_counts'][0]!=2
     assert all(f['symmetry']==0 for f in updates) # validation D4 is independently enabled.
     checkpoint=load_checkpoint(root,reference,c,torch.device('cuda:0'))
-    assert checkpoint['reader']['no_repeat_files']==no_repeat and checkpoint['reader']['split']=='train'
+    assert checkpoint['reader']['no_repeat_files'] and checkpoint['reader']['split']=='train'
     assert checkpoint['optimization']['consumed_samples']==32
     assert (('q_winloss_loss' in val[0])==c['network']['predict_q_values'])
     assert all(np.isfinite(f['loss']) for f in updates+val)
@@ -2183,7 +2237,7 @@ def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_
 def test_no_repeat_insufficient_snapshot_fails_before_cuda_update(tmp_path,gpu_config):
     from test_replay import holdout_entries
     from etazero.shuffle import build_snapshot
-    c=copy.deepcopy(gpu_config);c['training'].update(no_repeat_files=True,train_steps=100)
+    c=copy.deepcopy(gpu_config);c['training'].update(train_steps=100)
     # Include both train and holdout files before testing the learner's quota.
     c['replay'].update(min_rows=9,keep_target_rows='all',taper_exponent=1,expand_per_row=1)
     root=tmp_path/'run';entries=holdout_entries(root,2);snapshot=build_snapshot(root,1,entries,c)
@@ -2194,47 +2248,108 @@ def test_no_repeat_insufficient_snapshot_fails_before_cuda_update(tmp_path,gpu_c
     assert not events and len(list((root/'checkpoints').glob('*.pt')))==1
 
 
-def test_fixed_quota_actual_cuda_short_first_attempt_and_fixed_models(tmp_path,gpu_config,monkeypatch):
-    import etazero.runtime as runtime
-    from etazero.data import metadata
-    c=copy.deepcopy(gpu_config);c['replay']['min_rows']=64;c['training']['sub_epochs']=2
-    c['selfplay']['bootstrap_games']=2;c['training']['replay_ratio']=.25
-    launch=runtime.Controller.launch;shortened=set()
-    def short_first(self,plan,games):
-        if plan['iteration']>=2 and plan['iteration'] not in shortened:
-            shortened.add(plan['iteration']);assert games>1;return launch(self,plan,1)
-        return launch(self,plan,games)
-    monkeypatch.setattr(runtime.Controller,'launch',short_first)
+@pytest.mark.parametrize('compiled', [False, True])
+def test_single_pass_cuda_short_games_credit_and_completed_round_resume(tmp_path,gpu_config,monkeypatch,compiled):
+    from etazero.data import Catalog
+    from etazero.plotting import run_history
+    c=copy.deepcopy(gpu_config)
+    c['replay'].update(min_rows=64,keep_target_rows='all')
+    c['training'].update(train_steps=32,sub_epochs=8,skip_validation=True,replay_ratio=1,compile=compiled)
+    c['shuffle']['snapshot_keep']=3  # Preserve the first payload for the exact resume comparison.
+    estimate=Catalog.previous_rows_per_game
+    # A stale long-game estimate still launches complete real native games.
+    monkeypatch.setattr(Catalog,'previous_rows_per_game',lambda self,i:10000 if i>=2 else estimate(self,i))
     root=tmp_path/'run';state=run_training(root,c,BINARY,max_iteration=3)
-    assert state['checkpoint']['total_samples']==96 and state['checkpoint']['total_steps']==12
-    origin=state['replay_origin_rows'];assert origin>=64 and state['target_rows']==origin+256
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
-    backfills=[e for e in events if e['event']=='selfplay_backfill'];assert {e['iteration'] for e in backfills}>={2,3}
-    cumulative=0;identities=[];worker_pids=set()
-    for iteration in range(4):
-        plan=load_json(root/'.internal/iterations'/f'{iteration:06d}'/'plan.json');round_rows=0
-        for path in (root/'selfplay'/f'iteration_{iteration:06d}').rglob('*.npz'):
-            m=metadata(read_raw(path));assert m['model_id']==plan['input_model']['id'];round_rows+=m['rows']
-        cumulative+=round_rows
-        if iteration>=1:
-            assert cumulative>=plan['target_rows']
-            status=load_json(root/'.internal/iterations'/f'{iteration:06d}'/'status.json')
-            m=load_json(root/'snapshots'/status['snapshot_id']/'manifest.json')
-            assert m['selection']['raw_rows']==cumulative
-            assert m['selection']['random_rows']==origin if iteration>=2 else m['selection']['random_rows']==cumulative
-            assert m['selection']['usable_rows']==64+(cumulative-origin) if iteration>=2 else m['selection']['usable_rows']==64
+    assert not any(e['event']=='selfplay_backfill' and e['iteration']>=2 for e in events)
+    assert all(e['planned_games']==1 for e in events if e['event']=='selfplay_target' and e['iteration']>=2)
+    credit=0;total=0
+    for iteration in (1,2,3):
+        status=load_json(root/'.internal/iterations'/f'{iteration:06d}'/'status.json')
+        manifest=load_json(root/'snapshots'/status['snapshot_id']/'manifest.json')
+        batches=sum(f['rows']//8 for f in manifest['files'])
+        if iteration==1:
+            expected=min(32,batches)
+            assert expected<32
+        else:
+            credit+=status['new_rows']
+            expected=min(32,int(credit//8),batches)
+            credit-=expected*8
+            assert expected<32
+        assert status['train_steps']==expected and status['snapshot_batches']==batches
+        total+=expected
+        if expected:
+            checkpoint=load_checkpoint(root,status['checkpoint'],c)
+            assert checkpoint['reader']['epoch']==0 and checkpoint['reader']['no_repeat_files']
+            assert checkpoint['step']==expected
             starts=[e for e in events if e['event']=='subepoch_start' and e['iteration']==iteration]
-            assert [e['consumed_step'] for e in starts]==[0,2]
-            identities.append(plan['input_model']['id'])
-        phases=[e for e in events if e.get('iteration')==iteration]
-        end=next(i for i,e in enumerate(phases) if e['event']=='phase_end' and e['phase']=='selfplay')
-        releases=[i for i,e in enumerate(phases) if e['event']=='worker_release'];assert releases and max(releases)<end
-        worker_pids|={e['pid'] for e in phases if e['event']=='worker_start'}
-    assert len(set(identities))==3 and len(worker_pids)==1
+            assert len(starts)==min(expected,8)
+        assert run_history(root)[iteration]['steps']==expected
+    assert state['train_credit']==credit and state['checkpoint']['total_steps']==total
+    assert state['checkpoint']['total_samples']==total*8
+    # Resume the same shortened budget from its first consumed batch and
+    # compare model, reader and scaler state with uninterrupted execution.
+    assert_compiled_partial_resume(tmp_path,root,c)
     hashes={p:sha256(p) for p in (root/'selfplay').rglob('*.npz')}
     assert run_training(root,c,BINARY,resume=True,max_iteration=3)==state
-    assert hashes=={p:sha256(p) for p in hashes}
-    save_json(root/'quota_checks.json',dict(origin=origin,state=state,backfills=backfills,input_models=identities,worker_pids=sorted(worker_pids)))
+    assert all(sha256(p)==digest for p,digest in hashes.items())
+    save_json(root/'single_pass_checks.json',dict(state=state,events=events))
+
+
+def test_zero_step_cuda_round_keeps_model_and_fractional_credit(tmp_path,gpu_config,monkeypatch):
+    from etazero.data import Catalog
+    from etazero.plotting import run_history
+    c=copy.deepcopy(gpu_config);c['training'].update(replay_ratio=.001,skip_validation=True)
+    estimate=Catalog.previous_rows_per_game
+    monkeypatch.setattr(Catalog,'previous_rows_per_game',lambda self,i:1e9 if i>=2 else estimate(self,i))
+    root=tmp_path/'run';first=run_training(root,c,BINARY,max_iteration=1)
+    publication=load_json(root/'models/current.json')
+    before={p:sha256(p) for p in (root/'checkpoints').glob('*.pt')}
+    state=run_training(root,c,BINARY,resume=True,max_iteration=2)
+    status=load_json(root/'.internal/iterations/000002/status.json')
+    assert status['train_steps']==0 and status['new_rows']>0
+    assert state['model']==first['model'] and state['checkpoint']==first['checkpoint']
+    assert 0<state['train_credit']<8
+    assert state['train_credit']==pytest.approx(status['new_rows']*.001)
+    assert run_history(root)[-1]['steps']==0
+    assert load_json(root/'models/current.json')=={**publication,'elapsed_seconds':state['elapsed_seconds']}
+    assert before=={p:sha256(p) for p in (root/'checkpoints').glob('*.pt')}
+    assert run_training(root,c,BINARY,resume=True,max_iteration=2)==state
+
+
+def test_shortened_cuda_controller_budget_survives_learner_interruption(tmp_path,gpu_config,monkeypatch):
+    import etazero.runtime as runtime
+    c=copy.deepcopy(gpu_config)
+    c['replay'].update(min_rows=64,keep_target_rows='all')
+    c['training'].update(train_steps=32,skip_validation=True,replay_ratio=1)
+    root=tmp_path/'run';first=run_training(root,c,BINARY,max_iteration=1)
+    parent_credit=first['train_credit'];train=runtime.train_iteration
+    def interrupted(run_dir,config,plan,base,log,stopping):
+        updates=0
+        def record(event,**fields):
+            nonlocal updates
+            updates+=event=='update';log(event,**fields)
+        result=train(run_dir,config,plan,base,record,lambda:updates>=1)
+        assert not result[1]
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime,'train_iteration',interrupted)
+        paused=run_training(root,c,BINARY,resume=True,max_iteration=2)
+    assert paused==first and paused['train_credit']==parent_credit
+    directory=root/'.internal/iterations/000002'
+    budget_hash=sha256(directory/'status.json')
+    budget=load_json(directory/'status.json')
+    assert budget['train_steps']>1
+    pending=load_json(directory/'learner.json')['checkpoint']
+    assert pending['step']==1
+    resumed=run_training(root,c,BINARY,resume=True,max_iteration=2)
+    completed=load_json(directory/'status.json')
+    for key in ('train_steps','available_credit','new_rows','snapshot_batches'):
+        assert completed[key]==budget[key]
+    assert budget_hash!=sha256(directory/'status.json')  # Only stage completion changes.
+    assert resumed['train_credit']==budget['available_credit']-budget['train_steps']*8
+    assert resumed['checkpoint']['total_steps']==first['checkpoint']['total_steps']+budget['train_steps']
+    assert run_training(root,c,BINARY,resume=True,max_iteration=2)==resumed
 
 
 @pytest.mark.parametrize('compiled', [False,True])
@@ -2253,7 +2368,7 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
         base=initialize(root,c);value=load_checkpoint(root,base,c)
         model=make_network(c).cuda();model.load_state_dict(value['model']);optimizer=optimizer_for(model,c);optimizer.load_state_dict(value['optimizer'])
         o=Optimization(model,c,optimizer,value['optimization']);scaler=torch.amp.GradScaler('cuda',init_scale=1)
-        restore_rng(value['rng']);bases.append(commit_checkpoint(root,c,model,optimizer,scaler,0,0,0,None,base,[],o))
+        restore_rng(value['rng']);bases.append(commit_checkpoint(root,c,model,optimizer,scaler,0,0,0,None,o))
     original=make_network;injection={'remaining':1}
     def instrumented(configuration):
         model=original(configuration)
@@ -2411,16 +2526,20 @@ def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gp
     assert failed_state['iteration']==(3 if committed else 2)
     assert all(sha256(path)==digest for path,digest in preserved.items())
     pending={p:sha256(p) for folder in ('selfplay/iteration_000002','checkpoints','models') for p in (root/folder).rglob('*')
-             if p.is_file() and ('iteration_000002' in str(p) or '.tmp_' in str(p)) and
+             if p.is_file() and ('iteration_000002' in str(p) or '.tmp_' in str(p)) and p.parent != root/'checkpoints' and
              # After commit, configured pruning may remove intermediate payloads;
              # lineage JSON, the final checkpoint, raw games and models remain.
              not (committed and p.parent==root/'checkpoints' and p.suffix=='.pt' and p!=root/failed_state['checkpoint']['path'])}
     assert pending
     resumed=run_training(root,gpu_config,BINARY,resume=True,max_iteration=2)
-    assert resumed['iteration']==3 and resumed['checkpoint']['total_steps']==8 and resumed['checkpoint']['total_samples']==64
+    budget=load_json(root/'.internal/iterations/000002/status.json')
+    steps=base['checkpoint']['total_steps']+budget['train_steps']
+    assert resumed['iteration']==3 and resumed['checkpoint']['total_steps']==steps
+    assert resumed['checkpoint']['total_samples']==steps*gpu_config['training']['batch_size']
+    assert resumed['train_credit']==budget['available_credit']-budget['train_steps']*gpu_config['training']['batch_size']
     assert resumed['replay_origin_rows']==base['replay_origin_rows']
     quota=gpu_config['training']['train_steps']*gpu_config['training']['batch_size']/gpu_config['training']['replay_ratio']
-    assert resumed['target_rows']==pytest.approx(base['target_rows']+quota)
+    assert resumed['target_rows']==pytest.approx(base['replay_rows']+quota)
     assert_preserved(root,pending)
     assert not list((root/'models').glob('.tmp_*'))
     assert load_json(root/'models/current.json')['model']==resumed['model']
@@ -2436,12 +2555,12 @@ def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gp
     assert run_training(root,gpu_config,BINARY,resume=True,max_iteration=2)==resumed
     assert before=={p:sha256(p) for p in before}
     save_json(root/'transaction_checks.json',{'boundary':boundary,'committed_before_recovery':committed,
-              'final_steps':8,'final_samples':64,'active_rows':rows,'preserved_old_artifacts':len(preserved),
+              'final_steps':steps,'final_samples':resumed['checkpoint']['total_samples'],'active_rows':rows,'preserved_old_artifacts':len(preserved),
               'preserved_pending_artifacts':len(pending),'history_iterations':[0,1,2],
-              'resume_policy':'whole round rollback before state commit; no rerun after commit'})
+              'resume_policy':'stage and learner cursor resume before state commit; no rerun after commit'})
 
 
-@pytest.mark.parametrize('corruption',['model','manifest','checkpoint'])
+@pytest.mark.parametrize('corruption',['model','manifest'])
 def test_committed_artifact_corruption_rejected_before_cuda_workers(tmp_path,recovery_parent,gpu_config,corruption):
     parent,state=recovery_parent;root=tmp_path/'run';shutil.copytree(parent,root)
     if corruption=='model':path=root/state['model']['path']
@@ -2450,7 +2569,7 @@ def test_committed_artifact_corruption_rejected_before_cuda_workers(tmp_path,rec
     path.write_bytes(b'injected partial artifact')
     before=sha256(root/'.internal/state.json')
     starts=sum(json.loads(line)['event']=='worker_start' for line in (root/'logs/events.jsonl').read_text().splitlines())
-    with pytest.raises((ValueError,json.JSONDecodeError),match='checksum|Expecting'):
+    with pytest.raises((ValueError,json.JSONDecodeError),match='size|Expecting'):
         run_training(root,gpu_config,BINARY,resume=True,max_iteration=2)
     assert sha256(root/'.internal/state.json')==before
     assert starts==sum(json.loads(line)['event']=='worker_start' for line in (root/'logs/events.jsonl').read_text().splitlines())
