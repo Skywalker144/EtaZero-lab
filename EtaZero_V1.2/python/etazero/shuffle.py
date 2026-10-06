@@ -13,10 +13,11 @@ from pathlib import Path
 import shutil
 import uuid
 import fcntl
+import warnings
 import numpy as np
-from .data import read_raw, training_view
+from .data import read_raw, training_view, training_targets, TRAIN_TARGETS
 from .schema import CONTRACT_ID
-from .storage import atomic_write, load_json, save_json, save_npz, sha256, sync_directory, write_npz
+from .storage import atomic_write, load_json, save_json, save_npz, sync_directory, write_npz
 
 
 def desired_window(rows, replay):
@@ -39,8 +40,8 @@ def replay_counts(entries, minimum):
             'postrandom_rows':postrandom,'usable_rows':min(random_rows,minimum)+postrandom}
 
 
-def window_sources(entries, replay):
-    counts=replay_counts(entries,replay['min_rows'])
+def window_sources(entries, replay, counts=None):
+    counts=replay_counts(entries,replay['min_rows']) if counts is None else counts
     if counts['raw_rows']<replay['min_rows']:raise ValueError('Cannot shuffle before replay.min_rows is reached')
     desired=desired_window(counts['usable_rows'],replay)
     # Catalogue mtimes come from stat, never iteration or writer wall-clock metadata.
@@ -91,40 +92,26 @@ def partition_rows(rows, buckets, rng):
     return rng.permutation(rows), np.concatenate(([0], np.cumsum(counts)))
 
 
-def _source_view(path, expected_hash, cache):
-    path, cache = Path(path), Path(cache)
-    view_path, certificate = cache/(expected_hash+'.npz'), cache/(expected_hash+'.json')
-    stat = path.stat()
-    stamp = [stat.st_size, stat.st_mtime_ns]
-    if certificate.exists() and view_path.exists():
-        info = load_json(certificate)
-        if info['contract'] != CONTRACT_ID or info['source_sha256'] != expected_hash:
-            raise ValueError(f'Invalid training-view certificate: {certificate}')
-        if info['source_stat'] != stamp:
-            if sha256(path) != expected_hash:
-                raise ValueError(f'Raw source changed after snapshot selection: {path}')
-            info['source_stat'] = stamp
-            save_json(certificate, info)
-        if sha256(view_path) != info['sha256']:
-            raise ValueError(f'Training-view checksum mismatch: {view_path}')
+def view_key(entry, targets=TRAIN_TARGETS):
+    return CONTRACT_ID + '_' + entry['metadata']['shard_id'] + '_' + ''.join(str(i) for i,k in enumerate(TRAIN_TARGETS) if k in targets)
+
+
+def _source_view(path, source_id, cache, targets):
+    view_path = Path(cache)/(source_id+'.npz')
+    if view_path.exists():
         return _load_view(view_path)
-    if sha256(path) != expected_hash:
-        raise ValueError(f'Raw source changed after snapshot selection: {path}')
-    arrays = training_view(read_raw(path))
-    # A derived, authenticated cache. Full trajectories remain the source of truth.
-    atomic_write(view_path, lambda p: _temporary(p, arrays))
-    save_json(certificate, {'contract':CONTRACT_ID, 'source_sha256':expected_hash,
-                           'source_stat':stamp, 'sha256':sha256(view_path)})
+    arrays = training_view(read_raw(path, deep=False), targets)
+    atomic_write(view_path, lambda p: _temporary(p, arrays), durable=False)
     return arrays
 
 
 def _scatter(task):
-    index, sources, raw, root, buckets, seed, cache, keep_prob, compressed = task
+    index, sources, raw, root, buckets, seed, cache, keep_prob, compressed, targets = task
     rng = np.random.default_rng(np.random.SeedSequence([*seed,index]))
     views = []
-    for path, expected_hash in sources:
+    for path, source_id in sources:
         if raw:
-            view = _source_view(path, expected_hash, cache)
+            view = _source_view(path, source_id, cache, targets)
         else:
             view = _load_view(path)
         views.append(view)
@@ -179,7 +166,7 @@ def _merge_bucket(task):
         selection = permutation[start:stop]
         path = Path(output) / f"train_{label}_{index}.npz"
         save_npz(path, {k: a[selection] for k, a in arrays.items()})
-        result.append({"path": path.name, "rows": len(selection), "sha256": sha256(path)})
+        result.append({"path": path.name, "rows": len(selection)})
     return result
 
 
@@ -188,6 +175,8 @@ def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
     s, canvas = config["shuffle"], config["network"]["canvas"]
     # Six globals, four spatial float targets (two policies + W-L Q/visits),
     # opponent/full-game gates, three TD WDLs and main WDL.
+    # Keep the conservative full-target estimate so disabling unused targets
+    # does not change groups, bucket counts or the shuffle's random draws.
     train_bytes = 6*4 + 5*((canvas*canvas+7)//8) + 16*canvas*canvas + 2*4 + 9*4 + 12
     # Raw includes int64 visits and at most twice as many observations as moves.
     raw_bytes = 20*canvas*canvas + 10*((canvas*canvas+7)//8) + 164
@@ -226,26 +215,26 @@ def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
 
 def _groups(items, limit):
     groups, group, count = [], [], 0
-    for path, checksum, n in items:
+    for path, source_id, n in items:
         if n<=0:continue
-        group.append((path,checksum));count+=n
+        group.append((path,source_id));count+=n
         if count>=limit:
             groups.append(group);group=[];count=0
     if group:groups.append(group)
     return groups
 
 
-def _source_groups(root, chosen, limit, seed, partition=0):
-    items = [(str(root/e['path']),e['sha256'],e['metadata']['rows']) for e in chosen]
+def _source_groups(root, chosen, limit, seed, partition=0, targets=TRAIN_TARGETS):
+    items = [(str(root/e['path']),view_key(e,targets),e['metadata']['rows']) for e in chosen]
     rng = np.random.default_rng(np.random.SeedSequence([seed,2**32-1,partition]))
     return _groups([items[i] for i in rng.permutation(len(items))],limit)
 
 
-def _two_phase(pool, groups, raw, rows, scratch, output, plan, shard_rows, seed, label, cache, keep_prob=1.0, partition=0):
+def _two_phase(pool, groups, raw, rows, scratch, output, plan, shard_rows, seed, label, cache, keep_prob=1.0, partition=0, targets=TRAIN_TARGETS):
     if not groups:return []
     buckets = plan['buckets_per_wave']
     namespace=(seed,1,partition) if raw else (seed,2,partition,int(label))
-    assignments = pool.map(_scatter, [(i,g,raw,str(scratch),buckets,namespace,str(cache),keep_prob,plan['compress_temp']) for i,g in enumerate(groups)])
+    assignments = pool.map(_scatter, [(i,g,raw,str(scratch),buckets,namespace,str(cache),keep_prob,plan['compress_temp'],targets) for i,g in enumerate(groups)])
     files, counts = [[] for _ in range(buckets)], [0]*buckets
     for group_output in assignments:
         for bucket, path, n in group_output:
@@ -258,9 +247,10 @@ def _two_phase(pool, groups, raw, rows, scratch, output, plan, shard_rows, seed,
 def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None, output_name="data", partition=0):
     if not chosen:return []
     s = config['shuffle']
+    targets = config.get('targets') or training_targets(config)
     rows = sum(e['metadata']['rows'] for e in chosen)
-    items = [(str(root/e['path']),e['sha256'],e['metadata']['rows']) for e in chosen]
-    groups = _source_groups(root,chosen,plan['group_rows'],seed,partition)
+    items = [(str(root/e['path']),view_key(e,targets),e['metadata']['rows']) for e in chosen]
+    groups = _source_groups(root,chosen,plan['group_rows'],seed,partition,targets)
     sizes = {path:n for path,_,n in items}
     keep_prob = plan['keep_prob']
     kept_rows = sum(int(round(sum(sizes[path] for path,_ in group)*keep_prob)) for group in groups)
@@ -272,10 +262,10 @@ def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None, out
     with owner as workers:
         if plan['waves'] == 1:
             outputs = _two_phase(workers,groups,True,kept_rows,scratch,output,plan,s['training_shard_rows'],
-                                 seed,'0',cache,keep_prob,partition)
+                                 seed,'0',cache,keep_prob,partition,targets)
         else:
             waves = [[] for _ in range(plan['waves'])]
-            scatter = workers.map(_scatter,[(i,g,True,str(scratch/'waves'),plan['waves'],(seed,1,partition),str(cache),keep_prob,plan['compress_temp'])
+            scatter = workers.map(_scatter,[(i,g,True,str(scratch/'waves'),plan['waves'],(seed,1,partition),str(cache),keep_prob,plan['compress_temp'],targets)
                                              for i,g in enumerate(groups)])
             for assignments in scatter:
                 for wave,path,n in assignments:
@@ -288,7 +278,7 @@ def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None, out
                 wave_scratch=scratch/f'merge_{wave}';wave_scratch.mkdir()
                 wave_groups=_groups(parts,plan['group_rows'])
                 outputs.extend(_two_phase(workers,wave_groups,False,sum(p[2] for p in parts),wave_scratch,
-                                          output,plan,s['training_shard_rows'],seed,str(wave),cache,partition=partition))
+                                          output,plan,s['training_shard_rows'],seed,str(wave),cache,partition=partition,targets=targets))
                 shutil.rmtree(wave_scratch)
                 shutil.rmtree(scratch/'waves'/f'bucket_{wave}')
     outputs.sort(key=lambda x:x['path'])
@@ -297,11 +287,11 @@ def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None, out
     return outputs
 
 
-def _check_space(root, temp_parent, output_parent, chosen, plan):
+def _check_space(root, temp_parent, output_parent, chosen, plan, targets):
     rows=sum(e['metadata']['rows'] for e in chosen)
     cache=root/'.internal/training_views'
     cold_rows=sum(e['metadata']['rows'] for e in chosen
-                  if not (cache/(e['sha256']+'.npz')).exists() or not (cache/(e['sha256']+'.json')).exists())
+                  if not (cache/(view_key(e,targets)+'.npz')).exists())
     requirements={}
     for path,size in ((temp_parent,plan['temporary_bytes_estimate']),
                       (output_parent,plan['output_rows_estimate']*plan['training_bytes_per_row']*2),
@@ -312,15 +302,17 @@ def _check_space(root, temp_parent, output_parent, chosen, plan):
         requirements[device][1]+=size
     for path,required in requirements.values():
         if shutil.disk_usage(path).free<required:
-            raise OSError(f'Insufficient shuffle disk space at {path}: estimated {required} bytes including cold view cache')
+            warnings.warn(f'Shuffle disk estimate exceeds free space at {path}: {required} uncompressed bytes including cold view cache', RuntimeWarning)
 
 
-def build_snapshot(run_dir, iteration, entries, config, pool=None):
+def build_snapshot(run_dir, iteration, entries, config, pool=None, counts=None):
     root, r, s = Path(run_dir), config["replay"], config['shuffle']
-    # All entries are required to compute capped random/usable totals. Quota
-    # totals are separate from the usable replay rows.
-    entries=[{**e,'mtime_ns':(root/e['path']).stat().st_mtime_ns} for e in entries]
-    chosen,selection=window_sources(entries,r)
+    # The live catalog has already reconciled producer mtimes and totals.
+    # Standalone callers supply raw entries and need that reconciliation here.
+    if counts is None:
+        entries=[{**e,'mtime_ns':(root/e['path']).stat().st_mtime_ns} for e in entries]
+    chosen,selection=window_sources(entries,r,counts)
+    targets=training_targets(config)
     rows=selection['window_rows'];desired=selection['desired_rows']
     seed = config["run"]["seed"]+iteration
     keep_prob=sampling_probability(rows,r) # Before MD5 filtering, like the source.
@@ -331,7 +323,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None):
         subset_rows=sum(e['metadata']['rows'] for e in sources)
         max_raw=max((max(e['metadata']['plies'],e['metadata']['rows']) for e in sources),default=0)
         rough=resource_plan(subset_rows,max_raw,math.ceil(subset_rows/s['group_rows']),config,keep_prob)
-        groups=_source_groups(root,sources,rough['group_rows'],seed,partition)
+        groups=_source_groups(root,sources,rough['group_rows'],seed,partition,targets)
         return resource_plan(subset_rows,max_raw,len(groups),config,keep_prob)
     plan=partition_plan(train_sources,0);val_plan=partition_plan(val_sources,1)
     identity = f"iteration_{iteration:06d}_{uuid.uuid4().hex}"
@@ -342,7 +334,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None):
     scratch = temp_parent/(".shuffle_"+identity)
     space_plan=dict(plan,temporary_bytes_estimate=plan['temporary_bytes_estimate']+val_plan['temporary_bytes_estimate'],
                     output_rows_estimate=plan['output_rows_estimate']+val_plan['output_rows_estimate'])
-    _check_space(root,temp_parent,snapshots,chosen,space_plan)
+    _check_space(root,temp_parent,snapshots,chosen,space_plan,targets)
     try:
         stage.mkdir();scratch.mkdir()
         outputs = _write_data(root,stage,scratch/'train',train_sources,config,plan,seed,pool)
@@ -360,7 +352,8 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None):
                     'validation_sources':val_sources,'validation_files':validation_outputs,
                     'validation_rows':sum(e['rows'] for e in validation_outputs),'validation_resource_plan':val_plan,
                     'skip_validation':skip,
-                    'recipe':{'replay':r,'shuffle':s,'network':{'canvas':config['network']['canvas']}}}
+                    'targets':targets,
+                    'recipe':{'replay':r,'shuffle':s,'targets':targets,'network':{'canvas':config['network']['canvas']}}}
         if config['agent']['algorithm'] == 'muzero':
             from .muzero.data import replay_weight_mean
             if any(e['metadata'].get('unroll_steps') != config['unroll']['steps'] or
@@ -381,7 +374,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None):
 
 
 def restore_snapshot(snapshot):
-    """Rebuild an evicted derived payload, requiring the original file hashes."""
+    """Rebuild an evicted derived payload, using its saved sources and deterministic shuffle recipe."""
     snapshot = Path(snapshot)
     with (snapshot/'.restore.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -399,7 +392,7 @@ def restore_snapshot(snapshot):
         space_plan=dict(manifest['resource_plan'])
         for key in ('temporary_bytes_estimate','output_rows_estimate'):
             space_plan[key]+=manifest['validation_resource_plan'][key]
-        _check_space(root,temp_parent,snapshot,manifest['sources']+manifest['validation_sources'],space_plan)
+        _check_space(root,temp_parent,snapshot,manifest['sources']+manifest['validation_sources'],space_plan,manifest['targets'])
         # The lock proves no cooperating restorer/evictor owns this scratch.
         for garbage in list(snapshot.glob('.evicted_*'))+list(snapshot.glob('.restore_*')):
             if garbage.is_dir():
@@ -438,5 +431,5 @@ def prune_derived(run_dir, snapshots, keep_views):
                 shutil.rmtree(garbage)
     cache = root/'.internal/training_views'
     for path in cache.glob('*'):
-        if path.suffix in ('.npz','.json') and path.stem not in keep_views:
+        if path.suffix == '.npz' and path.stem not in keep_views:
             path.unlink()
