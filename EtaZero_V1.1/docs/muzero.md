@@ -31,7 +31,11 @@ WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、�
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
-训练 worker 检测到非有限 latent 时退出，并在错误中记录 `initial` / `recurrent` 阶段、推理精度和 batch 大小。失败批次的输入、输出 latent 及实际加载的模型另存为 `logs/nan_diagnostics/latent_*.pt`，错误中给出文件路径；保存失败时保留原异常并说明保存错误。诊断文件可用 `torch.jit.load` 读取，`input0/input1` 分别对应该阶段的两个输入，`model` 保留推理模块。直接调用原生程序时，可通过 `ETAZERO_NAN_DIAGNOSTIC_DIR` 指定捕获目录。
+[MuZero 后端](../cpp/src/muzero/torch_backend.cpp) 为各服务建立独立 CUDA stream，复用 pinned observation、global 和 action 输入缓冲区。节点 latent 使用独立分配与 foreach 批量复制，避免单个存活节点保留整批 latent。一次预测回传完成该 stream 上此前的节点复制，结果交给搜索线程后可安全读取和复用父节点。模型加载时核对算法、画布与输入契约；运行时保留输入边界和输出形状检查，不额外归约 latent 有限性、回传 mask 或校验 heads 的实际精度。数值与 mask 正确性由独立开发测试验证。上述执行路径独立于 AlphaZero 的后端、组批队列和搜索实现。
+
+CUDA 服务在加载时为 initial 与 recurrent 准备 batch 为 1、2、4 等二次幂及 `max_batch` 的独立 CUDA Graph，运行时选择能容纳请求的最小 bucket。NBT 的推理归一化使用固定统计，ResNet 按样本归一化；不足 bucket 的部分重复一个有效输入，丢弃额外输出，不增加搜索节点或训练目标。recurrent 通过 foreach 将父 latent 直接组装到 graph 输入，避免中间拼接分配。各 graph 保留自己的输入、输出和内存池；节点复制完成后才允许下一次重放，父节点不会引用可被覆盖的 graph 输出。准备和模型加载的耗时进入实际轮次墙钟；固定模型短测通过预热排除这一启动成本。
+
+FP16 后端在加载时将 Conv2d / Linear 的权重与 bias 转为 autocast 原本使用的 FP16 值，避免每次前向重复转换矩阵。归一化参数、统计、mask 和 latent 保持 FP32；导出文件与 learner 权重保持原有存储精度。
 
 ## 搜索与子树加权开关
 
