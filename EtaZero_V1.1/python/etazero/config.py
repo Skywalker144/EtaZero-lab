@@ -86,7 +86,7 @@ FIELDS = {
                                   fork_game_min_choices=int,early_fork_game_max_choices=int,fork_game_max_choices=int)),
     'side_positions': ("selfplay", dict(side_position_prob=float)),
     'pda': ("selfplay", dict(normal_asymmetric_playout_prob=float,max_asymmetric_ratio=float)),
-    'selfplay': ("selfplay", {'bootstrap_games': int, 'recent_games': int}),
+    'selfplay': ("selfplay", {'bootstrap_games': int}),
     'reduce_visits': ("selfplay", {'reduce_visits': boolean, 'reduce_visits_threshold': float,
                                    'reduce_visits_threshold_lookback': int, 'reduced_visits_min': int,
                                    'reduced_visits_weight': float}),
