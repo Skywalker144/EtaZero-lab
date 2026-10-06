@@ -12,7 +12,7 @@ import torch
 from etazero.config import ROOT, load_config
 from etazero.experiment import (experiment_plan, initialization_key, prepare_initializations,
                                 arm_progress, write_arm_config, run_experiment, Scheduler)
-from etazero.plotting import (run_history, training_figure, loss_figure, performance_figure,
+from etazero.plotting import (run_history, round_history, training_figure, loss_figure, performance_figure,
                              journal_events, METRICS)
 from etazero.storage import save_json, load_json, sha256
 
@@ -89,42 +89,40 @@ def journal(root, events):
 
 def test_history_counts_amp_consumption_and_finite_gradients_separately(tmp_path):
     save_json(tmp_path/'.internal/state.json', {'iteration': 2, 'checkpoint': {'id': 'c', 'path': 'checkpoints/c.pt'}})
-    save_json(tmp_path/'checkpoints/c.json', {'parent': None, 'committed_updates': ['skip', 'success']})
     update = {'event': 'update', 'iteration': 1, 'policy_loss': 1, 'opponent_policy_loss': 1,
               'soft_policy_loss': 1, 'soft_opponent_policy_loss': 1, 'value_loss': 1}
     update.update({k:0 for k in ('td_value_long_loss','td_value_mid_loss','td_value_short_loss',
                                 'long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')})
-    journal(tmp_path, [{**update, 'update_id': 'skip', 'amp_skipped': True, 'loss': 6, 'grad_norm': float('inf')},
-                       {**update, 'update_id': 'success', 'amp_skipped': False, 'loss': 10, 'grad_norm': 5}])
-    row, = run_history(tmp_path)
+    journal(tmp_path, [{**update, 'step': 1, 'amp_skipped': True, 'loss': 6, 'grad_norm': float('inf')},
+                       {**update, 'step': 2, 'amp_skipped': False, 'loss': 10, 'grad_norm': 5}])
+    row = round_history(tmp_path,1,2,0)
     assert row['steps'] == 2 and row['amp_skipped_steps'] == 1 and row['gradient_steps'] == 1
     assert row['loss'] == 8 and row['grad_norm'] == 5
 
 
 def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
     save_json(tmp_path/'.internal/state.json', {'iteration': 2, 'checkpoint': {'id': 'base', 'path': 'checkpoints/base.pt', 'total_steps': 1}})
-    save_json(tmp_path/'checkpoints/base.json', {'parent': None, 'committed_updates': ['kept']})
     save_json(tmp_path/'.internal/iterations/000002/learner.json', {'checkpoint': {'id': 'progress', 'path': 'checkpoints/progress.pt', 'total_steps': 2}})
-    save_json(tmp_path/'checkpoints/progress.json', {'parent': {'id': 'base', 'path': 'checkpoints/base.pt'}, 'committed_updates': ['current']})
     stats = {'event': 'selfplay_statistics', 'iteration': 1, 'games': 4, 'rows': 40, 'plies': 48,
              'avg_game_length': 12, 'avg_rows_per_game': 10, 'black_wins': 2, 'white_wins': 1, 'draws': 1}
-    update = {'event': 'update', 'iteration': 1, 'total_steps': 1, 'update_id': 'kept',
+    update = {'event': 'update', 'iteration': 1, 'total_steps': 1, 'step': 1,
               'loss': 6, 'policy_loss': 2, 'opponent_policy_loss': .5,
               'soft_policy_loss': 2, 'soft_opponent_policy_loss': .5, 'value_loss': 1, 'grad_norm': 5}
     update.update({k:0 for k in ('td_value_long_loss','td_value_mid_loss','td_value_short_loss',
                                 'long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')})
     infer = {'event': 'inference', 'evaluator': 'network', 'iteration': 1, 'attempt': 'a', 'worker_id': 0,
              'requests': 8, 'batches': 2, 'queue_wait_us': 24, 'submitted': 10, 'cache_hits': 2}
-    path = journal(tmp_path, [stats, stats, {'event': 'iteration_complete', 'iteration': 1, 'unique_rows': 40},
-                             update, update, {**update, 'update_id': 'abandoned', 'loss': 999},
-                             {**update, 'iteration': 2, 'update_id': 'current', 'loss': 7},
+    path = journal(tmp_path, [stats, stats, {'event': 'iteration_complete', 'iteration': 1, 'unique_rows': 40, 'total_samples': 8},
+                             update, update, {**update, 'step': 2, 'loss': 999},
+                             {**update, 'iteration': 2, 'step': 1, 'loss': 7},
                              {**stats, 'iteration': 2}, infer, infer,
                              {'event': 'phase_end', 'iteration': 1, 'phase': 'selfplay', 'seconds': 2},
                              {'event': 'phase_end', 'iteration': 1, 'phase': 'selfplay', 'seconds': 3}])
     with path.open('a') as file:
         file.write('{"event":')
-    rows = run_history(tmp_path)
+    rows = [round_history(tmp_path,1,1,0)]
     assert len(rows) == 1 and rows[0]['steps'] == 1 and rows[0]['loss'] == 6
+    assert rows[0]['total_samples'] == 8
     assert rows[0]['games'] == 4 and rows[0]['requests'] == 8 and rows[0]['phases']['selfplay'] == 5
     figure = training_figure(rows)
     assert len(figure.axes) == 6
@@ -149,22 +147,22 @@ def test_history_uses_committed_updates_and_completed_selfplay(tmp_path):
 
 def test_validation_history_excludes_abandoned_and_uncommitted_rounds(tmp_path):
     save_json(tmp_path/'.internal/state.json', {'iteration': 4, 'checkpoint': {'id': 'c', 'path': 'checkpoints/c.pt'}})
-    save_json(tmp_path/'checkpoints/c.json', {'parent': None, 'committed_updates': ['one', 'two', 'three']})
     values = dict.fromkeys(METRICS, 1.0); values['loss'] = 11.0
     def update(iteration, identity):
-        return dict(values, event='update', iteration=iteration, update_id=identity)
+        return dict(values, event='update', iteration=iteration, step=1)
     def complete(iteration):
-        return dict(event='iteration_complete', iteration=iteration, unique_rows=100*iteration)
+        return dict(event='iteration_complete', iteration=iteration, unique_rows=100*iteration,
+                    total_samples=16*iteration)
     def validation(iteration, loss):
         return dict(values, event='validation', iteration=iteration, samples=16, batches=2, loss=loss)
-    journal(tmp_path, [update(1, 'abandoned'), validation(1, 999),
+    journal(tmp_path, [update(1, 'abandoned'),
                        dict(event='plan', iteration=1), update(1, 'one'), complete(1),
                        update(2, 'two'), validation(2, 12), validation(2, 12), complete(2),
                        validation(3, 999), dict(event='plan', iteration=3), update(3, 'three'),
                        dict(event='validation', iteration=3, samples=0, batches=0,
                             reason='no_complete_validation_batch'), complete(3),
                        update(4, 'current'), validation(4, 999), complete(4)])
-    history = run_history(tmp_path)
+    history = [round_history(tmp_path,i,1,0) for i in (1,2,3)]
     assert [r['iteration'] for r in history] == [1, 2, 3]
     assert 'validation' not in history[0]
     assert history[1]['validation']['loss'] == 12
@@ -172,6 +170,7 @@ def test_validation_history_excludes_abandoned_and_uncommitted_rounds(tmp_path):
     figure = loss_figure(history)
     assert len(figure.axes) == 12
     train, val = figure.axes[0].lines
+    assert list(train.get_xdata()) == [16, 32, 48]
     assert list(train.get_ydata()) == [11, 11, 11]
     np.testing.assert_equal(val.get_ydata(), [np.nan, 12, np.nan])
     assert val.get_linestyle() == '-' and val.get_marker() == 'None'
@@ -292,6 +291,21 @@ def test_experiment_rejects_existing_identity_changes(tmp_path, monkeypatch, cha
         run_experiment(plan, binary)
     assert calls == [True]
     assert manifest.read_bytes() == original
+
+
+def test_experiment_accepts_execution_changes(tmp_path, monkeypatch):
+    directory = umbrella(tmp_path)
+    binary = tmp_path/'binary'
+    binary.write_bytes(b'test binary')
+    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr(Scheduler, 'run', lambda _: 0)
+    plan = experiment_plan(directory, environ={}, work_dir=tmp_path/'work')
+    assert run_experiment(plan, binary) == 0
+    plan['arms'][0]['config']['run']['cpu_threads'] = 3
+    plan['arms'][0]['config']['training']['checkpoint_every'] = 1
+    assert run_experiment(plan, binary) == 0
+    current = load_json(Path(plan['work_dir'])/'.internal/identity.json')
+    assert current['arms'][0]['config']['run']['cpu_threads'] == 3
 
 
 def test_scheduler_failure_interrupts_other_running_arms(tmp_path, monkeypatch):
