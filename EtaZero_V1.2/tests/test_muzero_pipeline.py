@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.data import read_raw, metadata, training_view
+from etazero.data import read_raw, metadata, training_view, game_weight_statistics
 from etazero.network import make_network
 from etazero.runtime import run_training
 from etazero.storage import load_json, sha256
@@ -21,13 +21,17 @@ def assert_diagnostics(root, config):
     from etazero.plotting import run_history, training_figure
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
     updates=[e for e in events if e['event']=='update']
+    budgets={e['iteration']:e['train_steps'] for e in events if e['event']=='training_budget'}
     assert updates
     for row in updates:
         assert len(row['step_losses']) == config['unroll']['steps']+1
         assert sum(row['step_losses']) == pytest.approx(row['loss'],rel=2e-6)
-        assert set(row['grad_norms']) == {'representation','dynamics','prediction'}
-        if not row['amp_skipped']:
-            assert np.linalg.norm(list(row['grad_norms'].values())) == pytest.approx(row['grad_norm'],rel=2e-6)
+        measured = row['step']==1 or row['step']%config['optimizer']['norm_interval']==0 or row['step']==budgets[row['iteration']]
+        assert ('grad_norms' in row)==measured
+        if measured:
+            assert set(row['grad_norms']) == {'representation','dynamics','prediction'}
+            if not row['amp_skipped']:
+                assert np.linalg.norm(list(row['grad_norms'].values())) == pytest.approx(row['grad_norm'],rel=2e-6)
     figure=training_figure(run_history(root))
     assert len(figure.axes)==8 and len(figure.axes[6].lines)==2 and len(figure.axes[7].lines)==3
     figure.clear()
@@ -85,7 +89,8 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture):
     state = run_training(root, c, ROOT/'build/etazero', max_iteration=2)
     assert_diagnostics(root,c)
     saved = load_checkpoint(root, state['checkpoint'], c)
-    assert state['checkpoint']['total_steps'] == 8
+    steps=sum(load_json(root/'.internal/iterations'/f'{i:06d}'/'status.json')['train_steps'] for i in (1,2))
+    assert 0<steps<=2*c['training']['train_steps'] and state['checkpoint']['total_steps']==steps
     assert saved['algorithm'] == 'muzero' and saved['muzero_config'] == c['muzero']
     initial = load_checkpoint(root, load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'], c)
     for key in ('representation.stem.weight','dynamics.stem.weight','prediction.policy_head.out.weight'):
@@ -193,7 +198,7 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
     entries=[]; sides=absorbing=zero=0
     for path in sorted(directory.glob('*.npz')):
         a = read_raw(path); m = metadata(a); v = training_view(a)
-        entries.append(dict(path=str(path.relative_to(tmp_path)), sha256=sha256(path), metadata=m))
+        entries.append(dict(path=str(path.relative_to(tmp_path)), metadata=m, weight_stats=game_weight_statistics(a)))
         starts=[]
         for g in range(m['games']):
             lo, hi=a['game_offsets'][g:g+2]
