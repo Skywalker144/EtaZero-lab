@@ -33,6 +33,8 @@ def validate_search_parameters(c):
     bounds={'uncertainty_coeff':(.0001,1),'uncertainty_exponent':(0,2),'uncertainty_max_weight':(1,100),
             'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50)}
     for key,(low,high) in bounds.items():
+        if key.startswith('uncertainty_') and not c['use_uncertainty']: continue
+        if key.startswith('noise_') and not c['use_noise_pruning']: continue
         if not math.isfinite(c[key]) or not low<=c[key]<=high:
             raise ValueError(f'Invalid search correction: {key}')
     if not 0 <= c['nn_symmetry'] < 8 or not 0 <= c['max_playouts'] <= 2**31-1:
@@ -59,7 +61,7 @@ FIELDS = {
     "muzero_training": ("train", {"auxiliary_losses": boolean, "katago_optimizer": boolean,
                                   "learning_rate": float, "weight_decay": float}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
-                           'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'no_repeat_files':boolean,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
+                           'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
                            "replay_ratio": float, "d4_augmentation": boolean, "soft_policy_weight_scale": float, "disable_optimistic_policy": boolean}),
     "optimizer": ("train", {"kind": str, "lr_scale": float, "lr_warmup": boolean,
@@ -242,6 +244,47 @@ def csv(value, cast=str):
     return [cast(x.strip()) for x in value.split(",") if x.strip()]
 
 
+# Lower bounds belong to the module that consumes each field.
+NUMERIC_MINIMUMS = {
+    'run': (('cpu_threads',), ('seed', 'max_iteration', 'max_seconds')),
+    'environment': ((), ('forbidden_feature_dropout_prob',)),
+    'network': (('canvas', 'channels'), ('blocks',)),
+    'muzero': (('latent_channels', 'dynamics_channels', 'prediction_channels'), ('dynamics_blocks', 'prediction_blocks')),
+    'unroll': (('steps',), ('hidden_gradient_scale',)),
+    'muzero_training': (('learning_rate',), ('weight_decay',)),
+    'training': (('train_steps', 'batch_size', 'sub_epochs', 'checkpoint_every', 'checkpoint_keep', 'replay_ratio'), ('prefetch_depth', 'max_validation_samples', 'gradient_clip', 'soft_policy_weight_scale')),
+    'optimizer': (('lr_scale', 'head_lr_factor', 'noreg_lr_factor', 'norm_interval', 'lookahead_k', 'lookahead_alpha', 'swa_scale'), ('input_wd_factor', 'normal_wd_factor', 'normal_attn_wd_factor', 'swa_period_samples')),
+    'replay': (('min_rows', 'taper_exponent', 'keep_target_rows', 'max_rows'), ('expand_per_row', 'taper_scale')),
+    'shuffle': (('workers', 'group_rows', 'bucket_rows', 'training_shard_rows', 'waves', 'memory_mb', 'snapshot_keep'), ()),
+    'search': (('full_search_visits', 'cheap_search_visits'), ('cheap_search_probs', 'cheap_search_target_weight', 'max_playouts', 'max_time')),
+    'graph_search': ((), ('graph_search_catch_up_leak_prob',)),
+    'uncertainty': (('uncertainty_coeff', 'uncertainty_max_weight'), ('uncertainty_exponent',)),
+    'optimistic_policy': ((), ('policy_optimism', 'root_policy_optimism')),
+    'noise_pruning': (('noise_prune_utility_scale',), ('noise_pruning_cap',)),
+    'reanalysis': ((), ('reanalyze_prop', 'reanalyze_policy_surprise_weight', 'reanalyze_value_surprise_weight', 'reanalyze_surprise_exponent')),
+    'hint_positions': ((), ('hint_positions_prob',)),
+    'game_forks': (('fork_game_min_choices', 'early_fork_game_max_choices', 'fork_game_max_choices'), ('early_fork_game_prob', 'fork_game_prob', 'early_fork_game_expected_move_prop')),
+    'side_positions': ((), ('side_position_prob',)),
+    'pda': (('max_asymmetric_ratio',), ('normal_asymmetric_playout_prob',)),
+    'selfplay': (('bootstrap_games',), ()),
+    'reduce_visits': (('reduce_visits_threshold_lookback', 'reduced_visits_min'), ('reduce_visits_threshold', 'reduced_visits_weight')),
+    'puct': (('c_puct', 'c_puct_base', 'c_puct_stdev_prior'), ('c_puct_log', 'c_puct_stdev_prior_weight', 'c_puct_stdev_scale', 'virtual_loss')),
+    'fpu': ((), ('fpu_reduction_max', 'root_fpu_reduction_max', 'fpu_parent_weight_by_visited_policy_pow', 'fpu_loss_prop', 'root_fpu_loss_prop', 'fpu_parent_weight')),
+    'value_weighting': ((), ('value_weight_exponent',)),
+    'forced_playouts': ((), ('root_desired_per_child_visits_coeff',)),
+    'policy_target': ((), ('chosen_move_subtract', 'chosen_move_prune')),
+    'lcb': (('lcb_stdevs',), ('min_visit_prop_for_lcb',)),
+    'symmetry': (('root_num_symmetries_to_sample',), ('nn_symmetry',)),
+    'temperature': (('nn_policy_temperature', 'root_policy_temperature_early', 'root_policy_temperature', 'temperature_halflife'), ('temperature', 'final_temperature', 'temperature_only_below_prob')),
+    'dirichlet_noise': (('dirichlet_total_concentration',), ('noise_fraction',)),
+    'opening': (('max_tries',), ('probability', 'avg_dist_factor', 'balance_exponent', 'rejection_probability', 'rejection_probability_fallback')),
+    'policy_init': (('policy_temperature',), ('policy_init_mean',)),
+    'surprise_weighting': ((), ('policy_surprise_data_weight', 'value_surprise_data_weight')),
+    'parallelism': (('game_threads', 'search_threads'), ()),
+    'inference': (('server_threads', 'max_batch', 'queue_capacity'), ('cache_entries', 'batch_wait_us')),
+    'writer': (('writer_queue', 'shard_rows'), ('first_file_min_random_proportion',)),
+}
+
 def validate(c):
     from .schema import RULES
     a = c["agent"]
@@ -265,26 +308,31 @@ def validate(c):
             raise ValueError('MuZero without auxiliary losses requires predict_q_values=false')
         if c['graph_search']['use_graph_search'] or c['search']['reuse_tree'] or c['symmetry']['root_num_symmetries_to_sample'] != 1:
             raise ValueError('MuZero requires use_graph_search=false, reuse_tree=false and root_num_symmetries_to_sample=1')
+    inactive = set()
+    for section, flag in (('uncertainty','use_uncertainty'), ('noise_pruning','use_noise_pruning'),
+                          ('fpu','use_fpu'), ('reanalysis','use_reanalyze'), ('reduce_visits','reduce_visits')):
+        if not c[section][flag]:
+            inactive.add(section)
+    if c['opening']['probability'] == 0: inactive.add('opening')
+    if not any(c['policy_init'][k] for k in ('policy_init','policy_after','policy_on_failure')):
+        inactive.add('policy_init')
     for section, fields in c.items():
         for key, value in fields.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if not math.isfinite(value) or (value < 0 and (section,key)!=("replay","add_to_data_rows")):
-                    raise ValueError(f"{section}.{key} must be nonnegative and finite")
-                zero_allowed = {"dynamics_blocks", "prediction_blocks", "hidden_gradient_scale", "first_file_min_random_proportion","hint_positions_prob","early_fork_game_prob","fork_game_prob","early_fork_game_expected_move_prop","reanalyze_prop","reanalyze_policy_surprise_weight","reanalyze_value_surprise_weight","reanalyze_surprise_exponent","side_position_prob","normal_asymmetric_playout_prob","uncertainty_exponent", "policy_optimism", "root_policy_optimism", "noise_pruning_cap", "graph_search_catch_up_leak_prob", "max_playouts", "max_time", "nn_symmetry", "fpu_parent_weight", "fpu_parent_weight_by_visited_policy_pow", "seed", "max_iteration", "max_seconds", "blocks", "batch_wait_us",
-                                "weight_decay", "virtual_loss", "noise_fraction", "temperature", "temperature_early",
-                                "final_temperature", "gradient_clip", "soft_policy_weight_scale", "swa_period_samples", "input_wd_factor", "normal_wd_factor", "normal_attn_wd_factor", "forbidden_feature_dropout_prob", "expand_per_row", "cache_entries",
-                                "policy_surprise_data_weight", "value_surprise_data_weight", "cheap_search_probs",
-                                "cheap_search_target_weight", "fpu_reduction_max", "root_fpu_reduction_max",
-                                "reduce_visits_threshold", "reduced_visits_weight",
-                                "min_visit_prop_for_lcb", "root_desired_per_child_visits_coeff", "value_weight_exponent",
-                                "chosen_move_subtract", "chosen_move_prune", "fpu_loss_prop", "root_fpu_loss_prop", "c_puct_log",
-                                "c_puct_stdev_prior_weight", "c_puct_stdev_scale", "temperature_only_below_prob",
-                                "max_validation_samples","taper_scale","add_to_data_rows","probability", "avg_dist_factor", "balance_exponent", "rejection_probability",
-                                "rejection_probability_fallback", "policy_init_mean"}
-                if key not in zero_allowed and value == 0:
-                    raise ValueError(f"{section}.{key} must be positive")
+            if isinstance(value, (int,float)) and not isinstance(value,bool) and not math.isfinite(value):
+                raise ValueError(f'{section}.{key} must be finite')
+        if section in inactive:
+            continue
+        positive, nonnegative = NUMERIC_MINIMUMS.get(section, ((),()))
+        for keys, allow_zero in ((positive,False),(nonnegative,True)):
+            for key in keys:
+                if section == 'search' and key in ('cheap_search_visits','cheap_search_target_weight') and c['search']['cheap_search_probs'] == 0:
+                    continue
+                value = fields[key]
+                if value == 'all': continue
+                if value < 0 or (not allow_zero and value == 0):
+                    raise ValueError(f'{section}.{key} must be {"nonnegative" if allow_zero else "positive"}')
     if c['training']['sub_epochs']>c['training']['train_steps']:
-        raise ValueError('training.sub_epochs cannot exceed the fixed round batch budget')
+        raise ValueError('training.sub_epochs cannot exceed the baseline round batch budget')
     env, net = c["environment"], c["network"]
     # MuZero ResNet keeps the NBT head width rules; the AZ presets are unchanged.
     network_widths(net["channels"], 'nbt' if a['algorithm'] == 'muzero' else net['architecture'])
@@ -312,13 +360,13 @@ def validate(c):
     validate_search_parameters({key: value for section in ('search', 'graph_search', 'uncertainty', 'optimistic_policy', 'noise_pruning', 'fpu', 'puct', 'symmetry', 'temperature')
                                 for key, value in c[section].items()})
     if (not 2 <= search['full_search_visits'] <= 2**31 - 1 or search['cheap_search_probs'] > 1
-            or not 2 <= search['cheap_search_visits'] <= search['full_search_visits']
-            or search['cheap_search_target_weight'] > 1 or c['lcb']['min_visit_prop_for_lcb'] > 1):
+            or (search['cheap_search_probs'] > 0 and not 2 <= search['cheap_search_visits'] <= search['full_search_visits'])
+            or (search['cheap_search_probs'] > 0 and search['cheap_search_target_weight'] > 1) or c['lcb']['min_visit_prop_for_lcb'] > 1):
         raise ValueError('Invalid cheap search cap/probability/weight or LCB visit proportion')
     if (search['cheap_search_probs'] == 1 and search['cheap_search_target_weight'] == 0 and
             not (c['reanalysis']['use_reanalyze'] and c['reanalysis']['reanalyze_prop']>0)):
         raise ValueError('All-cheap zero-weight searches produce no training rows')
-    if (c['reduce_visits']['reduce_visits_threshold'] > 0.999999 or
+    if c['reduce_visits']['reduce_visits'] and (c['reduce_visits']['reduce_visits_threshold'] > 0.999999 or
             not 1 <= c['reduce_visits']['reduce_visits_threshold_lookback'] <= 1000 or
             not 2 <= c['reduce_visits']['reduced_visits_min'] <= search['full_search_visits'] or
             c['reduce_visits']['reduced_visits_weight'] > 1):
@@ -328,7 +376,7 @@ def validate(c):
         raise ValueError('Invalid hint/game fork probability')
     if hints['hint_positions_prob']>0 and not hints['positions_file']:
         raise ValueError('Enabled hint sampling requires positions_file')
-    if not 1<=forks['fork_game_min_choices']<=min(forks['early_fork_game_max_choices'],forks['fork_game_max_choices']) or max(forks['early_fork_game_max_choices'],forks['fork_game_max_choices'])>100 or forks['early_fork_game_expected_move_prop']>1:
+    if (forks['early_fork_game_prob'] > 0 or forks['fork_game_prob'] > 0) and (not 1<=forks['fork_game_min_choices']<=min(forks['early_fork_game_max_choices'],forks['fork_game_max_choices']) or max(forks['early_fork_game_max_choices'],forks['fork_game_max_choices'])>100 or forks['early_fork_game_expected_move_prop']>1):
         raise ValueError('Invalid game fork candidate range')
     ra=c['reanalysis']
     if ra['use_reanalyze']:
@@ -354,12 +402,13 @@ def validate(c):
     opening, policy_init = c["opening"], c["policy_init"]
     if any(opening[k] > 1 for k in ("probability", "rejection_probability", "rejection_probability_fallback")):
         raise ValueError("Opening probabilities must be in [0,1]")
-    if (opening["max_tries"] > 1000 or any(opening[k] > 100 for k in
-            ("avg_dist_factor", "balance_exponent")) or policy_init["policy_init_mean"] > 100 or
-            not 0.1 <= policy_init["policy_temperature"] <= 5):
+    if 'opening' not in inactive and (opening["max_tries"] > 1000 or any(opening[k] > 100 for k in
+            ("avg_dist_factor", "balance_exponent"))):
         raise ValueError("Invalid opening configuration")
+    if 'policy_init' not in inactive and (policy_init['policy_init_mean'] > 100 or not .1 <= policy_init['policy_temperature'] <= 5):
+        raise ValueError('Invalid policy init configuration')
     r, s = c["replay"], c["shuffle"]
-    if not 0 < r["taper_exponent"] <= 1:
+    if not 0 < r["taper_exponent"]:
         raise ValueError("Invalid replay window exponent")
     if r["keep_target_rows"] != "all" and not isinstance(r["keep_target_rows"],int):
         raise ValueError("keep_target_rows must be a positive integer or all")
@@ -393,3 +442,15 @@ def native_text(config):
 def write_native(config, path):
     from .storage import atomic_write
     atomic_write(path,lambda p:p.write_text(native_text(config)))
+
+
+def resume_config(config):
+    """State/layout requirements, independent of paths and execution resources."""
+    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'optimizer', 'training')
+    result = {name: dict(config[name]) for name in sections if name in config}
+    for key in ('checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
+                'max_validation_samples','randomize_validation_files'):
+        result['training'].pop(key, None)
+    result['optimizer'].pop('lookahead_print', None)
+    result['seed'] = config['run']['seed']
+    return result
