@@ -31,7 +31,7 @@ WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、�
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
-[MuZero 后端](../cpp/src/muzero/torch_backend.cpp) 为各服务建立独立 CUDA stream，复用 pinned observation、global 和 action 输入缓冲区。节点 latent 使用独立分配与 foreach 批量复制，避免单个存活节点保留整批 latent。一次预测回传完成该 stream 上此前的节点复制，结果交给搜索线程后可安全读取和复用父节点。模型加载时核对算法、画布与输入契约；运行时保留输入边界和输出形状检查，不额外归约 latent 有限性、回传 mask 或校验 heads 的实际精度。数值与 mask 正确性由独立开发测试验证。上述执行路径独立于 AlphaZero 的后端、组批队列和搜索实现。
+[MuZero 后端](../cpp/src/muzero/torch_backend.cpp) 为各服务建立独立 CUDA stream，复用 pinned observation、global 和 action 输入缓冲区。同一 worker 的服务共享一次模型加载、精度转换和 JIT 准备，各自持有 CUDA Graph；轮间把共享模型移回 CPU，换代时复用执行结构并更新权重与归一化统计。节点 latent 使用独立分配与 foreach 批量复制，避免单个存活节点保留整批 latent。一次预测回传完成该 stream 上此前的节点复制，结果交给搜索线程后可安全读取和复用父节点。模型加载时核对算法、画布与输入契约；运行时保留输入边界和输出形状检查，不额外归约 latent 有限性、回传 mask 或校验 heads 的实际精度。数值与 mask 正确性由独立开发测试验证。上述执行路径独立于 AlphaZero 的后端、组批队列和搜索实现。
 
 CUDA 服务在加载时为 initial 与 recurrent 准备 batch 为 1、2、4 等二次幂及 `max_batch` 的独立 CUDA Graph，运行时选择能容纳请求的最小 bucket。NBT 的推理归一化使用固定统计，ResNet 按样本归一化；不足 bucket 的部分重复一个有效输入，丢弃额外输出，不增加搜索节点或训练目标。recurrent 通过 foreach 将父 latent 直接组装到 graph 输入，避免中间拼接分配。各 graph 保留自己的输入、输出和内存池；节点复制完成后才允许下一次重放，父节点不会引用可被覆盖的 graph 输出。准备和模型加载的耗时进入实际轮次墙钟；固定模型短测通过预热排除这一启动成本。
 
@@ -85,18 +85,24 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 | 压缩零重复行、逐行 shuffle | 保存完整后续目标，shuffle 打乱起点序列 |
 | side 位置 | 仅根监督；不伪造吸收态 |
 | 并发组批、虚拟损失、失败唤醒 | 独立管理 initial/recurrent 请求及设备 latent 生命周期 |
-| checkpoint、文件校验、完整轮提交 | 共用运行管理，增加算法/三段模型/展开数据身份校验 |
+| checkpoint、数据边界、完整轮提交 | 共用运行管理，增加算法/三段模型/展开数据身份校验 |
 
-恢复同时涵盖模型、归一化统计、优化器、Lookahead/SWA、scaler、训练计数、模型 RNG 和 reader 消费游标及吸收态动作 RNG。控制器保留既有整轮提交边界；learner 的轮内 checkpoint 可恢复下一批更新。evaluate/match 和常驻分析服务从实际推理设备上已加载模型的元数据选择搜索实现，并将该模型交给后端使用，不另做用于识别类型的 CPU 完整加载。可以混合 AlphaZero/MuZero 对弈；含 MuZero 的比赛应使用关闭图共享和复用的 profile。
+恢复同时涵盖模型、归一化统计、优化器、Lookahead/SWA、scaler、训练计数、模型 RNG 和 reader 消费游标及吸收态动作 RNG。控制器保留既有整轮提交边界；训练入口直接使用 learner 的轮内 checkpoint 恢复下一批更新。evaluate/match 和常驻分析服务从实际推理设备上已加载模型的元数据选择搜索实现，并将该模型交给后端使用，不另做用于识别类型的 CPU 完整加载。可以混合 AlphaZero/MuZero 对弈；含 MuZero 的比赛应使用关闭图共享和复用的 profile。
 
 ## 训练诊断图
 
-`training.png` 在原有概览面板下增加两项 MuZero 诊断，布局为四行两列，每轮提交自动更新，也可通过 `scripts/run.sh plot --run-dir ...` 重建：
+`training.png` 布局为四行两列，每轮提交后自动更新，正常停止或恢复后也会重建，也可通过 `scripts/run.sh plot --run-dir ...` 查看已提交轮次。
+
+MuZero 概览中的缓存面板使用 **Root NN invalid policy mass**：对主 policy 原始 logits 以温度 1 在实际棋盘上归一化，求已占用位置的概率质量。排除画布外位置，不混入 optimistic policy、根温度或噪声；Renju 禁手允许落子后判负，不属于此处的占用掩码。每轮按实际自对弈落子前的根等权取均值，包含 cheap/full，排除开局初始化、side 与重分析。随机冷启动及未采集轮次显示缺测。百分比纵轴从 0 开始，按测量值自动缩放。每局的 sum/count 随原始对局元数据保存，跨分片只汇总一次；统计在 CPU 根预测上完成，不增加推理或 GPU 同步。MuZero 概览全部曲线不使用 marker；缓存计数仍显示在性能图中。该均值受局长与尺寸分布影响，不单独表示棋力。
+
+第四行提供两项展开训练诊断：
 
 - **Loss by unroll step**：横轴为 0 至 K，0 是 representation 的根预测。展示最新已完成轮次与所有有测量轮次的算术均值。每步包含该步完整 heads 的带权 loss，以整个起点 batch 为分母，保留真实后续步权重、side mask 和吸收态目标；各步之和等于日志总 loss。这里没有乘只作用于反向传播的 `1/K`，曲线不是单步梯度贡献。
-- **Gradient norms by module**：沿轮次展示 representation h、dynamics g、prediction f。采用实际反传（已包含 hidden/loss 梯度缩放）经 AMP 反缩放后、裁剪前的参数梯度 L2 范数；总和反传时除以 batch size，均值反传时直接记录，与已有 Network 梯度图保持平均 loss 口径。三段没有共享参数，每次更新的三个范数平方和等于总范数平方；轮次均值不再要求满足该等式。side-only batch 的 dynamics 没有梯度，记录真实零值。
+- **Gradient norms by module**：以累计训练样本量展示 representation h、dynamics g、prediction f，横轴刻度采用紧凑科学计数法，顶部按轮末记录标注累计运行时间（小时）。采用实际反传（已包含 hidden/loss 梯度缩放）经 AMP 反缩放后、裁剪前的参数梯度 L2 范数；总和反传时除以 batch size，均值反传时直接记录，与已有 Network 梯度图保持平均 loss 口径。三段没有共享参数，每次更新的三个范数平方和等于总范数平方；轮次均值不再要求满足该等式。side-only batch 的 dynamics 没有梯度，记录真实零值。
 
-loss 均值包含 AMP 跳步消费，梯度均值只采用成功更新；原始 overflow 仍保存在日志。所有曲线根据 checkpoint 提交链筛选并去重，不计回滚更新。诊断只读取并 detach 已算出的 loss 和梯度，不额外反传或改变优化器更新。旧日志未记录这两类指标时显示缺测，不能事后从总 loss 或总梯度还原。
+loss 均值包含 AMP 跳步消费，梯度均值只采用成功更新；原始 overflow 仍保存在日志。所有曲线读取已提交逐轮指标；轮内恢复按消费 step 去重，不重复计入重算更新。诊断只读取并 detach 已算出的 loss 和梯度，不额外反传或改变优化器更新。旧日志未记录这两类指标时显示缺测，不能事后从总 loss 或总梯度还原。
+
+全模型范数和逐展开步 loss 仍逐 batch 记录；三个模块范数仅在首 batch、`optimizer.norm_interval` 时点和轮末采集。模块曲线是这些成功更新的采样均值，缺测 batch 不进入分母；与历史逐 batch 采集的模块范数均值口径不同。采集频率不改变裁剪、范数衰减策略或训练时钟。
 
 ## 验证入口与限制
 
@@ -110,3 +116,5 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests/test_muzero_n
 ```
 
 测试覆盖 normalization、手算梯度边界、潜在树视角与访问预算、无真实树内规则、固定 D4、缓存/后端归属、并发失败、完整序列分片、cheap/side/reanalysis/吸收态、reader 与 learner 恢复，以及真实 CUDA 训练与 Python/TorchScript/LibTorch initial/recurrent 对照。初始预测与连续 recurrent 预测的数值对照在独立测试中执行，每轮导出不执行数值校验。短测试说明执行链路和所测算法性质成立，不代表训练收敛、吞吐或棋力收益已验证。
+
+MuZero 回放权重均值按选中训练分片涉及的不同完整棋局的真实可训练主局位置统计，排除开局、不按重复起点加权。catalog 入库时保存逐局总权重与位置数；shuffle 按棋局身份去重聚合，不再重读整个窗口。
