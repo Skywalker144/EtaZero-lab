@@ -14,21 +14,23 @@ def sync_directory(path):
         os.close(fd)
 
 
-def atomic_write(path, writer, immutable=False):
+def atomic_write(path, writer, immutable=False, *, durable=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp." + uuid.uuid4().hex)
     try:
         writer(temporary)
-        with temporary.open("rb") as file:
-            os.fsync(file.fileno())
+        if durable:
+            with temporary.open("rb") as file:
+                os.fsync(file.fileno())
         if immutable:
             # link, unlike replace, atomically refuses to overwrite an existing artifact.
             os.link(temporary, path)
             temporary.unlink()
         else:
             os.replace(temporary, path)
-        sync_directory(path.parent)
+        if durable:
+            sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -50,11 +52,7 @@ def sha256(path):
 
 
 def save_npz(path, arrays):
-    import numpy as np
-    def write(p):
-        with p.open("wb") as file:
-            np.savez_compressed(file, **arrays)
-    atomic_write(path, write, immutable=True)
+    atomic_write(path, lambda p: write_npz(p, arrays), immutable=True)
 
 
 def write_npz(path, arrays, compressed=True):
