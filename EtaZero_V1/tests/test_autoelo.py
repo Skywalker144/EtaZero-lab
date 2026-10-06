@@ -329,15 +329,18 @@ def test_latest_pointer_and_native_performance_preserve_prior_results(tmp_path):
 @pytest.mark.parametrize('code', [0, 130])
 def test_autoexp_invokes_elo_only_after_success_and_keeps_actual_arm_paths(tmp_path, monkeypatch, code):
     directory = tmp_path/'configs'; directory.mkdir()
-    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=2\nmax_seconds=0\narm_gpus=2\nshared_init=false\nautoelo=true\n')
+    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=2\nmax_seconds=0\narm_gpus=2\nshared_init=false\nautoelo=true\narms=a\n')
     (directory/'a').mkdir()
     (directory/'a/run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path/"custom-output"}\n')
+    (directory/'b').mkdir()
+    (directory/'b/run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path/"unselected-output"}\n')
     plan = experiment_plan(directory, environ={}, work_dir=tmp_path/'controller')
     binary = tmp_path/'binary'; binary.write_bytes(b'binary')
     monkeypatch.setattr('etazero.runtime.verify_build', lambda _: 'hash')
     monkeypatch.setattr(Scheduler, 'run', lambda _: code)
     calls = []
     def elo_plan(directory, binary, *, arms, gpu):
+        assert [arm['name'] for arm in arms] == ['a']
         calls.append((arms[0]['run_dir'], gpu))
         return {'summary': {}, 'output': str(tmp_path/'elo')}
     monkeypatch.setattr('etazero.autoelo.autoelo_plan', elo_plan)
