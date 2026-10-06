@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101820">
+  <meta name="theme-color" content="#f3f3f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141414" media="(prefers-color-scheme: dark)">
   <title>EtaZero · 开发工作台</title>
   <link rel="icon" href="data:,">
   <script src="/theme.js"></script>
@@ -18,6 +19,9 @@
   <div id="error" class="error" role="alert" hidden></div>
   <main class="workspace">
     <aside class="setup panel" aria-label="模型与会话配置">
+      <details id="setup-details" class="setup-details" open>
+      <summary class="setup-toggle">会话配置<span>展开 / 收起</span></summary>
+      <div class="setup-content">
       <div class="panel-heading"><h2>会话配置</h2><button id="refresh-models" title="重新扫描已发布模型，不重启服务">刷新模型</button></div>
       <form id="settings">
         <label class="field">配置目录<select id="run" required></select></label>
@@ -35,6 +39,8 @@
       <details class="inspector"><summary>模型元信息 <span>MANIFEST</span></summary><pre id="model-info"></pre></details>
       <details class="inspector"><summary>搜索配置 <span>EVAL</span></summary><p class="muted">下列为生效配置；根访问上限取当前会话值，每次搜索清树。推理精度 auto 按设备解析。预算不改变训练配置。</p><pre id="engine-config"></pre></details>
       <p id="engine-info" class="engine-info"></p>
+      </div>
+      </details>
     </aside>
 
     <section class="position panel" aria-label="棋盘与历史">
@@ -56,7 +62,7 @@
       <div class="panel-heading"><h2>搜索分析</h2><span id="analysis-move" class="muted">—</span></div>
       <div id="analysis-empty" class="empty-state">创建棋局后按 A 分析当前方，或等待 AI 落子。</div>
       <div id="analysis-data" hidden>
-        <div class="analysis-context"><span id="analysis-context"></span><button id="show-analysis" title="在主棋盘查看本次搜索的落子前局面">定位局面</button></div>
+        <div class="analysis-context"><span id="analysis-context" role="status" aria-live="polite"></span><button id="show-analysis" title="在主棋盘查看本次搜索的落子前局面">定位局面</button></div>
         <div class="metrics"><div><small>根访问</small><strong id="completed"></strong></div><div><small>搜索耗时</small><strong id="seconds"></strong></div><div><small>根访问 / s</small><strong id="throughput"></strong></div></div>
         <div class="value-heading"><span id="value-label">当前方 W−L</span><strong id="value"></strong></div>
         <div class="wdl-bar" aria-hidden="true"><i id="wdl-win"></i><i id="wdl-draw"></i><i id="wdl-loss"></i></div>
