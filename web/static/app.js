@@ -75,16 +75,16 @@ function renderBoard(game, disabled) {
   const size = game?.board_size || Number($('size').value) || catalog.default_size;
   const step = 100 / (size + 1);
   const end = step * size;
-  let drawing = `<svg viewBox="0 0 100 100" aria-hidden="true"><g stroke="#927b59" stroke-width=".12">`;
+  let drawing = `<svg viewBox="0 0 100 100" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".12">`;
   for (let i = 1; i <= size; i++) {
     const p = i * step;
     drawing += `<path d="M${step},${p}H${end} M${p},${step}V${end}"/>`;
   }
-  drawing += '</g><g fill="#796b52" font-family="system-ui" font-size="1.55" text-anchor="middle">';
+  drawing += '</g><g fill="var(--board-label)" font-family="system-ui" font-size="1.55" text-anchor="middle">';
   for (let i = 0; i < size; i++) {
     drawing += `<text x="${(i + 1) * step}" y="${100 - step * .37}">${columns[i]}</text><text x="${step * .38}" y="${(i + 1) * step + .55}">${size - i}</text>`;
   }
-  drawing += '</g><g fill="#877454">';
+  drawing += '</g><g fill="var(--board-star)">';
   if (size % 2 === 1) {
     const stars = size >= 11 ? [3, (size + 1) / 2, size - 2] : [(size + 1) / 2];
     for (const x of stars) for (const y of stars) {
@@ -144,7 +144,9 @@ function renderHeatmap(id, field, maximumId, analysis) {
   }
   const map = $(id);
   map.style.gridTemplateColumns = `16px repeat(${size}, minmax(0, 1fr))`;
+  map.style.gridTemplateRows = `16px repeat(${size}, minmax(0, 1fr))`;
   map.classList.toggle('dense', size > 15);
+  map.classList.toggle('compact', size >= 11);
   map.innerHTML = html;
   $(maximumId).textContent = `${(maximum * 100).toFixed(2)}%`;
 }
@@ -209,7 +211,7 @@ function renderNetworkMaps() {
     const section = document.createElement('section');
     section.dataset.head = name;
     section.innerHTML = `<div class="heatmap-heading"><h3>${label}</h3><span>${index + 1} / ${networkHeads.length}</span></div><div class="network-head-name mono">${name}</div>` +
-      `<div class="heat-grid ${size > 15 ? 'dense' : ''}" role="group" aria-label="${label}热力图" style="grid-template-columns:16px repeat(${size},minmax(0,1fr))">${html}</div>` +
+      `<div class="heat-grid ${size > 15 ? 'dense' : ''} ${size >= 11 ? 'compact' : ''}" role="group" aria-label="${label}热力图" style="grid-template-columns:16px repeat(${size},minmax(0,1fr));grid-template-rows:16px repeat(${size},minmax(0,1fr))">${html}</div>` +
       `<div class="heat-legend"><span>${format(low)}</span><i></i><span>${format(high)}</span></div>` +
       `<p class="network-summary">最高 ${coordinate(best, size)} ${(head.probabilities[best] * 100).toFixed(2)}%<br>熵 ${entropy.toFixed(2)} nats · 已落子质量 ${(occupied * 100).toFixed(2)}%</p>`;
     $('network-maps').append(section);
@@ -243,7 +245,11 @@ function renderAnalysis() {
   $('analysis-data').hidden = !a;
   $('analysis-move').textContent = a ? `第 ${a.turn + 1} 手前 · ${a.player === 1 ? '黑' : '白'}方` : '—';
   if (!a) { analysisKey = null; renderHeatmaps(); renderNetworkMaps(); return; }
-  $('analysis-context').textContent = samePosition(state.game, a) ? '当前局面分析' : `历史分析 · 搜索后已落子`;
+  const updating = state.busy && state.phase === 'thinking';
+  $('analysis-context').textContent = updating ? '正在更新 · 当前显示上次分析' :
+    state.error ? '操作失败 · 当前显示上次分析' :
+    samePosition(state.game, a) ? '当前局面分析' : '历史分析 · 当前局面尚未分析';
+  $('analysis-context').classList.toggle('updating', updating);
   const key = JSON.stringify(a);
   if (key !== analysisKey) {
     $('seconds').textContent = `${a.seconds.toFixed(3)}s`;
@@ -332,6 +338,7 @@ function render() {
   $('history-count').textContent = `${viewTurn ?? game?.turn ?? 0} / ${game?.turn || 0} 手`;
   $('timeline').max = game?.turn || 0;
   $('timeline').value = viewTurn ?? game?.turn ?? 0;
+  $('timeline').style.setProperty('--range-progress', `${game?.turn ? Number($('timeline').value) / game.turn * 100 : 0}%`);
   $('timeline').disabled = !game?.turn;
   $('first').disabled = $('prev').disabled = !game || (viewTurn ?? game.turn) === 0;
   $('next').disabled = $('live').disabled = viewTurn === null;
@@ -347,6 +354,9 @@ function render() {
   renderAnalysis();
 }
 function renderSettingsNote() {
+  document.querySelectorAll('[data-visits]').forEach(button => {
+    button.setAttribute('aria-pressed', String(Number(button.dataset.visits) === Number($('visits').value)));
+  });
   const edited = state?.game && (Number($('visits').value) !== state.visits || $('mode').value !== state.mode ||
     Number(document.querySelector('input[name="human"]:checked').value) !== state.human);
   $('apply-settings').classList.toggle('settings-dirty', Boolean(edited));
@@ -524,6 +534,10 @@ try {
   $('numbers').checked = preferences.numbers !== false;
 } catch { /* Use defaults when storage is unavailable. */ }
 setInterval(renderStatus, 200);
+const compactLayout = window.matchMedia('(max-width: 1150px)');
+function updateSetupLayout() { $('setup-details').open = !compactLayout.matches; }
+compactLayout.addEventListener('change', updateSetupLayout);
+updateSetupLayout();
 async function start() {
   for (;;) {
     try { await loadCatalog(); break; }
