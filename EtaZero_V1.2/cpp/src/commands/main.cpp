@@ -104,7 +104,8 @@ template<class T> void array(std::ostream& out, const std::vector<T>& values) {
     for (auto x : values) { if (!first) out << ','; out << x; first = false; } out << ']';
 }
 std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false,
-                                          torch::jit::Module* web_model = nullptr) {
+                                          torch::jit::Module* web_model = nullptr,
+                                          std::shared_ptr<PreparedModel> prepared = nullptr) {
     std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "evaluate" ? "evaluation" : mode;
     int batch = c.integer(prefix+".max_batch"), canvas = c.integer("network.canvas");
     std::vector<std::unique_ptr<Backend>> backends;
@@ -115,7 +116,7 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
     std::optional<torch::jit::Module> detected_model;
     if(kind=="network" && mode!="selfplay" && mode!="infer") {
         // Detect from the actual inference model, then hand it to its backend.
-        // Selfplay already knows the algorithm and retains its owner-thread load.
+        // Selfplay already knows the algorithm and loads during backend preparation.
         torch::Device device(a.get("device"));c10::cuda::OptionalCUDAGuard guard;
         if(device.is_cuda())guard.set_device(device);
         detected_model=torch::jit::load(a.get(second?"model-b":"model"),device);
@@ -127,6 +128,8 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         else throw std::runtime_error("Unknown model metadata");
         if(web_model)*web_model=*detected_model; // Share immutable weights with Web-only diagnostics.
     }
+    if(!prepared)prepared=detected_model?std::make_shared<PreparedModel>(std::move(*detected_model)):
+                                        std::make_shared<PreparedModel>();
     if(algorithm=="muzero") {
         std::vector<std::unique_ptr<muzero::Backend>> models;
         for(int i=0;i<c.integer(prefix+".server_threads");++i) {
@@ -135,7 +138,7 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
                 auto precision=c.text(prefix+".inference_precision");
                 if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
                 models.push_back(std::make_unique<muzero::TorchBackend>(a.get(second?"model-b":"model"),a.get("device"),canvas,batch,precision,
-                    i==0?std::move(detected_model):std::nullopt));
+                    prepared));
             }
         }
         return std::make_unique<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),
@@ -144,14 +147,10 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
             std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0),c.integer(prefix+".queue_capacity"));
     }
     if(algorithm!="alphazero")throw std::runtime_error("Unknown model algorithm");
-    auto loaded_model=std::make_shared<TorchBackend::LoadedModel>();
-    if(detected_model) {
-        loaded_model->module=std::move(*detected_model);loaded_model->ready=true;
-    }
     for (int i=0;i<c.integer(prefix+".server_threads");++i) {
         if(kind=="random")backends.push_back(std::make_unique<RandomBackend>(canvas,std::stoull(a.get("seed"))));
         else backends.push_back(std::make_unique<TorchBackend>(a.get(second ? "model-b" : "model"),a.get("device"),canvas,batch,
-                                                         c.text(prefix+".inference_precision"),loaded_model));
+                                                         c.text(prefix+".inference_precision"),prepared));
     }
     return std::make_unique<BatchEvaluator>(std::move(backends), a.get(second ? "model-b-id" : "model-id"), canvas,
                                           batch, c.integer(prefix+".queue_capacity"), c.integer(prefix+".batch_wait_us"),
@@ -236,9 +235,14 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                     bool cheap=cheap_probability>0 && std::bernoulli_distribution(cheap_probability)(rng);
                     auto limits=selfplay_search_limits(search_config,historical_values,cheap,advantage,game.player(),context);
                     limits.search.should_stop=[&]{return stop_requested.load() || failure.load();};
+                    limits.search.collect_root_policy_invalid_mass=!random && source.unroll_steps>0;
                     auto result = search.run(game,temp,limits.search);
                     if(stop_requested || failure)break;
                     if(result.action<0)throw std::runtime_error("Selfplay search has no move: zero playout budget");
+                    if(limits.search.collect_root_policy_invalid_mass) {
+                        record.root_policy_invalid_mass_sum+=result.root_policy_invalid_mass;
+                        ++record.root_policy_invalid_mass_count;
+                    }
                     Step step{game.player(),result.action,result.simulations,static_cast<float>(temp),0,
                               game.observation(),std::move(result.policy),std::move(result.visits)};
                     step.cheap_search=limits.cheap_search;step.target_weight=limits.target_weight;
@@ -292,10 +296,11 @@ std::string read_field() {
 }
 int worker(const Args& base,const Config& config) {
     ForkPool forks;std::unique_ptr<InferenceService> cached;
+    auto prepared=std::make_shared<PreparedModel>();
     std::string model,path,operation;
     while(!stop_requested && std::getline(std::cin,operation)) {
         if(operation=="release") {
-            bool allocated=static_cast<bool>(cached);cached.reset();model.clear();path.clear();
+            bool allocated=static_cast<bool>(cached);cached.reset();prepared->offload();model.clear();path.clear();
             if(allocated && base.get("device").rfind("cuda:",0)==0)c10::cuda::CUDACachingAllocator::emptyCache();
             std::cout<<"{\"event\":\"worker_released\"}"<<std::endl;continue;
         }
@@ -303,7 +308,17 @@ int worker(const Args& base,const Config& config) {
         Args request=base;
         for(const char* key:{"model","model-id","games","output","attempt-id","iteration","seed","evaluator"})request.args[key]=read_field();
         if(!cached || model!=request.get("model-id") || path!=request.get("model") || request.get("evaluator")=="random") {
-            cached.reset();cached=evaluator(request,config,"selfplay");model=request.get("model-id");path=request.get("model");
+            cached.reset();prepared->offload();auto started=std::chrono::steady_clock::now();
+            cached=evaluator(request,config,"selfplay",false,nullptr,prepared);
+            model=request.get("model-id");path=request.get("model");
+            if(request.get("evaluator")=="network") {
+                const auto& timing=prepared->timing;
+                std::cout<<"{\"event\":\"worker_prepared\",\"seconds\":"
+                         <<std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()
+                         <<",\"load_seconds\":"<<timing.load_seconds<<",\"weights_seconds\":"<<timing.weights_seconds
+                         <<",\"graph_seconds\":"<<timing.graph_seconds<<",\"reused_runtime\":"
+                         <<(timing.reused_runtime?"true":"false")<<"}"<<std::endl;
+            }
         } else if(path!=request.get("model"))throw std::runtime_error("Worker model identity collision");
         int code=selfplay(request,config,*cached,forks);
         std::cout<<"{\"event\":\"worker_complete\",\"attempt_id\":"<<quote(request.get("attempt-id"))<<",\"code\":"<<code<<"}"<<std::endl;
