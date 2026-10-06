@@ -131,22 +131,22 @@ bool Search::catch_up(Edge& edge,Node& child,int worker) {
 Search::Search(Evaluator& e,SearchSettings s,uint64_t seed) : Search(s,seed) {evaluator_=&e;}
 Search::Search(SearchSettings s,uint64_t seed) : settings_(s) {
     if(s.simulations<1 || s.threads<1 || s.c_puct<=0 || s.virtual_loss<0 ||
-       s.noise_fraction<0 || s.noise_fraction>1 || s.dirichlet_total_concentration<=0 || s.max_visits<0 || s.fpu_reduction_max<0 || s.root_fpu_reduction_max<0 ||
-       s.fpu_parent_power<0 || s.fpu_parent_weight<0 || s.fpu_parent_weight>1 || s.max_playouts<0 || s.max_time<0 || !std::isfinite(s.max_time) ||
+       s.noise_fraction<0 || s.noise_fraction>1 || s.dirichlet_total_concentration<=0 || s.max_visits<0 || (s.use_fpu && (s.fpu_reduction_max<0 || s.root_fpu_reduction_max<0 ||
+       s.fpu_parent_power<0 || s.fpu_parent_weight<0 || s.fpu_parent_weight>1)) || s.max_playouts<0 || s.max_time<0 || !std::isfinite(s.max_time) ||
        s.nn_symmetry<0 || s.nn_symmetry>=8 || s.forced_playouts<0 || s.lcb_stdevs<=0 || s.min_lcb_visit_prop<0 || s.min_lcb_visit_prop>1 ||
-       s.value_weight_exponent<0 || s.chosen_move_subtract<0 || s.chosen_move_prune<0 || s.fpu_loss_prop<0 || s.fpu_loss_prop>1 ||
-       s.root_fpu_loss_prop<0 || s.root_fpu_loss_prop>1 || s.c_puct_log<0 || s.c_puct_base<=0 || s.c_puct_stdev_prior<=0 ||
+       s.value_weight_exponent<0 || s.chosen_move_subtract<0 || s.chosen_move_prune<0 || (s.use_fpu && (s.fpu_loss_prop<0 || s.fpu_loss_prop>1 ||
+       s.root_fpu_loss_prop<0 || s.root_fpu_loss_prop>1)) || s.c_puct_log<0 || s.c_puct_base<=0 || s.c_puct_stdev_prior<=0 ||
        s.c_puct_stdev_prior_weight<0 || s.c_puct_stdev_scale<0 || s.c_puct_stdev_scale>1 || s.root_symmetries<1 || s.root_symmetries>8 ||
        s.nn_policy_temperature<=0 || s.root_policy_temperature<=0 || s.root_policy_temperature_early<=0 || s.temperature_halflife<=0 ||
        s.chosen_move_temperature_only_below_prob<0 || s.chosen_move_temperature_only_below_prob>1 ||
        !std::isfinite(s.graph_catch_up_leak_prob) || s.graph_catch_up_leak_prob<0 || s.graph_catch_up_leak_prob>1 ||
-       !std::isfinite(s.uncertainty_coeff) || s.uncertainty_coeff<0.0001 || s.uncertainty_coeff>1 ||
+       (s.use_uncertainty && (!std::isfinite(s.uncertainty_coeff) || s.uncertainty_coeff<0.0001 || s.uncertainty_coeff>1 ||
        !std::isfinite(s.uncertainty_exponent) || s.uncertainty_exponent<0 || s.uncertainty_exponent>2 ||
-       !std::isfinite(s.uncertainty_max_weight) || s.uncertainty_max_weight<1 || s.uncertainty_max_weight>100 ||
+       !std::isfinite(s.uncertainty_max_weight) || s.uncertainty_max_weight<1 || s.uncertainty_max_weight>100)) ||
        !std::isfinite(s.policy_optimism) || s.policy_optimism<0 || s.policy_optimism>1 ||
        !std::isfinite(s.root_policy_optimism) || s.root_policy_optimism<0 || s.root_policy_optimism>1 ||
-       !std::isfinite(s.noise_prune_utility_scale) || s.noise_prune_utility_scale<0.001 || s.noise_prune_utility_scale>10 ||
-       !std::isfinite(s.noise_pruning_cap) || s.noise_pruning_cap<0 || s.noise_pruning_cap>1e50)
+       (s.use_noise_pruning && (!std::isfinite(s.noise_prune_utility_scale) || s.noise_prune_utility_scale<0.001 || s.noise_prune_utility_scale>10 ||
+       !std::isfinite(s.noise_pruning_cap) || s.noise_pruning_cap<0 || s.noise_pruning_cap>1e50)))
         throw std::runtime_error("Invalid search settings");
     root_=new_node();thread_states_.resize(s.threads);cleanup_roots_.resize(s.threads,nullptr);
     for(int i=0;i<s.threads;++i) {
