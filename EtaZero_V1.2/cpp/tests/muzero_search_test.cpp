@@ -57,6 +57,24 @@ struct QuotaBackend : mu::Backend {
         return out;
     }
 };
+struct PolicyMassBackend : QuotaBackend {
+    double shift;
+    explicit PolicyMassBackend(double s):shift(s){}
+    std::vector<mu::InferenceOutput> initial(const InferenceInputs& inputs) override {
+        std::vector<mu::InferenceOutput> result;
+        for(auto input:inputs) {
+            auto out=output(0,-1);auto& e=out.evaluation;
+            e.has_auxiliary=true;e.optimistic_logits.assign(36,shift);
+            for(int a=0;a<36;++a) {
+                bool occupied=(*input)[36+a] || (*input)[72+a];
+                e.logits[a]=shift+((*input)[a]?(occupied?std::log(7.0):0):1000);
+                e.optimistic_logits[a]=shift+a;
+            }
+            result.push_back(std::move(out));
+        }
+        return result;
+    }
+};
 int main(){
     Game game(5,6,Rule::FREESTYLE);game.play(0);
     SearchSettings settings{79,1,1000,1,0,.3,false};settings.value_weight_exponent=0;
@@ -68,6 +86,31 @@ int main(){
     check(result.policy[0]==0&&result.policy[5]==0&&result.policy[1]==1,"true root legal mask");
     search.advance(1);search.run(game,0,SearchRun{2});check(probe.initials==2,"new actual move reencodes root");
     evaluator->finish();
+    for(double shift:{-1000.0,1000.0})for(int symmetry=0;symmetry<8;++symmetry) {
+        std::vector<std::unique_ptr<mu::Backend>> backends;
+        backends.push_back(std::make_unique<PolicyMassBackend>(shift));
+        mu::BatchEvaluator mass_evaluator(std::move(backends),6,8,0,0,false,0,1);
+        auto config=settings;config.nn_randomize=false;config.nn_symmetry=symmetry;
+        config.root_policy_optimism=.75;config.nn_policy_temperature=2;config.noise_fraction=.25;
+        config.root_policy_temperature=3;config.root_policy_temperature_early=3;
+        SearchRun options;options.max_playouts=1;options.training=true;
+        mu::Search plain(mass_evaluator,config,12);auto baseline=plain.run(game,0,options);
+        check(std::isnan(baseline.root_policy_invalid_mass),"disabled diagnostic stays unmeasured");
+        options.collect_root_policy_invalid_mass=true;
+        mu::Search measured(mass_evaluator,config,12);auto diagnostic=measured.run(game,0,options);
+        check(std::abs(diagnostic.root_policy_invalid_mass-7.0/31)<1e-12,
+              "raw main policy mass ignores padding, optimism, temperatures and orientation");
+        check(diagnostic.action==baseline.action&&diagnostic.network_policy==baseline.network_policy&&
+              diagnostic.search_policy==baseline.search_policy&&diagnostic.visits==baseline.visits,
+              "measurement leaves search behavior unchanged");
+        Game empty(5,6,Rule::FREESTYLE);
+        check(measured.run(empty,0,options).root_policy_invalid_mass==0,"empty board has zero invalid mass");
+        empty.play(0);empty.play(6);
+        check(std::abs(measured.run(empty,0,options).root_policy_invalid_mass-14.0/37)<1e-12,
+              "both players' occupied positions contribute");
+        options.max_playouts=0;
+        check(std::isnan(measured.run(game,0,options).root_policy_invalid_mass),"no root inference means no measurement");
+    }
     {
         std::vector<std::unique_ptr<mu::Backend>> backends;backends.push_back(std::make_unique<QuotaBackend>());
         mu::BatchEvaluator quota(std::move(backends),6,8,0,0,false,0,1);
