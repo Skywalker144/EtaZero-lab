@@ -4,9 +4,43 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cmath>
 #include <cstring>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <sstream>
+#include <thread>
 
 namespace etazero::muzero {
 namespace {
+[[noreturn]] void latent_failure(const std::exception& error,const std::string& stage,
+    const std::string& precision,torch::jit::Module& model,const c10::IValue& result,
+    const torch::Tensor& input0,const torch::Tensor& input1) {
+    std::string message=std::string(error.what())+" (stage="+stage+", precision="+precision+
+        ", batch="+std::to_string(input0.size(0));
+    const char* directory=std::getenv("ETAZERO_NAN_DIAGNOSTIC_DIR");
+    if(directory && *directory) {
+        try {
+            std::filesystem::create_directories(directory);
+            std::ostringstream name;
+            name<<"latent_"<<stage<<"_"<<std::chrono::steady_clock::now().time_since_epoch().count()
+                <<"_"<<std::this_thread::get_id()<<".pt";
+            auto path=std::filesystem::path(directory)/name.str();
+            torch::jit::Module dump("MuZeroLatentDiagnostic");
+            dump.register_attribute("stage",c10::StringType::get(),stage);
+            dump.register_attribute("precision",c10::StringType::get(),precision);
+            dump.register_buffer("input0",input0.to(torch::kCPU));
+            dump.register_buffer("input1",input1.to(torch::kCPU));
+            dump.register_buffer("output_hidden",result.toTuple()->elements()[0].toTensor().to(torch::kCPU));
+            // Preserve the actual loaded model together with the failing batch.
+            dump.register_module("model",model);
+            dump.save(path.string());
+            message+=", diagnostic="+path.string();
+        } catch(const std::exception& capture_error) {
+            message+=", diagnostic_save_failed="+std::string(capture_error.what());
+        }
+    }
+    throw std::runtime_error(message+")");
+}
 struct AutocastGuard {
     bool enabled=at::autocast::is_autocast_enabled(at::kCUDA);
     at::ScalarType dtype=at::autocast::get_autocast_dtype(at::kCUDA);
@@ -68,7 +102,13 @@ std::vector<TorchBackend::Output> TorchBackend::initial(const InferenceInputs& i
         std::memcpy(obs.data_ptr<float>()+i*spatial,input.data(),spatial*sizeof(float));
         std::memcpy(globals.data_ptr<float>()+i*GLOBAL_FEATURES,input.data()+spatial,GLOBAL_FEATURES*sizeof(float));
     }
-    return unpack(model_.get_method("initial")({obs.to(device_),globals.to(device_)}),masks);
+    auto device_obs=obs.to(device_),device_globals=globals.to(device_);
+    auto result=model_.get_method("initial")({device_obs,device_globals});
+    try {return unpack(result,masks);}
+    catch(const std::exception& error) {
+        if(std::string(error.what())!="Nonfinite MuZero latent")throw;
+        latent_failure(error,"initial",precision_,model_,result,device_obs,device_globals);
+    }
 }
 std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Action>& inputs) {
     check_batch(inputs.size());c10::InferenceMode inference_guard;
@@ -88,7 +128,13 @@ std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Acti
         latents.push_back(latent->tensor_);masks.push_back(latent->mask_);
         actions.data_ptr<int64_t>()[i]=input.action;
     }
-    return unpack(model_.get_method("recurrent")({torch::cat(latents,0),actions.to(device_)}),masks);
+    auto hidden=torch::cat(latents,0),device_actions=actions.to(device_);
+    auto result=model_.get_method("recurrent")({hidden,device_actions});
+    try {return unpack(result,masks);}
+    catch(const std::exception& error) {
+        if(std::string(error.what())!="Nonfinite MuZero latent")throw;
+        latent_failure(error,"recurrent",precision_,model_,result,hidden,device_actions);
+    }
 }
 std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result,
     const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks) {
