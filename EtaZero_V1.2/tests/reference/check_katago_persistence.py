@@ -49,10 +49,10 @@ def check():
     scaler=torch.amp.GradScaler('cuda',enabled=False)
     cursor={'independent':'consumed cursor'}
     with tempfile.TemporaryDirectory() as directory:
-        reference=commit_checkpoint(directory,config,model,optimizer,scaler,1,1,1,cursor,None,['independent_update'],optimization)
+        reference=commit_checkpoint(directory,config,model,optimizer,scaler,1,1,1,cursor,optimization)
         saved=load_checkpoint(directory,reference,config)
-        expected={'id','contract','config_id','network_config','model','optimizer','optimization','scaler','rng','reader',
-                  'iteration','step','total_steps','total_samples','optimizer_steps','parent','committed_updates','source_id'}
+        expected={'id','contract','resume_config','network_config','model','optimizer','optimization','scaler','rng','reader',
+                  'iteration','step','total_steps','total_samples','optimizer_steps','source_id'}
         assert set(saved)==expected and saved['reader']==cursor and saved['optimizer_steps']==0 and saved['total_samples']==8
         assert set(saved['rng'])=={'python','numpy','torch','cuda'}
         assert set(saved['optimization'])>={'slow','lookahead_counter','swa','swa_samples','consumed_samples','optimizer_steps',
@@ -64,7 +64,7 @@ def check():
                 scope='Original save function executed; local real CPU checkpoint roundtrip; field-scope comparison, not recovery equivalence.',
                 differences=['Source saves model/optimizer/metrics/train_state/SWA; save function does not capture Python/NumPy/Torch/CUDA RNG, AMP scaler or Lookahead local cache/counter.',
                              'Source train_state owns SWA accumulated samples and file usage, not Eta consumed file-row cursor and whole-round quota/commit authority.',
-                             'Eta exact learner resume has extra persisted state; controller resumes last committed whole round and archives pending work.'])
+                             'Eta exact learner resume has extra persisted state; controller resumes completed phases and the saved learner cursor.'])
 
 
 if __name__=='__main__':print(json.dumps(check(),indent=2))
