@@ -78,6 +78,7 @@ def test_q_d4_independent_coordinate_permutation(symmetry):
 
 
 def test_q_per_repeat_values_survive_shuffle_reader_and_resume(tmp_path,config):
+    config['network'].update(architecture='transformer',blocks=5,channels=192,predict_q_values=True)
     raw,meta=winning_record(2)
     raw['row_repeats'][0]=3;raw['target_weights'][0]=3;compact_search(raw)
     meta['rows']=11;raw['metadata']=np.frombuffer(json.dumps(meta).encode(),np.uint8)
