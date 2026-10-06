@@ -16,7 +16,7 @@ from etazero.export import example_inputs
 from etazero.network import MaskedBatchNorm, make_network, base_losses as losses, inference_network
 from etazero.reader import BatchReader
 from etazero.schema import CONTRACT_ID, RAW_DTYPES, pack_observations, unpack_observations
-from etazero.shuffle import build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
+from etazero.shuffle import view_key, build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
 from etazero.storage import save_npz, save_json, sha256
 
 
@@ -332,8 +332,9 @@ def test_shuffle_resource_limits_and_failure_cleanup(tmp_path,config):
     with pytest.raises(ValueError,match="memory"):
         resource_plan(10000,5000,3,config)
     config["shuffle"].update(memory_mb=2048,training_shard_rows=2,waves=3,temp_dir=str(tmp_path/"scratch"))
-    entries[0]["sha256"]="bad checksum"
-    with pytest.raises(ValueError,match="source changed"):
+    a['globals']=a['globals'].astype(np.float64)
+    bad=path.with_name('bad.npz');save_npz(bad,a);os.replace(bad,path)
+    with pytest.raises(ValueError,match="dtype mismatch"):
         build_snapshot(tmp_path,1,entries,config)
     assert not list((tmp_path/"scratch").iterdir())
     assert not list((tmp_path/"snapshots").iterdir())
@@ -351,7 +352,7 @@ def test_katago_window_hand_values(config):
     with pytest.raises(ValueError,match='positive'):
         validate(config)
     replay['keep_target_rows']=-1
-    with pytest.raises(ValueError,match='nonnegative'):
+    with pytest.raises(ValueError,match='positive'):
         validate(config)
 
 
@@ -446,6 +447,8 @@ def test_partition_distribution_and_conservation():
 
 def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
     import etazero.shuffle as shuffle
+    from etazero.data import training_targets
+    targets=training_targets(config)
     a,m=winning_record();path=tmp_path/'selfplay'/'a.npz';save_npz(path,a)
     entries=[{'path':str(path.relative_to(tmp_path)),'sha256':sha256(path),'metadata':m}]
     config['replay']['min_rows']=9
@@ -456,7 +459,7 @@ def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
     # Cache hits must not invoke trajectory decoding/validation again.
     with monkeypatch.context() as patch:
         patch.setattr(shuffle,'read_raw',lambda *a:(_ for _ in ()).throw(AssertionError('revalidated')))
-        view=shuffle._source_view(path,entries[0]['sha256'],tmp_path/'.internal/training_views')
+        view=shuffle._source_view(path,view_key(entries[0],targets),tmp_path/'.internal/training_views',targets)
         assert len(view['value'])==9
     prune_derived(tmp_path,[identity],set())
     assert path.exists() and (snapshot/'manifest.json').read_bytes()==manifest_before
@@ -464,10 +467,10 @@ def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
     restore_snapshot(snapshot)
     assert hashes=={p.name:sha256(p) for p in (snapshot/'data').glob('*.npz')}
     assert (snapshot/'manifest.json').read_bytes()==manifest_before
-    cache=tmp_path/'.internal/training_views'/(entries[0]['sha256']+'.npz')
+    cache=tmp_path/'.internal/training_views'/(view_key(entries[0],targets)+'.npz')
     cache.write_bytes(b'corrupt cache')
-    with pytest.raises(ValueError,match='view checksum'):
-        shuffle._source_view(path,entries[0]['sha256'],tmp_path/'.internal/training_views')
+    with pytest.raises(ValueError,match='pickled'):
+        shuffle._source_view(path,view_key(entries[0],targets),tmp_path/'.internal/training_views',targets)
 
 
 def test_catalog_indexed_window_and_incremental_scan(tmp_path):
@@ -579,13 +582,13 @@ def test_cold_start_quota_hand_values(config):
     from etazero.runtime import iteration_plan
     config['training'].update(train_steps=1000,batch_size=128,replay_ratio=8)
     config['replay']['min_rows']=10000
-    state={'iteration':0,'model':None,'checkpoint':{'id':'initial'},'target_rows':0,'replay_origin_rows':None}
+    state={'iteration':0,'model':None,'checkpoint':{'id':'initial'},'target_rows':0,'replay_origin_rows':None,'replay_rows':0,'train_credit':0}
     assert iteration_plan(state,config)['train_steps']==0
     assert iteration_plan(state,config)['input_model']['evaluator']=='random'
     state['iteration']=1
     assert iteration_plan(state,config)['target_rows']==10000
     # 90000 excess bootstrap rows cannot pay for the next 16000 steady-state rows.
-    state.update(iteration=2,model={'id':'trained'},target_rows=100000,replay_origin_rows=100000)
+    state.update(iteration=2,model={'id':'trained'},target_rows=100000,replay_origin_rows=100000,replay_rows=100000)
     plan=iteration_plan(state,config)
     assert plan['target_rows']==116000
     assert math.ceil((plan['target_rows']-100000)/80)==200
@@ -746,7 +749,8 @@ def test_temp_compression_preserves_snapshot_bytes(tmp_path,config,waves):
         manifest=json.loads((tmp_path/'snapshots'/identity/'manifest.json').read_text())
         results.append(manifest['files'])
     assert results[0]==results[1]
-    cache=tmp_path/'.internal/training_views'/(entry['sha256']+'.npz')
+    from etazero.data import training_targets
+    cache=tmp_path/'.internal/training_views'/(view_key(entry,training_targets(config))+'.npz')
     with zipfile.ZipFile(cache) as archive:
         assert all(item.compress_type==zipfile.ZIP_DEFLATED for item in archive.infolist())
     arrays={'zeros':np.zeros((4096,128),np.float32)}
@@ -935,6 +939,8 @@ def test_search_correction_samples_and_bounds(config):
     for section,items in (('uncertainty',('uncertainty_coeff','uncertainty_exponent','uncertainty_max_weight')),
                           ('optimistic_policy',('policy_optimism','root_policy_optimism')),
                           ('noise_pruning',('noise_prune_utility_scale','noise_pruning_cap'))):
+        if section == 'uncertainty':config[section]['use_uncertainty']=True
+        if section == 'noise_pruning':config[section]['use_noise_pruning']=True
         for key in items:
             low,high=bounds[key];original=config[section][key]
             for value in (low,high):config[section][key]=value;validate(config)
