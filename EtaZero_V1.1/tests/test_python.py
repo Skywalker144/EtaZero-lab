@@ -418,11 +418,12 @@ def test_unique_catalog_is_idempotent(tmp_path):
     catalog=Catalog(tmp_path,"test","config")
     try:
         catalog.scan({1:"model"});catalog.scan({1:"model"})
-        assert catalog.counts(10)==(9,1,9.)
+        assert catalog.counts()==(9,1)
+        assert catalog.previous_rows_per_game(2)==9.
         save_npz(tmp_path/"selfplay"/"duplicate.npz",a)
         with pytest.raises(Exception):
             catalog.scan({1:"model"})
-        assert catalog.counts(10)==(9,1,9.)
+        assert catalog.counts()==(9,1)
     finally:
         catalog.close()
 
@@ -477,7 +478,8 @@ def test_catalog_indexed_window_and_incremental_scan(tmp_path):
             a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
             directory=tmp_path/'selfplay'/f'iteration_{iteration:06d}';save_npz(directory/'a.npz',a)
             catalog.scan({iteration:'model'},[directory])
-        assert catalog.counts(2)==(36,4,9.)
+        assert catalog.counts()==(36,4)
+        assert catalog.previous_rows_per_game(5)==9.
         assert [e['metadata']['iteration_id'] for e in catalog.entries(10)]==[3,4]
         # Live scans need not revisit committed historical directories; recovery does.
         (tmp_path/'selfplay'/'iteration_000001'/'a.npz').unlink()
@@ -551,7 +553,8 @@ def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
     catalog=Catalog(tmp_path,'test','config')
     try:
         catalog.scan({1:'model'})
-        assert catalog.counts(10)==(5,1,5.)
+        assert catalog.counts()==(5,1)
+        assert catalog.previous_rows_per_game(2)==5.
         assert catalog.statistics(1)['avg_game_length']==9
         config['replay'].update(min_rows=5,keep_target_rows='all')
         snapshot=build_snapshot(tmp_path,1,catalog.entries(),config)
@@ -603,8 +606,11 @@ def test_iteration_one_backfills_actual_shortfall(config):
     config['replay']['min_rows']=50
     class VariableLengthCatalog:
         rows=10;games=1
-        def counts(self,recent):
-            return self.rows,self.games,self.rows/self.games
+        def counts(self):
+            return self.rows,self.games
+        def previous_rows_per_game(self,iteration):
+            assert iteration==1
+            return 10.
     controller=object.__new__(Controller)
     controller.config=config;controller.catalog=VariableLengthCatalog()
     controller.stop=False;controller.services={}
@@ -618,7 +624,7 @@ def test_iteration_one_backfills_actual_shortfall(config):
         controller.catalog.rows+=games*3;controller.catalog.games+=games
     controller.launch=launch
     controller.produce({'iteration':1,'target_rows':50})
-    assert quotas==[4,7,2,1]
+    assert quotas==[4,3,2,2,1,1,1]
     assert controller.catalog.rows==52
 
 
@@ -683,7 +689,8 @@ def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
     path=tmp_path/'selfplay/game.npz';save_npz(path,a)
     catalog=Catalog(tmp_path,'test','config')
     try:
-        catalog.scan({1:'model'});assert catalog.counts(10)==(9,1,9.)
+        catalog.scan({1:'model'});assert catalog.counts()==(9,1)
+        assert catalog.previous_rows_per_game(2)==9.
         config['replay'].update(min_rows=9,keep_target_rows='all')
         config['shuffle'].update(bucket_rows=9,training_shard_rows=9)
         identity=build_snapshot(tmp_path,1,catalog.entries(),config)

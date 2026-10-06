@@ -321,7 +321,7 @@ class Controller:
             if status["phase"]!="completed":
                 raise ValueError(f'Unknown persisted phase: {status["phase"]}')
             # Assign from the immutable plan; repeated recovery cannot add the target twice.
-            rows,games,_=self.catalog.counts(c["selfplay"]["recent_games"])
+            rows,games=self.catalog.counts()
             origin = rows if iteration == 1 else state['replay_origin_rows']
             next_state={"run_id":self.run_id,"iteration":iteration+1,
                    "target_rows":rows if iteration == 1 else plan["target_rows"], "replay_origin_rows":origin,
@@ -426,11 +426,12 @@ class Controller:
             remaining=c['selfplay']['bootstrap_games']-completed
             if remaining > 0 and not self.stopping():
                 self.launch(plan,remaining);self.scan()
-            rows,games,average=self.catalog.counts(c['selfplay']['recent_games'])
-            if not self.stopping() and (games != c['selfplay']['bootstrap_games'] or not average):
+            rows,games=self.catalog.counts()
+            if not self.stopping() and (games != c['selfplay']['bootstrap_games'] or not rows):
                 raise RuntimeError('Bootstrap did not produce the configured games and valid training rows')
         else:
-            rows,completed,average=self.catalog.counts(c['selfplay']['recent_games'])
+            rows,completed=self.catalog.counts()
+            average=self.catalog.previous_rows_per_game(iteration)
             if not average:
                 raise RuntimeError('Cold start produced no valid rows-per-game estimate')
             deficit=max(0,plan['target_rows']-rows)
@@ -445,7 +446,7 @@ class Controller:
             if games and not self.stopping():
                 self.launch(plan,games);self.scan()
             while not self.stopping():
-                new_rows,new_completed,average=self.catalog.counts(c['selfplay']['recent_games'])
+                new_rows,new_completed=self.catalog.counts()
                 if new_rows >= plan['target_rows']:
                     break
                 # PCR and stochastic multiplicity can give completed games no

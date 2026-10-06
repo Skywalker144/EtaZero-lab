@@ -437,10 +437,16 @@ class Catalog:
                 break
         return result[::-1]
 
-    def counts(self, recent_games):
-        rows, games = self.db.execute('SELECT rows,games FROM totals WHERE id=1').fetchone()
-        lengths = [x[0] for x in self.db.execute("SELECT rows FROM games ORDER BY rowid DESC LIMIT ?", (recent_games,))]
-        return rows, games, float(np.mean(lengths)) if lengths else None
+    def counts(self):
+        return self.db.execute('SELECT rows,games FROM totals WHERE id=1').fetchone()
+
+    def previous_rows_per_game(self, iteration):
+        """Pool actual rows and unique games from the preceding two rounds."""
+        rows, games = self.db.execute('SELECT COALESCE(SUM(rows),0), '
+                                     'COALESCE(SUM(json_extract(stats, "$.games")),0) '
+                                     'FROM shards WHERE iteration>=? AND iteration<?',
+                                     (max(0, iteration-2), iteration)).fetchone()
+        return rows/games if games else None
 
     def iteration_counts(self, iteration):
         rows, games = self.db.execute('SELECT COALESCE(SUM(rows),0), COALESCE(SUM(json_extract(stats, "$.games")),0) '

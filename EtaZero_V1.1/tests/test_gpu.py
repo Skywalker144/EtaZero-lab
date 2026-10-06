@@ -1199,6 +1199,13 @@ def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeyp
     try:
         assert catalog.iteration_counts(0)[1]==2
         assert catalog.iteration_counts(2)[1]>0 and catalog.iteration_counts(3)[1]>0
+        events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
+        for iteration in (2,3):
+            previous=[catalog.iteration_counts(i) for i in range(iteration-2,iteration)]
+            expected=sum(r for r,g in previous)/sum(g for r,g in previous)
+            estimates=[e['rows_per_game'] for e in events
+                       if e['event'] in ('selfplay_target','selfplay_backfill') and e['iteration']==iteration]
+            assert estimates and all(x==pytest.approx(expected) for x in estimates)
     finally:
         catalog.close()
     plans={i:load_json(root/'.internal/iterations'/f'{i:06d}'/'plan.json') for i in range(4)}
@@ -2420,7 +2427,7 @@ def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gp
     info=load_json(root/'.internal/run.json')
     catalog=Catalog(root,info['id'],info['config_id'])
     try:
-        rows=catalog.counts(gpu_config['selfplay']['recent_games'])[0]
+        rows=catalog.counts()[0]
     finally:catalog.close()
     raw_rows=sum(metadata(read_raw(p))['rows'] for p in (root/'selfplay').rglob('*.npz'))
     assert rows==raw_rows
@@ -2488,7 +2495,7 @@ def test_native_final_row_shards_cuda_training_and_export(tmp_path,gpu_config):
     catalog=Catalog(root,'shards','test')
     try:
         catalog.scan({2:'conditional'})
-        assert catalog.counts(10)[:2]==(rows,4) and catalog.iteration_counts(2)==(rows,4)
+        assert catalog.counts()==(rows,4) and catalog.iteration_counts(2)==(rows,4)
         assert catalog.statistics(2)['games']==4
     finally:catalog.close()
     snapshot=build_snapshot(root,2,entries,c)

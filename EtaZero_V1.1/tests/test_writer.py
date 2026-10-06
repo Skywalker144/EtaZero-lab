@@ -39,17 +39,20 @@ def test_native_final_row_shards_preserve_all_targets_and_catalog(tmp_path,limit
     catalog=Catalog(tmp_path,'test','config')
     try:
         catalog.scan({1:'model'})
-        assert catalog.counts(10)==(19*games,games,19.)
+        assert catalog.counts()==(19*games,games)
+        assert catalog.previous_rows_per_game(2)==19.
         assert catalog.iteration_counts(1)==(19*games,games)
         stats=catalog.statistics(1)
         assert (stats['games'],stats['plies'],stats['rows'],stats['black_wins'])==(games,9*games,19*games,games)
         catalog.scan({1:'model'})
-        assert catalog.counts(10)==(19*games,games,19.)
+        assert catalog.counts()==(19*games,games)
+        assert catalog.previous_rows_per_game(2)==19.
         # Rebuild from randomized filenames: fragments may be discovered out of order.
         catalog.close()
         (tmp_path/'.internal/catalog.sqlite').unlink()
         catalog=Catalog(tmp_path,'test','config');catalog.scan({1:'model'})
-        assert catalog.counts(10)==(19*games,games,19.)
+        assert catalog.counts()==(19*games,games)
+        assert catalog.previous_rows_per_game(2)==19.
     finally:catalog.close()
 
 
@@ -68,7 +71,7 @@ def test_catalog_rejects_bad_fragments_without_counting_them(tmp_path,corruption
         save_npz(directory/'corrupt.npz',bad)
         with pytest.raises((ValueError,sqlite3.IntegrityError)):
             catalog.scan({1:'model'})
-        assert catalog.counts(10)==(19,1,19.)
+        assert catalog.counts()==(19,1)
     finally:catalog.close()
 
 

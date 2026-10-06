@@ -1,6 +1,7 @@
 """Fixed-round production quota and independent round/segment/learner clocks."""
 from config_samples import CONFIGS
 import copy
+import json
 from types import SimpleNamespace
 import numpy as np
 import pytest
@@ -9,17 +10,58 @@ from etazero.config import ROOT,load_config,validate
 from etazero.runtime import Controller,iteration_plan
 from etazero.training import subepoch_ends
 from etazero.shuffle import replay_counts
+from etazero.data import Catalog, validate_raw
+from etazero.storage import save_npz
 from test_optimization import small_optimization
+from test_python import winning_record, compact_search
 
 
 def controller(config,rows=100,games=1):
     class Counts:
         def __init__(self):self.rows=rows;self.games=games;self.round_games=0
-        def counts(self,recent):return self.rows,self.games,self.rows/self.games if self.games else None
+        def counts(self):return self.rows,self.games
+        def previous_rows_per_game(self,iteration):return rows/games if games else None
         def iteration_counts(self,iteration):return 0,self.round_games
     value=object.__new__(Controller);value.config=config;value.catalog=Counts();value.stop=False;value.services={}
     value.stopping=lambda:False;value.scan=lambda:None;value.events=[]
     value.journal=lambda event,**fields:value.events.append((event,fields));return value
+
+
+def test_two_iteration_estimate_uses_actual_rows_and_weights_by_games(tmp_path):
+    catalog=Catalog(tmp_path,'test','config')
+    try:
+        assert catalog.previous_rows_per_game(1) is None
+        for iteration,counts in ((0,[90]),(1,[2]),(2,[8,0,5]),(3,[90])):
+            for game,rows in enumerate(counts):
+                raw,m=winning_record()
+                raw['row_repeats'][:]=0;raw['row_repeats'][0]=rows
+                raw['target_weights']=raw['row_repeats'].astype(np.float32)
+                compact_search(raw)
+                m.update(iteration_id=iteration,attempt_id=str(iteration),shard_id=f'{iteration}:{game}',rows=rows)
+                raw['game_ids'][0]=game
+                raw['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+                validate_raw(raw)
+                save_npz(tmp_path/'selfplay'/f'{iteration}_{game}.npz',raw)
+        catalog.scan({i:'model' for i in range(4)})
+        assert catalog.previous_rows_per_game(1)==90  # Bootstrap only.
+        assert catalog.previous_rows_per_game(2)==46  # Bootstrap and iteration 1.
+        assert catalog.previous_rows_per_game(3)==3.75  # (2 + 8 + 0 + 5) / (1 + 3).
+        assert catalog.previous_rows_per_game(4)==25.75  # Drops iteration 1.
+        assert catalog.counts()==(195,6)
+        assert catalog.statistics(2)['avg_game_length']==9
+        assert catalog.previous_rows_per_game(0) is None
+    finally:catalog.close()
+
+
+def test_planning_and_backfill_keep_previous_iterations_estimate():
+    c=load_config(CONFIGS / 'smoke_test');driver=controller(c,100,20);quotas=[]
+    def launch(plan,games):
+        quotas.append(games)
+        driver.catalog.rows+=games*2;driver.catalog.games+=games;driver.catalog.round_games+=games
+    driver.launch=launch;driver.produce(dict(iteration=3,target_rows=115))
+    assert quotas==[3,2,1,1,1] and driver.catalog.rows==116
+    events=[fields for event,fields in driver.events if event in ('selfplay_target','selfplay_backfill')]
+    assert [f['rows_per_game'] for f in events]==[5]*5
 
 
 def test_postbootstrap_backfills_entire_quota_using_actual_short_games():
@@ -57,7 +99,9 @@ def test_completed_zero_row_games_do_not_abort_quota_backfill():
         # Legal stochastic rounding gives the first completed batch zero rows.
         if len(quotas)>1:driver.catalog.rows+=games*5
     driver.launch=launch;driver.produce(dict(iteration=2,target_rows=110))
-    assert quotas==[2,3] and driver.catalog.rows==115
+    assert quotas==[2,2] and driver.catalog.rows==110
+    estimates=[f['rows_per_game'] for e,f in driver.events if e in ('selfplay_target','selfplay_backfill')]
+    assert estimates==[5,5]
 
 
 def test_cold_anchor_fixed_consumption_quota_and_random_id_are_separate():

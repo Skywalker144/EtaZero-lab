@@ -142,7 +142,8 @@ def test_native_side_writer_catalog_shuffle_reader_roundtrip(tmp_path):
     catalog=Catalog(tmp_path,'test','config')
     try:
         catalog.scan({1:'model'})
-        assert catalog.counts(10)==(11,1,11.)
+        assert catalog.counts()==(11,1)
+        assert catalog.previous_rows_per_game(2)==11.
         c=load_config(CONFIGS / 'smoke_test')
         c['replay'].update(min_rows=11,keep_target_rows='all')
         c['shuffle'].update(bucket_rows=11,training_shard_rows=11)
