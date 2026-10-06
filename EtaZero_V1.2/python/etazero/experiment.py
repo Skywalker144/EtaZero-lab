@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 import time
-from .config import ROOT, FILES, FIELDS, boolean, fingerprint, load_config, validate
+from .config import ROOT, FILES, FIELDS, boolean, fingerprint, load_config, resume_config, validate
 from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sha256
 
@@ -132,7 +132,7 @@ def arm_progress(arm, settings, initialization=None):
                 raise ValueError(f'Nonempty arm directory has no run record: {root}')
         return 'pending'
     info = load_json(info_path)
-    if info['config_id'] != fingerprint(arm['config']) or info['config'] != arm['config']:
+    if resume_config(info['config']) != resume_config(arm['config']):
         raise ValueError(f'Arm configuration differs from saved run: {arm["name"]}')
     origin = info['weights_initialization']
     if initialization != origin:
@@ -266,7 +266,7 @@ class Scheduler:
 
 def run_experiment(plan, binary):
     from .runtime import verify_build
-    verify_build(binary)
+    binary_hash = verify_build(binary)
     work = Path(plan['work_dir']); (work/'.internal').mkdir(parents=True, exist_ok=True)
     with (work/'.internal/experiment.lock').open('a+') as lock:
         try:
@@ -281,17 +281,19 @@ def run_experiment(plan, binary):
                 raise ValueError('Experiment umbrella or shared initialization changed; use a new experiment directory')
             current_arms = {arm['name']: arm for arm in identity['arms']}
             for arm in previous['arms']:
-                if current_arms.get(arm['name']) != arm:
+                current = current_arms.get(arm['name'])
+                if (current is None or any(current[key] != arm[key] for key in ('config_dir','run_dir'))
+                        or resume_config(current['config']) != resume_config(arm['config'])):
                     raise ValueError(f'Existing experiment arm changed or was removed: {arm["name"]}; '
                                      'use a new experiment directory')
             if previous != identity:
-                # Append new arms under the scheduler lock, retaining all existing definitions.
+                # Record new arms and execution changes under the scheduler lock.
                 save_json(manifest, identity)
         else:
             save_json(manifest, identity, immutable=True)
         initializations = prepare_initializations(work, plan['arms']) if identity['shared_init'] else {}
         save_json(work/'.internal/plan.json', {**plan, 'initializations': initializations,
-                                             'binary_sha256': sha256(binary)})
+                                             'binary_sha256': binary_hash})
         code = Scheduler(work, plan, binary, initializations).run()
         if code == 0 and plan['settings']['autoelo']:
             # Keep the controller lock through evaluation. Failures are distinct
