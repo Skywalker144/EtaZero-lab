@@ -2,7 +2,7 @@
 
 EtaZero 面向 Freestyle、Standard、Renju 五子棋。支持 AlphaZero / PUCT 与 MuZero / PUCT。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 组合尚未实现，配置检查明确拒绝。
 
-训练按完整轮次执行自对弈 → shuffle → learner → 模型发布。各阶段内部支持并行对局、GPU 组批推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
+训练按完整轮次执行自对弈 → shuffle → learner → 模型发布。各阶段内部支持并行对局、GPU 组批与 CUDA Graph 推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
 
 ## 构建与小规模验证
 
@@ -24,13 +24,13 @@ CONFIG_DIR=configs/baseline bash scripts/run.sh
 
 `CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`evaluate`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
 
-bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按固定训练量与 replay ratio 规划，详见 [产样规划](docs/implementation.md#固定训练量与自对弈产量)。
+bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照单遍限制；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
 
 MuZero 的网络、展开训练与搜索约束见 [MuZero](docs/muzero.md)。
 
 ## 续训与评估
 
-输出目录已有 `.internal/run.json` 时自动恢复，无需 `--resume`。`--iterations` 指累计完成目标，提高目标可以追加训练。控制器从上一完整轮 checkpoint 重跑未提交轮，相关原始产物保留为归档；`--weights` 仅用于新运行的权重初始化。恢复状态与校验范围见 [发布与恢复](docs/implementation.md#模型发布与恢复)。
+输出目录已有 `.internal/run.json` 时自动恢复，无需 `--resume`。`--iterations` 指累计完成目标，提高目标可以追加训练。控制器复用已完成阶段，自对弈保留完整对局，learner 从已保存的消费游标继续下一批；`--weights` 仅用于新运行的权重初始化。恢复状态与校验范围见 [发布与恢复](docs/implementation.md#模型发布与恢复)。
 
 ```bash
 CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 3
@@ -55,7 +55,7 @@ CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh
 
 ## 等时间 Elo
 
-训练预算和 Elo 横轴使用已提交完整轮次扣除编译后的累计墙钟；暂停、恢复和作废尝试不进入该时间。预算在轮边界检查，可能超过目标。历史缺少编译计时的结果不能精确换算到这一口径。
+训练预算和 Elo 横轴使用已提交完整轮次扣除编译与绘图后的累计墙钟；可正常结算的中断尝试计入续训轮次，暂停和启动恢复不进入该时间。预算在轮边界检查，可能超过目标。历史缺少编译计时的结果不能精确换算到这一口径。
 
 ```bash
 bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --dry-run
@@ -76,7 +76,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 查看对局线程、搜索线程、共享组批及 C++ / Python 分工 | [执行架构](docs/implementation.md#执行架构) |
 | 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
-| 查看 replay ratio、累计缺口及 selfplay 局数 | [产样规划](docs/implementation.md#固定训练量与自对弈产量) |
+| 查看 replay ratio、训练额度及 selfplay 局数 | [产样规划](docs/implementation.md#训练额度与自对弈产量) |
 | 调整平衡开局及独立 policy init | [开局机制](docs/algorithms.md#平衡开局与-policy-init) |
 | 查看实验产物和内部状态位置 | [运行目录](docs/implementation.md#运行目录) |
 | 调整配置、继承与本机覆盖 | [配置组织](docs/implementation.md#配置组织) |
