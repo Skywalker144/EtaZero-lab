@@ -26,7 +26,10 @@ struct IdentityBackend : Backend {
 struct GatedBackend : IdentityBackend {
     std::atomic<bool>& ready;
     explicit GatedBackend(std::atomic<bool>& gate):ready(gate) {}
-    void initialize() override {while(!ready.load())std::this_thread::yield();}
+    std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
+        while(!ready.load())std::this_thread::yield();
+        return IdentityBackend::evaluate(inputs);
+    }
 };
 struct NonemptyBackend : IdentityBackend {
     std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
