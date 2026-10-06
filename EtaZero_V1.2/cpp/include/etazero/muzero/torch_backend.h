@@ -1,8 +1,8 @@
 #pragma once
 #include "inference.h"
+#include "etazero/prepared_model.h"
 #include <torch/script.h>
 #include <c10/cuda/CUDAStream.h>
-#include <optional>
 
 namespace etazero::muzero {
 // Latents belong to one backend/model/device and one tree orientation. They
@@ -22,7 +22,7 @@ public:
     using Action = InferenceAction;
     TorchBackend(const std::string& path, const std::string& device, int canvas,
                  int max_batch, const std::string& precision = "float32",
-                 std::optional<torch::jit::Module> loaded_model = std::nullopt);
+                 std::shared_ptr<PreparedModel> shared_model = nullptr);
     TorchBackend(const TorchBackend&) = delete;
     TorchBackend& operator=(const TorchBackend&) = delete;
     ~TorchBackend() override;
@@ -34,6 +34,7 @@ public:
 private:
     torch::Device device_;
     torch::jit::Module model_;
+    std::shared_ptr<PreparedModel> shared_model_;
     std::unique_ptr<c10::cuda::CUDAStream> stream_;
     torch::Tensor observation_host_, globals_host_, actions_host_;
     struct Graph;

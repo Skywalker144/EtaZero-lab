@@ -32,10 +32,11 @@ int main(int argc,char** argv) {
     try {
         if(argc!=4)throw std::runtime_error("Usage: muzero_inference_probe MODEL DEVICE PRECISION");
         at::set_num_threads(1);
-        TorchBackend backend(argv[1],argv[2],6,2,argv[3]);
         // A detected module must work without reopening its source file.
         auto detected=torch::jit::load(argv[1],torch::Device(argv[2]));
-        TorchBackend other(std::string(argv[1])+".must-not-be-opened",argv[2],6,2,argv[3],std::move(detected));
+        auto shared=std::make_shared<etazero::PreparedModel>(std::move(detected));
+        TorchBackend backend("unused",argv[2],6,2,argv[3],shared);
+        TorchBackend other(std::string(argv[1])+".must-not-be-opened",argv[2],6,2,argv[3],shared);
         std::vector<std::vector<float>> obs(2,std::vector<float>(5*36+6,0));
         for(int i=0;i<2;++i) {
             for(int y=0;y<5+i;++y)for(int x=0;x<5+i;++x)obs[i][y*6+x]=1;

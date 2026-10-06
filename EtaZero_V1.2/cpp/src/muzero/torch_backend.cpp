@@ -32,30 +32,21 @@ struct TorchBackend::Graph {
 };
 TorchBackend::~TorchBackend()=default;
 TorchBackend::TorchBackend(const std::string& path,const std::string& device,int canvas,
-                           int max_batch,const std::string& precision,std::optional<torch::jit::Module> loaded_model)
-    : device_(device),precision_(precision),canvas_(canvas),max_batch_(max_batch) {
+                           int max_batch,const std::string& precision,std::shared_ptr<PreparedModel> shared_model)
+    : device_(device),shared_model_(shared_model?std::move(shared_model):std::make_shared<PreparedModel>()),
+      precision_(precision),canvas_(canvas),max_batch_(max_batch) {
     if(canvas<5 || canvas>25 || max_batch<1)throw std::runtime_error("Invalid MuZero backend dimensions");
     if(precision!="float32" && precision!="float16")throw std::runtime_error("Invalid MuZero inference precision");
     if(precision=="float16" && !device_.is_cuda())throw std::runtime_error("MuZero FP16 inference requires CUDA");
     c10::cuda::OptionalCUDAGuard device_guard;
     if(device_.is_cuda())device_guard.set_device(device_);
-    model_=loaded_model?std::move(*loaded_model):torch::jit::load(path,device_);model_.eval();
+    model_=shared_model_->prepare(path,device_,precision_);
     auto meta=model_.get_method("metadata")({}).toTuple();
     const auto& fields=meta->elements();
     if(fields.size()!=4 || fields[0].toInt()!=canvas || fields[1].toStringRef()!=CONTRACT_ID ||
        fields[2].toStringRef()!="muzero" || fields[3].toInt()<1)
         throw std::runtime_error("MuZero model algorithm/contract/canvas mismatch");
     latent_channels_=fields[3].toInt();
-    if(precision_=="float16") {
-        // These are exactly the matrices/biases that CUDA autocast rounds to
-        // FP16 on every call. Prepare immutable inference weights once, while
-        // keeping normalization parameters and buffers in their FP32 domain.
-        for(const auto& named:model_.named_modules()) {
-            auto type=named.value.type()->name();
-            if(type && (type->name()=="Conv2d" || type->name()=="Linear"))
-                for(auto parameter:named.value.parameters(false))parameter.set_data(parameter.to(torch::kFloat16));
-        }
-    }
     if(device_.is_cuda()) {
         // Model loading completes on the constructor's stream before services
         // may use the immutable weights on their independent streams.
@@ -66,7 +57,10 @@ TorchBackend::TorchBackend(const std::string& path,const std::string& device,int
     observation_host_=torch::empty({max_batch_,INPUT_PLANES,canvas_,canvas_},host);
     globals_host_=torch::empty({max_batch_,GLOBAL_FEATURES},host);
     actions_host_=torch::empty({max_batch_},host.dtype(torch::kInt64));
-    if(stream_)capture_graphs();
+    if(stream_) {
+        auto started=std::chrono::steady_clock::now();capture_graphs();
+        shared_model_->timing.graph_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    }
 }
 void TorchBackend::capture_graphs() {
     // Constructors run before batch-service threads start. Capture is therefore
