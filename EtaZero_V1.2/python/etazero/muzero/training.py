@@ -11,6 +11,8 @@ def augment_batch(batch, symmetry):
     canvas = batch['obs'].shape[-1]
     result = {**batch, 'obs': apply_symmetry(batch['obs'], symmetry).contiguous()}
     for key in ('policy', 'opponent_policy', 'q_values', 'q_visits'):
+        if key not in batch:
+            continue
         value = batch[key]
         result[key] = apply_symmetry(value.reshape(*value.shape[:-1], canvas, canvas), symmetry).reshape_as(value).contiguous()
     # Transformed grid maps new coordinates to old ones; actions need its inverse.
@@ -47,7 +49,7 @@ class TrainingForward(nn.Module):
                 return (pl + vl, pl, zero, zero, zero, vl, *([zero] * 6))
             return losses(logits, value, td, error, obs,
                           *(t[:, step] for t in targets[:6]), self.soft_scale,
-                          self.disable_optimistic, *(t[:, step] for t in targets[6:]), row_weight=weight)
+                          self.disable_optimistic, *(t[:, step] if t is not None else None for t in targets[6:]), row_weight=weight)
 
     def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight,
                 target, td_target, full_game_weight, q_values, q_visits,
@@ -66,7 +68,7 @@ class TrainingForward(nn.Module):
         if hidden.shape[0] == 0:
             return total, torch.stack(step_losses + [step_losses[0].new_zeros(())] * self.steps)
         obs = obs[indices]; actions = actions[indices].long()
-        targets = tuple(t[indices] for t in targets)
+        targets = tuple(t[indices] if t is not None else None for t in targets)
         weights = step_weights[indices] * (hidden.shape[0] / step_weights.shape[0])
         for step in range(self.steps):
             # MuZero_V2 leaves the first representation->dynamics gradient intact.
