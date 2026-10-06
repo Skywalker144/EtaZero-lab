@@ -31,6 +31,8 @@ WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、�
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
+训练 worker 检测到非有限 latent 时退出，并在错误中记录 `initial` / `recurrent` 阶段、推理精度和 batch 大小。失败批次的输入、输出 latent 及实际加载的模型另存为 `logs/nan_diagnostics/latent_*.pt`，错误中给出文件路径；保存失败时保留原异常并说明保存错误。诊断文件可用 `torch.jit.load` 读取，`input0/input1` 分别对应该阶段的两个输入，`model` 保留推理模块。直接调用原生程序时，可通过 `ETAZERO_NAN_DIAGNOSTIC_DIR` 指定捕获目录。
+
 ## 搜索与子树加权开关
 
 [MuZero 搜索](../cpp/src/muzero/search.cpp) 的根使用真实合法动作。根以下只使用有效棋盘 mask，允许重复选择同一点，不调用真实落子和终局判断。每次真实落子后丢弃旧树，以新观测的 representation 开始搜索。整棵树固定一个 D4 朝向，动作映射到该朝向，预测映射回画布坐标；不旋转或平均 latent。
