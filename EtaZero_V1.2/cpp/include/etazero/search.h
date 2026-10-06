@@ -40,6 +40,7 @@ struct SearchRun {
     double max_time = -1; // Seconds, including root inference; -1 inherits settings.
     std::function<bool()> should_stop;
     int hint_action = -1; // Root-only guidance; changes always clear statistics.
+    bool collect_root_policy_invalid_mass = false;
 };
 // Completed weighted samples, all quantities from the parent player's perspective.
 struct RootChildStats {
@@ -75,6 +76,7 @@ struct SearchResult {
     double seconds = 0;
     bool stopped_early = false;
     double value = 0, policy_surprise = 0;
+    double root_policy_invalid_mass = std::numeric_limits<double>::quiet_NaN();
     double network_sample_weight=0, network_value_stdev=0, search_weight=0, search_weight_sq=0;
     WDL network_wdl{0,1,0}, search_wdl{0,1,0};
     std::vector<double> network_policy, search_policy;

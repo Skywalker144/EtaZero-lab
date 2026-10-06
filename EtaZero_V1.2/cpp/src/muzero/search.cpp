@@ -66,7 +66,22 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     auto obs=game.observation();
     for(int a=0;a<area;++a){if(obs[a])board_actions_.push_back(a);if(game.legal(a))root_actions.push_back(a);}
     root_=node();remove_noise_=options.remove_root_noise;hint_=options.hint_action;
-    expand(*root_,evaluator_.initial(transform_observation(obs,game.canvas(),mapping_)),root_actions,true);
+    auto initial=evaluator_.initial(transform_observation(obs,game.canvas(),mapping_));
+    if(options.collect_root_policy_invalid_mass) {
+        const auto& logits=initial.evaluation.logits;
+        double maximum=-std::numeric_limits<double>::infinity();
+        for(int a:board_actions_)maximum=std::max(maximum,logits.at(mapping_[a]));
+        double total=0,invalid=0;
+        for(int a:board_actions_) {
+            double mass=std::exp(logits.at(mapping_[a])-maximum);
+            total+=mass;
+            if(obs[area+a] || obs[2*area+a])invalid+=mass;
+        }
+        if(!std::isfinite(total)||total<=0||!std::isfinite(invalid))
+            throw std::runtime_error("Invalid root policy diagnostic mass");
+        result.root_policy_invalid_mass=invalid/total;
+    }
+    expand(*root_,std::move(initial),root_actions,true);
     std::vector<double> policy;for(const auto& e:root_->edges)policy.push_back(e.prior);
     double root_temp=remove_noise_?1:temperature_at_turn(settings_.root_policy_temperature_early,settings_.root_policy_temperature,settings_.temperature_halflife,game.turn(),game.size()*game.size());
     if(root_temp!=1)policy=policy_temperature_distribution(policy,root_temp);
@@ -78,7 +93,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     int cap=options.max_visits?options.max_visits:settings_.max_visits;
     int budget=std::min(cap?std::max(0,cap-1):settings_.simulations,std::max(0,max_playouts-1));
     double max_time=options.max_time<0?settings_.max_time:options.max_time;
-    std::mutex mutex;std::condition_variable changed;int issued=0,completed=0;bool stopped=false;std::exception_ptr error;
+    std::mutex mutex;std::condition_variable changed;int issued=0,completed=0;int64_t pending=0;bool stopped=false;std::exception_ptr error;
     auto worker=[&]{
       try {
         for(;;) {
@@ -95,7 +110,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
                     for(;;){size_t which=select(*current,current==root_);if(which==current->edges.size())break;
                         path.push_back({current,which});auto& edge=current->edges[which];
                         if(!edge.child){edge.child=node();current->expansion_order.push_back(which);leaf=edge.child;parent=current;action=edge.action;break;}current=edge.child;}
-                    if(leaf){for(auto [p,i]:path)++p->edges[i].pending;++issued;break;}
+                    if(leaf){for(auto [p,i]:path){++p->edges[i].pending;++pending;}++issued;break;}
                     changed.wait_for(lock,std::chrono::milliseconds(2));
                 }
             }
@@ -103,10 +118,10 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
                 auto output=evaluator_.recurrent(parent->latent,mapping_[action]);
                 std::lock_guard<std::mutex> lock(mutex);expand(*leaf,std::move(output),board_actions_,false);
                 for(auto it=path.rbegin();it!=path.rend();++it)recompute(*it->first);
-                for(auto [p,i]:path)--p->edges[i].pending;++completed;
+                for(auto [p,i]:path){--p->edges[i].pending;--pending;}++completed;
             } catch(...) {
                 std::lock_guard<std::mutex> lock(mutex);if(!error)error=std::current_exception();
-                for(auto [p,i]:path)if(p->edges[i].pending>0)--p->edges[i].pending;
+                for(auto [p,i]:path){--p->edges[i].pending;--pending;}
             }
             changed.notify_all();
         }
@@ -115,8 +130,9 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     std::vector<std::thread> threads;
     try{for(int i=1;i<std::min(settings_.threads,budget);++i)threads.emplace_back(worker);worker();}
     catch(...){std::lock_guard<std::mutex> lock(mutex);error=std::current_exception();changed.notify_all();}
-    for(auto& thread:threads)thread.join();if(error)std::rethrow_exception(error);
-    for(const auto& n:nodes_)for(const auto& e:n->edges)if(e.pending)throw std::runtime_error("MuZero leaked pending visits");
+    for(auto& thread:threads)thread.join();
+    if(pending)throw std::runtime_error("MuZero leaked pending visits");
+    if(error)std::rethrow_exception(error);
     if(!stopped&&completed!=budget)throw std::runtime_error("MuZero search budget mismatch");
     result.simulations=completed;result.new_playouts=completed+1;result.root_visits=root_->stats.visits;result.stopped_early=stopped;
     result.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
