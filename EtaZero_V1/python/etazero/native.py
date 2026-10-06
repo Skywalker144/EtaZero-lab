@@ -1,5 +1,6 @@
 """Owned, persistent native selfplay process with one bounded request at a time."""
 import json
+import os
 from pathlib import Path
 import queue
 import signal
@@ -14,9 +15,11 @@ class NativeWorker:
         self.responses=queue.Queue(maxsize=2)
         self.log=None;self.attempt=None;self.failure=None;self.closing=False
         self.stderr=self.stderr_path.open('wb')
+        env=dict(os.environ)
+        env['ETAZERO_NAN_DIAGNOSTIC_DIR']=str(self.stderr_path.parent/'nan_diagnostics')
         try:
             self.process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                                          stderr=self.stderr,start_new_session=True)
+                                          stderr=self.stderr,start_new_session=True,env=env)
         except BaseException:
             self.stderr.close();raise
         self.thread=threading.Thread(target=self._read,daemon=True);self.thread.start()
