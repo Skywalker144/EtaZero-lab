@@ -84,8 +84,8 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
     if gpu is not None and config['match']['device'] != 'cpu':
         config['match']['device'] = 'cuda:0'
     if arms is None and data is None:
-        from .experiment import experiment_plan
-        arms = experiment_plan(directory, environ=environ)['arms']
+        from .experiment import experiment_plan, scheduled_arms
+        arms = scheduled_arms(experiment_plan(directory, environ=environ))
     roots = [(a['name'], Path(a['run_dir'])) for a in arms] if arms is not None else None
     base = Path(output).resolve() if output is not None else default_output(directory, arms, data)
     anchor_path = base/'anchor.json'

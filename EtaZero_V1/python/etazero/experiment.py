@@ -17,7 +17,7 @@ from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sha256
 
 EXP_FIELDS = {'max_iteration': int, 'max_seconds': float, 'arm_gpus': str, 'shared_init': boolean,
-              'autoelo': boolean}
+              'autoelo': boolean, 'arms': str}
 ENV_FIELDS = {'MAX_ITERS': 'max_iteration', 'MAX_TIME_SECONDS': 'max_seconds',
               'ARM_GPUS': 'arm_gpus', 'SHARED_INIT': 'shared_init', 'AUTOELO': 'autoelo'}
 
@@ -30,11 +30,11 @@ def experiment_plan(directory, environ=None, work_dir=None):
     directory = directory.resolve()
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     parser.read_string((directory/'exp.cfg').read_text())
-    required = set(EXP_FIELDS) - {'autoelo'}
+    required = set(EXP_FIELDS) - {'autoelo', 'arms'}
     if (parser.defaults() or parser.sections() != ['experiment'] or
             not required <= set(parser['experiment']) or set(parser['experiment']) - set(EXP_FIELDS)):
         raise ValueError('exp.cfg requires exactly [experiment] and '+', '.join(EXP_FIELDS))
-    raw = {'autoelo': 'true', **dict(parser['experiment'])}
+    raw = {'autoelo': 'true', 'arms': '', **dict(parser['experiment'])}
     for source, target in ENV_FIELDS.items():
         if source in env:
             raw[target] = env[source]
@@ -69,6 +69,14 @@ def experiment_plan(directory, environ=None, work_dir=None):
         arms.append({'name': selected.name, 'config_dir': str(selected), 'run_dir': str(destination), 'config': config})
     if not arms:
         raise ValueError(f'No experiment arm directories with run.cfg in {directory}')
+    selected = settings['arms'].strip()
+    if selected:
+        names = [name.strip() for name in selected.split(',')]
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError('experiment.arms requires nonempty, unique arm names')
+        unknown = set(names) - {arm['name'] for arm in arms}
+        if unknown:
+            raise ValueError('Unknown experiment arms: '+', '.join(sorted(unknown)))
     destinations = [Path(a['run_dir']) for a in arms]
     for i, destination in enumerate(destinations):
         if destination == work or destination in work.parents:
@@ -77,6 +85,12 @@ def experiment_plan(directory, environ=None, work_dir=None):
             if destination == other or destination in other.parents or other in destination.parents:
                 raise ValueError('Experiment arms require independent, non-overlapping run directories')
     return {'umbrella': str(directory), 'work_dir': str(work), 'settings': settings, 'slots': slots, 'arms': arms}
+
+
+def scheduled_arms(plan):
+    selected = plan['settings'].get('arms', '').strip()
+    names = {name.strip() for name in selected.split(',')} if selected else None
+    return [arm for arm in plan['arms'] if names is None or arm['name'] in names]
 
 
 def initialization_key(config):
@@ -222,7 +236,7 @@ class Scheduler:
 
     def run(self):
         settings = self.plan['settings']; queue = []
-        for arm in self.plan['arms']:
+        for arm in scheduled_arms(self.plan):
             origin = self.initializations.get(arm['name'])
             # run.json stores just path/checksum, while the umbrella also stores the group key.
             origin = {k: origin[k] for k in ('path', 'sha256')} if origin else None
@@ -289,7 +303,7 @@ def run_experiment(plan, binary):
                 save_json(manifest, identity)
         else:
             save_json(manifest, identity, immutable=True)
-        initializations = prepare_initializations(work, plan['arms']) if identity['shared_init'] else {}
+        initializations = prepare_initializations(work, scheduled_arms(plan)) if identity['shared_init'] else {}
         save_json(work/'.internal/plan.json', {**plan, 'initializations': initializations,
                                              'binary_sha256': sha256(binary)})
         code = Scheduler(work, plan, binary, initializations).run()
@@ -301,7 +315,7 @@ def run_experiment(plan, binary):
             status = work/'.internal/elo_status.json'
             save_json(status, {'status': 'planning'})
             try:
-                evaluation = autoelo_plan(plan['umbrella'], binary, arms=plan['arms'], gpu=plan['slots'][0])
+                evaluation = autoelo_plan(plan['umbrella'], binary, arms=scheduled_arms(plan), gpu=plan['slots'][0])
                 print('autoelo: '+json.dumps(evaluation['summary']), flush=True)
                 save_json(status, {'status': 'running', 'output': evaluation['output']})
                 handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -333,6 +347,7 @@ def main():
         parser.error('Set CONFIG_DIR or --config-dir to an experiment umbrella')
     plan = experiment_plan(args.config_dir, work_dir=args.work_dir)
     if args.dry_run:
+        plan['scheduled_arms'] = [arm['name'] for arm in scheduled_arms(plan)]
         if plan['settings']['autoelo']:
             from .autoelo import load_elo_config
             from .eval_config import load_evaluation_config
