@@ -67,6 +67,9 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, s
     for(const auto& backend:backends_)if(backend->supports_auxiliary()!=backends_[0]->supports_auxiliary())
         throw std::runtime_error("Inference servers disagree on auxiliary capability");
     rows_by_server.resize(backends_.size(),0);
+    for(int s=0;s<8;++s)mappings_[s]=symmetry_mapping(input_size_,s);
+    // CUDA graph capture must finish before another service can dispatch CUDA work.
+    for(auto& backend:backends_)backend->initialize();
     try {
         for (size_t i=0; i<backends_.size(); ++i) servers_.emplace_back(&BatchEvaluator::serve, this, i);
     } catch (...) {
@@ -145,8 +148,12 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
         symmetry=std::uniform_int_distribution<int>(0,7)(random_);
     }
     request->symmetry=symmetry;
-    auto mapping=symmetry_mapping(obs.size(),symmetry);
-    auto transformed=transform_input(obs,mapping);
+    const auto& mapping=mappings_[symmetry];
+    auto& transformed=request->transformed;transformed.resize(obs.size());
+    const size_t area=mapping.size();
+    for(int p=0;p<INPUT_PLANES;++p)for(size_t a=0;a<area;++a)
+        transformed[p*area+mapping[a]]=obs[p*area+a];
+    std::copy(obs.begin()+INPUT_PLANES*area,obs.end(),transformed.begin()+INPUT_PLANES*area);
     static std::atomic<uint64_t> next{0};
     request->id=next.fetch_add(1);request->owner=this;request->observation=&transformed;
     request->submitted = std::chrono::steady_clock::now();
@@ -166,15 +173,6 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     return std::move(request->output);
 }
 void BatchEvaluator::serve(size_t index) {
-    try { backends_[index]->initialize(); }
-    catch (...) {
-        { std::lock_guard<std::mutex> lock(mutex_);
-          if (!failure_) failure_=std::current_exception();
-          closing_=true;
-          for(auto r:queue_)r->fail(failure_);
-          queue_.clear(); }
-        changed_.notify_all(); return;
-    }
     std::vector<Request*> batch;batch.reserve(max_batch_);
     InferenceInputs inputs;inputs.reserve(max_batch_);
     for (;;) {
@@ -207,27 +205,18 @@ void BatchEvaluator::serve(size_t index) {
             }
             auto outputs = backends_[index]->evaluate(inputs);
             if (outputs.size() != batch.size()) throw std::runtime_error("Inference output batch mismatch");
-            // Validate the whole batch before fulfilling any promises, so failure wakes everyone once.
+            // Layout belongs to the batch boundary; search validates numerical
+            // values while consuming policies/WDL, without a duplicate scan.
             for (const auto& out : outputs) {
-                double mass=0;
-                for(auto p:out.wdl) {
-                    if(!std::isfinite(p)||p<0||p>1)throw std::runtime_error("Invalid backend WDL");
-                    mass+=p;
-                }
-                if(std::abs(mass-1)>1e-5)throw std::runtime_error("Unnormalized backend WDL");
-                if (out.logits.size() * INPUT_PLANES + GLOBAL_FEATURES != input_size_ || !std::isfinite(out.value()) || std::abs(out.value()) > 1.00001)
-                    throw std::runtime_error("Invalid inference output value/shape");
-                for (double p : out.logits) if (!std::isfinite(p)) throw std::runtime_error("Nonfinite policy logits");
-                if(out.has_auxiliary) {
-                    if(out.optimistic_logits.size()!=out.logits.size() || !std::isfinite(out.shortterm_value_stdev) || out.shortterm_value_stdev<0)
-                        throw std::runtime_error("Invalid auxiliary inference output");
-                    for(double p:out.optimistic_logits)if(!std::isfinite(p))throw std::runtime_error("Nonfinite optimistic logits");
-                }
+                if (out.logits.size() * INPUT_PLANES + GLOBAL_FEATURES != input_size_)
+                    throw std::runtime_error("Invalid inference output shape");
+                if(out.has_auxiliary && out.optimistic_logits.size()!=out.logits.size())
+                    throw std::runtime_error("Invalid auxiliary inference output shape");
             }
             for(const auto& output:outputs)if(output.has_auxiliary!=backends_[index]->supports_auxiliary())
                 throw std::runtime_error("Backend auxiliary output violates capability contract");
             for(size_t i=0;i<outputs.size();++i)
-                restore_output(outputs[i],symmetry_mapping(input_size_,batch[i]->symmetry));
+                restore_output(outputs[i],mappings_[batch[i]->symmetry]);
             requests.fetch_add(batch.size()); batches.fetch_add(1);
             rows_by_server[index]+=batch.size();
             uint64_t previous=max_observed_batch.load();

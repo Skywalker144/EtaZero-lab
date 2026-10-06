@@ -34,7 +34,7 @@ class Backend {
 public:
     virtual ~Backend() = default;
     virtual bool supports_auxiliary() const { return false; }
-    virtual void initialize() {} // Called on the owning service thread, before taking requests.
+    virtual void initialize() {} // Called serially, before any service threads start.
     virtual std::vector<Evaluation> evaluate(const InferenceInputs& inputs) = 0;
 };
 class InferenceService : public Evaluator {
@@ -51,6 +51,7 @@ class BatchEvaluator final : public InferenceService {
         uint64_t id;
         const BatchEvaluator* owner=nullptr;
         const std::vector<float>* observation=nullptr;
+        std::vector<float> transformed;
         std::string cache_key;
         size_t cache_slot = 0;
         int symmetry = 0;
@@ -72,6 +73,7 @@ class BatchEvaluator final : public InferenceService {
     struct CacheEntry { std::string key; std::shared_ptr<const Evaluation> output; };
     std::vector<CacheEntry> cache_;
     std::array<std::mutex, 64> cache_locks_;
+    std::array<std::vector<int>, 8> mappings_;
     std::string model_;
     bool randomize_;
     int symmetry_;
