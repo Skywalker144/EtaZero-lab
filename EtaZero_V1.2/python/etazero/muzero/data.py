@@ -5,13 +5,13 @@ real-row weights are normalized by the snapshot's mean main-row weight; roots
 already reflect writer multiplicity. Absorbing actions are drawn by the reader's
 checkpointed RNG, while absent side continuations are fully masked.
 """
+import math
 import numpy as np
 
-from ..data import metadata, alphazero_training_view, trajectory_td_targets, read_raw
+from ..data import metadata, alphazero_training_view, trajectory_td_targets, TRAIN_TARGETS
 from ..schema import PLANES, GLOBALS
 
-TARGETS = ('policy', 'opponent_policy', 'opponent_policy_weight', 'value', 'td_value',
-           'full_game_weight', 'q_values', 'q_visits')
+TARGETS = TRAIN_TARGETS
 EXTRA = ('actions', 'step_weights', 'sequence_mask', 'absorbing')
 
 
@@ -35,11 +35,11 @@ def validate_trajectory(a):
         raise ValueError('MuZero Q target outside [-1,1]')
 
 
-def training_view(a):
-    root = alphazero_training_view(a)
+def training_view(a, targets=TARGETS):
+    root = alphazero_training_view(a, targets)
     m = metadata(a); k = m['unroll_steps']; n = len(root['value']); area = m['canvas'] ** 2
     result = {key: root[key] for key in ('obs', 'globals')}
-    for key in TARGETS:
+    for key in targets:
         result[key] = np.zeros((n, k+1, *root[key].shape[1:]), dtype=np.float32)
         result[key][:, 0] = root[key]
     result['actions'] = np.zeros((n, k), np.int64)
@@ -57,7 +57,8 @@ def training_view(a):
         starts.extend((g, -1) for _ in range(side_count))
         winner = a['winners'][g]
         terminal = np.array([winner == 1, winner == 0, winner == -1], np.float64)
-        td[g] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(size)**2)
+        if 'td_value' in targets:
+            td[g] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(size)**2)
     starts = starts[m['row_begin']:m['row_begin'] + n]
     if len(starts) != n:
         raise ValueError('MuZero start-row ordering mismatch')
@@ -67,7 +68,9 @@ def training_view(a):
         mask = np.zeros(area, np.float32); size = int(a['sizes'][g]); canvas = m['canvas']
         mask.reshape(canvas, canvas)[:size, :size] = 1
         uniform = mask / mask.sum()
-        result['policy'][row, 1:] = result['opponent_policy'][row, 1:] = uniform
+        result['policy'][row, 1:] = uniform
+        if 'opponent_policy' in targets:
+            result['opponent_policy'][row, 1:] = uniform
         if start < 0:
             continue
         lo, hi = a['game_offsets'][g:g+2]; ol = a['observation_offsets'][g]
@@ -85,19 +88,23 @@ def training_view(a):
             if current >= hi:
                 result['absorbing'][row, step] = 1
                 result['step_weights'][row, step] = 1
-                result['opponent_policy_weight'][row, step] = 1
-                result['full_game_weight'][row, step] = 1
-                result['td_value'][row, step] = terminal
+                if 'opponent_policy' in targets:
+                    result['opponent_policy_weight'][row, step] = 1
+                if 'td_value' in targets:
+                    result['full_game_weight'][row, step] = 1
+                    result['td_value'][row, step] = terminal
                 # No fabricated searched Q/visits in absorbing states.
                 continue
             result['step_weights'][row, step] = a['target_weights'][current]
             result['policy'][row, step] = a['trajectory_policy'][current]
-            result['q_values'][row, step] = a['trajectory_q_values'][current].astype(np.float32) / 32000
-            result['q_visits'][row, step] = a['trajectory_q_visits'][current]
+            if 'q_values' in targets:
+                result['q_values'][row, step] = a['trajectory_q_values'][current].astype(np.float32) / 32000
+                result['q_visits'][row, step] = a['trajectory_q_visits'][current]
             gate = not a['reanalyzed'][current] or bool(a['reanalysis_used_outcome'][current])
-            result['full_game_weight'][row, step] = gate
-            result['td_value'][row, step] = td[g][current-lo]
-            if current+1 < hi and gate:
+            if 'td_value' in targets:
+                result['full_game_weight'][row, step] = gate
+                result['td_value'][row, step] = td[g][current-lo]
+            if 'opponent_policy' in targets and current+1 < hi and gate:
                 result['opponent_policy'][row, step] = a['trajectory_policy'][current+1]
                 result['opponent_policy_weight'][row, step] = 1
     return result
@@ -107,33 +114,30 @@ def replay_weight_mean(root, sources):
     """Mean over distinct real trainable main positions in the selected window."""
     seen = set(); total = 0.; count = 0
     for entry in sources:
-        a = read_raw(root / entry['path']); m = metadata(a)
-        if m.get('algorithm') != 'muzero':
+        if entry['metadata'].get('algorithm') != 'muzero':
             raise ValueError('MuZero snapshot contains another algorithm')
-        for g, game in enumerate(a['game_ids']):
-            key = (m['run_id'], m['attempt_id'], m['worker_id'], int(game))
-            if key in seen:
+        for game in entry['weight_stats']:
+            if game['id'] in seen:
                 continue
-            seen.add(key); lo, hi = a['game_offsets'][g:g+2]
-            valid = a['train_mask'][lo:hi].astype(bool)
-            total += float(a['target_weights'][lo:hi][valid].sum(dtype=np.float64)); count += int(valid.sum())
-    if count == 0 or total <= 0:
+            seen.add(game['id'])
+            total += game['sum']; count += game['count']
+    if count <= 0 or not math.isfinite(total) or total <= 0:
         raise ValueError('MuZero replay has no positive main-position weight')
     return total / count
 
 
-def validate_view(arrays, rows, canvas, steps):
+def validate_view(arrays, rows, canvas, steps, targets=TARGETS):
     shapes = {'obs': (rows, len(PLANES), (canvas*canvas+7)//8), 'globals': (rows, len(GLOBALS)),
               'actions': (rows, steps), 'step_weights': (rows, steps+1),
               'sequence_mask': (rows, steps+1), 'absorbing': (rows, steps+1)}
-    for key in TARGETS:
+    for key in targets:
         trailing = (canvas*canvas,) if key in ('policy', 'opponent_policy', 'q_values', 'q_visits') else (3,3) if key == 'td_value' else (3,) if key == 'value' else ()
         shapes[key] = (rows, steps+1, *trailing)
     if set(arrays) != set(shapes):
         raise ValueError('MuZero training-view fields mismatch')
     for key, shape in shapes.items():
         dtype = np.uint8 if key in ('obs', 'absorbing') else np.int64 if key == 'actions' else np.float32
-        if arrays[key].shape != shape or arrays[key].dtype != dtype or not np.isfinite(arrays[key]).all():
+        if arrays[key].shape != shape or arrays[key].dtype != dtype:
             raise ValueError(f'Invalid MuZero training {key}')
 
 
