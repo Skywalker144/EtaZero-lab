@@ -4,6 +4,8 @@
 #include <ATen/Parallel.h>
 #include <iostream>
 #include <iomanip>
+#include <thread>
+#include <cmath>
 using etazero::muzero::TorchBackend;
 template<class T> void array(const std::vector<T>& values) {
     std::cout<<'[';
@@ -67,6 +69,52 @@ int main(int argc,char** argv) {
         // Sibling expansion must not mutate an already cached parent latent.
         auto repeat=backend.recurrent({{initial[0].latent,1},{initial[1].latent,7}});
         std::cout<<',';output(repeat);std::cout<<"]\n";
+        // Exercise a partial power-of-two bucket and a non-power-of-two cap.
+        TorchBackend padded(argv[1],argv[2],6,5,argv[3]);
+        auto three=padded.initial({&obs[0],&obs[1],&obs[0]});
+        auto five=padded.initial({&obs[0],&obs[1],&obs[0],&obs[1],&obs[0]});
+        auto siblings=padded.recurrent({{three[0].latent,1},{three[1].latent,7},{three[2].latent,1}});
+        for(size_t i=0;i<five.size();++i) {
+            const auto& actual=five[i].evaluation;const auto& expected=initial[i%2].evaluation;
+            for(size_t a=0;a<actual.logits.size();++a)
+                if(std::abs(actual.logits[a]-expected.logits[a])>3e-3+3e-3*std::abs(expected.logits[a]))
+                    throw std::runtime_error("MuZero graph padding changed real-row policy");
+            auto mask=five[i].latent->copy_to_cpu();
+            for(size_t a=0;a<36;++a)
+                if(mask[mask.size()-36+a]!=obs[i%2][a])
+                    throw std::runtime_error("MuZero graph padding changed real-row mask");
+        }
+        for(size_t i=0;i<siblings.size();++i)
+            for(int v=0;v<3;++v)
+                if(std::abs(siblings[i].evaluation.wdl[v]-repeat[i%2].evaluation.wdl[v])>3e-3)
+                    throw std::runtime_error("MuZero graph padding changed recurrent value");
+        // The production service calls backends from threads other than the
+        // constructor. Vary batch sizes, reuse old parents and run both owners
+        // concurrently to exercise stream guards and reusable input buffers.
+        std::exception_ptr errors[2];
+        auto concurrent=[&](int index,TorchBackend& owner) {
+            try {
+                for(int turn=0;turn<4;++turn) {
+                    auto roots=owner.initial({&obs[0],&obs[1]});
+                    auto child=owner.recurrent({{roots[index].latent,index?7:1}});
+                    auto again=owner.recurrent({{roots[0].latent,1},{roots[1].latent,7}});
+                    auto close=[](double a,double b){return std::abs(a-b)<=3e-3+3e-3*std::abs(b);};
+                    for(size_t a=0;a<child[0].evaluation.logits.size();++a)
+                        if(!close(child[0].evaluation.logits[a],again[index].evaluation.logits[a]))
+                            throw std::runtime_error("Concurrent MuZero parent reuse changed policy");
+                    for(int v=0;v<3;++v)
+                        if(!close(child[0].evaluation.wdl[v],again[index].evaluation.wdl[v]))
+                            throw std::runtime_error("Concurrent MuZero parent reuse changed value");
+                    auto mask=roots[index].latent->copy_to_cpu();
+                    for(size_t a=0;a<36;++a)
+                        if(mask[mask.size()-36+a]!=obs[index][a])
+                            throw std::runtime_error("Concurrent MuZero inference changed mask");
+                }
+            } catch(...) {errors[index]=std::current_exception();}
+        };
+        std::thread first(concurrent,0,std::ref(backend)),second(concurrent,1,std::ref(other));
+        first.join();second.join();
+        for(auto error:errors)if(error)std::rethrow_exception(error);
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }
