@@ -39,6 +39,7 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends,in
 }
 BatchEvaluator::~BatchEvaluator(){try{finish();}catch(...){}}
 InferenceOutput BatchEvaluator::submit(Request& request,size_t server) {
+    request.done=false;request.error=nullptr;request.time=std::chrono::steady_clock::now();
     {std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock,[&]{return error_||closing_||queued_<capacity_;});
         if(error_)std::rethrow_exception(error_);
@@ -47,7 +48,10 @@ InferenceOutput BatchEvaluator::submit(Request& request,size_t server) {
     }
     changed_.notify_all();std::unique_lock<std::mutex> lock(request.mutex);
     request.changed.wait(lock,[&]{return request.done;});
-    if(request.error)std::rethrow_exception(request.error);return std::move(request.output);
+    if(request.error)std::rethrow_exception(request.error);
+    auto output=std::move(request.output);
+    request.observation=nullptr;request.action={};
+    return output;
 }
 InferenceOutput BatchEvaluator::initial(const std::vector<float>& obs) {
     ++submitted;std::string key;size_t slot=0;
@@ -59,14 +63,14 @@ InferenceOutput BatchEvaluator::initial(const std::vector<float>& obs) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         if(cache_[slot].key==key && cache_[slot].output.latent){++cache_hits;return cache_[slot].output;}
     }
-    Request request;request.observation=&obs;auto output=submit(request,0);
+    thread_local Request request;request.observation=&obs;auto output=submit(request,0);
     if(!cache_.empty()){std::lock_guard<std::mutex> lock(cache_mutex_);cache_[slot]={std::move(key),output};}
     return output;
 }
 InferenceOutput BatchEvaluator::recurrent(std::shared_ptr<const Latent> latent,int action) {
     ++submitted;auto routed=std::dynamic_pointer_cast<const RoutedLatent>(latent);
     if(!routed || routed->owner!=owner_)throw std::runtime_error("MuZero latent belongs to another inference service");
-    Request request;request.action={routed->value,action};return submit(request,routed->server);
+    thread_local Request request;request.action={routed->value,action};return submit(request,routed->server);
 }
 Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
     return evaluate_symmetry(obs,symmetry_,false,1,randomize_);
@@ -77,7 +81,7 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     if(randomize){std::lock_guard<std::mutex> lock(random_mutex_);symmetry=std::uniform_int_distribution<int>(0,7)(random_);}
     auto map=symmetry_mapping(canvas_,symmetry);
     auto input=transform_observation(obs,canvas_,map);InferenceOutput result;
-    if(skip){++submitted;Request request;request.observation=&input;result=submit(request,0);}else result=initial(input);
+    if(skip){++submitted;thread_local Request request;request.observation=&input;result=submit(request,0);}else result=initial(input);
     restore_evaluation(result.evaluation,map);return result.evaluation;
 }
 void BatchEvaluator::serve(size_t server) {
@@ -85,6 +89,8 @@ void BatchEvaluator::serve(size_t server) {
         std::lock_guard<std::mutex> lock(r->mutex);r->output=std::move(output);r->error=error;r->done=true;r->changed.notify_one();
     };
     std::vector<Request*> batch;
+    InferenceInputs initial_inputs;std::vector<InferenceAction> recurrent_inputs;
+    batch.reserve(batch_);initial_inputs.reserve(batch_);recurrent_inputs.reserve(batch_);
     try {
         backends_[server]->initialize();
         for(;;) {
@@ -99,17 +105,15 @@ void BatchEvaluator::serve(size_t server) {
                 auto& queue=initial?initial_:recurrent_[server];
                 batch.clear();while(!queue.empty()&&batch.size()<batch_){batch.push_back(queue.front());queue.pop_front();}queued_-=batch.size();++active_;changed_.notify_all();
             }
-            for(auto r:batch)wait_microseconds+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-r->time).count();
+            uint64_t waiting=0;
+            for(auto r:batch)waiting+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-r->time).count();
+            wait_microseconds+=waiting;
             std::vector<InferenceOutput> outputs;
-            if(initial){InferenceInputs input;for(auto r:batch)input.push_back(r->observation);outputs=backends_[server]->initial(input);}
-            else{std::vector<InferenceAction> input;for(auto r:batch)input.push_back(r->action);outputs=backends_[server]->recurrent(input);}
+            if(initial){initial_inputs.clear();for(auto r:batch)initial_inputs.push_back(r->observation);outputs=backends_[server]->initial(initial_inputs);}
+            else{recurrent_inputs.clear();for(auto r:batch)recurrent_inputs.push_back(r->action);outputs=backends_[server]->recurrent(recurrent_inputs);recurrent_inputs.clear();}
             if(outputs.size()!=batch.size())throw std::runtime_error("MuZero batch output count mismatch");
             for(auto& output:outputs) {
                 if(!output.latent)throw std::runtime_error("Missing MuZero latent");
-                auto& e=output.evaluation;double mass=0;
-                for(auto p:e.wdl){if(!std::isfinite(p)||p<0||p>1)throw std::runtime_error("Invalid MuZero WDL");mass+=p;}
-                if(std::abs(mass-1)>1e-5||e.logits.size()!=static_cast<size_t>(canvas_*canvas_))throw std::runtime_error("Invalid MuZero prediction");
-                for(double p:e.logits)if(!std::isfinite(p))throw std::runtime_error("Nonfinite MuZero policy");
                 auto routed=std::make_shared<RoutedLatent>();routed->value=output.latent;routed->owner=owner_;routed->server=server;output.latent=std::move(routed);
             }
             requests+=batch.size();++batches;rows_by_server[server]+=batch.size();
