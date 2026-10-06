@@ -1,4 +1,4 @@
-"""Durable authority, interrupted rollback, artifact integrity and controller ownership."""
+"""Durable authority, interrupted stage resume, artifact integrity and controller ownership."""
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ from etazero.storage import save_json, sha256
 def exported(root):
     path=root/'models/fixed/model.pt';path.parent.mkdir(parents=True);path.write_bytes(b'complete artifact')
     info={'id':'fixed','path':'models/fixed/model.pt','contract':CONTRACT_ID,'canvas':6,
-          'checkpoint':{'id':'fixed'},'weights':'model','sha256':sha256(path)}
+          'checkpoint':{'id':'fixed'},'weights':'model','sha256':sha256(path),'bytes':path.stat().st_size}
     save_json(path.parent/'manifest.json',info)
     return path,info
 
@@ -23,7 +23,7 @@ def test_export_requires_complete_manifest_and_matching_payload(tmp_path):
     path,info=exported(tmp_path)
     assert verify_export(tmp_path,info,6)==info
     path.write_bytes(b'partial')
-    with pytest.raises(ValueError,match='checksum'):verify_export(tmp_path,info,6)
+    with pytest.raises(ValueError,match='size'):verify_export(tmp_path,info,6)
     path.write_bytes(b'complete artifact')
     modified={**info,'weights':'swa'}
     with pytest.raises(ValueError,match='manifest'):verify_export(tmp_path,modified,6)
@@ -32,11 +32,13 @@ def test_export_requires_complete_manifest_and_matching_payload(tmp_path):
     with pytest.raises(ValueError,match='identity'):verify_export(tmp_path,modified,6)
 
 
-def test_rollback_interrupted_rename_retries_without_losing_artifacts(tmp_path,monkeypatch):
+def test_stage_recovery_keeps_progress_and_archives_only_export_scratch(tmp_path,monkeypatch):
     state={'iteration':2,'elapsed_seconds':17,'checkpoint':None,'model':None}
-    names=['models/.tmp_partial/model.pt','selfplay/iteration_000002/raw.npz',
-           '.internal/iterations/000002/status.json','logs/iterations/000002.json']
-    for name in names:
+    preserved=['selfplay/iteration_000002/raw.npz', '.internal/iterations/000002/status.json',
+               '.internal/iterations/000002/learner.json', 'logs/iterations/000002.json',
+               'snapshots/iteration_000002/data/train.npz','checkpoints/iteration_000002_step_2.pt']
+    scratch=['models/.tmp_partial/model.pt','models/.tmp_second/model.pt']
+    for name in preserved+scratch:
         p=tmp_path/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(name.encode())
     original=Path.rename;calls=0
     def interrupted(self,target):
@@ -48,7 +50,8 @@ def test_rollback_interrupted_rename_retries_without_losing_artifacts(tmp_path,m
         patch.setattr(Path,'rename',interrupted)
         with pytest.raises(OSError,match='injected'):recover_iteration(tmp_path,state)
     recover_iteration(tmp_path,state)
-    for name in names:
+    for name in preserved:assert (tmp_path/name).read_bytes()==name.encode()
+    for name in scratch:
         saved=list((tmp_path/'.internal/discarded').glob('*/'+name))
         assert len(saved)==1 and saved[0].read_bytes()==name.encode()
         assert not (tmp_path/name).exists()
