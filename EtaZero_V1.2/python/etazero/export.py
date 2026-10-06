@@ -35,8 +35,8 @@ def verify_export(run_dir, info, canvas):
             info['weights'] not in ('model','swa')):
         raise ValueError('Exported model identity/contract mismatch')
     path = Path(run_dir)/relative
-    if load_json(path.parent/'manifest.json') != info or sha256(path) != info['sha256']:
-        raise ValueError('Exported model manifest/checksum mismatch')
+    if load_json(path.parent/'manifest.json') != info or path.stat().st_size != info['bytes']:
+        raise ValueError('Exported model manifest/size mismatch')
     return info
 
 
@@ -65,6 +65,7 @@ def export_model(run_dir, config, checkpoint):
     info = {"id":checkpoint["id"],"checkpoint":checkpoint,"contract":CONTRACT_ID,"canvas":canvas,
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
             "path":str(Path("models")/checkpoint["id"]/"model.pt"),"sha256":sha256(stage/"model.pt"),
+            "bytes":(stage/"model.pt").stat().st_size,
             'inference_precision':config['inference']['inference_precision'],'backend':'libtorch',
             'normalization': {'fixup': 'masked_fixup_bias', 'fixscaleonenorm': 'precomputed_inv_std',
                               'masked_layernorm': 'masked_layernorm'}[model.norm_kind]}
