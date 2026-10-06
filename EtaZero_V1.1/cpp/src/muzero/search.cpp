@@ -43,7 +43,7 @@ size_t Search::select(Node& node,bool root) {
     for(size_t i=0;i<node.edges.size();++i) {
         const auto& e=node.edges[i];if(e.child&&!e.child->ready)continue;
         const ValueStats s=e.child?e.child->stats:ValueStats{};
-        double score=child_selection_score(e.search_prior,s.weight>0?-s.value:fpu,s.weight,e.pending,total,node.stats,settings_,root&&!remove_noise_);
+        double score=child_selection_score(e.search_prior,s.weight>0?-s.value:fpu,s.weight,e.pending,total,node.stats,settings_,root&&!remove_noise_&&e.child!=nullptr);
         if(root&&e.action==hint_) {
             double weight=s.weight+e.pending*settings_.virtual_loss;
             double next=(weight+node.stats.weight/std::max<int64_t>(1,node.stats.visits))/(s.visits+1.0);
