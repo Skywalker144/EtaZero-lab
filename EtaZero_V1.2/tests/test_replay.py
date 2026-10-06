@@ -179,7 +179,7 @@ def test_scatter_row_ids_pairing_rounding_and_independent_wave_streams(tmp_path)
     source=tmp_path/'input.npz';ids=np.arange(12,dtype=np.float32)
     save_npz(source,dict(value=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
     # Source round tie: 12*0.375=4.5 rounds to 4 (ties-to-even).
-    root=tmp_path/'scatter';outputs=_scatter((0,[(str(source),None)],False,str(root),4,(17,2,0),str(tmp_path),.375,True))
+    root=tmp_path/'scatter';outputs=_scatter((0,[(str(source),None)],False,str(root),4,(17,2,0),str(tmp_path),.375,True,()))
     selected=[]
     for bucket,path,n in outputs:
         with np.load(path) as a:
