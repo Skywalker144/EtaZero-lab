@@ -76,23 +76,19 @@ def test_committed_selection_and_schedule(tmp_path):
     with pytest.raises(ValueError):discover_players(tmp_path,2)
 
 
-def test_rollback_preserves_committed_data_and_archives_uncommitted_time(tmp_path):
-    state={'iteration':2,'elapsed_seconds':17.,'checkpoint':{'path':'checkpoints/iteration_000001_done.pt'},'model':None}
-    committed=tmp_path/'selfplay/iteration_000001/raw.npz';committed.parent.mkdir(parents=True);committed.write_bytes(b'committed')
-    paths=['selfplay/iteration_000002/raw.npz','.internal/iterations/000002/learner.json',
-           'checkpoints/iteration_000002_step_01.pt','models/iteration_000002_a/model.pt',
-           'snapshots/iteration_000002_a/data.npz','logs/iterations/000002.json','.internal/catalog.sqlite']
+def test_stage_resume_preserves_pending_data_and_uncommitted_time(tmp_path):
+    state={'iteration':2,'elapsed_seconds':17.,'checkpoint':None,'model':None}
+    paths=['selfplay/iteration_000001/raw.npz','selfplay/iteration_000002/raw.npz',
+           '.internal/iterations/000002/learner.json','checkpoints/iteration_000002_step_01.pt',
+           'models/iteration_000002_a/model.pt','snapshots/iteration_000002_a/data.npz',
+           'logs/iterations/000002.json','.internal/catalog.sqlite']
     for relative in paths:
-        p=tmp_path/relative;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'uncommitted')
-    recover_iteration(tmp_path,state)
-    assert committed.read_bytes()==b'committed' and state['elapsed_seconds']==17
-    for relative in paths:
-        assert not (tmp_path/relative).exists()
-        saved=list((tmp_path/'.internal/discarded').glob('*/'+relative))
-        assert len(saved)==1 and saved[0].read_bytes()==b'uncommitted'
-    archives=list((tmp_path/'.internal/discarded').iterdir())
-    recover_iteration(tmp_path,state)
-    assert list((tmp_path/'.internal/discarded').iterdir())==archives
+        p=tmp_path/relative;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(relative.encode())
+    for _ in range(2):
+        recover_iteration(tmp_path,state)
+        assert state['elapsed_seconds']==17
+        for relative in paths:assert (tmp_path/relative).read_bytes()==relative.encode()
+    assert not (tmp_path/'.internal/discarded').exists()
 
 
 def test_cli_requires_explicit_model_source():
