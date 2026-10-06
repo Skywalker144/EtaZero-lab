@@ -13,8 +13,9 @@
 
 | 版本目录 | 状态 |
 |---|---|
-| EtaZero_V0 | 开发中 |
-| EtaZero_V1 | 开发中 |
+| EtaZero_V0 | 已冻结 |
+| EtaZero_V1 | 已冻结 |
+| EtaZero_V1.1 | 开发中 |
 
 ## 修改边界
 
