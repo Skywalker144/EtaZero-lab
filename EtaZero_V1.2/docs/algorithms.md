@@ -206,7 +206,7 @@ L_base = mean_t[0.72 * CE(WDL_target, WDL_pred)
 
 总 loss 为上式加三个 TD、长期/短期 optimistic 和短期价值误差分量的平均值，启用Q时再加上述Q分量；实际反向使用 `batch_size * L`，与来源的 batch 求和尺度一致。默认梯度上限按优化器、batch 与 LR scale 计算；`training.gradient_clip > 0` 则以平均梯度尺度覆盖上限。梯度日志仍为裁剪前平均 loss 的梯度范数。SGD 的衰减加入优化器梯度，AdamW 的衰减解耦施加，均不重复加入 loss。价值目标来自真实终局，未完成对局不会凭空补零价值。
 
-Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；每个分段开始重置同步计数但不复制权重；完整训练轮结束丢弃未同步的 fast 权重，保留优化器状态、消费计数和成功更新计数。`training.sub_epochs`默认1，可将固定batch预算按floor等分为非空分段（不得超过train_steps）；分段计数与整轮batch计数分别保存，LR/WD和范数采样仍沿整轮时钟。该固定预算是用户适配，不照抄来源文件概率预算。来源epoch末复制slow后到下个subepoch才重置counter，本地轮末立即将counter归零；下一段的优化执行一致。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
+Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；每个分段开始重置同步计数但不复制权重；完整训练轮结束丢弃未同步的 fast 权重，保留优化器状态、消费计数和成功更新计数。`training.sub_epochs`默认1，可将实际batch预算按floor等分为非空分段，实际步数较少时减少段数；分段计数与整轮batch计数分别保存，LR/WD和范数采样仍沿整轮时钟。该单遍与训练额度预算是用户适配，不照抄来源文件概率预算。来源epoch末复制slow后到下个subepoch才重置counter，本地轮末立即将counter归零；下一段的优化执行一致。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
 
 LR/WD 在轮开始刷新，之后按本轮消费 batch 数每 5 批刷新，累计消费超过 2 亿样本后改为每 50 批；刷新使用消费后的计数，作用于下一 batch。范数在更新前测量，默认每 100 batch 取 snapshot，先进入统计再刷新 WD、执行 Lookahead 与 SWA。关闭 `optimizer.norm_only_at_print` 时逐 batch 累积均值，在打印点把历史和及权重同时缩为 0.001；来源的 `norm_*_batch` 没有逐 batch 的 0.995 EMA 衰减。`optimizer.lookahead_print` 只在 Lookahead 周期起点累积该分支的范数，原始 loss 日志仍逐 batch 保存。
 
@@ -220,7 +220,7 @@ Side 数据使用独立观测、policy、visits 和搜索 WDL，不伪造该分�
 
 适配差异：D4 使用可恢复的 Torch CPU RNG，不复现来源 NumPy 种子的逐位随机序列。所有 loss 日志记录乘系数后的 batch 均值，十一项之和为 total；KataGo 的 soft loss 日志在乘 soft 系数之前记录。没有 pass、元数据来源筛选或 Go 专有监督，不宣称复现完整 KataGo 网络与训练。
 
-learner 从该轮固定窗口快照中采样，完成 `train.cfg` 规定的训练步数和 batch size，保存完整训练状态并发布推理模型。自对弈产量按 [固定训练量与 replay ratio](implementation.md#固定训练量与自对弈产量) 规划。额外一致性损失未接入。
+learner 从该轮窗口快照中最多读取一遍，训练步数受 `train.cfg` 的基准上限、新增数据额度和完整 batch 数限制，保存完整训练状态并发布推理模型；零步轮次保留当前模型。自对弈产量与训练预算见 [训练额度与自对弈产量](implementation.md#训练额度与自对弈产量)。额外一致性损失未接入。
 
 ### PDA、侧分支与重分析
 
