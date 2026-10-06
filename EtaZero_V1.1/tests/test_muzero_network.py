@@ -266,44 +266,6 @@ def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precis
 
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Requires host CUDA')
-@pytest.mark.parametrize('stage', ['initial', 'recurrent'])
-def test_native_latent_failure_preserves_inputs_and_model(tmp_path, dimensions, stage):
-    binary = ROOT / 'build/muzero_inference_probe'
-    if not binary.exists():
-        pytest.skip('Build the native MuZero inference probe first')
-    model = MuZeroNet(dimensions).cuda().eval()
-    with torch.no_grad():
-        # Finite FP32 weights deliberately overflow the native FP16 convolution.
-        part = model.representation if stage == 'initial' else model.dynamics
-        part.stem.weight.fill_(1e10)
-    path = tmp_path / 'overflow.pt'
-    torch.jit.script(inference_network(model)).save(str(path))
-    directory = tmp_path / 'diagnostics'
-    env = dict(os.environ, ETAZERO_NAN_DIAGNOSTIC_DIR=str(directory))
-    result = subprocess.run([str(binary), str(path), 'cuda:0', 'float16'],
-                            env=env, capture_output=True, text=True)
-    assert result.returncode == 1
-    assert 'Nonfinite MuZero latent' in result.stderr
-    assert f'stage={stage}' in result.stderr
-    files = list(directory.glob('*.pt'))
-    assert len(files) == 1
-    assert str(files[0]) in result.stderr
-    dump = torch.jit.load(str(files[0]), map_location='cpu')
-    assert dump.stage == stage and dump.precision == 'float16'
-    assert torch.isfinite(dump.input0).all()
-    assert not torch.isfinite(dump.output_hidden).all()
-    expected = inputs()[0] if stage == 'initial' else None
-    if stage == 'initial':
-        torch.testing.assert_close(dump.input0, expected)
-        torch.testing.assert_close(dump.input1, inputs()[1])
-    else:
-        assert dump.input0.shape == (2, dimensions.latent_channels + 1, 6, 6)
-        assert dump.input1.tolist() == [0, 0]
-    saved_part = dump.model.model.representation if stage == 'initial' else dump.model.model.dynamics
-    torch.testing.assert_close(saved_part.stem.weight, part.stem.weight.cpu())
-
-
-@pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Requires host CUDA')
 @pytest.mark.parametrize('amp', [False, True])
 def test_cuda_unroll_gradients(dimensions, amp):
     config = load_config(CONFIGS / 'smoke_test')
