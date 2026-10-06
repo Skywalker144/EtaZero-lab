@@ -156,7 +156,8 @@ class App:
                              mode=payload.get('mode', 'play'), evaluation=deepcopy(config['evaluation']) if replacement else self.state['evaluation'])
             elif operation == 'play':
                 reply = self.engine.command(f"play {payload['action']}")
-                self.publish(game=reply['state'], analysis=None)
+                # Keep the last complete analysis visible until the next search succeeds.
+                self.publish(game=reply['state'])
             elif operation == 'undo':
                 moves = self.state['game']['moves']
                 last_human = len(moves) - 1 if self.state['mode'] == 'manual' else max(
