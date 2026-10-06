@@ -11,7 +11,8 @@ import pytest
 import torch
 from etazero.config import ROOT, load_config
 from etazero.experiment import (experiment_plan, initialization_key, prepare_initializations,
-                                arm_progress, write_arm_config, run_experiment, Scheduler)
+                                arm_progress, write_arm_config, run_experiment, Scheduler,
+                                scheduled_arms)
 from etazero.plotting import (run_history, training_figure, loss_figure, performance_figure,
                              journal_events, METRICS)
 from etazero.storage import save_json, load_json, sha256
@@ -62,6 +63,38 @@ def test_shared_weights_group_by_network_seed_and_verify_payload(tmp_path):
     path = Path(origins['a']['path']); path.write_bytes(path.read_bytes()+b'changed')
     with pytest.raises(ValueError, match='checksum'):
         prepare_initializations(tmp_path, arms)
+
+
+@pytest.mark.parametrize('selection', ['missing', 'a,a', 'a,'])
+def test_plan_rejects_invalid_arm_selection(tmp_path, selection):
+    directory = umbrella(tmp_path)
+    with (directory/'exp.cfg').open('a') as stream:
+        stream.write(f'arms = {selection}\n')
+    with pytest.raises(ValueError, match='arm'):
+        experiment_plan(directory, environ={})
+
+
+def test_arm_selection_can_change_without_changing_registered_identity(tmp_path, monkeypatch):
+    directory = umbrella(tmp_path)
+    original = (directory/'exp.cfg').read_text()
+    work = tmp_path/'work'
+    binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
+    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    initialized, started = [], []
+    def initialize(work, arms):
+        initialized.append([arm['name'] for arm in arms])
+        return {}
+    monkeypatch.setattr('etazero.experiment.prepare_initializations', initialize)
+    monkeypatch.setattr(Scheduler, 'start', lambda self, arm, slot, gpu: started.append(arm['name']))
+    for selection in ('a', 'b', ''):
+        (directory/'exp.cfg').write_text(original+f'arms = {selection}\n')
+        plan = experiment_plan(directory, environ={}, work_dir=work)
+        expected = [selection] if selection else ['a', 'b']
+        assert [arm['name'] for arm in scheduled_arms(plan)] == expected
+        assert run_experiment(plan, binary) == 0
+        assert initialized[-1] == expected
+        assert [arm['name'] for arm in load_json(work/'.internal/identity.json')['arms']] == ['a', 'b']
+    assert started == ['a', 'b', 'a', 'b']
 
 
 def journal(root, events):
