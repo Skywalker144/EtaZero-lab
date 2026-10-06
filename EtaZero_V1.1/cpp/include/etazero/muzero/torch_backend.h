@@ -1,6 +1,7 @@
 #pragma once
 #include "inference.h"
 #include <torch/script.h>
+#include <c10/cuda/CUDAStream.h>
 #include <optional>
 
 namespace etazero::muzero {
@@ -24,18 +25,28 @@ public:
                  std::optional<torch::jit::Module> loaded_model = std::nullopt);
     TorchBackend(const TorchBackend&) = delete;
     TorchBackend& operator=(const TorchBackend&) = delete;
-    // Synchronous, single-owner API. A future batch service must serialize each
-    // backend and route recurrent requests back to the owner of their latent.
+    ~TorchBackend() override;
+    // Each backend owns a stream and reusable inputs. The batch service
+    // serializes calls and routes recurrent requests to the latent owner.
     std::vector<Output> initial(const InferenceInputs& inputs);
     std::vector<Output> recurrent(const std::vector<Action>& inputs);
     int latent_channels() const { return latent_channels_; }
 private:
     torch::Device device_;
     torch::jit::Module model_;
+    std::unique_ptr<c10::cuda::CUDAStream> stream_;
+    torch::Tensor observation_host_, globals_host_, actions_host_;
+    struct Graph;
+    std::vector<std::unique_ptr<Graph>> initial_graphs_, recurrent_graphs_;
     std::string precision_;
     int canvas_, max_batch_, latent_channels_;
     std::shared_ptr<const int> owner_ = std::make_shared<const int>(0);
     void check_batch(size_t n) const;
+    void capture_graphs();
+    Graph& graph_for(const std::vector<std::unique_ptr<Graph>>& graphs,size_t n);
+    c10::IValue graph_outputs(Graph& graph,size_t n);
+    c10::IValue replay(const std::vector<std::unique_ptr<Graph>>& graphs,
+                      const torch::Tensor& input0,const torch::Tensor& input1);
     std::vector<Output> unpack(const c10::IValue& result,
         const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks);
 };
