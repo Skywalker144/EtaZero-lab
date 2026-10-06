@@ -41,6 +41,8 @@ struct FinishedGame {
     OpeningResult opening;
     double forbidden_feature_dropout_prob = 0.5;
     std::vector<SidePosition> side_positions;
+    double root_policy_invalid_mass_sum = 0;
+    uint64_t root_policy_invalid_mass_count = 0;
 };
 void compute_value_surprises(FinishedGame& game,bool direct=false);
 void apply_training_weights(FinishedGame& game,double policy_factor,double value_factor,std::mt19937_64& rng,

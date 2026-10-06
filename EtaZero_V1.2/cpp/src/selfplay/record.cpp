@@ -232,6 +232,8 @@ struct RecordWriter::Buffers {
     std::vector<float> start_values, globals;
     std::vector<std::string> opening_failures;
     std::vector<uint64_t> ids,seeds;
+    std::vector<double> root_policy_invalid_mass_sum;
+    std::vector<uint64_t> root_policy_invalid_mass_count;
     std::vector<int64_t> game_offsets,obs_offsets,visits,sample_indices;
     std::vector<int32_t> actions,simulations;
     std::vector<int16_t> policies,opponent_policies;
@@ -257,6 +259,7 @@ struct RecordWriter::Buffers {
         side_visits.clear();side_forbidden_input.clear();
         q_values.clear();q_visits.clear();side_q_values.clear();side_q_visits.clear();
         observations.clear();globals.clear();players.clear();rules.clear();winners.clear();reasons.clear();sizes.clear();ids.clear();seeds.clear();
+        root_policy_invalid_mass_sum.clear();root_policy_invalid_mass_count.clear();
         visits.clear();actions.clear();simulations.clear();policies.clear();temperatures.clear();rewards.clear();
         opponent_policies.clear();opponent_policy_weights.clear();
         opening_moves.clear();balanced_moves.clear();policy_moves.clear();opening_attempts.clear();
@@ -286,10 +289,16 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
     if(!buffers_)buffers_=std::make_unique<Buffers>(g.canvas,max_rows_);
     auto& b=*buffers_;
     if(g.canvas!=b.canvas)throw std::runtime_error("Writer canvas mismatch");
+    if(!std::isfinite(g.root_policy_invalid_mass_sum) || g.root_policy_invalid_mass_sum<0 ||
+       g.root_policy_invalid_mass_sum>g.root_policy_invalid_mass_count ||
+       (g.root_policy_invalid_mass_count && g.root_policy_invalid_mass_count!=g.steps.size()-g.opening.actions.size()))
+        throw std::runtime_error("Invalid root policy game diagnostics");
     if(b.ids.empty())b.row_begin=row_begin;
     else if(row_begin!=0)throw std::runtime_error("Only the first trajectory may start at a partial training row");
     b.rows+=rows;
     b.ids.push_back(g.id);b.seeds.push_back(g.seed);b.sizes.push_back(g.size);
+    b.root_policy_invalid_mass_sum.push_back(g.root_policy_invalid_mass_sum);
+    b.root_policy_invalid_mass_count.push_back(g.root_policy_invalid_mass_count);
     b.rules.push_back(static_cast<int8_t>(g.rule));b.winners.push_back(g.winner);b.reasons.push_back(g.reason);
     b.initial_position_moves.push_back(g.opening.initial_position_moves);b.initial_position_kind.push_back(g.opening.initial_position_kind);b.hint_actions.push_back(g.opening.hint_action);
     b.opening_moves.push_back(g.opening.actions.size());b.balanced_moves.push_back(g.opening.balanced_moves);
@@ -441,7 +450,14 @@ void RecordWriter::publish() {
          << ",\"shard_id\":" << quote(source_.attempt+":"+std::to_string(source_.worker)+":"+shard)
          << ",\"created_ns\":" << created << ",\"opening_failures\":[";
     for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<quote(b.opening_failures[i]);}meta<<"]";
-    if(source_.unroll_steps>0)meta<<",\"algorithm\":\"muzero\",\"unroll_steps\":"<<source_.unroll_steps;
+    if(source_.unroll_steps>0) {
+        meta<<",\"algorithm\":\"muzero\",\"unroll_steps\":"<<source_.unroll_steps
+            <<",\"root_policy_invalid_mass_sum\":["<<std::setprecision(17);
+        for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<b.root_policy_invalid_mass_sum[i];}
+        meta<<"],\"root_policy_invalid_mass_count\":[";
+        for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<b.root_policy_invalid_mass_count[i];}
+        meta<<"]";
+    }
     meta<<"}";
     std::string metadata = meta.str(); std::vector<uint8_t> meta_bytes(metadata.begin(), metadata.end());
     auto destination = directory_ / shard, temporary = destination; temporary += ".tmp";
