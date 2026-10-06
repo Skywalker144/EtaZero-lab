@@ -50,6 +50,8 @@ value_weight_exponent = 0
 
 PUCT/FPU、根噪声、温度、forced playout、目标剪枝、LCB、optimistic policy、uncertainty 和 noise pruning 可按配置使用，共用纯数学函数。LCB 只是搜索启发式，短期误差 head 也不代表 dynamics 模型误差或随深度增加的不确定性；这些增强项对 MuZero 的效果需要独立实验。
 
+Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无子节点的候选动作使用 FPU 与普通 PUCT 竞争首次访问；正在评估的子节点跳过选点。去除根噪声的搜索不启用 forced playout。
+
 ## 连续数据与展开训练
 
 [writer](../cpp/src/selfplay/record.cpp) 保留完整真实对局，新增所有可训练位置的 policy/Q/visits，包括重复次数为零的 cheap 位置。开局前缀不产生监督。原始文件标识 `algorithm=muzero` 和展开长度，不能将 AlphaZero 分片作为 MuZero 数据。
