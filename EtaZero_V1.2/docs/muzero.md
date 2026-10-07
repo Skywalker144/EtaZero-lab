@@ -6,7 +6,7 @@ MuZero 使用独立的 latent 搜索、initial/recurrent 推理组批及轨迹�
 CONFIG_DIR=configs/muzero bash scripts/run.sh
 ```
 
-该配置保留 baseline 的训练预算、优化器及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 搜索未实现，对应组合明确报错。
+该配置使用 ResNet 主干和普通 AdamW，继承 baseline 的训练预算及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 搜索未实现，对应组合明确报错。
 
 展开后的训练行更大，名义训练分片大小由 [MuZero train.cfg](../configs/muzero/train.cfg) 覆盖；派生配置按配置继承规则读取这些字段。shuffle 保留 baseline 的 worker 数和总数组内存预算，按行大小规划有效桶大小。
 
@@ -21,6 +21,8 @@ CONFIG_DIR=configs/muzero bash scripts/run.sh
 ## 网络与推理
 
 [网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用 MuZero_V2 的两层全宽 3×3 残差块、逐样本 masked normalization 与 SiLU。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。ResNet 的归一化对每个样本的所有通道和有效格点进行 FP32 归约，不维护 BatchNorm 统计，卷积保留来源的默认初始化；prediction 不额外加入末端归一化。ResNet 要求 `katago_optimizer=false`，不套用 NBT/fson 参数分组。相同通道数与块数不保证相同参数量或计算量。
+
+ResNet 的 `MaskedNorm` 在通道与有效空间位置上共同计算每样本的均值、方差，采用每通道可学习缩放和偏置；其统计方式接近单组 GroupNorm，并排除棋盘 padding。它不是 BatchNorm，也不是具有逐位置仿射参数的 `nn.LayerNorm([C,H,W])`。representation/dynamics 的入口和残差块采用该归一化与 SiLU；共享的 policy/value heads 仍采用 Mish 与 bias mask。
 
 - representation 接收现有五空间平面和六全局特征，包含棋规、执色、禁手特征与 PDA 条件。
 - latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。采用 MiniZero 的极小跨度保护：当 `max-min < 1e-5` 时，分母为 `max-min+1e-5`，否则使用原跨度。输出保持在 `[0,1]` 内，极小跨度时最大值可小于 1；该规则同时用于 representation、dynamics、训练和导出推理。FP16 推理仍在 FP32 做归一化。
