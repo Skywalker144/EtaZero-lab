@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import pytest
 from etazero.config import ROOT, fingerprint, load_config
-from etazero.eval_config import load_evaluation_config
+from etazero.engine_config import load_engine_config
 from etazero.arena import Player, build_schedule, discover_players, PairStore, save_manifest
 from etazero.runtime import recover_iteration
 from etazero.storage import save_json, load_json, sha256
@@ -17,25 +17,25 @@ def test_eval_profiles_are_independent(tmp_path,monkeypatch):
     monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     selected=tmp_path/'configs/smoke_test'
     before=load_config(selected)
-    (selected/'eval.cfg.local').write_text('[evaluation]\nvisits = 71\n')
+    (selected/'analysis.cfg.local').write_text('[analysis]\nvisits = 71\n')
     assert load_config(selected)==before
     assert fingerprint(load_config(selected))==fingerprint(before)
-    assert load_evaluation_config(selected,environ={})['evaluation']['visits']==71
-    assert load_evaluation_config(selected,environ={'EVAL_VISITS':'100','MATCH_VISITS':'3'})['evaluation']['visits']==100
-    assert load_evaluation_config(selected,match=True,environ={'EVAL_VISITS':'3'})['match']['visits']==100
+    assert load_engine_config(selected,environ={})['analysis']['visits']==71
+    assert load_engine_config(selected,environ={'ANALYSIS_VISITS':'100','MATCH_VISITS':'3'})['analysis']['visits']==100
+    assert load_engine_config(selected,match=True,environ={'ANALYSIS_VISITS':'3'})['match']['visits']==100
     # Changing training search/inference does not alter either evaluator.
-    evaluation=load_evaluation_config(selected,environ={})
-    match=load_evaluation_config(selected,True,environ={})
+    evaluation=load_engine_config(selected,environ={})
+    match=load_engine_config(selected,True,environ={})
     (selected/'selfplay.cfg.local').write_text('[puct]\nc_puct=7\n[inference]\ninference_precision=float16\n')
-    assert load_evaluation_config(selected,environ={})==evaluation
-    assert load_evaluation_config(selected,True,environ={})==match
-    (selected/'eval.cfg.local').write_text('[evaluation]\nvisits=oops\n')
+    assert load_engine_config(selected,environ={})==evaluation
+    assert load_engine_config(selected,True,environ={})==match
+    (selected/'analysis.cfg.local').write_text('[analysis]\nvisits=oops\n')
     assert load_config(selected)['puct']['c_puct']==7
-    with pytest.raises(ValueError):load_evaluation_config(selected,environ={})
+    with pytest.raises(ValueError):load_engine_config(selected,environ={})
     for field,value in [('VISITS','0'),('BOARD_SIZE','4'),('RULE','oops'),('OPENING_PROBABILITY','0'),
                         ('ROOT_NUM_SYMMETRIES_TO_SAMPLE','9'),('NN_POLICY_TEMPERATURE','0'),
                         ('ROOT_POLICY_TEMPERATURE','0'),('TEMPERATURE_HALFLIFE','0'),('TEMPERATURE_ONLY_BELOW_PROB','1.1')]:
-        with pytest.raises(ValueError):load_evaluation_config(CONFIGS / 'baseline',True,environ={'MATCH_'+field:value})
+        with pytest.raises(ValueError):load_engine_config(CONFIGS / 'baseline',True,environ={'MATCH_'+field:value})
 
 
 def test_manifest_and_partial_pair_resume(tmp_path):
@@ -93,7 +93,7 @@ def test_stage_resume_preserves_pending_data_and_uncommitted_time(tmp_path):
 
 def test_cli_requires_explicit_model_source():
     import subprocess
-    result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'evaluate','--config-dir',str(CONFIGS / 'smoke_test')],
+    result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'analysis','--config-dir',str(CONFIGS / 'smoke_test')],
                           text=True,capture_output=True)
     assert result.returncode!=0 and 'requires --model or --run-dir' in result.stderr
     help_result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'--help'],text=True,capture_output=True)

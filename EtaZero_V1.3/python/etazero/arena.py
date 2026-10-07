@@ -12,8 +12,8 @@ from threading import Event, Thread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import ROOT, native_text
-from .eval_config import load_evaluation_config
-from .evaluation import model_info
+from .engine_config import load_engine_config
+from .analysis import model_info
 from .runtime import verify_build
 from .process import install_signals, stop_process
 from .storage import run_lock, write_json
@@ -346,8 +346,8 @@ def run_arena(output: Path, manifest: dict, binary: Path, samples: int,
 def single_match(config, binary, model_a, model_b, output, games=None):
     import copy
     config = copy.deepcopy(config)
-    from .eval_config import validate_evaluation
-    validate_evaluation(config, True)
+    from .engine_config import validate_engine_config
+    validate_engine_config(config, True)
     players = []
     for label, path in (('a', model_a), ('b', model_b)):
         path, info = model_info(path)
@@ -389,7 +389,7 @@ def main():
         with run_lock(output/'arena.lock'):
             write_ratings(output, args.bootstrap_samples)
         return
-    config = load_evaluation_config(args.config_dir, match=True)
+    config = load_engine_config(args.config_dir, match=True)
     if args.games is None:
         args.games = config['match']['games']
     binary = args.binary.resolve()

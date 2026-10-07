@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.eval_config import load_evaluation_config
+from etazero.engine_config import load_engine_config
 from etazero.muzero.training import TrainingForward
 from etazero.optimization import optimizer_for, optimization_for, inference_weights
 
@@ -31,7 +31,7 @@ def test_raw_profile_and_shuffle_budget():
     assert c['replay']['min_rows'] == c['replay']['max_rows']
     assert resource_plan(150000, c['writer']['shard_rows'], 10, c)['bucket_rows'] >= 8192
     for match in (False, True):
-        search = load_evaluation_config(CONFIGS / 'raw_muzero', match=match)['match' if match else 'evaluation']
+        search = load_engine_config(CONFIGS / 'raw_muzero', match=match)['match' if match else 'analysis']
         for key in ('use_fpu', 'use_lcb', 'policy_target_pruning', 'use_uncertainty', 'use_noise_pruning',
                     'policy_optimism', 'root_policy_optimism', 'value_weight_exponent', 'chosen_move_prune'):
             assert not search[key]

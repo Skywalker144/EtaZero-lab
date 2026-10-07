@@ -337,9 +337,9 @@ def main():
     if args.dry_run:
         if plan['settings']['autoelo']:
             from .autoelo import load_elo_config
-            from .eval_config import load_evaluation_config
+            from .engine_config import load_engine_config
             plan['elo'] = {'settings': load_elo_config(plan['umbrella']),
-                           'config': load_evaluation_config(plan['umbrella'], match=True, umbrella=True),
+                           'config': load_engine_config(plan['umbrella'], match=True, umbrella=True),
                            'schedule': 'Discovered after every scheduled arm has completed'}
         print(json.dumps(plan, indent=2)); return 0
     return run_experiment(plan, args.binary.resolve())

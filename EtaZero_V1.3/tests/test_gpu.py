@@ -14,8 +14,8 @@ import pytest
 import torch
 from etazero.config import ROOT, load_config, write_native
 from etazero.data import read_raw, metadata, game_row_ranges
-from etazero.evaluation import evaluate
-from etazero.eval_config import load_evaluation_config
+from etazero.analysis import analyze
+from etazero.engine_config import load_engine_config
 from etazero.export import example_inputs, export_model, verify_export
 from etazero.network import make_network, inference_network, MaskedBatchNorm
 from etazero.optimization import Optimization, inference_weights
@@ -356,7 +356,7 @@ def test_checkpoint_retention_resume_history_and_old_model(tmp_path,gpu_config):
     assert run_history(tmp_path)==history
     assert (tmp_path/'training.png').stat().st_size>0
     old_model=tmp_path/statuses[0]['model']['path']
-    _,evaluation=evaluate(load_evaluation_config(CONFIGS / 'smoke_test'),BINARY,
+    _,evaluation=analyze(load_engine_config(CONFIGS / 'smoke_test'),BINARY,
                           tmp_path,model=old_model,size=5,rule='renju')
     assert evaluation['result']['root_visits']==100
     resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=4)
@@ -442,11 +442,14 @@ def test_native_parity_all_sizes_rules_and_match(pipeline,gpu_config):
             np.testing.assert_allclose(native["raw_logits"],p[0,0].cpu(),rtol=2e-4,atol=2e-5)
             np.testing.assert_allclose(native["raw_wdl"],v[0].float().softmax(0).cpu(),rtol=2e-4,atol=2e-5)
     model_b=root/load_json(root/".internal/iterations"/"000001"/"status.json")["model"]["path"]
-    _,result=evaluate(load_evaluation_config(CONFIGS / 'smoke_test',match=True),BINARY,root,model_b=model_b,size=5,rule="renju",games=4)
-    assert result["result"]["complete"] and len(result["result"]["games"])==4
-    assert {g["winner"] for g in result["result"]["games"]}<={-1,0,1}
-    assert all(set(g["root_visits"])=={100} for g in result["result"]["games"])
-    _,result=evaluate(load_evaluation_config(CONFIGS / 'smoke_test'),BINARY,root,size=5,rule="freestyle",moves="0,5,1,6,2,7,3,8,4")
+    from etazero.arena import single_match
+    config=load_engine_config(CONFIGS / 'smoke_test',match=True)
+    config['match'].update(board_size=5,rule='renju')
+    _,games=single_match(config,BINARY,root/state['model']['path'],model_b,root/'match',games=4)
+    assert len(games)==4
+    assert {g['winner'] for g in games}<={-1,0,1}
+    assert all(set(g['root_visits'])=={100} for g in games)
+    _,result=analyze(load_engine_config(CONFIGS / 'smoke_test'),BINARY,root,size=5,rule="freestyle",moves="0,5,1,6,2,7,3,8,4")
     assert result["result"]["terminal"] and result["result"]["value"]==-1
 
 
@@ -470,11 +473,11 @@ def test_root_d4_probabilities_and_policy_temperatures(pipeline,gpu_config):
             values.append(value.float().softmax(1))
     expected_policy=torch.stack(policies).mean(0)[0].cpu().numpy()
     expected_wdl=torch.stack(values).mean(0)[0].cpu().numpy()
-    config=load_evaluation_config(CONFIGS / 'smoke_test')
-    config['evaluation'].update(root_num_symmetries_to_sample=8,nn_policy_temperature=1.7,
+    config=load_engine_config(CONFIGS / 'smoke_test')
+    config['analysis'].update(root_num_symmetries_to_sample=8,nn_policy_temperature=1.7,
                                root_policy_temperature_early=2,root_policy_temperature=1.5,
                                temperature_halflife=7,temperature_early=0.8,temperature=0.1)
-    _,payload=evaluate(config,BINARY,root,size=5,rule='renju',moves='0,5')
+    _,payload=analyze(config,BINARY,root,size=5,rule='renju',moves='0,5')
     result=payload['result'];crop=[y*canvas+x for y in range(5) for x in range(5)]
     np.testing.assert_allclose(result['network_policy'],expected_policy[crop],rtol=3e-4,atol=2e-5)
     np.testing.assert_allclose(result['network_wdl'],expected_wdl,rtol=3e-4,atol=2e-5)
@@ -495,28 +498,28 @@ def test_single_d4_root_only_and_inference_precision(tmp_path,pipeline,gpu_confi
     tensor=torch.from_numpy(obs).unsqueeze(0).cuda();global_tensor=torch.from_numpy(globals).unsqueeze(0).cuda()
     legal=((obs[0]>0)&(obs[1]==0)&(obs[2]==0)).flatten()
     crop=[y*canvas+x for y in range(5) for x in range(5)]
-    config=load_evaluation_config(CONFIGS / 'smoke_test')
-    config['evaluation'].update(visits=1,max_playouts=1,inference_precision=precision,nn_randomize=False)
+    config=load_engine_config(CONFIGS / 'smoke_test')
+    config['analysis'].update(visits=1,max_playouts=1,inference_precision=precision,nn_randomize=False)
     for symmetry in (0,1,5,7):
-        config['evaluation']['nn_symmetry']=symmetry
+        config['analysis']['nn_symmetry']=symmetry
         with torch.inference_mode(),torch.autocast('cuda',dtype=torch.float16,enabled=precision=='auto'):
             logits,wdl,optimistic,_=model(apply_symmetry(tensor,symmetry).contiguous(),global_tensor)
             logits=logits.float()+.2*(optimistic.float()-logits.float())
         restored=apply_symmetry(logits.reshape(1,canvas,canvas),(0,3,2,1,4,5,6,7)[symmetry]).flatten().float()
         expected=restored.masked_fill(~torch.from_numpy(legal).cuda(),-torch.inf).softmax(0).cpu().numpy()
-        _,payload=evaluate(config,BINARY,root,size=5,rule='renju',moves='1,5')
+        _,payload=analyze(config,BINARY,root,size=5,rule='renju',moves='1,5')
         result=payload['result']
         np.testing.assert_allclose(result['network_policy'],expected[crop],rtol=4e-4,atol=3e-5)
         np.testing.assert_allclose(result['network_wdl'],wdl[0].float().softmax(0).cpu(),rtol=4e-4,atol=3e-5)
         assert result['inference_precision']==('float16' if precision=='auto' else 'float32')
         assert result['initial_visits']==0 and result['root_visits']==result['new_playouts']==1
         assert result['simulations']==sum(result['visits'])==0 and result['nn_requests']==2
-    config['evaluation'].update(visits=10,max_playouts=100,max_time=0)
-    _,timed=evaluate(config,BINARY,root,size=5,rule='renju',moves='1,5')
+    config['analysis'].update(visits=10,max_playouts=100,max_time=0)
+    _,timed=analyze(config,BINARY,root,size=5,rule='renju',moves='1,5')
     assert timed['result']['root_visits']==timed['result']['new_playouts']==2
     assert timed['result']['simulations']==1 and timed['result']['stopped_early']
-    config['evaluation']['max_playouts']=0
-    _,empty=evaluate(config,BINARY,root,size=5,rule='renju',moves='1,5')
+    config['analysis']['max_playouts']=0
+    _,empty=analyze(config,BINARY,root,size=5,rule='renju',moves='1,5')
     assert empty['result']['action']==-1 and empty['result']['new_playouts']==empty['result']['root_visits']==0
     assert len(empty['result']['policy'])==25 and not any(empty['result']['policy'])
     assert empty['result']['nn_requests']==1 # Only the explicitly requested raw diagnostic.
@@ -526,7 +529,7 @@ def test_match_same_bot_clear_and_different_bot_reuse(tmp_path,pipeline):
     from etazero.arena import single_match
     root,state=pipeline;a=root/state['model']['path']
     b=root/load_json(root/'logs/iterations/000001.json')['model']['path']
-    config=load_evaluation_config(CONFIGS / 'smoke_test',True)
+    config=load_engine_config(CONFIGS / 'smoke_test',True)
     config['match'].update(inference_precision='auto',search_threads=4,server_threads=2)
     _,same=single_match(config,BINARY,a,a,tmp_path/'same')
     assert len(same)==4
@@ -561,10 +564,10 @@ class LeafFailureModel(torch.nn.Module):
 def test_real_cuda_parallel_leaf_failure_releases_waiters(tmp_path,gpu_config):
     canvas=gpu_config['network']['canvas'];model=tmp_path/'failure.pt'
     torch.jit.script(LeafFailureModel(canvas).cuda().eval()).save(str(model))
-    config=load_evaluation_config(CONFIGS / 'smoke_test')
-    config['evaluation'].update(search_threads=8,server_threads=2,cache_entries=0)
+    config=load_engine_config(CONFIGS / 'smoke_test')
+    config['analysis'].update(search_threads=8,server_threads=2,cache_entries=0)
     native={**config,'network':{'canvas':canvas}};write_native(native,tmp_path/'effective.cfg')
-    command=[str(BINARY),'evaluate','--config',str(tmp_path/'effective.cfg'),'--model',str(model),
+    command=[str(BINARY),'analysis','--config',str(tmp_path/'effective.cfg'),'--model',str(model),
              '--model-id','leaf-failure','--device','cuda:0','--size','5','--rule','freestyle']
     result=subprocess.run(command,text=True,capture_output=True,timeout=30)
     (tmp_path/'stdout.log').write_text(result.stdout);(tmp_path/'stderr.log').write_text(result.stderr)
@@ -944,15 +947,15 @@ def test_multiple_servers_fp16_packed_waves_and_prefetch(tmp_path,gpu_config):
     assert services and all(len(e["rows_by_server"])==2 for e in services)
     assert any(min(e["rows_by_server"])>0 for e in services if e["iteration"]>=2)
     assert all(e["requests"]+e["cache_hits"]==e["submitted"] for e in services)
-    evaluation_config=load_evaluation_config(CONFIGS / 'smoke_test',environ={
-        'EVAL_SERVER_THREADS':'2','EVAL_INFERENCE_PRECISION':'float16','EVAL_CACHE_ENTRIES':'64'})
-    _,evaluation=evaluate(evaluation_config,BINARY,root,size=5,rule="freestyle",moves="0,5,1")
+    evaluation_config=load_engine_config(CONFIGS / 'smoke_test',environ={
+        'ANALYSIS_SERVER_THREADS':'2','ANALYSIS_INFERENCE_PRECISION':'float16','ANALYSIS_CACHE_ENTRIES':'64'})
+    _,evaluation=analyze(evaluation_config,BINARY,root,size=5,rule="freestyle",moves="0,5,1")
     assert evaluation['result']['inference_precision']=='float16'
     # Repeated analysis of the same board reuses the first random orientation.
     # Raw diagnostics deliberately bypass cache and cannot establish this property.
-    evaluation_config['evaluation'].update(visits=2,cache_entries=65536)
+    evaluation_config['analysis'].update(visits=2,cache_entries=65536)
     effective=tmp_path/'cache.cfg';write_native({**evaluation_config,'network':{'canvas':6}},effective)
-    command=[str(BINARY),'serve','--config',str(effective),'--model',str(root/state['model']['path']),
+    command=[str(BINARY),'analysis','--stream','true','--config',str(effective),'--model',str(root/state['model']['path']),
              '--model-id',state['model']['id'],'--device','cuda:0']
     session=subprocess.run(command,input='new 5 freestyle\nanalyze 2\nanalyze 2\nquit\n',
                            text=True,capture_output=True,check=True,timeout=30)
@@ -1466,12 +1469,12 @@ def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monke
     from etazero.arena import single_match, PairStore
     from etazero.elo import write_ratings
     root,state=pipeline
-    ec=load_evaluation_config(CONFIGS / 'smoke_test')
-    _,result=evaluate(ec,BINARY,root,size=5,rule='renju',moves='0,6')
+    ec=load_engine_config(CONFIGS / 'smoke_test')
+    _,result=analyze(ec,BINARY,root,size=5,rule='renju',moves='0,6')
     assert result['result']['root_visits']==100
     assert result['result']['simulations']==99 and sum(result['result']['visits'])==99
     assert 0<=result['result']['action']<25 and len(result['result']['policy'])==25
-    mc=load_evaluation_config(CONFIGS / 'smoke_test',True)
+    mc=load_engine_config(CONFIGS / 'smoke_test',True)
     a=root/state['model']['path']
     b=root/load_json(root/'logs/iterations/000001.json')['model']['path']
     output=tmp_path/'match'
@@ -1670,7 +1673,7 @@ def test_match_opening_uses_both_models_by_source_roles(tmp_path,gpu_config):
         model=tmp_path/(name+'.pt')
         torch.jit.script(OpeningChoiceModel(canvas,ascending,value_logit).cuda().eval()).save(str(model))
         paths.append(model)
-    c=load_evaluation_config(CONFIGS / 'smoke_test',True,environ={})
+    c=load_engine_config(CONFIGS / 'smoke_test',True,environ={})
     c['match'].update(visits=2,game_threads=1,nn_randomize=False,cache_entries=0,inference_precision='float32')
     c['opening'].update(policy_init=True,policy_init_mean=20,policy_temperature=1,rejection_probability=0)
     write_native({**c,'network':{'canvas':canvas}},tmp_path/'effective.cfg')
@@ -1821,17 +1824,17 @@ class DiamondCudaModel(torch.nn.Module):
 def test_graph_real_cuda_shared_nodes_leak_and_cache(tmp_path,gpu_config):
     canvas=gpu_config['network']['canvas'];model=tmp_path/'diamond.pt'
     torch.jit.script(DiamondCudaModel(canvas).cuda().eval()).save(str(model))
-    config=load_evaluation_config(CONFIGS / 'smoke_test')
-    config['evaluation'].update(visits=500,search_threads=1,server_threads=1,cache_entries=0,
+    config=load_engine_config(CONFIGS / 'smoke_test')
+    config['analysis'].update(visits=500,search_threads=1,server_threads=1,cache_entries=0,
         nn_randomize=False,nn_symmetry=0,root_num_symmetries_to_sample=1,inference_precision='float32')
     cases={}
     for name,graph,leak,threads,cache in (
         ('tree',False,0,1,0),('tree_cached',False,0,1,4096),('graph',True,0,1,0),('leak',True,1,1,0),
         ('parallel',True,0,8,0),('cached',True,0,1,4096)):
-        cfg=copy.deepcopy(config);cfg['evaluation'].update(use_graph_search=graph,
+        cfg=copy.deepcopy(config);cfg['analysis'].update(use_graph_search=graph,
             graph_search_catch_up_leak_prob=leak,search_threads=threads,server_threads=2 if threads>1 else 1,cache_entries=cache)
         native={**cfg,'network':{'canvas':canvas}};path=tmp_path/(name+'.cfg');write_native(native,path)
-        command=[str(BINARY),'evaluate','--config',str(path),'--model',str(model),'--model-id','diamond',
+        command=[str(BINARY),'analysis','--config',str(path),'--model',str(model),'--model-id','diamond',
                  '--device','cuda:0','--size','5','--rule','renju','--seed','23']
         run=subprocess.run(command,text=True,capture_output=True,timeout=60)
         (tmp_path/(name+'.stdout.log')).write_text(run.stdout);(tmp_path/(name+'.stderr.log')).write_text(run.stderr)
@@ -1861,11 +1864,11 @@ def test_graph_real_cuda_shared_nodes_leak_and_cache(tmp_path,gpu_config):
 def test_graph_shared_cuda_failure_releases_all_parents(tmp_path,gpu_config):
     canvas=gpu_config['network']['canvas'];model=tmp_path/'shared_failure.pt'
     torch.jit.script(DiamondCudaModel(canvas,4).cuda().eval()).save(str(model))
-    config=load_evaluation_config(CONFIGS / 'smoke_test')
-    config['evaluation'].update(visits=500,search_threads=8,server_threads=2,cache_entries=0,
+    config=load_engine_config(CONFIGS / 'smoke_test')
+    config['analysis'].update(visits=500,search_threads=8,server_threads=2,cache_entries=0,
         nn_randomize=False,nn_symmetry=0,root_num_symmetries_to_sample=1,use_graph_search=True)
     native={**config,'network':{'canvas':canvas}};write_native(native,tmp_path/'effective.cfg')
-    command=[str(BINARY),'evaluate','--config',str(tmp_path/'effective.cfg'),'--model',str(model),
+    command=[str(BINARY),'analysis','--config',str(tmp_path/'effective.cfg'),'--model',str(model),
              '--model-id','shared-failure','--device','cuda:0','--size','5','--rule','renju']
     result=subprocess.run(command,text=True,capture_output=True,timeout=30)
     (tmp_path/'stdout.log').write_text(result.stdout);(tmp_path/'stderr.log').write_text(result.stderr)
@@ -1896,12 +1899,12 @@ def test_cuda_search_corrections_logits_error_and_terminal_stats(tmp_path,gpu_co
     canvas=gpu_config['network']['canvas'];models={}
     for error in (0.,.5,2.):
         path=tmp_path/f'error_{error}.pt';torch.jit.script(SearchCorrectionsCudaModel(canvas,error).cuda().eval()).save(str(path));models[error]=path
-    config=load_evaluation_config(CONFIGS / 'smoke_test');config['evaluation'].update(visits=1,max_playouts=1,
+    config=load_engine_config(CONFIGS / 'smoke_test');config['analysis'].update(visits=1,max_playouts=1,
         inference_precision='float32',nn_randomize=False,nn_symmetry=0,search_threads=1,server_threads=1,nn_policy_temperature=1.7)
     cases={}
     def run(name,c,error=.5,moves=''):
         native={**c,'network':{'canvas':canvas}};path=tmp_path/(name+'.cfg');write_native(native,path)
-        command=[str(BINARY),'evaluate','--config',str(path),'--model',str(models[error]),'--model-id',f'aux-{error}',
+        command=[str(BINARY),'analysis','--config',str(path),'--model',str(models[error]),'--model-id',f'aux-{error}',
                  '--device','cuda:0','--size','5','--rule','renju','--moves',moves,'--seed','4']
         result=subprocess.run(command,text=True,capture_output=True,timeout=30)
         (tmp_path/(name+'.stdout.log')).write_text(result.stdout);(tmp_path/(name+'.stderr.log')).write_text(result.stderr)
@@ -1909,7 +1912,7 @@ def test_cuda_search_corrections_logits_error_and_terminal_stats(tmp_path,gpu_co
         output=json.loads(result.stdout);cases[name]=output;return output
     for error in (0.,.5,2.):
         for optimism in (0.,.2,1.):
-            c=copy.deepcopy(config);c['evaluation']['root_policy_optimism']=optimism
+            c=copy.deepcopy(config);c['analysis']['root_policy_optimism']=optimism
             r=run(f'root_{error}_{optimism}',c,error)
             ordinary=np.zeros(canvas*canvas,np.float32);ordinary[4]=np.log(9)
             short=np.zeros_like(ordinary);short[1]=np.log(9)
@@ -1923,12 +1926,12 @@ def test_cuda_search_corrections_logits_error_and_terminal_stats(tmp_path,gpu_co
             assert r['network_sample_weight']==pytest.approx(expected,rel=1e-12)
             assert r['search_weight']==pytest.approx(expected,rel=1e-12)
             assert r['search_weight_sq']==pytest.approx(expected*expected,rel=1e-12)
-    c=copy.deepcopy(config);c['evaluation'].update(visits=2,max_playouts=2,root_policy_optimism=0,nn_policy_temperature=1,
+    c=copy.deepcopy(config);c['analysis'].update(visits=2,max_playouts=2,root_policy_optimism=0,nn_policy_temperature=1,
         use_noise_pruning=False)
     # Black's four-in-a-row: the highest ordinary logit at (0,4) wins immediately.
     moves=','.join(str(v) for v in (0,canvas,1,canvas+1,2,canvas+2,3,canvas+3))
     for uncertainty in (False,True):
-        c['evaluation']['use_uncertainty']=uncertainty;r=run('terminal_'+str(uncertainty),c,moves=moves)
+        c['analysis']['use_uncertainty']=uncertainty;r=run('terminal_'+str(uncertainty),c,moves=moves)
         own=.25/(.5+.25/8) if uncertainty else 1.;leaf=8 if uncertainty else 1.
         predicted=r['network_wdl'];value=(own*(predicted[0]-predicted[2])+leaf)/(own+leaf);draw=own*predicted[1]/(own+leaf)
         expected=np.array([(1-draw+value)/2,draw,(1-draw-value)/2])
@@ -1937,7 +1940,7 @@ def test_cuda_search_corrections_logits_error_and_terminal_stats(tmp_path,gpu_co
         assert r['search_weight']==pytest.approx(own+leaf,rel=1e-12)
         assert r['search_weight_sq']==pytest.approx(own*own+leaf*leaf,rel=1e-12)
     # Combined production settings exercise all three corrections with a weighted shared graph.
-    c=copy.deepcopy(config);c['evaluation'].update(visits=500,max_playouts=500,search_threads=8,server_threads=2,
+    c=copy.deepcopy(config);c['analysis'].update(visits=500,max_playouts=500,search_threads=8,server_threads=2,
         root_num_symmetries_to_sample=8,cache_entries=1024)
     combined=run('combined_graph',c)
     assert combined['root_visits']==500 and sum(combined['visits'])==499
@@ -2017,12 +2020,12 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
     # Fresh one-visit roots isolate actual conditional NN values from terminal
     # outcomes in deeper search, using both side-to-move signs and neutral input.
     evaluations=[]
-    e=load_evaluation_config(CONFIGS / 'smoke_test')
-    e['evaluation'].update(visits=1,inference_precision='float32',nn_randomize=False)
+    e=load_engine_config(CONFIGS / 'smoke_test')
+    e['analysis'].update(visits=1,inference_precision='float32',nn_randomize=False)
     for d,moves in ((0,''),(1,''),(1,'0'),(3,''),(3,'0')):
-        e['evaluation']['playout_doubling_advantage']=d
+        e['analysis']['playout_doubling_advantage']=d
         write_native({**c,**e},tmp_path/'evaluation.cfg')
-        output=subprocess.run([str(BINARY),'evaluate','--config',str(tmp_path/'evaluation.cfg'),
+        output=subprocess.run([str(BINARY),'analysis','--config',str(tmp_path/'evaluation.cfg'),
              '--model',str(model),'--model-id','conditional','--device','cuda:0','--size','5','--rule','renju','--moves',moves],
              text=True,capture_output=True,check=True,timeout=30)
         value=json.loads(output.stdout);half=.5*d*(-1 if moves else 1)

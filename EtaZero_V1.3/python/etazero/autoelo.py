@@ -13,7 +13,7 @@ import uuid
 from .arena import (PairStore, build_schedule, discover_players, identity,
                     native_config, run_arena)
 from .config import ROOT, boolean
-from .eval_config import load_evaluation_config
+from .engine_config import load_engine_config
 from .elo_cache import prepare_pairs, retain_pairs
 from .process import install_signals
 from .runtime import verify_build
@@ -78,7 +78,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
                  overrides=None, environ=None, gpu=None):
     directory = config_directory(directory)
     settings = load_elo_config(directory, environ, overrides)
-    config = load_evaluation_config(directory, match=True, environ=environ, umbrella=True)
+    config = load_engine_config(directory, match=True, environ=environ, umbrella=True)
     # Elo owns the number of games; match.cfg supplies only the match protocol.
     config['match']['games'] = settings['games_per_pair']
     if gpu is not None and config['match']['device'] != 'cpu':
@@ -115,7 +115,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
                               'cuda_visible_devices': str(gpu) if gpu is not None else
                               (os.environ if environ is None else environ).get('CUDA_VISIBLE_DEVICES')}}
     manifest['source_sha256'] = {name: sha256(Path(__file__).parent/name)
-                               for name in ('autoelo.py', 'arena.py', 'elo.py', 'elo_cache.py', 'eval_config.py')}
+                               for name in ('autoelo.py', 'arena.py', 'elo.py', 'elo_cache.py', 'engine_config.py')}
     # Store JSON-native values so in-memory and reloaded manifests compare equal.
     manifest = json.loads(json.dumps(manifest))
     session = base/identity(manifest)[:16]

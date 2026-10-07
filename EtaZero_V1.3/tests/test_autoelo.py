@@ -11,7 +11,7 @@ from etazero.autoelo import autoelo_plan, load_elo_config, publish_latest
 from etazero.autoelo import run_autoelo
 from etazero.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pairs
 from etazero.config import ROOT, load_config
-from etazero.eval_config import load_evaluation_config
+from etazero.engine_config import load_engine_config
 from etazero.experiment import experiment_plan, run_experiment, Scheduler
 from etazero.schema import CONTRACT_ID
 from etazero.storage import load_json, save_json, sha256
@@ -134,7 +134,7 @@ def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path
     manifest = {'players': [{'id':'a','sha256':'aa'}, {'id':'b','sha256':'bb'}],
                 'config': {'match': {'seed':1, 'visits':100, 'games':4}},
                 'binary_sha256':'bin', 'execution': {'pair_workers':1},
-                'source_sha256': {'eval_config.py':'compiler', 'elo.py':'fit'}}
+                'source_sha256': {'engine_config.py':'compiler', 'elo.py':'fit'}}
     pair = {'id':identity(('a','b')), 'players':['a','b']}
     import copy
     original = pair_identity(manifest, pair)
@@ -145,7 +145,7 @@ def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path
     other['players'][0].update(model='/moved/model.pt', seconds=1000)
     assert pair_identity(other, pair) == original
     for group, key, value in [('config', 'visits', 200), ('execution', 'pair_workers', 2),
-                               ('source_sha256', 'eval_config.py', 'changed')]:
+                               ('source_sha256', 'engine_config.py', 'changed')]:
         changed = copy.deepcopy(manifest)
         target = changed[group]['match'] if group == 'config' else changed[group]
         target[key] = value
@@ -233,12 +233,12 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
             load_elo_config(tmp_path, environ={}, overrides=overrides)
     training = load_config(CONFIGS / 'muzero')
     (tmp_path/'match.cfg').write_text('[match]\ngame_threads=20\nreuse_tree=false\nuse_graph_search=false\n')
-    match = load_evaluation_config(tmp_path, match=True, umbrella=True, environ={})
+    match = load_engine_config(tmp_path, match=True, umbrella=True, environ={})
     assert match['match']['game_threads'] == 20 and not match['match']['reuse_tree']
     assert load_config(CONFIGS / 'muzero') == training
     (tmp_path/'match.cfg').write_text('[match]\nunknown=1\n')
-    with pytest.raises(ValueError, match='Unknown evaluation key'):
-        load_evaluation_config(tmp_path, match=True, umbrella=True, environ={})
+    with pytest.raises(ValueError, match='Unknown engine key'):
+        load_engine_config(tmp_path, match=True, umbrella=True, environ={})
 
 
 def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(tmp_path, monkeypatch):

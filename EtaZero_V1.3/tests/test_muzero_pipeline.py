@@ -116,11 +116,11 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture):
     # must lead to the identical next updates after a mid-round interruption.
     from test_gpu import assert_compiled_partial_resume
     assert_compiled_partial_resume(tmp_path, root, c)
-    from etazero.evaluation import evaluate
-    from etazero.eval_config import load_evaluation_config
-    evaluation = load_evaluation_config(CONFIGS / 'muzero')
-    evaluation['evaluation'].update(visits=12, search_threads=2)
-    _, result = evaluate(evaluation, ROOT/'build/etazero', root, size=5, rule='renju', moves='0,5')
+    from etazero.analysis import analyze
+    from etazero.engine_config import load_engine_config
+    evaluation = load_engine_config(CONFIGS / 'muzero')
+    evaluation['analysis'].update(visits=12, search_threads=2)
+    _, result = analyze(evaluation, ROOT/'build/etazero', root, size=5, rule='renju', moves='0,5')
     assert result['result']['root_visits'] == 12 and result['result']['initial_visits'] == 0
 
 
@@ -251,8 +251,8 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
 @pytest.mark.parametrize('amp', ['float16', 'bfloat16'])
 def test_cuda_amp_pipeline_and_mixed_match(tmp_path, amp):
-    from etazero.evaluation import evaluate
-    from etazero.eval_config import load_evaluation_config
+    from etazero.arena import single_match
+    from etazero.engine_config import load_engine_config
     from etazero.export import export_model
     from etazero.training import initialize
     from etazero.config import write_native
@@ -267,9 +267,9 @@ def test_cuda_amp_pipeline_and_mixed_match(tmp_path, amp):
     ac=load_config(CONFIGS / 'smoke_test'); write_native(ac,alpha/'config/effective.cfg')
     initial=initialize(alpha,ac)
     model=export_model(alpha,ac,initial)
-    match=load_evaluation_config(CONFIGS / 'muzero',match=True)
-    match['match'].update(visits=9,game_threads=2,search_threads=2,max_batch=8,
+    match=load_engine_config(CONFIGS / 'muzero',match=True)
+    match['match'].update(board_size=5,rule='renju',visits=9,game_threads=2,search_threads=2,max_batch=8,
                           inference_precision='float16')
-    _, result=evaluate(match,ROOT/'build/etazero',root,model_b=alpha/model['path'],
-                       size=5,rule='renju',games=4,output=tmp_path/'mixed_match')
-    assert result['result']['complete'] and len(result['result']['games'])==4
+    _, games=single_match(match,ROOT/'build/etazero',root/state['model']['path'],alpha/model['path'],
+                         tmp_path/'mixed_match',games=4)
+    assert len(games)==4

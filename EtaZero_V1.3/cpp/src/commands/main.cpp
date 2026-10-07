@@ -29,7 +29,7 @@ struct Args {
     std::map<std::string, std::string> args;
     Args(int argc, char** argv) {
         const std::set<std::string> allowed{"config","model","model-id","device","games","output","run-id","attempt-id",
-                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks"};
+                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream"};
         for (int i = 2; i < argc; i += 2) {
             std::string name = argv[i];
             if (name.rfind("--",0) != 0 || !allowed.count(name.substr(2)) || i+1 >= argc || !args.emplace(name.substr(2), argv[i+1]).second)
@@ -46,7 +46,7 @@ uint64_t mix(uint64_t n) {
 }
 SearchSettings settings(const Config& c, const std::string& mode) {
     bool selfplay = mode == "selfplay";
-    std::string section = selfplay ? "search" : mode == "match" ? "match" : "evaluation";
+    std::string section = selfplay ? "search" : mode == "match" ? "match" : "analysis";
     auto key = [&](const std::string& group, const std::string& name) {
         return (selfplay ? group : section) + "." + name;
     };
@@ -94,7 +94,7 @@ SearchSettings settings(const Config& c, const std::string& mode) {
 }
 double move_temperature(const Config& c,const std::string& mode,const Game& game) {
     bool selfplay=mode=="selfplay";
-    std::string section=selfplay?"temperature":mode=="match"?"match":"evaluation";
+    std::string section=selfplay?"temperature":mode=="match"?"match":"analysis";
     return temperature_at_turn(c.number(section+(selfplay?".temperature":".temperature_early")),
         c.number(section+(selfplay?".final_temperature":".temperature")),
         c.number(section+".temperature_halflife"),game.turn(),game.size()*game.size());
@@ -106,7 +106,7 @@ template<class T> void array(std::ostream& out, const std::vector<T>& values) {
 std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false,
                                           torch::jit::Module* web_model = nullptr,
                                           std::shared_ptr<PreparedModel> prepared = nullptr) {
-    std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "evaluate" ? "evaluation" : mode;
+    std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "analysis" ? "analysis" : mode;
     int batch = c.integer(prefix+".max_batch"), canvas = c.integer("network.canvas");
     std::vector<std::unique_ptr<Backend>> backends;
     std::string kind=a.get("evaluator","network");
@@ -161,6 +161,10 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
 std::unique_ptr<GameSearch> search_for(InferenceService& evaluator,SearchSettings settings,uint64_t seed) {
     if(auto mu=dynamic_cast<muzero::Evaluator*>(&evaluator))return std::make_unique<muzero::Search>(*mu,settings,seed);
     return std::make_unique<Search>(evaluator,settings,seed);
+}
+SearchResult analyze_position(GameSearch& search,const Config& config,const Game& game,SearchRun options={}) {
+    options.should_stop=[]{return stop_requested.load();};
+    return search.run(game,move_temperature(config,"analysis",game),options);
 }
 void moves(Game& g, const std::string& text) {
     if (text.empty()) return;
@@ -326,15 +330,15 @@ int worker(const Args& base,const Config& config) {
     }
     return stop_requested?2:0;
 }
-int evaluate(const Args& a, const Config& c, bool raw) {
+int analyze(const Args& a, const Config& c, bool raw) {
     Game game(a.integer("size"),c.integer("network.canvas"),parse_rule(a.get("rule")));
     moves(game,a.get("moves",""));
-    if(!raw)game.set_pda(c.number("evaluation.playout_doubling_advantage"),c.text("evaluation.playout_doubling_advantage_player")=="black"?1:-1);
+    if(!raw)game.set_pda(c.number("analysis.playout_doubling_advantage"),c.text("analysis.playout_doubling_advantage_player")=="black"?1:-1);
     if (game.finished() && !raw) {
         std::cout << "{\"terminal\":true,\"winner\":" << game.winner() << ",\"value\":" << game.terminal_value() << ",\"reason\":" << game.reason() << "}\n";
         return 0;
     }
-    auto eval=evaluator(a,c,raw?"infer":"evaluate");
+    auto eval=evaluator(a,c,raw?"infer":"analysis");
     // Raw diagnostics must not seed the search cache with an identity-orientation output.
     auto network=eval->evaluate_symmetry(game.observation(),0,true);
     std::cout.precision(12);
@@ -356,9 +360,8 @@ int evaluate(const Args& a, const Config& c, bool raw) {
         std::cout<<']';
     }
     if (!raw) {
-        auto search_owner=search_for(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
-        SearchRun options;options.should_stop=[]{return stop_requested.load();};
-        auto result=search.run(game,move_temperature(c,"evaluate",game),options);
+        auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
+        auto result=analyze_position(search,c,game);
         std::cout << ",\"action\":" << result.action << ",\"value\":" << result.value << ",\"simulations\":" << result.simulations << ",\"root_visits\":" << result.root_visits
                   << ",\"initial_visits\":" << result.initial_visits << ",\"new_playouts\":" << result.new_playouts << ",\"seconds\":" << result.seconds
                   << ",\"network_sample_weight\":" << result.network_sample_weight << ",\"network_value_stdev\":" << result.network_value_stdev
@@ -374,7 +377,7 @@ int evaluate(const Args& a, const Config& c, bool raw) {
         std::cout << ",\"visits\":"; array(std::cout,result.visits);
     }
     eval->finish();
-    auto precision=c.text(raw?"inference.inference_precision":"evaluation.inference_precision");
+    auto precision=c.text(raw?"inference.inference_precision":"analysis.inference_precision");
     if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
     std::cout << ",\"inference_precision\":" << quote(precision) << ",\"nn_requests\":" << eval->requests << ",\"cache_hits\":" << eval->cache_hits << "}\n"; return stop_requested?130:0;
 }
@@ -494,10 +497,10 @@ void web_analysis(const SearchResult& result,const Game& game,double seconds,uin
     }
     std::cout<<"]}}";
 }
-int serve(const Args& a,const Config& c) {
+int analysis_session(const Args& a,const Config& c) {
     torch::jit::Module web_model;
-    auto eval=evaluator(a,c,"evaluate",false,&web_model);
-    auto search_owner=search_for(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
+    auto eval=evaluator(a,c,"analysis",false,&web_model);
+    auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
     std::optional<Game> game;
     std::optional<WebOpening> opening;
     std::vector<int> played;
@@ -566,11 +569,11 @@ int serve(const Args& a,const Config& c) {
                 options.should_stop=[]{return stop_requested.load();};
                 auto requests=eval->requests.load(),batches=eval->batches.load();
                 auto start=std::chrono::steady_clock::now();
-                auto result=search.run(before,move_temperature(c,"evaluate",before),options);
+                auto result=analyze_position(search,c,before,options);
                 if(stop_requested)break;
                 if(result.action<0)throw std::runtime_error("Search has no move: zero playout budget");
                 double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-                auto planes=web_policy_planes(web_model,before,a.get("device"),c.text("evaluation.inference_precision"));
+                auto planes=web_policy_planes(web_model,before,a.get("device"),c.text("analysis.inference_precision"));
                 if(words[0]=="genmove") {
                     game->play(result.action);played.push_back(result.action/canvas*game->size()+result.action%canvas);
                 }
@@ -583,7 +586,7 @@ int serve(const Args& a,const Config& c) {
             std::cout<<"{\"ok\":false,\"error\":"<<quote(error.what())<<"}\n"<<std::flush;
         }
     }
-    eval->finish();return 0;
+    eval->finish();return stop_requested?130:0;
 }
 int match(const Args& a,const Config& c) {
     auto match_start=std::chrono::steady_clock::now();
@@ -697,17 +700,21 @@ int match(const Args& a,const Config& c) {
 }
 int main(int argc,char** argv) {
     try {
-        if(argc<2)throw std::runtime_error("Expected selfplay, worker, evaluate, infer, match or serve");
+        if(argc<2)throw std::runtime_error("Expected selfplay, worker, analysis, infer or match");
         std::string mode=argv[1]; Args args(argc,argv); Config config(args.get("config"));
         if(mode=="selfplay" || mode=="worker" || mode=="infer")
             if((config.text("agent.algorithm")!="alphazero" && config.text("agent.algorithm")!="muzero") || config.text("agent.root_search_algo")!="puct" || config.text("agent.nonroot_search_algo")!="puct")
                 throw std::runtime_error("Native executable requires AlphaZero or MuZero with PUCT/PUCT");
-        torch::set_num_threads(config.integer((mode=="evaluate" || mode=="serve")?"evaluation.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
+        torch::set_num_threads(config.integer(mode=="analysis"?"analysis.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
         if(mode=="selfplay") {ForkPool forks;auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service,forks);service->finish();return code;}
         if(mode=="worker")return worker(args,config);
-        if(mode=="evaluate"||mode=="infer")return evaluate(args,config,mode=="infer");
-        if(mode=="serve")return serve(args,config);
+        if(mode=="analysis") {
+            const auto stream=args.get("stream","false");
+            if(stream!="true" && stream!="false")throw std::runtime_error("--stream must be true or false");
+            return stream=="true"?analysis_session(args,config):analyze(args,config,false);
+        }
+        if(mode=="infer")return analyze(args,config,true);
         if(mode=="match")return match(args,config);
         throw std::runtime_error("Unknown native command: "+mode);
     } catch(const std::exception& error) {std::cerr<<"EtaZero: "<<error.what()<<'\n';return 1;}

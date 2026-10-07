@@ -18,7 +18,7 @@ def pair_identity(manifest, pair):
     return {'models': [{'id': p, 'sha256': players[p]['sha256']} for p in pair['players']],
             'config': config, 'binary_sha256': manifest['binary_sha256'],
             'execution': manifest.get('execution', {}), 'seed': pair_seed(manifest, pair),
-            'eval_config_sha256': manifest.get('source_sha256', {}).get('eval_config.py')}
+            'engine_config_sha256': manifest.get('source_sha256', {}).get('engine_config.py')}
 
 
 def merge_pair(source, source_total, destination, destination_total, seed):

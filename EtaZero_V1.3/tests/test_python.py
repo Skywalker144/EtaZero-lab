@@ -809,13 +809,13 @@ def test_reduce_visits_config_inheritance_and_independent_pcr(tmp_path, config):
     config['search']['cheap_search_visits']=4
     config['reduce_visits'].update(reduced_visits_min=8,reduce_visits_threshold=0,reduced_visits_weight=0)
     validate(config)
-    from etazero.eval_config import load_evaluation_config
-    assert 'reduce_visits' not in load_evaluation_config(CONFIGS / 'smoke_test')['evaluation']
-    assert 'reduce_visits' not in load_evaluation_config(CONFIGS / 'smoke_test',True)['match']
+    from etazero.engine_config import load_engine_config
+    assert 'reduce_visits' not in load_engine_config(CONFIGS / 'smoke_test')['analysis']
+    assert 'reduce_visits' not in load_engine_config(CONFIGS / 'smoke_test',True)['match']
 
 
 def test_explicit_search_samples_and_independent_precision(config):
-    from etazero.eval_config import load_evaluation_config, validate_evaluation
+    from etazero.engine_config import load_engine_config, validate_engine_config
     baseline=load_config(CONFIGS / 'baseline')
     assert (baseline['search']['full_search_visits'],baseline['search']['cheap_search_visits'])==(400,70)
     assert baseline['puct']==dict(c_puct=1.05,c_puct_log=0.28,c_puct_base=500,
@@ -828,8 +828,8 @@ def test_explicit_search_samples_and_independent_precision(config):
     assert baseline['inference']['inference_precision']=='float16' and baseline['training']['amp']=='off'
     assert baseline['symmetry']['nn_randomize'] and baseline['symmetry']['root_num_symmetries_to_sample']==4
     for match in (False,True):
-        profile=load_evaluation_config(CONFIGS / 'baseline',match)
-        c=profile['match' if match else 'evaluation']
+        profile=load_engine_config(CONFIGS / 'baseline',match)
+        c=profile['match' if match else 'analysis']
         assert (c['visits'],c['c_puct'],c['c_puct_log'],c['c_puct_stdev_scale'])==(500,1,0.45,0.85)
         assert (c['c_puct_stdev_prior'],c['c_puct_stdev_prior_weight'],c['value_weight_exponent'])==(0.4,2,0.25)
         assert c['nn_randomize'] and c['root_num_symmetries_to_sample']==1
@@ -838,7 +838,7 @@ def test_explicit_search_samples_and_independent_precision(config):
         c.update(device='cpu',visits=1,max_playouts=0,max_time=0,nn_randomize=False,nn_symmetry=7,
                  fpu_parent_weight_by_visited_policy=False,fpu_parent_weight=0.75,
                  fpu_parent_weight_by_visited_policy_pow=0)
-        validate_evaluation(profile,match)
+        validate_engine_config(profile,match)
     config['search'].update(max_playouts=0,max_time=0)
     config['symmetry'].update(nn_randomize=False,nn_symmetry=7)
     config['fpu'].update(fpu_parent_weight_by_visited_policy=False,fpu_parent_weight=0.75,
@@ -873,7 +873,7 @@ def test_output_row_forbidden_dropout_repeats_and_domains(config):
 
 
 def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatch):
-    from etazero.eval_config import load_evaluation_config
+    from etazero.engine_config import load_engine_config
     import shutil
     shutil.copytree(CONFIGS,tmp_path/'configs')
     monkeypatch.setattr('etazero.config.ROOT',tmp_path)
@@ -884,11 +884,11 @@ def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatc
     assert c['policy_init']['policy_init'] and c['policy_init']['policy_init_mean']==12 and c['policy_init']['policy_temperature']==1
     match=base/'match.cfg'
     match.write_text(match.read_text().replace('\npolicy_init = false\n','\n').replace('\npolicy_temperature = 1\n','\n'))
-    c=load_evaluation_config(base,True,environ={})
+    c=load_engine_config(base,True,environ={})
     assert not c['opening']['policy_init'] and c['opening']['policy_init_mean']==0 and c['opening']['policy_temperature']==1
     with pytest.raises(ValueError,match='policy_init_mean'):
-        load_evaluation_config(base,True,environ={'MATCH_OPENING_POLICY_INIT':'true'})
-    c=load_evaluation_config(base,True,environ={'MATCH_OPENING_POLICY_INIT':'true','MATCH_OPENING_POLICY_INIT_MEAN':'12','MATCH_OPENING_POLICY_TEMPERATURE':'1.6'})
+        load_engine_config(base,True,environ={'MATCH_OPENING_POLICY_INIT':'true'})
+    c=load_engine_config(base,True,environ={'MATCH_OPENING_POLICY_INIT':'true','MATCH_OPENING_POLICY_INIT_MEAN':'12','MATCH_OPENING_POLICY_TEMPERATURE':'1.6'})
     assert c['opening']['policy_init_mean']==12 and c['opening']['policy_temperature']==1.6
     for section,text in [('environment','[environment]\nsizes=15x14\n'),('environment','[environment]\nrules=vc1_b\n')]:
         (base/'env.cfg.local').write_text(text)
@@ -896,17 +896,17 @@ def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatc
 
 
 def test_graph_configuration_bounds_and_environment_override(config):
-    from etazero.eval_config import load_evaluation_config,validate_evaluation
+    from etazero.engine_config import load_engine_config,validate_engine_config
     assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0)
     for match in (False,True):
-        group='match' if match else 'evaluation';prefix='MATCH_' if match else 'EVAL_'
+        group='match' if match else 'analysis';prefix='MATCH_' if match else 'ANALYSIS_'
         for leak in (0,0.5,1):
-            c=load_evaluation_config(CONFIGS / 'smoke_test',match,environ={prefix+'USE_GRAPH_SEARCH':'false',prefix+'GRAPH_SEARCH_CATCH_UP_LEAK_PROB':str(leak)})
+            c=load_engine_config(CONFIGS / 'smoke_test',match,environ={prefix+'USE_GRAPH_SEARCH':'false',prefix+'GRAPH_SEARCH_CATCH_UP_LEAK_PROB':str(leak)})
             assert c[group]['use_graph_search'] is False and c[group]['graph_search_catch_up_leak_prob']==leak
         for leak in (-0.1,1.1,float('nan'),float('inf')):
-            c=load_evaluation_config(CONFIGS / 'smoke_test',match)
+            c=load_engine_config(CONFIGS / 'smoke_test',match)
             c[group]['graph_search_catch_up_leak_prob']=leak
-            with pytest.raises(ValueError):validate_evaluation(c,match)
+            with pytest.raises(ValueError):validate_engine_config(c,match)
     for leak in (0,0.5,1):
         config['graph_search'].update(use_graph_search=False,graph_search_catch_up_leak_prob=leak);validate(config)
     for leak in (-0.1,1.1,float('nan'),float('inf')):
@@ -915,26 +915,26 @@ def test_graph_configuration_bounds_and_environment_override(config):
 
 
 def test_search_correction_samples_and_bounds(config):
-    from etazero.eval_config import load_evaluation_config,validate_evaluation
+    from etazero.engine_config import load_engine_config,validate_engine_config
     assert config['uncertainty']==dict(use_uncertainty=False,uncertainty_coeff=.25,uncertainty_exponent=1,uncertainty_max_weight=8)
     assert config['optimistic_policy']==dict(policy_optimism=0,root_policy_optimism=0)
     assert config['noise_pruning']==dict(use_noise_pruning=False,noise_prune_utility_scale=.15,noise_pruning_cap=1e50)
     bounds={'uncertainty_coeff':(.0001,1),'uncertainty_exponent':(0,2),'uncertainty_max_weight':(1,100),
             'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50)}
     for match in (False,True):
-        group='match' if match else 'evaluation';prefix='MATCH_' if match else 'EVAL_'
-        c=load_evaluation_config(CONFIGS / 'smoke_test',match)
+        group='match' if match else 'analysis';prefix='MATCH_' if match else 'ANALYSIS_'
+        c=load_engine_config(CONFIGS / 'smoke_test',match)
         assert c[group]['use_uncertainty'] and c[group]['use_noise_pruning']
         assert c[group]['root_policy_optimism']==.2 and c[group]['policy_optimism']==1
-        overridden=load_evaluation_config(CONFIGS / 'smoke_test',match,environ={prefix+'USE_UNCERTAINTY':'false',prefix+'USE_NOISE_PRUNING':'false',prefix+'ROOT_POLICY_OPTIMISM':'0'})
+        overridden=load_engine_config(CONFIGS / 'smoke_test',match,environ={prefix+'USE_UNCERTAINTY':'false',prefix+'USE_NOISE_PRUNING':'false',prefix+'ROOT_POLICY_OPTIMISM':'0'})
         assert not overridden[group]['use_uncertainty'] and not overridden[group]['use_noise_pruning'] and overridden[group]['root_policy_optimism']==0
         for key,(low,high) in bounds.items():
             original=c[group][key]
             for value in (low,high):
-                c[group][key]=value;validate_evaluation(c,match)
+                c[group][key]=value;validate_engine_config(c,match)
             for value in (low-.01,high*2+1,float('inf'),float('nan')):
                 c[group][key]=value
-                with pytest.raises(ValueError):validate_evaluation(c,match)
+                with pytest.raises(ValueError):validate_engine_config(c,match)
             c[group][key]=original
     for section,items in (('uncertainty',('uncertainty_coeff','uncertainty_exponent','uncertainty_max_weight')),
                           ('optimistic_policy',('policy_optimism','root_policy_optimism')),
