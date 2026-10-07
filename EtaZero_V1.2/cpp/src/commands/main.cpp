@@ -386,12 +386,37 @@ int web_integer(const std::string& text) {
         throw std::runtime_error("Expected integer argument");
     return value;
 }
-void web_state(const Game& game,const std::vector<int>& moves) {
+uint64_t web_seed(const std::string& text) {
+    uint64_t value;
+    auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
+    if(parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size())
+        throw std::runtime_error("Expected uint64 seed");
+    return value;
+}
+struct WebOpening {
+    OpeningResult result;
+    uint64_t seed;
+    double seconds;
+};
+void web_state(const Game& game,const std::vector<int>& moves,const std::optional<WebOpening>& opening) {
     std::cout<<"{\"board_size\":"<<game.size()<<",\"canvas_size\":"<<game.canvas()
              <<",\"player\":"<<game.player()<<",\"turn\":"<<game.turn()
              <<",\"finished\":"<<(game.finished()?"true":"false")<<",\"winner\":"<<game.winner()
              <<",\"reason\":"<<game.reason()<<",\"board\":";
-    array(std::cout,game.board().cells);std::cout<<",\"moves\":";array(std::cout,moves);std::cout<<'}';
+    array(std::cout,game.board().cells);std::cout<<",\"moves\":";array(std::cout,moves);
+    std::cout<<",\"opening\":";
+    if(opening) {
+        const auto& result=opening->result;
+        // Seeds are strings in JSON so browsers retain all 64 bits.
+        std::cout<<"{\"seed\":"<<quote(std::to_string(opening->seed))<<",\"attempts\":"<<result.attempts
+                 <<",\"balanced_moves\":"<<result.balanced_moves<<",\"policy_moves\":"<<result.policy_moves
+                 <<",\"value\":"<<result.start_value<<",\"value_player\":"<<(result.balanced_moves%2==0?1:-1)
+                 <<",\"seconds\":"<<opening->seconds<<",\"moves\":";
+        std::vector<int> local;
+        for(int action:result.actions)local.push_back(action/game.canvas()*game.size()+action%game.canvas());
+        array(std::cout,local);std::cout<<'}';
+    } else std::cout<<"null";
+    std::cout<<'}';
 }
 struct WebPolicyPlanes {
     torch::Tensor logits, probabilities;
@@ -474,6 +499,7 @@ int serve(const Args& a,const Config& c) {
     auto eval=evaluator(a,c,"evaluate",false,&web_model);
     auto search_owner=search_for(*eval,settings(c,"evaluate"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
     std::optional<Game> game;
+    std::optional<WebOpening> opening;
     std::vector<int> played;
     const int canvas=c.integer("network.canvas");
     std::cout<<std::setprecision(17)<<"{\"ok\":true,\"canvas_size\":"<<canvas<<"}\n"<<std::flush;
@@ -484,9 +510,40 @@ int serve(const Args& a,const Config& c) {
             for(std::string word;input>>word;)words.push_back(word);
             if(words.empty())throw std::runtime_error("Empty command");
             if(words[0]=="quit" && words.size()==1)break;
-            if(words[0]=="new" && words.size()==3) {
+            if(words[0]=="new" && (words.size()==3 || words.size()==6)) {
                 Game replacement(web_integer(words[1]),canvas,parse_rule(words[2]));
-                game=std::move(replacement);played.clear();search.reset(std::stoull(a.get("seed","0")));
+                std::optional<WebOpening> generated;
+                std::vector<int> moves;
+                if(words.size()==6) {
+                    if(words[3]!="balanced")throw std::runtime_error("Unknown opening kind");
+                    uint64_t seed=web_seed(words[4]);
+                    int timeout_ms=web_integer(words[5]);
+                    if(timeout_ms<1 || timeout_ms>120000)throw std::runtime_error("Opening timeout must be in [1, 120000] ms");
+                    OpeningConfig config(c);
+                    if(config.probability!=1 || config.rejection_probability_fallback>=1)
+                        throw std::runtime_error("Balanced openings require probability one and a rejection fallback below one");
+                    std::mt19937_64 random(seed);
+                    auto started=std::chrono::steady_clock::now();
+                    auto deadline=started+std::chrono::milliseconds(timeout_ms);
+                    for(int retry=0;retry<100;++retry) {
+                        replacement=Game(replacement.size(),canvas,replacement.rule());
+                        auto result=initialize_opening(replacement,config,*eval,random,[&]{
+                            return stop_requested.load() || std::chrono::steady_clock::now()>=deadline;
+                        });
+                        if(result.status==OpeningStatus::Interrupted || stop_requested.load() || std::chrono::steady_clock::now()>=deadline)
+                            throw std::runtime_error("平衡开局生成已取消或超时，请重新创建棋局");
+                        if(result.status!=OpeningStatus::Success)
+                            throw std::runtime_error("Balanced opening failed: "+result.failure);
+                        if(replacement.finished())continue;
+                        for(int action:result.actions)moves.push_back(action/canvas*replacement.size()+action%canvas);
+                        generated=WebOpening{std::move(result),seed,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()};
+                        break;
+                    }
+                    if(!generated)throw std::runtime_error("100 consecutive terminal openings");
+                }
+                game=std::move(replacement);played=std::move(moves);opening=std::move(generated);
+                search.reset(std::stoull(a.get("seed","0")));
             } else if(!game)throw std::runtime_error("Start a new game first");
             else if(words[0]=="play" && words.size()==2) {
                 int local=web_integer(words[1]);
@@ -499,6 +556,8 @@ int serve(const Args& a,const Config& c) {
                 auto retained=played;retained.resize(retained.size()-count);
                 for(int local:retained)replacement.play(local/replacement.size()*canvas+local%replacement.size());
                 game=std::move(replacement);played=std::move(retained);
+                // Manual research may alter the generated prefix; its old value then no longer applies.
+                if(opening && played.size()<opening->result.actions.size())opening.reset();
             } else if((words[0]=="genmove" || words[0]=="analyze") && words.size()==2) {
                 int visits=web_integer(words[1]);
                 if(visits<2 || visits>100000)throw std::runtime_error("Visits must be in [2, 100000]");
@@ -515,11 +574,11 @@ int serve(const Args& a,const Config& c) {
                 if(words[0]=="genmove") {
                     game->play(result.action);played.push_back(result.action/canvas*game->size()+result.action%canvas);
                 }
-                std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played);std::cout<<",\"analysis\":";
+                std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played,opening);std::cout<<",\"analysis\":";
                 web_analysis(result,before,seconds,eval->requests.load()-requests,eval->batches.load()-batches,planes);
                 std::cout<<"}\n"<<std::flush;continue;
             } else if(!(words[0]=="state" && words.size()==1))throw std::runtime_error("Unknown command or arguments");
-            std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played);std::cout<<"}\n"<<std::flush;
+            std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played,opening);std::cout<<"}\n"<<std::flush;
         } catch(const std::exception& error) {
             std::cout<<"{\"ok\":false,\"error\":"<<quote(error.what())<<"}\n"<<std::flush;
         }
