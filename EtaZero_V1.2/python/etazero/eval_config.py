@@ -15,6 +15,19 @@ SEARCH = dict(playout_doubling_advantage=float,playout_doubling_advantage_player
 
 
 def load_evaluation_config(directory, match=False, environ=None, *, umbrella=False):
+    result = _load_profile(directory, match, environ, umbrella=umbrella)
+    validate_evaluation(result, match)
+    return result
+
+
+def load_match_opening_config(directory, environ=None, *, umbrella=False):
+    """Read match's opening alone, without imposing match search or game budgets."""
+    opening = _load_profile(directory, True, environ, umbrella=umbrella, groups=('opening',))['opening']
+    validate_match_opening(opening)
+    return opening
+
+
+def _load_profile(directory, match, environ, *, umbrella=False, groups=None):
     directory = Path(directory)
     if not directory.is_absolute() and not directory.exists():
         directory = ROOT/directory
@@ -68,6 +81,8 @@ def load_evaluation_config(directory, match=False, environ=None, *, umbrella=Fal
     prefix = 'MATCH_' if match else 'EVAL_'
     result = {}
     for group, keys in fields.items():
+        if groups is not None and group not in groups:
+            continue
         result[group] = {}
         for key, convert in keys.items():
             override = prefix+('OPENING_' if group == 'opening' else '')+key.upper()
@@ -81,7 +96,6 @@ def load_evaluation_config(directory, match=False, environ=None, *, umbrella=Fal
             if raw is None:
                 raise ValueError(f'Missing evaluation field: {group}.{key}')
             result[group][key] = convert(raw)
-    validate_evaluation(result, match)
     return result
 
 
@@ -110,8 +124,15 @@ def validate_evaluation(config, match=False):
     if match:
         if c['games'] < 4 or c['games'] % 4 or c['game_threads'] < 1:
             raise ValueError('Match games must be a positive multiple of four')
-        o = config['opening']
-        if o['probability'] != 1 or not 0 <= o['rejection_probability'] <= 1 or not 0 <= o['rejection_probability_fallback'] < 1:
-            raise ValueError('Matches require successful balanced openings and fallback rejection below one')
-        if not 1 <= o['max_tries'] <= 1000 or any(o[k] > 100 for k in ('avg_dist_factor','balance_exponent','policy_init_mean')) or not .1 <= o['policy_temperature'] <= 5:
-            raise ValueError('Invalid match opening configuration')
+        validate_match_opening(config['opening'])
+
+
+def validate_match_opening(o):
+    for key, value in o.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f'Invalid opening.{key}')
+    if o['probability'] != 1 or not 0 <= o['rejection_probability'] <= 1 or not 0 <= o['rejection_probability_fallback'] < 1:
+        raise ValueError('Matches require successful balanced openings and fallback rejection below one')
+    if not 1 <= o['max_tries'] <= 1000 or any(o[k] > 100 for k in ('avg_dist_factor','balance_exponent','policy_init_mean')) or not .1 <= o['policy_temperature'] <= 5:
+        raise ValueError('Invalid match opening configuration')
