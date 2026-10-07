@@ -18,6 +18,7 @@
 | EtaZero_V1.1 | 开发中 |
 | EtaZero_V1.2 | 开发中 |
 | EtaZero_V1.3 | 开发中 |
+| EtaZero_V1.4 | 开发中 |
 
 ## 修改边界
 
