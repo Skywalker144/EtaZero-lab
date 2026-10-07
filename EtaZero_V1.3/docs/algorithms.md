@@ -124,7 +124,7 @@ explore_scaling = (c_puct + c_puct_log * log((T+c_puct_base)/c_puct_base))
                   * sqrt(T+0.01) * parent_utility_stdev_factor
 ```
 
-未访问边用 FPU，关闭 `use_fpu` 时为零。FPU 沿用 KataGo 的 visited-policy 插值：令 `m` 为已分配子节点的先验质量，`a=min(1,m^power)`，则 `FPU = a * parent_Q + (1-a) * NN_Q - reduction * sqrt(m)`，随后按 `fpu_loss_prop` 向 −1 插值。parent_Q 包含节点初始网络样本；根与非根 reduction、loss proportion 独立，零权重 cheap search 根使用非根参数。关闭 `fpu_parent_weight_by_visited_policy` 时，来源的固定分支为 `fpu_parent_weight * NN_Q + (1-fpu_parent_weight) * parent_Q`，之后仍扣 reduction 并应用 loss proportion；默认固定权重为零，即纯 parent_Q。power 允许零。动态 cpuct 的 log 项与父价值标准差项沿用来源公式，可由配置关闭。价值尺度为 W−L 的 [-1,1]，无 score utility。参数见 [selfplay.cfg](../configs/baseline/selfplay.cfg)、[eval.cfg](../configs/baseline/eval.cfg) 与 [match.cfg](../configs/baseline/match.cfg)。
+未访问边用 FPU，关闭 `use_fpu` 时为零。FPU 沿用 KataGo 的 visited-policy 插值：令 `m` 为已分配子节点的先验质量，`a=min(1,m^power)`，则 `FPU = a * parent_Q + (1-a) * NN_Q - reduction * sqrt(m)`，随后按 `fpu_loss_prop` 向 −1 插值。parent_Q 包含节点初始网络样本；根与非根 reduction、loss proportion 独立，零权重 cheap search 根使用非根参数。关闭 `fpu_parent_weight_by_visited_policy` 时，来源的固定分支为 `fpu_parent_weight * NN_Q + (1-fpu_parent_weight) * parent_Q`，之后仍扣 reduction 并应用 loss proportion；默认固定权重为零，即纯 parent_Q。power 允许零。动态 cpuct 的 log 项与父价值标准差项沿用来源公式，可由配置关闭。价值尺度为 W−L 的 [-1,1]，无 score utility。参数见 [selfplay.cfg](../configs/baseline/selfplay.cfg) 与公共 [engine.cfg](../configs/baseline/engine.cfg)；用途覆盖见 [analysis.cfg](../configs/baseline/analysis.cfg) 和 [match.cfg](../configs/baseline/match.cfg)。
 
 节点更新使用 KataGo 的 `value_weight_exponent`：先执行适用的 noise pruning，按其剩余权重计算简单子价值均值，对每个子树用 `sqrt(1e-8 + 1/(1.5*sqrt(weight)))` 估计标准差，以自由度 3 的 t 分布 CDF（[-50,50] 上 2000 点线性插值表）加 0.0001 后取配置指数，偏重较好的子价值。noise pruning 关闭且根有噪声时，执行 configured chosen-move subtract/prune；noise pruning 开启时覆盖这个分支，即使 cap 为零。重分配后归一化到 noise pruning 后的剩余总权重，再加入本节点带 uncertainty 权重的网络样本。W−L、draw 和二阶矩使用同一重分配，权重平方和按缩放平方更新。指数为零是显式单位权重对照，不是默认搜索。实现见 [search_math.cpp](../cpp/src/search/search_math.cpp)。
 
@@ -136,7 +136,7 @@ EtaZero 保留原有的严格并行 visit／playout 发放上限；KataGo 的并
 
 多线程的在途访问以 `pending * virtual_loss` 作为虚拟样本权重，价值向 −1 插值，PUCT 分母与 forced 配额使用同一虚拟权重；探索分子的总子权重只计完成统计。正式访问数、统计与训练目标只使用已完成结果。搜索返回前回收或取消全部在途工作，不能为了填满 batch 超出预算后又隐瞒实际完成量。
 
-AlphaZero 可在同一模型代次内保留实际落子对应的子树。需要分别记录本次新增模拟量与复用后的总访问量，明确训练目标使用后者；新根的原始先验与探索先验分开保存，避免对已混噪声的先验再次混入噪声。规则、编码或模型变化后使树失效。跨手复用开关属于实验条件，应保存在生效配置中。不同模型身份的 Match 使用两棵树、默认保留命中子树；同一身份、同一模型路径与统一 Match profile 对应同 bot，双方共享一棵树且每手强制清树。固定局面 eval 默认不跨调用复用。`Search.set_evaluator` 更换模型时清除整棵树及线程状态；常驻 SP worker 按模型身份重建 evaluator，每轮固定模型的用户适配保持不变。
+AlphaZero 可在同一模型代次内保留实际落子对应的子树。需要分别记录本次新增模拟量与复用后的总访问量，明确训练目标使用后者；新根的原始先验与探索先验分开保存，避免对已混噪声的先验再次混入噪声。规则、编码或模型变化后使树失效。跨手复用开关属于实验条件，应保存在生效配置中。不同模型身份的 Match 使用两棵树、默认保留命中子树；同一身份、同一模型路径与统一 Match profile 对应同 bot，双方共享一棵树且每手强制清树。固定局面 analysis 默认不跨调用复用。`Search.set_evaluator` 更换模型时清除整棵树及线程状态；常驻 SP worker 按模型身份重建 evaluator，每轮固定模型的用户适配保持不变。
 
 ### 根探索、落子与训练目标
 
@@ -154,7 +154,7 @@ Policy target pruning 先按 `child_weight*max(0,N-1)/max(1,N)+2*P_search` 选�
 
 LCB 使用完成样本的 W−L 加权均值、二阶矩和 `ESS = weight_sum² / weight_sq_sum`。按 KataGo 加入最大方差先验，先验权重为 `weight_sum / ESS³`，更新两种权重和后重新计算 ESS，再计算 `LCB = Q-lcb_stdevs*sqrt(variance/ESS)`。仅剪枝后权重大于零、达到稳定边原始权重比例门槛的边可成为 LCB 最优边；将最优边权重提升到至少 `other_weight * ((radius+excess)/(radius+0.2*excess))²`。此处采用修正后的 LCB 索引行为，首个子边同样有效。
 
-自对弈实际落子使用剪枝后、LCB 前的分布；训练 policy target 再应用 LCB。评估和比赛在落子分布和输出策略中都应用 LCB，分别由各自 profile 控制。落子温度为 `late + (early-late)*0.5^(turn/temperature_halflife*19/sqrt(board_area))`，手数包含开局。自对弈的 early/late 分别为 `temperature.temperature` / `final_temperature`，eval/match 为 `temperature_early` / `temperature`。温度只改变行为抽样，不改变监督；小于等于 1e-4 且无概率保护时，按来源选择首个最大权重子边；其余情况对权重执行稳定幂变换，`temperature_only_below_prob` 可保护超过概率阈值的部分，仅变换低概率尾部。根 WDL 和 Q 是包含初始网络样本的完成加权搜索均值，与训练用的真实终局 WDL 目标分别保存。评估输出 `network_policy` / `network_wdl` 为根集成结果，`search_policy` 为根温度和噪声后的先验，`policy` 为最终监督／选择策略。
+自对弈实际落子使用剪枝后、LCB 前的分布；训练 policy target 再应用 LCB。评估和比赛在落子分布和输出策略中都应用 LCB，分别由各自 profile 控制。落子温度为 `late + (early-late)*0.5^(turn/temperature_halflife*19/sqrt(board_area))`，手数包含开局。自对弈的 early/late 分别为 `temperature.temperature` / `final_temperature`，analysis/match 为 `temperature_early` / `temperature`。温度只改变行为抽样，不改变监督；小于等于 1e-4 且无概率保护时，按来源选择首个最大权重子边；其余情况对权重执行稳定幂变换，`temperature_only_below_prob` 可保护超过概率阈值的部分，仅变换低概率尾部。根 WDL 和 Q 是包含初始网络样本的完成加权搜索均值，与训练用的真实终局 WDL 目标分别保存。评估输出 `network_policy` / `network_wdl` 为根集成结果，`search_policy` 为根温度和噪声后的先验，`policy` 为最终监督／选择策略。
 
 这些步骤直接核对 [KataGo FPU/forced/pruning](/home/sky/RL/SkyZero/KataGo/cpp/search/searchexplorehelpers.cpp)、[noise/LCB](/home/sky/RL/SkyZero/KataGo/cpp/search/searchhelpers.cpp)、[selection](/home/sky/RL/SkyZero/KataGo/cpp/search/searchresults.cpp)、[子树价值加权](/home/sky/RL/SkyZero/KataGo/cpp/search/searchupdatehelpers.cpp) 和 [selfplay 调用边界](/home/sky/RL/SkyZero/KataGo/cpp/program/play.cpp)，并以 SkyZero_V8.1、MuZero_V2 交叉核对。EtaZero 使用 W−L 子树价值加权，未引入 Go score utility、subtree value bias或专用推理算子；uncertainty weighting 与 noise pruning 见下节。随机引擎、并行锁调度和单对称身份评估沿用 EtaZero，不承诺来源逐位复现；t(3) CDF 使用数学等价闭式求值生成同网格插值表。
 

@@ -22,7 +22,7 @@ CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iter
 CONFIG_DIR=configs/baseline bash scripts/run.sh
 ```
 
-`CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`evaluate`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
+`CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`analysis`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
 
 bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照单遍限制；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
 
@@ -34,7 +34,7 @@ MuZero 的网络、展开训练与搜索约束见 [MuZero](docs/muzero.md)。
 
 ```bash
 CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 3
-bash scripts/run.sh evaluate --config-dir configs/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
+bash scripts/run.sh analysis --config-dir configs/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
 bash scripts/run.sh match --config-dir configs/smoke_test --run-dir data/my_check --model-b /path/to/model.pt --size 5 --rule freestyle --games 4 --output data/my_match
 bash scripts/run.sh plot --run-dir data/my_check
 ```

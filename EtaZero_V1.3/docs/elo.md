@@ -1,14 +1,18 @@
 # 固定评估与等时间 Elo
 
-`evaluate` 做单局面搜索，`match` 做一对模型的可恢复比赛，`arena` 选择历史模型、安排比赛并输出 Elo。所有公开动作使用实际棋盘零起始行优先编号，native 内部才转换为网络画布编号。评估必须用 `--model` 或 `--run-dir` 明确指定模型来源，不从评估配置目录猜测训练目录。模型由 manifest 校验身份与内容，同场模型画布须相同，网络宽度和深度可以不同。
+`analysis` 做局面搜索和常驻交互，`match` 做一对模型的可恢复比赛，`arena` 选择历史模型、安排比赛并输出 Elo。所有公开动作使用实际棋盘零起始行优先编号，native 内部才转换为网络画布编号。分析和比赛必须用 `--model` 或 `--run-dir` 明确指定模型来源，不从配置目录猜测训练目录。模型由 manifest 校验身份与内容，同场模型画布须相同，网络宽度和深度可以不同。训练直接发布导出模型，不使用 gatekeeper；训练 validation loss 独立于分析和比赛。
 
 ## 独立配置与搜索预算
 
-[evaluation 配置](../configs/baseline/eval.cfg) 和 [比赛配置](../configs/baseline/match.cfg) 只沿 `run.cfg` 的 extends 继承链读取自身文件与叶子目录的 `.local`。训练文件、训练环境变量和另一个评估文件不会覆盖它们，修改评估条件不改变训练配置身份。可使用 `EVAL_VISITS=100`、`MATCH_VISITS=100` 等前缀环境覆盖；开局字段使用 `MATCH_OPENING_` 前缀。字段校验集中在 [eval_config.py](../python/etazero/eval_config.py)。
+[engine.cfg](../configs/baseline/engine.cfg) 的 `[engine]` 定义公共搜索、推理、棋盘和种子默认值。[analysis.cfg](../configs/baseline/analysis.cfg) 的 `[analysis]` 只覆盖分析用途的差异；[match.cfg](../configs/baseline/match.cfg) 的 `[match]` 增加局数、对局并发及必要的模式覆盖，`[opening]` 管理比赛开局。两种模式共用字段定义、校验和 C++ 搜索参数转换，解析后只保存本次模式的完整生效配置。配置改变不影响训练配置身份。
 
-根访问上限由所选评估／比赛配置指定；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 eval 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；详细边界和严格并行发放与来源的差异见 [搜索预算](algorithms.md#puct-与搜索预算)。
+在文件首部用 `@include engine.cfg` 或 `@include ../baseline/analysis.cfg` 显式引用公共文件和父模式；相对路径以引用文件为基准，含空格的路径加引号。引用按顺序读取，再应用当前文件。`[analysis]` / `[match]` 覆盖公共 `[engine]` 值。随后依次应用所选文件目录的 `engine.cfg.local`、所选模式文件的 `.local`、公共 `ENGINE_<字段>` 环境覆盖、模式 `ANALYSIS_<字段>` / `MATCH_<字段>` 覆盖；开局使用 `MATCH_OPENING_<字段>`。父文件的 `.local` 不自动传播。缺失文件、引用循环、未知或重复字段明确报错。训练 `run.cfg` 的继承链和训练环境变量不参与加载。
 
-NN 单朝向默认随机 D4，cache 命中复用首次 canonical 输出，根多对称绕 cache。落子温度使用来源 Match profile 的半衰期调度；policy target 不乘落子温度。eval/match 的 `inference_precision=auto` 在本实现指定 CUDA 时使用 FP16、指定 CPU 时使用 FP32，结果记录实际精度，显式 FP32 保留。网络缓存、终局节点和根集成使 NN 请求数不等于 visits。
+命令可用 `--config /path/to/analysis.cfg` 或 `--config /path/to/match.cfg` 直接加载独立文件，也可用 `--config-dir` 选择对应模式文件所在目录；两者互斥。字段事实源是 [engine_config.py](../python/etazero/engine_config.py)。
+
+根访问上限由所选评估／比赛配置指定；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 analysis 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；详细边界和严格并行发放与来源的差异见 [搜索预算](algorithms.md#puct-与搜索预算)。
+
+NN 单朝向默认随机 D4，cache 命中复用首次 canonical 输出，根多对称绕 cache。落子温度使用来源 Match profile 的半衰期调度；policy target 不乘落子温度。analysis/match 的 `inference_precision=auto` 在本实现指定 CUDA 时使用 FP16、指定 CPU 时使用 FP32，结果记录实际精度，显式 FP32 保留。网络缓存、终局节点和根集成使 NN 请求数不等于 visits。
 
 评估和比赛均无训练根噪声；落子温度和搜索线程数由各自配置指定。零温度时，并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用 EtaZero LibTorch 后端，不宣称复制 KataGo 的全部比赛功能或数值行为。
 
@@ -16,8 +20,17 @@ NN 单朝向默认随机 D4，cache 命中复用首次 canonical 输出，根多
 
 ```bash
 # 在 EtaZero_V1.3/ 下，run-dir 用于寻找当前模型和保存默认输出。
-bash scripts/run.sh evaluate --config-dir configs/baseline --run-dir data/my_run --size 15 --rule renju --moves 112,113
+bash scripts/run.sh analysis --config configs/baseline/analysis.cfg --run-dir data/my_run --size 15 --rule renju --moves 112,113
 bash scripts/run.sh match --config-dir configs/baseline --model /path/to/a/model.pt --model-b /path/to/b/model.pt --games 40 --output data/my_match
+```
+
+单局面结果保存到运行目录 `analysis/<标识>/`，包含生效配置、模型和二进制身份、请求以及原始结果；`--output` 可另指定结果 JSON 路径。搜索 WDL 是局面预测，比赛胜率来自真实赛果。搜索建议点沿用配置落子温度，可能不是选择权重最大的点。
+
+`analysis --stream` 启动与 Web 共用的常驻原生引擎，权重和推理服务跨请求复用，独立局面搜索每次清树。协议为 stdin 每行一条命令、stdout 每行一个 JSON 响应；它是同步会话协议，未实现 KataGo 的异步 JSON 任务队列。支持 `new <size> <rule>`、`play <action>`、`analyze <visits>`、`genmove <visits>`、`state`、`undo <count>`、`quit`；`analyze` 返回分析而不落子，`genmove` 返回相同分析并执行建议动作。Web 还可附带比赛开局配置以生成平衡开局。
+
+```bash
+bash scripts/run.sh analysis --config configs/baseline/analysis.cfg --model /path/to/model.pt --stream
+# 输入示例：new 15 renju，然后 analyze 100、play 112、genmove 100、quit。
 ```
 
 每对模型局数为四的正倍数。以A或B作为参考黑方的开局各占一半（任务 `generator` 表示参考黑方模型），另一个模型为参考白方。每次balance尝试随机选参考botB/botW评估两个根视角与全部候选；可选policy init每手按当前棋盘执色选参考模型。参数遵循固定KataGomo：Match平衡指数10，policy init默认关闭，开启时显式mean、温度缺省1。开局记录保存参考黑方及实际balance/policy模型索引（0黑/1白）。同一个已生成开局交换A/B执黑／执白下两局，棋盘颜色和Renju规则不变。这是EtaZero的成对换色协议，第二侧不重新生成开局；与KataGomo逐局独立初始化区分。只接受成功且非终局的开局。无认输、无提前截断，按真实棋规结束。每局保存完整落子、胜者、时间与逐手根访问数。
@@ -73,7 +86,7 @@ bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估�
 
 组内按已选模型连接 `neighbors` 级近邻。跨臂按 `cross_seconds` 的整数倍选点，仅使用固定轮次模型，并要求每对臂的固定模型时间覆盖目标；最近距离相同时选择更早模型。每对臂独立确定覆盖范围，新增臂不改变其他臂的时间配对。临时末点不参与固定时间配对，`final_cross` 单独安排当前最终模型两两比赛。配对重复时只安排一次；比较图必须连通。全部赛果联合重新拟合，不先分别估计再平移，不约束曲线单调；增加数据后旧模型的 Elo 与区间可能变化。
 
-所有模型共用伞目录 `match.cfg`，直接覆盖 baseline 比赛 profile，再应用伞目录 `match.cfg.local` 和 `MATCH_` 环境覆盖，不继承各臂的训练或比赛条件。局数由 `elo.games_per_pair` 控制。MuZero 要求关闭图搜索与子树复用、根对称数量为一，不兼容条件在启动前拒绝。混合 AZ/MZ 时须在共享比赛配置中满足这些约束。固定 visits 不等于相同思考时间，评估耗时不进入训练横轴。
+所有模型共用伞目录 `match.cfg`，显式引用公共 engine 和比赛 profile，再应用伞目录 `match.cfg.local` 和 `MATCH_` 环境覆盖，不继承各臂的训练或比赛条件。局数由 `elo.games_per_pair` 控制。MuZero 要求关闭图搜索与子树复用、根对称数量为一，不兼容条件在启动前拒绝。混合 AZ/MZ 时须在共享比赛配置中满足这些约束。固定 visits 不等于相同思考时间，评估耗时不进入训练横轴。
 
 独立 `--data` 发现有已提交 state 的实际数据臂；autoexp 使用本次完整调度臂列表和真实输出路径，支持自定义 run_dir。autoexp 的 CUDA 比赛使用第一个训练 GPU 槽位，子进程通过 `CUDA_VISIBLE_DEVICES` 映射为 `cuda:0`；独立 autoelo 遵循比赛 device 与当前可见设备。
 
@@ -93,12 +106,12 @@ Python 只规划、调度 native 进程和落盘；棋规、开局、搜索、�
 |---|---|---|
 | `elo.cfg` | `pair_workers` | 整个赛程同时运行的模型对数量 |
 | `match.cfg` | `game_threads` | 每对 C++ 并发局数，开局生成也使用此上限 |
-| `match.cfg` | `search_threads` | 每局树内搜索线程，可能改变并行搜索轨迹 |
-| `match.cfg` | `max_batch` | 每个模型服务的一批请求上限 |
-| `match.cfg` | `server_threads` | 每个模型的推理服务线程；过多服务可能分散 batch，MuZero latent 固定路由到创建它的服务 |
-| `match.cfg` | `batch_wait_us` | 填充 batch 的最大等待窗口 |
-| `match.cfg` | `cpu_threads` | LibTorch CPU 算子线程数，区别于对局和搜索线程 |
-| `match.cfg` | `queue_capacity` | 推理待处理队列配置，不是 batch 大小 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `search_threads` | 每局树内搜索线程，可能改变并行搜索轨迹 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `max_batch` | 每个模型服务的一批请求上限 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `server_threads` | 每个模型的推理服务线程；过多服务可能分散 batch，MuZero latent 固定路由到创建它的服务 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `batch_wait_us` | 填充 batch 的最大等待窗口 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `cpu_threads` | LibTorch CPU 算子线程数，区别于对局和搜索线程 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `queue_capacity` | 推理待处理队列配置，不是 batch 大小 |
 
 先保留单搜索线程和单推理服务，调节模型对及对局并发，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件；树内线程、随机 D4 请求调度与缓存可能影响赛果。
 

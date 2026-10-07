@@ -1,6 +1,6 @@
 # MuZero
 
-MuZero 使用独立的 latent 搜索、initial/recurrent 推理组批及轨迹展开 learner，接通自对弈、shuffle、训练、模型发布、evaluate/match 和恢复。运行配置为 [configs/muzero](../configs/muzero/)，继承 `baseline`：
+MuZero 使用独立的 latent 搜索、initial/recurrent 推理组批及轨迹展开 learner，接通自对弈、shuffle、训练、模型发布、analysis/match 和恢复。运行配置为 [configs/muzero](../configs/muzero/)，继承 `baseline`：
 
 ```bash
 CONFIG_DIR=configs/muzero bash scripts/run.sh
@@ -52,7 +52,7 @@ FP16 后端在加载时将 Conv2d / Linear 的权重与 bias 转为 autocast 原
 value_weight_exponent = 0
 ```
 
-`0` 关闭按子树价值偏好的额外加权；正数开启，指数越大偏好越强。指数由所选配置确定。这个开关不同时关闭 uncertainty、noise pruning 或 LCB；在无噪声根且 uncertainty/noise pruning 等备份修正关闭时，指数 0 的普通树回传退化为逐次预测样本的算术平均。eval/match 对应字段位于各自的 `[evaluation]` / `[match]`。
+`0` 关闭按子树价值偏好的额外加权；正数开启，指数越大偏好越强。指数由所选配置确定。这个开关不同时关闭 uncertainty、noise pruning 或 LCB；在无噪声根且 uncertainty/noise pruning 等备份修正关闭时，指数 0 的普通树回传退化为逐次预测样本的算术平均。分析和比赛的公共字段位于 `engine.cfg` 的 `[engine]`，可在各自 `[analysis]` / `[match]` 中覆盖。
 
 PUCT/FPU、根噪声、温度、forced playout、目标剪枝、LCB、optimistic policy、uncertainty 和 noise pruning 可按配置使用，共用纯数学函数。LCB 只是搜索启发式，短期误差 head 也不代表 dynamics 模型误差或随深度增加的不确定性；这些增强项对 MuZero 的效果需要独立实验。
 
@@ -89,7 +89,7 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 | 并发组批、虚拟损失、失败唤醒 | 独立管理 initial/recurrent 请求及设备 latent 生命周期 |
 | checkpoint、数据边界、完整轮提交 | 共用运行管理，增加算法/三段模型/展开数据身份校验 |
 
-恢复同时涵盖模型、归一化统计、优化器、Lookahead/SWA、scaler、训练计数、模型 RNG 和 reader 消费游标及吸收态动作 RNG。控制器保留既有整轮提交边界；训练入口直接使用 learner 的轮内 checkpoint 恢复下一批更新。evaluate/match 和常驻分析服务从实际推理设备上已加载模型的元数据选择搜索实现，并将该模型交给后端使用，不另做用于识别类型的 CPU 完整加载。可以混合 AlphaZero/MuZero 对弈；含 MuZero 的比赛应使用关闭图共享和复用的 profile。
+恢复同时涵盖模型、归一化统计、优化器、Lookahead/SWA、scaler、训练计数、模型 RNG 和 reader 消费游标及吸收态动作 RNG。控制器保留既有整轮提交边界；训练入口直接使用 learner 的轮内 checkpoint 恢复下一批更新。analysis/match 和常驻分析服务从实际推理设备上已加载模型的元数据选择搜索实现，并将该模型交给后端使用，不另做用于识别类型的 CPU 完整加载。可以混合 AlphaZero/MuZero 对弈；含 MuZero 的比赛应使用关闭图共享和复用的 profile。
 
 ## 训练诊断图
 
