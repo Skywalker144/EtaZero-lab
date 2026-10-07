@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from secrets import randbits
 from threading import Condition
 import time
 from typing import Any
@@ -22,6 +23,11 @@ def integer(payload: dict, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def human_turns(game: dict, human: int):
+    prefix = len((game.get('opening') or {}).get('moves', []))
+    return [i for i in range(prefix, len(game['moves'])) if (1 if i % 2 == 0 else -1) == human]
+
+
 class App:
     def __init__(self, binary: Path, models: dict[str, Path], config: dict[str, Any], default_size: int,
                  runs=None, discover_catalog=None):
@@ -32,7 +38,7 @@ class App:
             str(path.resolve().parent.parent.parent): dict(
                 id=str(path.resolve().parent.parent.parent), label=path.resolve().parent.parent.parent.name,
                 path=str(path.resolve().parent.parent.parent), algorithm=self.metadata[key].get('algorithm', 'alphazero'),
-                evaluation=deepcopy(config['evaluation'])) for key, path in models.items()}
+                evaluation=deepcopy(config['evaluation']), opening=deepcopy(config.get('opening'))) for key, path in models.items()}
         self.discover_catalog = discover_catalog
         self.engine: Engine | None = None
         self.condition = Condition()
@@ -40,7 +46,8 @@ class App:
         self.closed = False
         self.state = dict(instance=uuid4().hex, version=0, catalog_revision=0, game_id=None, busy=False, phase='idle', game=None, analysis=None,
                           error=None, model=None, human=1, rule='freestyle',
-                          visits=config['evaluation']['visits'], mode='play', started_at=None, evaluation=None)
+                          visits=config['evaluation']['visits'], mode='play', started_at=None, evaluation=None,
+                          opening_kind='empty', opening_config=None)
 
     def catalog(self) -> dict:
         c = self.config['evaluation']
@@ -104,6 +111,8 @@ class App:
                 integer(payload, 'size', 5, self.metadata[payload['model']]['canvas'])
                 if payload.get('rule') not in RULES:
                     raise ValueError('未知棋规')
+                if payload.get('opening', 'empty') not in ('empty', 'balanced'):
+                    raise ValueError('未知开局类型')
             elif operation == 'play':
                 if not game or game['finished'] or (self.state['mode'] == 'play' and game['player'] != self.state['human']):
                     raise Conflict('当前不能落子')
@@ -111,8 +120,7 @@ class App:
                 if game['board'][action]:
                     raise ValueError('此处已有棋子')
             elif operation == 'undo':
-                if not game or not game['moves'] or (self.state['mode'] == 'play' and not any(
-                        (1 if i % 2 == 0 else -1) == self.state['human'] for i in range(len(game['moves'])))):
+                if not game or not game['moves'] or (self.state['mode'] == 'play' and not human_turns(game, self.state['human'])):
                     raise ValueError('还没有可以撤回的人类落子')
             elif operation == 'branch':
                 if not game or not game['moves']:
@@ -137,13 +145,25 @@ class App:
                 selected = payload['model']
                 run = self.runs[str(self.models[selected].resolve().parent.parent.parent)]
                 config = {'evaluation': deepcopy(run['evaluation'])}
+                opening_kind = payload.get('opening', 'empty')
+                if run.get('opening') is not None:
+                    config['opening'] = deepcopy(run['opening'])
+                if opening_kind == 'balanced' and 'opening' not in config:
+                    raise ValueError('所选配置缺少 match.cfg 平衡开局参数')
                 replacement = (self.engine is None or self.engine.process.poll() is not None or
-                               selected != self.state['model'] or config['evaluation'] != self.state['evaluation'])
+                               selected != self.state['model'] or config['evaluation'] != self.state['evaluation'] or
+                               config.get('opening') != self.state['opening_config'])
                 engine = Engine(self.binary, self.models[selected], config) if replacement else self.engine
                 try:
                     if payload['size'] > engine.canvas:
                         raise ValueError(f'该模型最大支持 {engine.canvas}×{engine.canvas} 棋盘')
-                    reply = engine.command(f"new {payload['size']} {payload['rule']}")
+                    command = f"new {payload['size']} {payload['rule']}"
+                    if opening_kind == 'balanced':
+                        self.publish(phase='opening', started_at=time.time())
+                        # Let native cancellation finish before the transport's hard timeout.
+                        timeout_ms = max(1, min(120000, int((engine.timeout - 5) * 1000)))
+                        command += f' balanced {randbits(64)} {timeout_ms}'
+                    reply = engine.command(command)
                 except BaseException:
                     if replacement:
                         engine.close()
@@ -153,15 +173,15 @@ class App:
                     previous.close()
                 self.publish(game=reply['state'], game_id=uuid4().hex, analysis=None, model=selected,
                              human=payload['human'], rule=payload['rule'], visits=payload['visits'],
-                             mode=payload.get('mode', 'play'), evaluation=deepcopy(config['evaluation']) if replacement else self.state['evaluation'])
+                             mode=payload.get('mode', 'play'), evaluation=deepcopy(config['evaluation']),
+                             opening_kind=opening_kind, opening_config=deepcopy(config.get('opening')))
             elif operation == 'play':
                 reply = self.engine.command(f"play {payload['action']}")
                 # Keep the last complete analysis visible until the next search succeeds.
                 self.publish(game=reply['state'])
             elif operation == 'undo':
                 moves = self.state['game']['moves']
-                last_human = len(moves) - 1 if self.state['mode'] == 'manual' else max(
-                    i for i in range(len(moves)) if (1 if i % 2 == 0 else -1) == self.state['human'])
+                last_human = len(moves) - 1 if self.state['mode'] == 'manual' else max(human_turns(self.state['game'], self.state['human']))
                 reply = self.engine.command(f'undo {len(moves) - last_human}')
                 self.publish(game=reply['state'], analysis=None)
             elif operation == 'branch':
