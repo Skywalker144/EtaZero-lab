@@ -281,6 +281,7 @@ function render() {
       $('rule').value = state.rule;
       $('visits').value = state.visits;
       $('mode').value = state.mode;
+      $('opening').value = state.opening_kind || 'empty';
       document.querySelector(`input[name="human"][value="${state.human}"]`).checked = true;
       updateSizes();
     }
@@ -300,8 +301,12 @@ function render() {
   const activeModel = catalog.models.find(m => m.id === state.model);
   $('session-info').textContent = game ? `${activeModel?.label || state.model} · ${state.visits}v` : '模型常驻 · 每次搜索从新根开始';
   $('session-info').title = game ? state.model : '';
+  const opening = game?.opening;
+  $('opening-info').hidden = !opening;
+  $('opening-info').textContent = opening ? `平衡开局 ${opening.moves.length} 手 · 尝试 ${opening.attempts} 次 · ${opening.value_player === 1 ? '黑' : '白'}方网络 W−L ${opening.value >= 0 ? '+' : ''}${opening.value.toFixed(4)} · ${opening.seconds.toFixed(2)}s` : '';
+  $('opening-info').title = opening ? `开局种子：${opening.seed}` : '';
   $('state-version').textContent = `单会话 · 状态 v${state.version} · ${state.evaluation?.device || selectedRun()?.evaluation.device || catalog.device}`;
-  $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => (i % 2 === 0 ? 1 : -1) === state.human));
+  $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => i >= (opening?.moves.length || 0) && (i % 2 === 0 ? 1 : -1) === state.human));
   $('analyze').disabled = $('step').disabled = busy || !game || game.finished || viewTurn !== null;
   $('retry').hidden = busy || state.mode !== 'play' || !game || game.finished || game.player === state.human;
   $('error').textContent = notice || state.error || '';
@@ -320,7 +325,7 @@ function render() {
     item.className = 'history-item';
     item.classList.toggle('active', i + 1 === (viewTurn ?? game.turn));
     item.dataset.turn = i + 1;
-    item.title = `查看第 ${i + 1} 手后的局面`;
+    item.title = `查看第 ${i + 1} 手后的局面${i < (opening?.moves.length || 0) ? ' · 开局生成' : ''}`;
     item.innerHTML = `<small>${i + 1}</small><i class="tiny-stone ${i % 2 === 0 ? 'black' : 'white'}"></i>${coordinate(action, game.board_size)}`;
     history.append(item);
   });
@@ -349,6 +354,8 @@ function render() {
   if (game) { evaluation.board_size = game.board_size; evaluation.rule = state.rule; }
   if (evaluation.inference_precision === 'auto') evaluation.inference_precision = evaluation.device.startsWith('cuda:') ? 'float16' : 'float32';
   $('engine-config').textContent = JSON.stringify(evaluation, null, 2);
+  $('opening-config').textContent = JSON.stringify({parameters: state.opening_config || selectedRun()?.opening,
+    ...(opening ? {generated: opening} : {})}, null, 2);
   updateEngineInfo();
   renderSettingsNote();
   renderAnalysis();
@@ -360,7 +367,7 @@ function renderSettingsNote() {
   const edited = state?.game && (Number($('visits').value) !== state.visits || $('mode').value !== state.mode ||
     Number(document.querySelector('input[name="human"]:checked').value) !== state.human);
   $('apply-settings').classList.toggle('settings-dirty', Boolean(edited));
-  $('settings-note').textContent = edited ? '模式 / 执子 / 预算尚未应用；分析使用当前会话配置。模型、棋盘和棋规需重开生效。' : '模型、棋盘和棋规在创建棋局时生效。';
+  $('settings-note').textContent = edited ? '模式 / 执子 / 预算尚未应用；分析使用当前会话配置。模型、棋盘、棋规和开局需重开生效。' : '模型、棋盘、棋规和开局在创建棋局时生效。';
 }
 function renderStatus() {
   if (!state) return;
@@ -369,7 +376,7 @@ function renderStatus() {
   if (!online) text = '等待服务连接';
   else if (state.busy || pending) {
     const elapsed = state.started_at ? Math.max(0, Date.now() / 1000 - state.started_at).toFixed(1) : '0.0';
-    text = `${state.phase === 'loading' ? '加载中' : '处理中'} · ${elapsed}s`;
+    text = `${state.phase === 'loading' ? '加载中' : state.phase === 'opening' ? '生成平衡开局' : '处理中'} · ${elapsed}s`;
   } else if (state.error) text = '操作失败 · 查看错误信息后重试';
   else if (game?.finished) text = game.winner === 0 ? '本局和棋' : `${game.winner === 1 ? '黑棋' : '白棋'}获胜`;
   else if (game) text = state.mode === 'manual' ? `${game.player === 1 ? '黑' : '白'}方落子 · 手动研究` : game.player === state.human ? '轮到你落子' : '等待 AI 落子';
@@ -440,7 +447,7 @@ function sessionSettings() {
 }
 $('settings').addEventListener('submit', event => {
   event.preventDefault();
-  command('new', {model: $('model').value, size: Number($('size').value), rule: $('rule').value, ...sessionSettings()});
+  command('new', {model: $('model').value, size: Number($('size').value), rule: $('rule').value, opening: $('opening').value, ...sessionSettings()});
 });
 $('settings').addEventListener('input', renderSettingsNote);
 $('apply-settings').addEventListener('click', () => {
