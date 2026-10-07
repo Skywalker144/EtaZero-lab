@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from etazero.config import ROOT
-from etazero.eval_config import load_evaluation_config
+from etazero.eval_config import load_evaluation_config, load_match_opening_config
 from etazero.build import verify_build
 from etazero.schema import CONTRACT_ID
 from etazero.storage import load_json
@@ -130,7 +130,8 @@ def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Pa
         if not config_dir and source != mapped:
             config['evaluation']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))
         runs[str(root)] = dict(id=str(root), label=label, path=str(root), algorithm=algorithm,
-                               config_dir=str(source.resolve()), evaluation=config['evaluation'])
+                               config_dir=str(source.resolve()), evaluation=config['evaluation'],
+                               opening=load_match_opening_config(source))
         if model and model.resolve().parent.parent.parent == root:
             runs[str(root)]['selected_model'] = next(key for key, path in models.items() if path == model.resolve())
     return models, runs
@@ -152,6 +153,7 @@ def main(argv=None):
         verify_build(args.binary)
         models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
         config = load_evaluation_config(args.config_dir or ROOT / 'configs/minimal_test')
+        config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/minimal_test')
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
     app = App(args.binary, models, config, config['evaluation']['board_size'],
