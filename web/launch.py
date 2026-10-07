@@ -15,13 +15,15 @@ def latest_version(root):
 
 def needs_build(root, binary):
     from etazero.build import verify_build
-    from etazero.storage import load_json
+    from etazero.storage import load_json, sha256
 
     try:
-        verify_build(binary)
-        sources = {str(path.relative_to(root)) for path in (root / 'cpp').rglob('*') if path.is_file()}
-        sources.add('python/etazero/schema.py')
-        return sources != set(load_json(binary.parent / 'build_manifest.json')['sources'])
+        binary_hash = verify_build(binary)
+        paths = [path for path in (root / 'cpp').rglob('*') if path.is_file()]
+        paths.append(root / 'python/etazero/schema.py')
+        sources = {str(path.relative_to(root)): sha256(path) for path in paths}
+        manifest = load_json(binary.parent / 'build_manifest.json')
+        return binary_hash != manifest['binary_sha256'] or sources != manifest['sources']
     except (OSError, ValueError, KeyError, TypeError):
         return True
 

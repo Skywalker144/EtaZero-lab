@@ -74,14 +74,14 @@ class AnalysisUpdateTests(unittest.TestCase):
         (model.parent / 'manifest.json').write_text(json.dumps(dict(
             id='ui-fixture', canvas=15, algorithm='alphazero', weights='SWA',
             checkpoint=dict(iteration=12, total_steps=10000))))
-        config = dict(evaluation=dict(visits=100, device='cpu', search_threads=1,
+        config = dict(analysis=dict(visits=100, device='cpu', search_threads=1,
                                      virtual_loss=1, board_size=15, rule='freestyle',
                                      inference_precision='float32'))
         self.app = App(Path('EtaZero_V1.2/build/etazero'), {'fixture': model}, config, 15)
         self.engine = ControlledEngine()
         self.app.engine = self.engine
         self.app.publish(game=self.engine.game, game_id='fixture', model='fixture',
-                         evaluation=config['evaluation'], analysis=analysis(position([112])))
+                         analysis_config=config['analysis'], analysis=analysis(position([112])))
         self.previous = self.app.snapshot()['analysis']
         self.addCleanup(self.app.close)
         self.addCleanup(self.engine.release.set)

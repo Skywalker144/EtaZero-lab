@@ -305,7 +305,7 @@ function render() {
   $('opening-info').hidden = !opening;
   $('opening-info').textContent = opening ? `平衡开局 ${opening.moves.length} 手 · 尝试 ${opening.attempts} 次 · ${opening.value_player === 1 ? '黑' : '白'}方网络 W−L ${opening.value >= 0 ? '+' : ''}${opening.value.toFixed(4)} · ${opening.seconds.toFixed(2)}s` : '';
   $('opening-info').title = opening ? `开局种子：${opening.seed}` : '';
-  $('state-version').textContent = `单会话 · 状态 v${state.version} · ${state.evaluation?.device || selectedRun()?.evaluation.device || catalog.device}`;
+  $('state-version').textContent = `单会话 · 状态 v${state.version} · ${state.analysis_config?.device || selectedRun()?.analysis_config.device || catalog.device}`;
   $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => i >= (opening?.moves.length || 0) && (i % 2 === 0 ? 1 : -1) === state.human));
   $('analyze').disabled = $('step').disabled = busy || !game || game.finished || viewTurn !== null;
   $('retry').hidden = busy || state.mode !== 'play' || !game || game.finished || game.player === state.human;
@@ -349,11 +349,11 @@ function render() {
   $('next').disabled = $('live').disabled = viewTurn === null;
   $('branch').hidden = viewTurn === null;
   $('branch').disabled = busy;
-  const evaluation = {...(state.evaluation || selectedRun()?.evaluation || catalog.evaluation), visits: Number($('visits').value), reuse_tree: false};
-  if (game) evaluation.visits = state.visits;
-  if (game) { evaluation.board_size = game.board_size; evaluation.rule = state.rule; }
-  if (evaluation.inference_precision === 'auto') evaluation.inference_precision = evaluation.device.startsWith('cuda:') ? 'float16' : 'float32';
-  $('engine-config').textContent = JSON.stringify(evaluation, null, 2);
+  const analysis_config = {...(state.analysis_config || selectedRun()?.analysis_config || catalog.analysis_config), visits: Number($('visits').value), reuse_tree: false};
+  if (game) analysis_config.visits = state.visits;
+  if (game) { analysis_config.board_size = game.board_size; analysis_config.rule = state.rule; }
+  if (analysis_config.inference_precision === 'auto') analysis_config.inference_precision = analysis_config.device.startsWith('cuda:') ? 'float16' : 'float32';
+  $('engine-config').textContent = JSON.stringify(analysis_config, null, 2);
   $('opening-config').textContent = JSON.stringify({parameters: state.opening_config || selectedRun()?.opening,
     ...(opening ? {generated: opening} : {})}, null, 2);
   updateEngineInfo();
@@ -432,11 +432,11 @@ async function loadCatalog() {
   updateEngineInfo();
 }
 function updateEngineInfo() {
-  const c = state?.evaluation || selectedRun()?.evaluation || catalog.evaluation;
+  const c = state?.analysis_config || selectedRun()?.analysis_config || catalog.analysis_config;
   $('engine-info').textContent = `${c.device} · ${c.search_threads} search threads · VL ${c.virtual_loss}`;
 }
 function applyRunDefaults() {
-  const c = selectedRun()?.evaluation || catalog.evaluation;
+  const c = selectedRun()?.analysis_config || catalog.analysis_config;
   $('size').value = c.board_size;
   $('rule').value = c.rule;
   $('visits').value = c.visits;

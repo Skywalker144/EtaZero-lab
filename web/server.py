@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from etazero.config import ROOT
-from etazero.eval_config import load_evaluation_config, load_match_opening_config
+from etazero.engine_config import load_engine_config, load_match_opening_config
 from etazero.build import verify_build
 from etazero.schema import CONTRACT_ID
 from etazero.storage import load_json
@@ -124,13 +124,13 @@ def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Pa
         info = load_json(paths[0].parent / 'manifest.json') if paths else {}
         effective = load_json(saved) if saved.is_file() else {}
         algorithm = info.get('algorithm', effective.get('agent', {}).get('algorithm', 'alphazero'))
-        source = config_dir or (mapped if mapped and (mapped / 'run.cfg').is_file() else
+        source = config_dir or (mapped if mapped and (mapped / 'analysis.cfg').is_file() else
                                 ROOT / 'configs' / ('muzero' if algorithm == 'muzero' else 'baseline'))
-        config = load_evaluation_config(source)
+        config = load_engine_config(source)
         if not config_dir and source != mapped:
-            config['evaluation']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))
+            config['analysis']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))
         runs[str(root)] = dict(id=str(root), label=label, path=str(root), algorithm=algorithm,
-                               config_dir=str(source.resolve()), evaluation=config['evaluation'],
+                               config_dir=str(source.resolve()), analysis_config=config['analysis'],
                                opening=load_match_opening_config(source))
         if model and model.resolve().parent.parent.parent == root:
             runs[str(root)]['selected_model'] = next(key for key, path in models.items() if path == model.resolve())
@@ -152,11 +152,11 @@ def main(argv=None):
     try:
         verify_build(args.binary)
         models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
-        config = load_evaluation_config(args.config_dir or ROOT / 'configs/minimal_test')
+        config = load_engine_config(args.config_dir or ROOT / 'configs/minimal_test')
         config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/minimal_test')
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
-    app = App(args.binary, models, config, config['evaluation']['board_size'],
+    app = App(args.binary, models, config, config['analysis']['board_size'],
               runs=runs, discover_catalog=lambda: discover_catalog(args.models_dir, args.model, args.config_dir))
     server = make_server(app, args.host, args.port)
     browser_host = '127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host

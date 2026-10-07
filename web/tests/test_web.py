@@ -11,9 +11,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from threading import Thread
 
-from etazero.eval_config import load_evaluation_config, load_match_opening_config
+from etazero.engine_config import load_engine_config, load_match_opening_config
 from etazero.config import ROOT, write_native
-from etazero.evaluation import model_info
+from etazero.analysis import model_info
 from web.engine import Engine
 from web.app import App, Conflict
 from web.server import discover_catalog, discover_models, make_server
@@ -36,7 +36,7 @@ class CatalogTests(unittest.TestCase):
         self.patch = patch('web.server.ROOT', self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.config = load_evaluation_config(ROOT / 'tests/fixtures/configs' / 'minimal_test', environ={})
+        self.config = load_engine_config(ROOT / 'tests/fixtures/configs' / 'minimal_test', environ={})
 
     def publish(self, run, iteration, algorithm='alphazero', current=False):
         root = self.data / run
@@ -77,10 +77,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(empty_run['models'], [])
         self.assertIsNone(empty_run['default_model'])
         mu = runs[str(muzero.parent.parent.parent)]
-        self.assertEqual(mu['evaluation']['board_size'], 11)
-        self.assertFalse(mu['evaluation']['use_graph_search'])
-        self.assertFalse(mu['evaluation']['reuse_tree'])
-        self.assertEqual(mu['evaluation']['root_num_symmetries_to_sample'], 1)
+        self.assertEqual(mu['analysis_config']['board_size'], 11)
+        self.assertFalse(mu['analysis_config']['use_graph_search'])
+        self.assertFalse(mu['analysis_config']['reuse_tree'])
+        self.assertEqual(mu['analysis_config']['root_num_symmetries_to_sample'], 1)
 
     def test_empty_catalog_and_refresh_discovers_new_runs(self):
         models, runs = discover_catalog(self.data)
@@ -104,7 +104,7 @@ class CatalogTests(unittest.TestCase):
         models, runs = discover_catalog(self.data / 'other', model, config_dir)
         self.assertIn(model, models.values())
         self.assertEqual(runs[str(model.parent.parent.parent)]['config_dir'], str(config_dir))
-        self.assertEqual(runs[str(model.parent.parent.parent)]['evaluation']['board_size'], 11)
+        self.assertEqual(runs[str(model.parent.parent.parent)]['analysis_config']['board_size'], 11)
         models, runs = discover_catalog(self.data, model, config_dir)
         app = App(BINARY, models, self.config, 11, runs=runs)
         self.addCleanup(app.close)
@@ -129,9 +129,9 @@ class WebTests(unittest.TestCase):
     def setUp(self):
         _, info = model_info(MODEL)
         profile = 'muzero_minimal_test' if info.get('algorithm') == 'muzero' else 'minimal_test'
-        self.config = load_evaluation_config(ROOT / 'tests/fixtures/configs' / profile, environ={
-            'EVAL_DEVICE': os.environ.get('ETAZERO_TEST_DEVICE', 'cuda:0'),
-            'EVAL_VISITS': '16',
+        self.config = load_engine_config(ROOT / 'tests/fixtures/configs' / profile, environ={
+            'ANALYSIS_DEVICE': os.environ.get('ETAZERO_TEST_DEVICE', 'cuda:0'),
+            'ANALYSIS_VISITS': '16',
         })
         self.config['opening'] = load_match_opening_config(ROOT / 'tests/fixtures/configs' / profile, environ={})
 
@@ -266,8 +266,8 @@ class WebTests(unittest.TestCase):
         from etazero.export import example_inputs
 
         model, info = model_info(MODEL)
-        device = self.config['evaluation']['device']
-        precision = self.config['evaluation']['inference_precision']
+        device = self.config['analysis']['device']
+        precision = self.config['analysis']['inference_precision']
         half = precision == 'float16' or (precision == 'auto' and device.startswith('cuda'))
         module = torch.jit.load(str(model), map_location=device).eval()
         with Engine(BINARY, Path(MODEL), self.config) as engine:
@@ -414,12 +414,12 @@ class WebTests(unittest.TestCase):
             engine.command('new 7 renju')
             engine.command('play 24')
             analysis = engine.command('analyze 16')['analysis']
-            resolved = Path(directory) / 'eval.cfg'
+            resolved = Path(directory) / 'analysis.cfg'
             write_native({**self.config, 'network': {'canvas': info['canvas']}}, resolved)
             native_move = 3 * info['canvas'] + 3
             reply = json.loads(subprocess.run(
-                [str(BINARY), 'evaluate', '--config', str(resolved), '--model', str(model),
-                 '--model-id', info['id'], '--device', self.config['evaluation']['device'],
+                [str(BINARY), 'analysis', '--config', str(resolved), '--model', str(model),
+                 '--model-id', info['id'], '--device', self.config['analysis']['device'],
                  '--size', '7', '--rule', 'renju', '--moves', str(native_move), '--seed', '1'],
                 check=True, capture_output=True, text=True).stdout)
             self.assertEqual(analysis['action'], reply['action'] // info['canvas'] * 7 + reply['action'] % info['canvas'])
@@ -487,7 +487,7 @@ class WebTests(unittest.TestCase):
             catalog = app.catalog()
             self.assertEqual(len(catalog['models']), 2)
             self.assertIn('manifest', catalog['models'][0])
-            self.assertEqual(catalog['evaluation']['device'], self.config['evaluation']['device'])
+            self.assertEqual(catalog['analysis_config']['device'], self.config['analysis']['device'])
             # Finish a manual game, then recover a nonterminal position by branching.
             perform('new', model='test', size=5, rule='freestyle', human=1, visits=16, mode='manual')
             for action in [0, 5, 1, 6, 2, 7, 3, 8, 4]:

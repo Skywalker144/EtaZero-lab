@@ -6,7 +6,7 @@ import tempfile
 from typing import Any
 
 from etazero.config import write_native
-from etazero.evaluation import model_info
+from etazero.analysis import model_info
 
 
 class Engine:
@@ -16,13 +16,13 @@ class Engine:
         self.errors = tempfile.TemporaryFile(mode='w+t')
         self.process = None
         try:
-            resolved = Path(self.directory.name) / 'eval.cfg'
+            resolved = Path(self.directory.name) / 'analysis.cfg'
             model, info = model_info(model)
             write_native({**config, 'network': {'canvas': info['canvas']}}, resolved)
-            evaluation = config['evaluation']
+            analysis = config['analysis']
             self.process = subprocess.Popen(
-                [str(binary.resolve()), 'serve', '--config', str(resolved), '--model', str(model),
-                 '--model-id', info['id'], '--device', evaluation['device'], '--seed', str(evaluation['seed'])],
+                [str(binary.resolve()), 'analysis', '--stream', 'true', '--config', str(resolved), '--model', str(model),
+                 '--model-id', info['id'], '--device', analysis['device'], '--seed', str(analysis['seed'])],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors,
                 text=True, bufsize=1,
             )

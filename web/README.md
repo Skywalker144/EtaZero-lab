@@ -10,11 +10,11 @@ bash web/webui.sh
 
 默认递归扫描该版本整个 `data/`，发现包含 `config/effective.json` 或 `models/` 的运行目录，包括实验伞目录下的嵌套运行。先选择“配置目录”，再选择“权重代数”；代数对应训练 iteration，按数值倒序排列，默认选择 `models/current.json` 指向的当前发布权重，没有发布指针时选择最新一代。尚未发布权重的目录显示“暂无权重”，不能创建棋局。存在可用的 `minimal_test` 时默认选中它，否则选择首个有权重的目录；`--model` 可指定初始选择。
 
-支持 AlphaZero 和 MuZero 已发布模型。运行路径相对于 `data/` 映射到同版本 `configs/`，加载对应 `eval.cfg` 及继承、本机和 `EVAL_*` 覆盖；找不到对应配置时，按模型算法使用 `baseline` 或 `muzero` 评估配置，默认棋盘尺寸取模型画布或保存的配置。`--config-dir` 可统一覆盖评估配置，须满足所选模型的搜索约束。MuZero 使用原生 latent 搜索，评估配置要求关闭图搜索和树复用、根对称数为 1。
+支持 AlphaZero 和 MuZero 已发布模型。运行路径相对于 `data/` 映射到同版本 `configs/`，加载对应 `analysis.cfg` 的显式引用、公共 `engine.cfg`、本机与 `ENGINE_*` / `ANALYSIS_*` 覆盖；找不到对应配置时，按模型算法使用 `baseline` 或 `muzero` 评估配置，默认棋盘尺寸取模型画布或保存的配置。`--config-dir` 可统一覆盖评估配置，须满足所选模型的搜索约束。MuZero 使用原生 latent 搜索，评估配置要求关闭图搜索和树复用、根对称数为 1。
 
 点击“创建棋局”加载模型；“刷新模型”重新扫描目录和权重，无需重启服务，保留当前选择、棋局和已加载模型。切换配置目录会填入该目录的默认棋盘、棋规和预算，新模型与评估配置在重开棋局后生效。
 
-创建棋局时可选择“空盘”或“平衡开局”。平衡开局复用当前版本的比赛开局算法，由所选模型同时评估黑白两侧，参数读取对应配置目录的 `match.cfg`、继承链、叶子 `.local` 和 `MATCH_OPENING_*` 覆盖；正常对弈仍使用 `eval.cfg`。每次生成使用新种子，棋盘下方显示开局手数、尝试次数、网络 W−L 与生成耗时，种子及完整参数可在“平衡开局”面板查看。W−L 标注最后一手平衡着后的行棋方视角，可能与可选 policy init 后的行棋方不同；模型估值接近零不保证真实胜率为 50%。
+创建棋局时可选择“空盘”或“平衡开局”。平衡开局复用当前版本的比赛开局算法，由所选模型同时评估黑白两侧，参数读取对应配置目录的 `match.cfg` 的显式引用、叶子 `.local` 和 `MATCH_OPENING_*` 覆盖；正常对弈仍使用 `analysis.cfg`。每次生成使用新种子，棋盘下方显示开局手数、尝试次数、网络 W−L 与生成耗时，种子及完整参数可在“平衡开局”面板查看。W−L 标注最后一手平衡着后的行棋方视角，可能与可选 policy init 后的行棋方不同；模型估值接近零不保证真实胜率为 50%。
 
 `max_tries` 是降低拒绝概率的阈值，超过后继续尝试直到成功或取消。生成在模型响应超时前取消，失败或取消明确报错，不发布部分开局。成功生成后按实际行棋方决定 AI 是否应手，局面研究模式不自动应手。
 
@@ -52,19 +52,19 @@ bash web/webui.sh
 bash web/webui.sh --model "EtaZero_V1/data/<运行目录>/models/<模型目录>/model.pt"
 # 限定扫描到目标版本中的某个运行或实验伞目录。
 bash web/webui.sh --models-dir "EtaZero_V1/data/<运行目录>" --port 8766
-# 独立评估配置，支持 EVAL_* 环境覆盖。
-EVAL_SEARCH_THREADS=8 EVAL_DEVICE=cuda:0 bash web/webui.sh
+# 独立评估配置，支持 ANALYSIS_* 环境覆盖。
+ANALYSIS_SEARCH_THREADS=8 ANALYSIS_DEVICE=cuda:0 bash web/webui.sh
 ```
 
-实现入口：[server.py](server.py)、[app.py](app.py)、[engine.py](engine.py)、[V1.2 原生 serve 命令](../EtaZero_V1.2/cpp/src/commands/main.cpp)、[界面](static/)。启动参数以 `python -m web.server --help` 为准。
+实现入口：[server.py](server.py)、[app.py](app.py)、[engine.py](engine.py)、[V1.3 原生 analysis 命令](../EtaZero_V1.3/cpp/src/commands/main.cpp)、[界面](static/)。启动参数以 `python -m web.server --help` 为准。
 
 ## 验证
 
 真实 CUDA 模型检查，在仓库根目录执行：
 
 ```bash
-PYTHONPATH=EtaZero_V1.2/python:. \
-ETAZERO_WEB_TEST_MODEL="$PWD/EtaZero_V1.2/data/<运行目录>/models/<模型目录>/model.pt" \
+PYTHONPATH=EtaZero_V1.3/python:. \
+ETAZERO_WEB_TEST_MODEL="$PWD/EtaZero_V1.3/data/<运行目录>/models/<模型目录>/model.pt" \
 conda run --no-capture-output -n pytorch python -m unittest discover -s web/tests -p test_web.py -v
 ```
 

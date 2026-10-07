@@ -36,22 +36,21 @@ class LaunchTests(unittest.TestCase):
                             for p in (source, schema)},
             }
             path = binary.parent / 'build_manifest.json'
-            with patch('etazero.build.ROOT', root):
-                self.assertTrue(needs_build(root, binary))
-                path.write_text(json.dumps(manifest))
-                self.assertFalse(needs_build(root, binary))
-                source.write_text('changed')
-                self.assertTrue(needs_build(root, binary))
-                source.write_text('original')
-                extra = root / 'cpp/new.cpp'
-                extra.touch()
-                self.assertTrue(needs_build(root, binary))
-                extra.unlink()
-                source.unlink()
-                self.assertTrue(needs_build(root, binary))
-                source.write_text('original')
-                binary.write_bytes(b'changed executable')
-                self.assertTrue(needs_build(root, binary))
+            self.assertTrue(needs_build(root, binary))
+            path.write_text(json.dumps(manifest))
+            self.assertFalse(needs_build(root, binary))
+            source.write_text('changed')
+            self.assertTrue(needs_build(root, binary))
+            source.write_text('original')
+            extra = root / 'cpp/new.cpp'
+            extra.touch()
+            self.assertTrue(needs_build(root, binary))
+            extra.unlink()
+            source.unlink()
+            self.assertTrue(needs_build(root, binary))
+            source.write_text('original')
+            binary.write_bytes(b'changed executable')
+            self.assertTrue(needs_build(root, binary))
 
     def test_open_browser_and_fallback(self):
         with patch('web.server.webbrowser.open', return_value=True) as opened:

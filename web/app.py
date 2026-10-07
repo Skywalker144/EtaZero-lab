@@ -38,7 +38,7 @@ class App:
             str(path.resolve().parent.parent.parent): dict(
                 id=str(path.resolve().parent.parent.parent), label=path.resolve().parent.parent.parent.name,
                 path=str(path.resolve().parent.parent.parent), algorithm=self.metadata[key].get('algorithm', 'alphazero'),
-                evaluation=deepcopy(config['evaluation']), opening=deepcopy(config.get('opening'))) for key, path in models.items()}
+                analysis_config=deepcopy(config['analysis']), opening=deepcopy(config.get('opening'))) for key, path in models.items()}
         self.discover_catalog = discover_catalog
         self.engine: Engine | None = None
         self.condition = Condition()
@@ -46,11 +46,11 @@ class App:
         self.closed = False
         self.state = dict(instance=uuid4().hex, version=0, catalog_revision=0, game_id=None, busy=False, phase='idle', game=None, analysis=None,
                           error=None, model=None, human=1, rule='freestyle',
-                          visits=config['evaluation']['visits'], mode='play', started_at=None, evaluation=None,
+                          visits=config['analysis']['visits'], mode='play', started_at=None, analysis_config=None,
                           opening_kind='empty', opening_config=None)
 
     def catalog(self) -> dict:
-        c = self.config['evaluation']
+        c = self.config['analysis']
         with self.condition:
             models = [dict(id=key, run=str(self.models[key].resolve().parent.parent.parent),
                            iteration=info['checkpoint']['iteration'],
@@ -76,7 +76,7 @@ class App:
                     rules=RULES, default_rule=c['rule'],
                     default_size=self.default_size, default_visits=c['visits'],
                     search_threads=c['search_threads'], virtual_loss=c['virtual_loss'], device=c['device'],
-                    evaluation=deepcopy(c))
+                    analysis_config=deepcopy(c))
 
     def snapshot(self, since: int = -1) -> dict:
         with self.condition:
@@ -144,14 +144,14 @@ class App:
             if operation == 'new':
                 selected = payload['model']
                 run = self.runs[str(self.models[selected].resolve().parent.parent.parent)]
-                config = {'evaluation': deepcopy(run['evaluation'])}
+                config = {'analysis': deepcopy(run['analysis_config'])}
                 opening_kind = payload.get('opening', 'empty')
                 if run.get('opening') is not None:
                     config['opening'] = deepcopy(run['opening'])
                 if opening_kind == 'balanced' and 'opening' not in config:
                     raise ValueError('所选配置缺少 match.cfg 平衡开局参数')
                 replacement = (self.engine is None or self.engine.process.poll() is not None or
-                               selected != self.state['model'] or config['evaluation'] != self.state['evaluation'] or
+                               selected != self.state['model'] or config['analysis'] != self.state['analysis_config'] or
                                config.get('opening') != self.state['opening_config'])
                 engine = Engine(self.binary, self.models[selected], config) if replacement else self.engine
                 try:
@@ -173,7 +173,7 @@ class App:
                     previous.close()
                 self.publish(game=reply['state'], game_id=uuid4().hex, analysis=None, model=selected,
                              human=payload['human'], rule=payload['rule'], visits=payload['visits'],
-                             mode=payload.get('mode', 'play'), evaluation=deepcopy(config['evaluation']),
+                             mode=payload.get('mode', 'play'), analysis_config=deepcopy(config['analysis']),
                              opening_kind=opening_kind, opening_config=deepcopy(config.get('opening')))
             elif operation == 'play':
                 reply = self.engine.command(f"play {payload['action']}")
