@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from threading import Thread
 
-from etazero.eval_config import load_evaluation_config
+from etazero.eval_config import load_evaluation_config, load_match_opening_config
 from etazero.config import ROOT, write_native
 from etazero.evaluation import model_info
 from web.engine import Engine
@@ -133,6 +133,133 @@ class WebTests(unittest.TestCase):
             'EVAL_DEVICE': os.environ.get('ETAZERO_TEST_DEVICE', 'cuda:0'),
             'EVAL_VISITS': '16',
         })
+        self.config['opening'] = load_match_opening_config(ROOT / 'tests/fixtures/configs' / profile, environ={})
+
+    def test_balanced_opening_state_coordinates_and_restart(self):
+        with Engine(BINARY, Path(MODEL), self.config) as engine:
+            pid = engine.process.pid
+            seen = []
+            for seed, rule in ((2**64 - 1, 'renju'), (17, 'standard'), (83, 'freestyle')):
+                game = engine.command(f'new 5 {rule} balanced {seed} 115000')['state']
+                opening = game['opening']
+                self.assertEqual(opening['seed'], str(seed))
+                self.assertGreater(opening['attempts'], 0)
+                self.assertEqual(game['moves'], opening['moves'])
+                self.assertEqual(game['turn'], opening['balanced_moves'] + opening['policy_moves'])
+                self.assertEqual(opening['value_player'], game['player'])
+                self.assertFalse(game['finished'])
+                self.assertEqual(len(set(game['moves'])), game['turn'])
+                expected = [0] * 25
+                for i, action in enumerate(game['moves']):
+                    self.assertTrue(0 <= action < 25)
+                    expected[action] = 1 if i % 2 == 0 else -1
+                self.assertEqual(game['board'], expected)
+                seen.append(game['moves'])
+                # Metadata survives ordinary search and moves; editing the prefix clears it.
+                analyzed = engine.command('analyze 16')
+                self.assertEqual(analyzed['state']['opening'], opening)
+                stepped = engine.command('genmove 16')['state']
+                self.assertEqual(stepped['opening'], opening)
+                retained = engine.command('undo 1')['state']
+                self.assertEqual(retained['moves'], game['moves'])
+                self.assertEqual(retained['opening'], opening)
+                self.assertIsNone(engine.command('undo 1')['state']['opening'])
+            self.assertGreater(len({tuple(moves) for moves in seen}), 1)
+            empty = engine.command('new 5 renju')['state']
+            self.assertEqual(empty['turn'], 0)
+            self.assertIsNone(empty['opening'])
+            self.assertEqual(engine.process.pid, pid)
+
+    def test_balanced_opening_cancellation_preserves_previous_game(self):
+        with Engine(BINARY, Path(MODEL), self.config) as engine:
+            engine.command('new 5 standard')
+            before = engine.command('play 12')['state']
+            with self.assertRaisesRegex(RuntimeError, '取消或超时'):
+                engine.command(f'new {engine.canvas} renju balanced 42 1')
+            self.assertEqual(engine.command('state')['state'], before)
+            self.assertFalse(engine.command('new 5 renju balanced 43 115000')['state']['finished'])
+
+    def test_balanced_human_colors_undo_and_manual_branch(self):
+        app = App(BINARY, {'test': Path(MODEL)}, self.config, 5)
+        self.addCleanup(app.close)
+
+        def perform(operation, **payload):
+            app.submit(operation, dict(version=app.snapshot()['version'], **payload))
+            with app.condition:
+                self.assertTrue(app.condition.wait_for(lambda: not app.state['busy'], timeout=120))
+            state = app.snapshot()
+            self.assertIsNone(state['error'])
+            return state
+
+        for human in (1, -1):
+            state = perform('new', model='test', size=5, rule='renju', human=human,
+                            visits=16, mode='play', opening='balanced')
+            pid = app.engine.process.pid
+            initial = state['game']
+            self.assertEqual(initial['player'], human)
+            prefix = initial['opening']['moves']
+            self.assertEqual(initial['moves'][:len(prefix)], prefix)
+            self.assertEqual(initial['turn'], len(prefix) + (0 if (1 if len(prefix) % 2 == 0 else -1) == human else 1))
+            with self.assertRaisesRegex(ValueError, '撤回'):
+                app.submit('undo', dict(version=state['version']))
+            action = next(i for i, stone in enumerate(initial['board']) if not stone)
+            perform('play', action=action)
+            state = perform('undo')
+            self.assertEqual(state['game'], initial)
+            self.assertEqual(app.engine.process.pid, pid)
+            state = perform('branch', turn=len(prefix) - 1)
+            self.assertEqual(state['mode'], 'manual')
+            self.assertIsNone(state['game']['opening'])
+            self.assertIsNone(state['analysis'])
+            self.assertEqual(state['game']['moves'], prefix[:-1])
+        state = perform('new', model='test', size=5, rule='standard', human=-1,
+                        visits=16, mode='manual', opening='balanced')
+        self.assertEqual(state['game']['turn'], len(state['game']['opening']['moves']))
+        self.assertIsNone(state['analysis'])
+
+    def test_browser_balanced_opening_history_and_empty_restart(self):
+        from playwright.sync_api import sync_playwright
+
+        app = App(BINARY, {'test': Path(MODEL)}, self.config, 5)
+        self.addCleanup(app.close)
+        server = make_server(app, '127.0.0.1', 0)
+        Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={'width': 1440, 'height': 900})
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(f'http://127.0.0.1:{server.server_port}')
+            page.wait_for_function("!document.querySelector('#new-game').disabled")
+            page.locator('#size').select_option('5')
+            page.locator('#mode').select_option('manual')
+            page.locator('#opening').select_option('balanced')
+            page.locator('#new-game').click()
+            page.wait_for_function("!document.querySelector('#new-game').disabled && document.querySelector('#opening-info').textContent.includes('平衡开局')", timeout=120000)
+            state = app.snapshot()
+            opening = state['game']['opening']
+            self.assertEqual(state['game']['turn'], len(opening['moves']))
+            self.assertEqual(page.locator('#history .history-item').count(), len(opening['moves']))
+            self.assertIn('开局生成', page.locator('#history .history-item').first.get_attribute('title'))
+            page.locator('.inspector').filter(has=page.locator('#opening-config')).locator('summary').click()
+            self.assertIn(opening['seed'], page.locator('#opening-config').text_content())
+            page.screenshot(path=f'/tmp/etazero-balanced-{state["model"]}-{model_info(MODEL)[1].get("algorithm", "alphazero")}.png', full_page=True)
+            page.locator('#first').click()
+            self.assertEqual(page.locator('#board .stone').count(), 0)
+            page.locator('#branch').click()
+            page.wait_for_function("!document.querySelector('#new-game').disabled && document.querySelector('#move-count').textContent === '第 0 手'")
+            self.assertTrue(page.locator('#opening-info').is_hidden())
+            page.locator('#opening').select_option('empty')
+            page.locator('#new-game').click()
+            page.wait_for_function("!document.querySelector('#new-game').disabled && document.querySelector('#opening').value === 'empty'")
+            self.assertIsNone(app.snapshot()['game']['opening'])
+            self.assertEqual(page.locator('#board .stone').count(), 0)
+            page.set_viewport_size({'width': 390, 'height': 900})
+            self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+            self.assertEqual(errors, [])
+            browser.close()
 
     def test_network_planes_match_published_model(self):
         import torch
