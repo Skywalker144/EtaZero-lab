@@ -54,6 +54,8 @@ public:
         out[spatial + 1] = rule_ == Rule::RENJU;
         out[spatial + 2] = rule_ == Rule::RENJU ? -perspective : 0;
         out[spatial + 3] = enabled;
+        out[spatial + HEX_GLOBAL] = rule_ == Rule::HEX;
+        out[spatial + HEX_WHITE_GLOBAL] = rule_ == Rule::HEX && perspective == -1;
         if(pda_doublings_!=0) {
             out[spatial+4]=1;out[spatial+5]=static_cast<float>(0.5*pda_doublings_*(perspective==pda_player_?1:-1));
         }
@@ -72,11 +74,13 @@ public:
         }
         board_.cells[local] = player_;
         ++turn_;
-        if (!winner_) for (int n : board_.lengths(local, player_))
+        if (rule_ == Rule::HEX && board_.hex_connected(player_)) { winner_ = player_; reason_ = 3; }
+        if (rule_ != Rule::HEX && !winner_) for (int n : board_.lengths(local, player_))
             if (n == 5 || (n > 5 && (rule_ == Rule::FREESTYLE || (rule_ == Rule::RENJU && player_ == -1)))) {
                 winner_ = player_; reason_ = 1;
             }
         finished_ = winner_ || turn_ == size() * size();
+        if (rule_ == Rule::HEX && finished_ && !winner_) throw std::runtime_error("Full Hex board has no connection");
         player_ = -player_;
     }
 };
