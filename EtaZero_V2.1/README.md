@@ -10,16 +10,16 @@ EtaZero 面向 Freestyle、Standard、Renju 五子棋及 Hex。支持 AlphaZero 
 
 ```bash
 bash scripts/build.sh
-bash scripts/run.sh check-config --config-dir configs/smoke_test
-CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 2
+bash scripts/run.sh check-config --config-dir configs/checks/smoke_test
+CONFIG_DIR=configs/checks/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 2
 ```
 
-`baseline` 提供五子棋起始配置，`baseline_hex` 提供 Hex 起始配置（参见 [Hex](docs/hex.md)），`smoke_test` 用于快速工程验收；测试本身使用独立的 `tests/fixtures/configs/`，不依赖用户运行配置的取值。设备由配置指定，不自动回退到 CPU。隐藏 GPU 的托管沙箱须在可访问宿主 CUDA 的执行环境运行 CUDA 检查。
+`baseline` 集中维护公共起始设置，`azg` 与 `azh` 提供 AlphaZero 两种棋类的配置（参见 [Hex](docs/hex.md)），`checks/smoke_test` 用于快速工程验收；测试本身使用独立的 `tests/fixtures/configs/`，不依赖用户运行配置的取值。设备由配置指定，不自动回退到 CPU。隐藏 GPU 的托管沙箱须在可访问宿主 CUDA 的执行环境运行 CUDA 检查。
 
 ## 配置与训练
 
 ```bash
-CONFIG_DIR=configs/baseline bash scripts/run.sh
+CONFIG_DIR=configs/azg bash scripts/run.sh
 ```
 
 `CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`analysis`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
@@ -28,16 +28,16 @@ bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮�
 
 MuZero 的网络、展开训练与搜索约束见 [MuZero](docs/muzero.md)。
 
-Gumbel 起始配置为 `baseline_gumbel`、`muzero_gumbel`、`baseline_gumbel_hex` 和 `muzero_gumbel_hex`，分别继承对应模型和规则的配置。根与非根算法独立选择，参数与使用方式见 [Gumbel](docs/gumbel.md)。
+基础配置在 `configs/` 下平铺：前缀 `az`、`mz` 分别表示 AlphaZero、MuZero，`gaz`、`gmz` 表示根和非根均使用 Gumbel，`gazp`、`gmzp` 表示 Gumbel 根与 PUCT 非根；后缀 `g`、`h` 分别表示 Gomoku、Hex。例如 `azg` 为 AlphaZero 五子棋，`gmzph` 为 Gumbel MuZero Hex，非根使用 PUCT。参数与使用方式见 [Gumbel](docs/gumbel.md)。
 
 ## 续训与评估
 
 输出目录已有 `.internal/run.json` 时自动恢复，无需 `--resume`。`--iterations` 指累计完成目标，提高目标可以追加训练。控制器复用已完成阶段，自对弈保留完整对局，learner 从已保存的消费游标继续下一批；`--weights` 仅用于新运行的权重初始化。恢复状态与校验范围见 [发布与恢复](docs/implementation.md#模型发布与恢复)。
 
 ```bash
-CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 3
-bash scripts/run.sh analysis --config-dir configs/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
-bash scripts/run.sh match --config-dir configs/smoke_test --run-dir data/my_check --model-b /path/to/model.pt --size 5 --rule freestyle --games 4 --output data/my_match
+CONFIG_DIR=configs/checks/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 3
+bash scripts/run.sh analysis --config-dir configs/checks/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
+bash scripts/run.sh match --config-dir configs/checks/smoke_test --run-dir data/my_check --model-b /path/to/model.pt --size 5 --rule freestyle --games 4 --output data/my_match
 bash scripts/run.sh plot --run-dir data/my_check
 ```
 
