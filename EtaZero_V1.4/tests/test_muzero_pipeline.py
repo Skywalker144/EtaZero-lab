@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """MuZero sequence semantics and native/CUDA end-to-end acceptance."""
 from config_samples import CONFIGS
 import os
@@ -168,7 +169,7 @@ def test_sequence_d4_actions_match_all_spatial_targets(symmetry):
     actions = torch.tensor([[0,7,14], [35,28,21]])
     obs = torch.zeros(2, 5, 6, 6); obs[:, 0, :5, :5] = 1
     policy = torch.nn.functional.one_hot(actions, 36).float()
-    batch = dict(obs=obs, actions=actions, policy=policy, opponent_policy=policy, q_values=policy, q_visits=policy)
+    batch = dict(globals=torch.zeros(2,len(GLOBALS)), obs=obs, actions=actions, policy=policy, opponent_policy=policy, q_values=policy, q_visits=policy)
     result = augment_batch(batch, symmetry)
     assert result['policy'].shape == policy.shape
     assert torch.equal(result['actions'], result['policy'].argmax(-1))
