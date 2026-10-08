@@ -4,9 +4,9 @@
 
 ## 独立配置与搜索预算
 
-[engine.cfg](../configs/baseline/engine.cfg) 的 `[engine]` 定义公共搜索、推理、棋盘和种子默认值。[analysis.cfg](../configs/baseline/analysis.cfg) 的 `[analysis]` 只覆盖分析用途的差异；[match.cfg](../configs/baseline/match.cfg) 的 `[match]` 增加局数、对局并发及必要的模式覆盖，`[opening]` 管理比赛开局。两种模式共用字段定义、校验和 C++ 搜索参数转换，解析后只保存本次模式的完整生效配置。配置改变不影响训练配置身份。
+[engine.cfg](../configs/baseline/engine.cfg) 的 `[engine]` 定义公共搜索、推理、棋盘和种子默认值。[analysis.cfg](../configs/baseline/analysis.cfg) 的 `[analysis]` 只覆盖分析用途的差异；[match.cfg](../configs/baseline/match.cfg) 的 `[match]` 增加局数、对局并发及必要的模式覆盖，`[opening]` 管理五子棋比赛开局，`[hex_opening]` 管理 Hex 比赛开局。Hex 两个开局门必须为 1；局面分析不自动生成开局，见 [Hex](hex.md)。两种模式共用字段定义、校验和 C++ 搜索参数转换，解析后只保存本次模式的完整生效配置。配置改变不影响训练配置身份。
 
-在文件首部用 `@include engine.cfg` 或 `@include ../baseline/analysis.cfg` 显式引用公共文件和父模式；相对路径以引用文件为基准，含空格的路径加引号。引用按顺序读取，再应用当前文件。`[analysis]` / `[match]` 覆盖公共 `[engine]` 值。随后依次应用所选文件目录的 `engine.cfg.local`、所选模式文件的 `.local`、公共 `ENGINE_<字段>` 环境覆盖、模式 `ANALYSIS_<字段>` / `MATCH_<字段>` 覆盖；开局使用 `MATCH_OPENING_<字段>`。父文件的 `.local` 不自动传播。缺失文件、引用循环、未知或重复字段明确报错。训练 `run.cfg` 的继承链和训练环境变量不参与加载。
+在文件首部用 `@include engine.cfg` 或 `@include ../baseline/analysis.cfg` 显式引用公共文件和父模式；相对路径以引用文件为基准，含空格的路径加引号。引用按顺序读取，再应用当前文件。`[analysis]` / `[match]` 覆盖公共 `[engine]` 值。随后依次应用所选文件目录的 `engine.cfg.local`、所选模式文件的 `.local`、公共 `ENGINE_<字段>` 环境覆盖、模式 `ANALYSIS_<字段>` / `MATCH_<字段>` 覆盖；五子棋开局使用 `MATCH_OPENING_<字段>`，Hex 开局使用 `MATCH_HEX_OPENING_<字段>`。父文件的 `.local` 不自动传播。缺失文件、引用循环、未知或重复字段明确报错。训练 `run.cfg` 的继承链和训练环境变量不参与加载。
 
 命令可用 `--config /path/to/analysis.cfg` 或 `--config /path/to/match.cfg` 直接加载独立文件，也可用 `--config-dir` 选择对应模式文件所在目录；两者互斥。字段事实源是 [engine_config.py](../python/etazero/engine_config.py)。
 
