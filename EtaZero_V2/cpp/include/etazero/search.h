@@ -107,7 +107,9 @@ public:
     virtual void advance(int action) = 0;
     virtual void reset(uint64_t seed) = 0;
 };
+struct GumbelSettings;
 class Search : public GameSearch {
+protected:
     struct Node;
     struct Edge {
         int move_index=-1;
@@ -201,12 +203,14 @@ class Search : public GameSearch {
     size_t node_count() const;
     Edge& child_edge(Node& node,int move_index);
     void collect_nodes(Node* keep); // Only after all search workers are quiescent.
-    void simulation(int worker);
+    template<bool ForcedRoot=false,bool GumbelInterior=false>
+    void simulation(int worker,int root_move=-1,const GumbelSettings* gumbel=nullptr);
+    int gumbel_selection(Node&,const GumbelSettings&);
     void simulate_many(int worker);
     void worker_loop(int worker);
 public:
-    Search(SearchSettings settings, uint64_t seed);
-    Search(Evaluator& evaluator, SearchSettings settings, uint64_t seed);
+    Search(SearchSettings settings, uint64_t seed,bool start_workers=true);
+    Search(Evaluator& evaluator, SearchSettings settings, uint64_t seed,bool start_workers=true);
     ~Search();
     SearchResult run(const Game& game, double temperature, SearchRun options = {});
     SearchResult run(const SearchState& state, double temperature, SearchRun options = {});

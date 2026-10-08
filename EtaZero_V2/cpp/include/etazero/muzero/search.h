@@ -2,7 +2,8 @@
 #include "etazero/search.h"
 #include "inference.h"
 namespace etazero::muzero {
-class Search final : public GameSearch {
+class Search : public GameSearch {
+protected:
     struct Node;
     struct Edge {int action;double prior,search_prior;int pending=0;Node* child=nullptr;};
     struct Node {

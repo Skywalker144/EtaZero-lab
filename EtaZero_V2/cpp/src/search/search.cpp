@@ -1,4 +1,5 @@
 #include "etazero/search.h"
+#include "etazero/gumbel.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -128,8 +129,8 @@ bool Search::catch_up(Edge& edge,Node& child,int worker) {
     } while(!edge.n.compare_exchange_weak(edge_visits,edge_visits+1));
     ++graph_catch_ups_;return true;
 }
-Search::Search(Evaluator& e,SearchSettings s,uint64_t seed) : Search(s,seed) {evaluator_=&e;}
-Search::Search(SearchSettings s,uint64_t seed) : settings_(s) {
+Search::Search(Evaluator& e,SearchSettings s,uint64_t seed,bool start_workers) : Search(s,seed,start_workers) {evaluator_=&e;}
+Search::Search(SearchSettings s,uint64_t seed,bool start_workers) : settings_(s) {
     if(s.simulations<1 || s.threads<1 || s.c_puct<=0 || s.virtual_loss<0 ||
        s.noise_fraction<0 || s.noise_fraction>1 || s.dirichlet_total_concentration<=0 || s.max_visits<0 || (s.use_fpu && (s.fpu_reduction_max<0 || s.root_fpu_reduction_max<0 ||
        s.fpu_parent_power<0 || s.fpu_parent_weight<0 || s.fpu_parent_weight>1)) || s.max_playouts<0 || s.max_time<0 || !std::isfinite(s.max_time) ||
@@ -153,7 +154,7 @@ Search::Search(SearchSettings s,uint64_t seed) : settings_(s) {
         random_.emplace_back(seed+0x9e3779b97f4a7c15ULL*i);
         inference_random_.emplace_back((seed^0xd1b54a32d192ed03ULL)+0x9e3779b97f4a7c15ULL*i);
     }
-    try {for(int i=1;i<s.threads;++i)workers_.emplace_back(&Search::worker_loop,this,i);}
+    try {if(start_workers)for(int i=1;i<s.threads;++i)workers_.emplace_back(&Search::worker_loop,this,i);}
     catch(...) {
         {std::lock_guard<std::mutex> lock(work_mutex_);closing_=true;}
         work_changed_.notify_all();for(auto& t:workers_)t.join();throw;
@@ -326,7 +327,8 @@ Search::Edge& Search::child_edge(Node& node,int move_index) {
     }
     return node.edge(index);
 }
-void Search::simulation(int worker) {
+template<bool ForcedRoot,bool GumbelInterior>
+void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
     auto& scratch=thread_states_[worker];auto& rng=random_[worker];
     if(!scratch.state || !scratch.state->reset_from(*position_))scratch.state=position_->clone();
     auto& state=*scratch.state;Node* node=root_;auto& path=scratch.path;path.clear();scratch.graph_path.clear();
@@ -343,6 +345,12 @@ void Search::simulation(int worker) {
                 stats.weight=stats.visits*terminal_weight;stats.weight_sq=stats.visits*terminal_weight*terminal_weight;break;
             }
             if(expand(*node,state,worker)){value=node->initial_value;draw=node->initial_wdl[1];break;}
+            int choice=-1;
+            if constexpr(ForcedRoot) {
+                if(node==root_)choice=root_move;
+                else if constexpr(GumbelInterior)choice=gumbel_selection(*node,*gumbel);
+            }
+            if(choice<0) {
             auto& candidates=scratch.candidates;
             do {
                 candidates.clear();
@@ -400,7 +408,8 @@ void Search::simulation(int worker) {
             // both snapshots may then include the same action. Keep tie sampling
             // uniform over actions even across that publication interval.
             candidates.erase(std::unique(candidates.begin(),candidates.end()),candidates.end());
-            int choice=candidates[std::uniform_int_distribution<size_t>(0,candidates.size()-1)(rng)];
+            choice=candidates[std::uniform_int_distribution<size_t>(0,candidates.size()-1)(rng)];
+            }
             Edge* edge=&child_edge(*node,choice);
             auto transition=state.move(node->moves[choice].action);
             if(transition.reward!=0 || transition.discount!=1 ||
@@ -432,6 +441,22 @@ void Search::simulation(int worker) {
         }
         ++completed_;
     } catch(...){release();throw;}
+}
+// Only Gumbel search uses these instantiations. The PUCT specialization has no strategy dispatch.
+template void Search::simulation<true,false>(int,int,const GumbelSettings*);
+template void Search::simulation<true,true>(int,int,const GumbelSettings*);
+int Search::gumbel_selection(Node& node,const GumbelSettings& settings) {
+    std::vector<GumbelChild> stats(node.move_count);
+    for(size_t i=0;i<node.move_count;++i) {
+        auto& move=node.moves[i];auto& out=stats[i];out.prior=move.prior;
+        int index=move.child_index.load(std::memory_order_acquire);
+        if(index>=0) {
+            auto& edge=node.edge(index);out.visits=edge.n.load();out.pending=edge.pending.load();
+            Node* child=edge.child.load(std::memory_order_acquire);
+            if(child){auto q=snapshot(*child);if(q.weight>0)out.q=edge.perspective.load()*q.value;}
+        }
+    }
+    return gumbel_interior_selection(stats,node.initial_value,settings);
 }
 void Search::simulate_many(int worker) {
     try {while(!failed_.load() && !stopped_.load()) {
