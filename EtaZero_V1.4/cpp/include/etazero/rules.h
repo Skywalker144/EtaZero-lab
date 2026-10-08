@@ -17,6 +17,7 @@ struct Board {
     }
     int offset(int origin, int direction, int distance) const;
     std::array<int, 4> lengths(int action, int player) const;
+    bool hex_connected(int player) const;
 };
 enum class Forbidden { NONE, OVERLINE, DOUBLE_FOUR, DOUBLE_THREE };
 class RenjuAnalyzer {
