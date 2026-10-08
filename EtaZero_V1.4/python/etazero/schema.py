@@ -3,9 +3,11 @@ import hashlib
 import json
 
 PLANES = ("on_board", "own", "opponent", "black_forbidden_black_to_move", "black_forbidden_white_to_move")
-GLOBALS = ("standard", "renju", "renju_color", "forbidden_feature_enabled", "pda_enabled", "pda_half_doublings")
-RULES = ("freestyle", "standard", "renju")
-REASONS = ("draw", "five", "forbidden")
+GLOBALS = ("standard", "renju", "renju_color", "forbidden_feature_enabled", "pda_enabled", "pda_half_doublings", "hex", "hex_white_to_move")
+HEX_GLOBAL = GLOBALS.index('hex')
+HEX_WHITE_GLOBAL = GLOBALS.index('hex_white_to_move')
+RULES = ("freestyle", "standard", "renju", "hex")
+REASONS = ("draw", "five", "forbidden", "connection")
 POLICY_HEADS = ("policy", "opponent_policy", "soft_policy", "soft_opponent_policy", "long_optimistic_policy", "short_optimistic_policy")
 Q_POLICY_HEAD = "q_winloss_pretanh"
 RAW_DTYPES = {
@@ -32,7 +34,7 @@ RAW_DTYPES = {
     "side_q_values": "int16", "side_q_visits": "int16",
 }
 CONTRACT = {"planes": PLANES, "globals": GLOBALS,
-            "global_layout": "float32[N,6]; standard,renju,Renju Black=-1 White=+1,forbidden enabled,PDA enabled,signed 0.5*log2(budget ratio) for side-to-move",
+            "global_layout": "float32[N,8]; standard,renju,Renju Black=-1 White=+1,forbidden enabled,PDA enabled,signed 0.5*log2(budget ratio),hex,Hex White to move",
             "feature_dropout": "full trajectory; forbidden_input uint8[sum(row_repeats)] sampled independently by writer; training view zeros both planes and enabled flag together", "rules": RULES, "reasons": REASONS,
             "observations": "uint8[N,planes,ceil(canvas*canvas/8)], MSB first, zero tail bits",
             "raw_dtypes": RAW_DTYPES, "side": "independent searched positions associated with parent game; value=all TD=own search WDL, full-game/error/optimistic/opponent gate zero",
@@ -60,6 +62,8 @@ CONTRACT_LAYOUT = {
     'value_perspective': 'side_to_move', 'policy_quantization_max': 30000, 'q_scale': 32000,
     'td_area_factors': (.176,.056,.016), 'row_order': ('main','side'),
     'raw_storage': 'complete_trajectory_with_repeated_row_span',
+    'hex_geometry': 'black_top_bottom_white_left_right_six_neighbors_no_swap_no_virtual_bridges',
+    'network_coordinates': 'actual_for_gomoku; transpose_for_hex_white; fixed_root_orientation_for_muzero_unroll',
 }
 CONTRACT_ID = hashlib.sha256(json.dumps(CONTRACT_LAYOUT, sort_keys=True).encode()).hexdigest()
 
@@ -87,7 +91,9 @@ def generate_header(path):
         f'inline constexpr int INPUT_PLANES = {len(PLANES)};\n'
         f'inline constexpr int GLOBAL_FEATURES = {len(GLOBALS)};\n'
         f'inline constexpr char CONTRACT_ID[] = "{CONTRACT_ID}";\n'
-        'enum class Rule { FREESTYLE, STANDARD, RENJU };\n'
+        f'inline constexpr int HEX_GLOBAL = {HEX_GLOBAL};\n'
+        f'inline constexpr int HEX_WHITE_GLOBAL = {HEX_WHITE_GLOBAL};\n'
+        'enum class Rule { FREESTYLE, STANDARD, RENJU, HEX };\n'
         f'inline constexpr const char* RULE_NAMES[] = {{{names}}};\n'
         '}\n')
 
