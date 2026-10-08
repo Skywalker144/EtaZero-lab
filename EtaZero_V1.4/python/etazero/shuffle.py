@@ -16,7 +16,7 @@ import fcntl
 import warnings
 import numpy as np
 from .data import read_raw, training_view, training_targets, TRAIN_TARGETS
-from .schema import CONTRACT_ID
+from .schema import CONTRACT_ID, GLOBALS, PLANES
 from .storage import atomic_write, load_json, save_json, save_npz, sync_directory, write_npz
 
 
@@ -177,7 +177,7 @@ def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
     # opponent/full-game gates, three TD WDLs and main WDL.
     # Keep the conservative full-target estimate so disabling unused targets
     # does not change groups, bucket counts or the shuffle's random draws.
-    train_bytes = 6*4 + 5*((canvas*canvas+7)//8) + 16*canvas*canvas + 2*4 + 9*4 + 12
+    train_bytes = len(GLOBALS)*4 + len(PLANES)*((canvas*canvas+7)//8) + 16*canvas*canvas + 2*4 + 9*4 + 12
     # Raw includes int64 visits and at most twice as many observations as moves.
     raw_bytes = 20*canvas*canvas + 10*((canvas*canvas+7)//8) + 164
     if config.get('agent', {}).get('algorithm') == 'muzero':
