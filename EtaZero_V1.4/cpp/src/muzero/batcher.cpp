@@ -1,5 +1,6 @@
 #include "etazero/muzero/inference.h"
 #include "etazero/schema.h"
+#include "etazero/symmetry.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -78,8 +79,9 @@ Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
 Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int symmetry,bool skip,double temperature,bool randomize,double optimism) {
     if(!std::isfinite(temperature)||temperature<=0||!std::isfinite(optimism)||optimism<0||optimism>1)
         throw std::runtime_error("Invalid MuZero evaluation settings");
-    if(randomize){std::lock_guard<std::mutex> lock(random_mutex_);symmetry=std::uniform_int_distribution<int>(0,7)(random_);}
-    auto map=symmetry_mapping(canvas_,symmetry);
+    input_symmetry(obs,symmetry);
+    if(randomize){std::lock_guard<std::mutex> lock(random_mutex_);symmetry=std::uniform_int_distribution<int>(0,hex_input(obs)?1:7)(random_);}
+    auto map=symmetry_mapping(canvas_,input_symmetry(obs,symmetry));
     auto input=transform_observation(obs,canvas_,map);InferenceOutput result;
     if(skip){++submitted;thread_local Request request;request.observation=&input;result=submit(request,0);}else result=initial(input);
     restore_evaluation(result.evaluation,map);return result.evaluation;
