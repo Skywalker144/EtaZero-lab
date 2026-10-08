@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 from config_samples import CONFIGS
 from collections import Counter
 import copy
@@ -37,7 +38,7 @@ def winning_record(rule=0):
         obs=np.zeros((5,canvas,canvas),np.uint8);obs[0,:size,:size]=1
         obs[1]=board==player;obs[2]=board==-player
         # This two-row five-in-a-row fixture has no forbidden points.
-        observations.append(obs);globals.append([rule==1,rule==2,-player if rule==2 else 0,rule==2,0,0])
+        observations.append(obs);globals.append([rule==1,rule==2,-player if rule==2 else 0,rule==2,0,0,0,0])
         if i<t: board.flat[actions[i]]=player
     a["observations"]=pack_observations(np.stack(observations))
     a["globals"]=np.array(globals,np.float32)
@@ -69,7 +70,7 @@ def winning_record(rule=0):
     m={"contract":CONTRACT_ID,"canvas":canvas,"rows":t,"row_begin":0,"plies":t,"games":1,"opening_failures":[""],"run_id":"test","attempt_id":str(rule),
        "worker_id":0,"iteration_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
     a["metadata"]=np.frombuffer(json.dumps(m).encode(),np.uint8)
-    for key, shape in {'side_observations': (0,5,5), 'side_globals': (0,6),
+    for key, shape in {'side_observations': (0,5,5), 'side_globals': (0,len(GLOBALS)),
                        'side_policies': (0,36), 'side_visits': (0,36), 'side_wdl': (0,3),
                        'side_q_values':(0,36),'side_q_visits':(0,36)}.items():
         a[key] = np.zeros(shape,dtype=RAW_DTYPES[key])
@@ -253,7 +254,7 @@ def test_network_preserves_independent_policy_and_value_features(config):
         hook=model.value_head.hidden.register_forward_pre_hook(lambda module,args:pooled.append(args[0]))
         try:
             with torch.no_grad():
-                policy,_=model(obs,torch.zeros(16,6))
+                policy,_=model(obs,torch.zeros(16,len(GLOBALS)))
         finally:
             hook.remove()
     centered=policy-policy.mean(2,keepdim=True)
