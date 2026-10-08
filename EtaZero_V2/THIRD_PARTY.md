@@ -6,6 +6,8 @@ KataGo copyright and MIT terms are retained in [licenses/KataGo.txt](licenses/Ka
 
 MiniZero's small-span latent normalization guard is adapted from `scale_hidden_state` at revision `394b2e483d00cb658d5a24ccca297f864c3280c7`. Its Apache-2.0 license and RLG Lab copyright notice are retained in [licenses/MiniZero.txt](licenses/MiniZero.txt); EtaZero retains FP32 masked reductions and implements the guard without an in-place update.
 
+Gumbel root scheduling, mixed-value Q completion, policy targets and deterministic interior selection are adapted from Google DeepMind Mctx `428bfb7e1c931715cd3d74f9c65e9991afd86df8` (Copyright 2021 DeepMind Technologies Limited). Apache-2.0 terms are retained in [licenses/Mctx-Apache-2.0.txt](licenses/Mctx-Apache-2.0.txt). EtaZero implements C++ double statistics, bounded parallel reservations, WDL/latent adapters and int16 target packing; it does not depend on JAX at runtime. SkyZero V7.19 and MiniZero were inspected as engineering references; their different budget/scaling rules are not used as numerical oracles.
+
 | Adaptation | Source | EtaZero scope |
 |---|---|---|
 | Parallel selfplay and inference | KataGo game threads, NN services, caches and synchronization | `cpp/src/selfplay/`, `inference/`, `search/`; shared batching, pooled synchronization, tiered child statistics and reusable worker resources |
