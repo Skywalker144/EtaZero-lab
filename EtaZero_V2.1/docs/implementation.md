@@ -71,7 +71,7 @@ worker 随机流从运行种子、iteration、持久化 attempt 序号和 worker
 
 ```bash
 conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
-  --config-dir configs/minimal_test --model /absolute/path/to/model.pt \
+  --config-dir configs/checks/minimal_test --model /absolute/path/to/model.pt \
   --output data/selfplay_benchmark_new --games 1024 --warmup-games 128 --repeats 2 \
   --candidates 32:32:1:1:0 128:128:1:1:0
 ```
@@ -84,7 +84,9 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
 
 每套配置位于 `configs/<name>/`。训练使用 `run.cfg`、`env.cfg`、`net.cfg`、`selfplay.cfg`、`train.cfg`；`env.cfg` 的 `[environment]` 管理棋盘、规则和训练行的禁手特征 dropout；`hex` 使用普通六邻接实际连接规则。`selfplay.cfg` 的 `[hex_opening]` 配置 Hex 首手平衡采样，与五子棋 `[opening]` 独立，详见 [Hex](hex.md)。`selfplay.cfg` 首部 `[search]` 集中完整／cheap 根访问预算、cheap 概率与权重；搜索技巧按独立 section 配置，底部 `[parallelism]`、`[inference]`、`[writer]` 管理执行资源。训练字段以 [config.py](../python/etazero/config.py) 为事实源。独立分析和比赛通过 `analysis.cfg`、`match.cfg` 显式引用公共 `engine.cfg`，字段以 [engine_config.py](../python/etazero/engine_config.py) 为事实源，不读取训练继承链，不参与训练配置身份；引用、覆盖优先级与直接文件入口见 [分析与比赛配置](elo.md#独立配置与搜索预算)。
 
-派生配置在 `run.cfg` 的 `[run]` 中使用 `extends = baseline`，父目录名优先在所选配置的同级解析，找不到时在本版本 `configs/` 下解析，因此实验伞目录中的臂也可直接 `extends = baseline` 或 `minimal_test`。解析次序是父配置、当前配置、当前目录的 `*.cfg.local`；父目录本机覆盖不向子配置传播。继承循环、父目录缺失、未知/重复字段、错误文件归属、非法枚举与范围、非法组合或未实现能力，均在启动 worker 前失败。
+基础配置在 `configs/` 下按短名平铺，命名规则见 [README](../README.md#配置与训练)。`baseline/` 集中维护完整的公共起始设置；工程检查配置放在 `checks/`，消融配置放在 `ablations/`。独立实验目录包含 `exp.cfg` 和平铺的实验臂，每臂通过 `extends` 继承基础配置，仅覆盖本次实验的差异；调度方式见 [自动实验](#自动实验)。
+
+派生配置在 `run.cfg` 的 `[run]` 中指定 `extends`。不含 `/` 的目录名（如 `baseline`）优先在声明该继承的配置同级解析，找不到时在本版本 `configs/` 下解析；每一级继承都以自身目录确定同级位置。包含 `/` 的路径始终相对于本版本 `configs/` 解析，例如 `extends = checks/smoke_test`，不受叶子位置或启动工作目录影响。禁止绝对路径与 `.`、`..` 路径段，明确路径解析符号链接后也必须留在 `configs/` 内。解析次序是父配置、当前配置、当前目录的 `*.cfg.local`；父目录本机覆盖不向子配置传播。继承循环、父目录缺失、未知/重复字段、错误文件归属、非法枚举与范围、非法组合或未实现能力，均在启动 worker 前失败。训练继承不会自动带入分析和比赛配置，后者仍通过 `@include` 显式引用文件。
 
 `run.run_dir` 可省略或留空，且不继承父配置。最终输出位置按 `--run-dir`、当前目录 `run.cfg.local`、当前目录 `run.cfg`、自动映射的优先级解析；本机覆盖中的空值恢复自动映射。默认将所选目录相对于本版本 `configs/` 的完整路径映射到 `data/`，例如 `configs/<伞目录>/<臂名>` → `data/<伞目录>/<臂名>/`。配置中的相对输出路径以本版本目录为基准，命令行中的相对输出路径以调用时工作目录为基准；最终路径解析符号链接并保存为绝对路径。`configs/` 外的配置必须显式指定输出位置，父配置中的输出位置不能满足这一要求。`check-config` 支持 `--run-dir` 并显示解析结果；同一最终路径的自动选择与显式指定生成相同配置身份。历史产物不自动迁移，恢复检查模型、优化器与数据消费所需条件，输出路径与执行资源不绑定训练身份。
 
