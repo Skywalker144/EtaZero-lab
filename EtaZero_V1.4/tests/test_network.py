@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """NBT structure, masking and global-context semantics."""
 from config_samples import CONFIGS
 import math
@@ -177,7 +178,7 @@ def test_nbt_skip_paths_and_padding_invariance():
         obs=torch.zeros(2,5,6,6);obs[:,0,:5,:5]=1
         obs[:,1,2,2]=1;obs[:,2,1,2]=1
         obs[1,:,5,:]=1000;obs[1,:,:,5]=1000;obs[1,0,5,:]=0;obs[1,0,:,5]=0
-        p,v=model(obs,torch.zeros(2,6))
+        p,v=model(obs,torch.zeros(2,len(GLOBALS)))
         torch.testing.assert_close(p[0],p[1],rtol=0,atol=0)
         torch.testing.assert_close(v[0],v[1],rtol=0,atol=0)
         assert p[:, :, ~obs[0,0].flatten().bool()].eq(0).all()
