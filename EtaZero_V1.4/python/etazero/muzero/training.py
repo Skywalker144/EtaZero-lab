@@ -7,19 +7,8 @@ from ..symmetry import apply_symmetry
 from .network import scale_gradient
 
 
-def augment_batch(batch, symmetry):
-    canvas = batch['obs'].shape[-1]
-    result = {**batch, 'obs': apply_symmetry(batch['obs'], symmetry).contiguous()}
-    for key in ('policy', 'opponent_policy', 'q_values', 'q_visits'):
-        if key not in batch:
-            continue
-        value = batch[key]
-        result[key] = apply_symmetry(value.reshape(*value.shape[:-1], canvas, canvas), symmetry).reshape_as(value).contiguous()
-    # Transformed grid maps new coordinates to old ones; actions need its inverse.
-    grid = torch.arange(canvas*canvas, device=batch['actions'].device).reshape(canvas, canvas)
-    inverse = apply_symmetry(grid, symmetry).flatten().argsort()
-    result['actions'] = inverse[batch['actions'].long()]
-    return result
+# MuZero uses the same root-based coordinate transform for K+1 targets and K actions.
+from ..symmetry import augment_batch
 
 
 class TrainingForward(nn.Module):
