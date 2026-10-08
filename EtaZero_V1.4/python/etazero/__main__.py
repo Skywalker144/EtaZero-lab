@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 from .config import ROOT, load_config, fingerprint
+from .schema import RULES
 
 
 def main():
@@ -36,7 +37,7 @@ def main():
         if name in ("analysis","match"):
             sub.add_argument("--model")
             sub.add_argument("--size",type=int)
-            sub.add_argument("--rule",choices=("freestyle","standard","renju"))
+            sub.add_argument("--rule",choices=RULES)
             sub.add_argument("--output")
         if name=='analysis':
             sub.add_argument('--moves',default='',help='Comma-separated board-row-major action indices')
