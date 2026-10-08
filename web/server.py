@@ -125,7 +125,7 @@ def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Pa
         effective = load_json(saved) if saved.is_file() else {}
         algorithm = info.get('algorithm', effective.get('agent', {}).get('algorithm', 'alphazero'))
         source = config_dir or (mapped if mapped and (mapped / 'analysis.cfg').is_file() else
-                                ROOT / 'configs' / ('muzero' if algorithm == 'muzero' else 'baseline'))
+                                ROOT / 'configs' / ('mzg' if algorithm == 'muzero' else 'baseline'))
         config = load_engine_config(source)
         if not config_dir and source != mapped:
             config['analysis']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))
@@ -152,9 +152,9 @@ def main(argv=None):
     try:
         verify_build(args.binary)
         models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
-        config = load_engine_config(args.config_dir or ROOT / 'configs/minimal_test')
-        config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/minimal_test')
-        config['hex_opening'] = load_match_hex_opening_config(args.config_dir or ROOT / 'configs/minimal_test')
+        config = load_engine_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
+        config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
+        config['hex_opening'] = load_match_hex_opening_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
     app = App(args.binary, models, config, config['analysis']['board_size'],

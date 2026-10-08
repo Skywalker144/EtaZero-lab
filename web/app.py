@@ -72,7 +72,7 @@ class App:
                 run['default_model'] = run.get('selected_model') or run['current_model'] or (generations[0]['id'] if generations else None)
             available = [run for run in runs if run['models']]
             default_run = next((run['id'] for run in available if run.get('selected_model')),
-                               next((run['id'] for run in available if run['label'] == 'minimal_test'),
+                               next((run['id'] for run in available if run['label'] == 'checks/minimal_test'),
                                     available[0]['id'] if available else runs[0]['id'] if runs else None))
         return dict(models=models, runs=runs, default_run=default_run, version=self.binary.parent.parent.name,
                     rules=RULES, default_rule=c['rule'],
