@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """Independent finite-trajectory, gradient, validity and storage contract checks."""
 from config_samples import CONFIGS
 import copy
@@ -107,7 +108,7 @@ def test_all_heads_and_inference_contract():
     c=load_config(CONFIGS / 'smoke_test')
     model=make_network(c)
     obs=torch.zeros(2,5,6,6);obs[:,0,:5,:5]=1
-    globals=torch.zeros(2,6)
+    globals=torch.zeros(2,len(GLOBALS))
     policy,value,td,raw=model.forward_all(obs,globals)
     assert policy.shape==(2,6,36) and value.shape==(2,3) and td.shape==(2,3,3) and raw.shape==(2,)
     target=torch.tensor([[1.,0.,0.],[0.,1.,0.]])
