@@ -195,7 +195,7 @@ def _read(directory, local=False):
 
 def load_config(directory, run_dir=None):
     directory = Path(directory).resolve()
-    configs_root = directory.parent
+    configs_root = (ROOT / "configs").resolve()
 
     def inherit(current, ancestors):
         if current in ancestors:
@@ -206,11 +206,19 @@ def load_config(directory, run_dir=None):
         parent = values.pop(("run", "extends"), None)
         result = {}
         if parent:
-            if Path(parent).name != parent or parent in (".", ".."):
-                raise ValueError("extends must name a directory under configs/")
-            parent_dir = configs_root / parent
-            if not (parent_dir / "run.cfg").is_file():
-                parent_dir = ROOT / "configs" / parent
+            parent_path = Path(parent)
+            if parent_path.is_absolute() or any(part in (".", "..") for part in parent.split("/")):
+                raise ValueError("extends must name a directory or a path relative to configs/ without . or ..")
+            if "/" in parent:
+                # Qualified paths always start at configs/, independent of the child.
+                parent_dir = (configs_root / parent_path).resolve()
+                if not parent_dir.is_relative_to(configs_root):
+                    raise ValueError("extends path must stay under configs/")
+            else:
+                # Bare names prefer siblings of each declaring configuration.
+                parent_dir = (current.parent / parent_path).resolve()
+                if not (parent_dir / "run.cfg").is_file():
+                    parent_dir = (configs_root / parent_path).resolve()
             result.update(inherit(parent_dir, ancestors + [current]))
             # Output locations belong to the selected config, not its parent.
             result.pop(("run", "run_dir"), None)
