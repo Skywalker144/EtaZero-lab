@@ -1,6 +1,6 @@
 # Hex
 
-Hex 支持 AlphaZero / PUCT 与 MuZero / PUCT，并可与三种五子棋规则按每局权重混合训练。棋类由 `env.cfg` 的 `environment.rules` 与 `rule_weights` 选择；尺寸仍使用 `sizes` 与 `size_weights`。完整 Hex 起始 profile 为 [baseline_hex](../configs/baseline_hex/env.cfg)，训练继承与分析/比赛引用方式见 [配置组织](implementation.md#配置组织)。
+Hex 支持 AlphaZero / PUCT 与 MuZero / PUCT，并可与三种五子棋规则按每局权重混合训练。棋类由 `env.cfg` 的 `environment.rules` 与 `rule_weights` 选择；尺寸仍使用 `sizes` 与 `size_weights`。完整 Hex 起始 profile 为 [azh](../configs/azh/env.cfg)，训练继承与分析/比赛引用方式见 [配置组织](implementation.md#配置组织)。
 
 ## 棋规与动作
 
@@ -28,7 +28,7 @@ Hex 使用独立 `[hex_opening]`，字段定义与范围以 [config.py](../pytho
 
 执行采样时，在实际尺寸内均匀抽取黑方首手，复制棋盘落子后，用参考白方网络评估白方胜率 `p = W`。令 `b = 2*p-1`，以 `max((1-b*b)^balance_exponent, min_accept_rate)` 接受该手；拒绝后重新均匀抽点，持续至接受或取消。不得改用 `W-L`，预测 D 非零时两者不同。最低接受率必须大于零；数值异常明确失败，不切换到五子棋 fallback。实际尝试数、参考模型、接受后白方 W-L 诊断值与动作均保留。
 
-自对弈和比赛的来源默认值分别见 [selfplay.cfg](../configs/baseline_hex/selfplay.cfg) 与 [match.cfg](../configs/baseline_hex/match.cfg)。比赛要求两个门均为 1，每个首手生成一次并供成对交换模型执色使用，开局参考模型随任务交替。普通自对弈黑白共用该轮模型。
+自对弈和比赛的来源默认值分别见 [selfplay.cfg](../configs/azh/selfplay.cfg) 与 [match.cfg](../configs/azh/match.cfg)。比赛要求两个门均为 1，每个首手生成一次并供成对交换模型执色使用，开局参考模型随任务交替。普通自对弈黑白共用该轮模型。
 
 平衡首手作为 `train_mask=0` 的可重放前缀保存，预算与采样行数为零。独立 `[policy_init]` 继续控制后续 policy 初始化；它可能改变平衡首手后的胜率。随机 bootstrap 不使用网络开局，已有 hint/fork 前缀跳过空盘平衡机制。
 
