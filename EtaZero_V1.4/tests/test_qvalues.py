@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """Pure W-L Q semantics: independent calculus and immutable per-writer-row data."""
 import copy
 import json
@@ -65,7 +66,7 @@ def test_side_q_is_not_gated_by_game_outcome():
 @pytest.mark.parametrize('symmetry',range(8))
 def test_q_d4_independent_coordinate_permutation(symmetry):
     values=torch.arange(9).reshape(1,9).float();visits=100+values
-    batch={'obs':torch.ones(1,5,3,3),'policy':values,'opponent_policy':values,
+    batch={'globals':torch.zeros(1,len(GLOBALS)),'obs':torch.ones(1,5,3,3),'policy':values,'opponent_policy':values,
            'q_values':values,'q_visits':visits}
     actual=augment_batch(batch,symmetry)
     expected=np.empty((3,3))
