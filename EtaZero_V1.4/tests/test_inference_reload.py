@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """Real GPU checks for weight/buffer replacement and CPU-only runtime retention."""
 import json
 import os
@@ -47,7 +48,7 @@ def test_reloaded_weights_buffers_executable_and_gpu_release(tmp_path,algorithm,
     assert all(r['allocated_after_offload']==0 for r in rounds)
     spatial=torch.zeros(5,5,6,6,device='cuda');spatial[:,0]=1
     for i in range(5):spatial[i,1,0,i]=1;spatial[i,2,1,i]=1
-    globals=torch.zeros(5,6,device='cuda')
+    globals=torch.zeros(5,len(GLOBALS),device='cuda')
     def flatten(output):
         if algorithm=='alphazero':logits,wdl,optimistic,error=output;latent=None
         else:latent,logits,wdl,optimistic,error=output
@@ -86,5 +87,8 @@ def test_training_rounds_reuse_only_after_model_publication(tmp_path,algorithm):
     starts={e['iteration']:e for e in events if e['event']=='worker_start'}
     assert starts[2]['pid']==starts[3]['pid']
     assert starts[2]['command'][starts[2]['command'].index('--model-id')+1]!=starts[3]['command'][starts[3]['command'].index('--model-id')+1]
-    assert state['checkpoint']['total_steps']==3*config['training']['train_steps']
+    # Actual round budgets may be capped by newly produced rows and full file batches.
+    updates=[e for e in events if e['event']=='update']
+    assert state['checkpoint']['total_steps']==len(updates)>0
+    assert set(e['iteration'] for e in updates)=={1,2,3}
     assert run_training(tmp_path,config,ROOT/'build/etazero',max_iteration=3)==state
