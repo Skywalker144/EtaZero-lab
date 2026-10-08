@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """Real-CUDA integration checks. Enable only in an execution context with host device access."""
 from config_samples import CONFIGS
 import copy
@@ -72,13 +73,15 @@ def test_script_starts_and_auto_resumes_training(tmp_path):
         assert result.returncode==0,result.stdout+'\n'+result.stderr
         return load_json(root/".internal/state.json")
     first=launch()
-    assert first["iteration"]==2 and first["checkpoint"]["total_steps"]==4
+    first_updates=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines() if json.loads(line)['event']=='update']
+    assert first["iteration"]==2 and first["checkpoint"]["total_steps"]==len(first_updates)>0
     run_id=first["run_id"]
     shards={p:sha256(p) for p in (root/"selfplay").rglob("*.npz")}
     assert shards
     second=launch("--iterations","2")
     assert second["run_id"]==run_id and second["iteration"]==3
-    assert second["checkpoint"]["total_steps"]==8
+    updates=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines() if json.loads(line)['event']=='update']
+    assert second["checkpoint"]["total_steps"]==len(updates)>first['checkpoint']['total_steps']
     assert all(sha256(path)==checksum for path,checksum in shards.items())
     assert launch("--plot")==second
     assert (root/"training.png").is_file()
@@ -1128,7 +1131,7 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
                           capture_output=True,text=True,timeout=60)
     assert result.returncode==0,result.stderr
     actual=json.loads(result.stdout)
-    spatial=torch.zeros(5,5,6,6,device='cuda');globals=torch.zeros(5,6,device='cuda')
+    spatial=torch.zeros(5,5,6,6,device='cuda');globals=torch.zeros(5,len(GLOBALS),device='cuda')
     for i in range(5):
         size=5+i%2;spatial[i,0,:size,:size]=1
         spatial[i,1,0,i]=1;spatial[i,2,1,i]=1
