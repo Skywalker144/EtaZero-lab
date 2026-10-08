@@ -26,7 +26,7 @@
 
 采用 AlphaZero 的策略价值网络、真实规则图搜索和自对弈监督闭环；网络预测落子概率与当前玩家的期望终局结果，训练结合策略交叉熵、价值误差与正则化。模型持续更新并供自对弈使用，固定模型评估独立运行，不默认加入“胜过旧模型才发布”的门控。[AlphaZero 原文，算法描述及式 1](https://arxiv.org/pdf/1712.01815)
 
-本项目将其适配到三种五子棋规则和可配置硬件规模。以下明确的是 EtaZero 的实现约定，不声称复现原论文的棋类任务、网络规模或实验预算。搜索接入 KataGo 的 FPU、shaped Dirichlet noise、playout cap randomization、forced playout / policy target pruning、加权价值统计、LCB、根多对称与分层温度；对局采样使用 policy/value surprise weighting，学习接入六项 policy、终局/TD WDL 和短期价值误差监督。五子棋无 score utility、pass、提子和 no-result，WDL 的 D 表示真实和棋。v17支持可选逐动作纯W−L Q监督；hint/hintFork 和 early/game fork 贯通独立启动前缀与预算；真实规则搜索支持图转置。
+本项目将其适配到三种五子棋规则、Hex 和可配置硬件规模。Hex 的连接规则、输入方向、两种对称与独立平衡开局见 [Hex](hex.md)。以下明确的是 EtaZero 的实现约定，不声称复现原论文的棋类任务、网络规模或实验预算。搜索接入 KataGo 的 FPU、shaped Dirichlet noise、playout cap randomization、forced playout / policy target pruning、加权价值统计、LCB、根多对称与分层温度；对局采样使用 policy/value surprise weighting，学习接入六项 policy、终局/TD WDL 和短期价值误差监督。五子棋无 score utility、pass、提子和 no-result，WDL 的 D 表示真实和棋。v17支持可选逐动作纯W−L Q监督；hint/hintFork 和 early/game fork 贯通独立启动前缀与预算；真实规则搜索支持图转置。
 
 ### 游戏状态与棋规
 
@@ -37,7 +37,8 @@
 | Freestyle | 任一方连成五子或更长即胜 |
 | Standard | 任一方恰好五子即胜；长连本身不判胜 |
 | Renju | 白方五子或更长胜；黑方按参考棋规处理恰好五子与长连、双四、双三 |
-| 满盘 | 先判本手胜负；无胜负时为和棋 |
+| Hex | 黑连接上下、白连接左右；六邻接实际路径连通即胜，没有和棋 |
+| 五子棋满盘 | 先判本手胜负；无胜负时为和棋 |
 
 Renju 沿用现有 MuZero / SkyZero 的棋盘局部规则，不扩展为完整比赛开局协议。参考中的禁手点允许实际落子，落下后判黑负，不在动作 mask 中提前删除；恰好五子与其他方向形状同时出现时按来源中的优先级判定。以固定版本 [KataGomo 禁手检测器](/home/sky/RL/SkyZero/KataGomo/cpp/forbiddenPoint/ForbiddenPointFinder.cpp) 和 [真实终局](/home/sky/RL/SkyZero/KataGomo/cpp/game/gamelogic.cpp) 核对具体规则；本地递归实现最初来自 MuZero / SkyZero。
 
@@ -46,6 +47,8 @@ Renju 沿用现有 MuZero / SkyZero 的棋盘局部规则，不扩展为完整�
 移植棋规要覆盖递归活三、边界与多方向交叉等情况，不能用局部字符串或简单形状计数代替来源语义。动作可提交性、落子后禁手判负和给网络的输入特征分别定义，不能混为一个“合法性”开关。
 
 ### 平衡开局与 policy init
+
+以下描述五子棋开局。Hex 根据棋规使用独立 `[hex_opening]`，见 [Hex 平衡开局](hex.md#平衡开局)。
 
 平衡开局以 [KataGomo 原始机制](/home/sky/RL/SkyZero/KataGomo/cpp/game/randomopening.cpp) 和 [原始调用边界](/home/sky/RL/SkyZero/KataGomo/cpp/program/play.cpp) 为依据，实现位于 [opening.cpp](../cpp/src/selfplay/opening.cpp)。基础参数与配置入口在 [selfplay.cfg](../configs/baseline/selfplay.cfg)。只移植本环境的无 VCN 模式，不引入来源的 VCN 棋规。
 
@@ -73,7 +76,7 @@ KataGomo 原生用 WDL 转换为行棋方标量，EtaZero 使用相同视角的 
 | 3 | 当前视角为黑方时，黑方的禁手点 |
 | 4 | 当前视角为白方时，黑方的禁手点 |
 
-禁手平面仅 Renju 非零；两个平面都表示黑方禁手，白方本身没有禁手。占用点与 padding 均为零，禁手判定复用真实落子使用的递归 RenjuAnalyzer。全局输入为 `float32[N,6]`：`is_standard`、`is_renju`、Renju 执色（黑 -1、白 +1，其他规则 0）、禁手特征可用标志（仅完整 Renju 输入为 1）。Freestyle 由前两项均为 0 表示。最后两个全局量为 PDA 启用标志及按当前执色变号的 `0.5*d`；五子棋无 draw utility 输入。全局量经无 bias 的线性层投影到 trunk 通道，广播加到首层空间卷积输出。
+禁手平面仅 Renju 非零；两个平面都表示黑方禁手，白方本身没有禁手。占用点与 padding 均为零，禁手判定复用真实落子使用的递归 RenjuAnalyzer。全局输入为 `float32[N,8]`：`is_standard`、`is_renju`、Renju 执色（黑 -1、白 +1，其他规则 0）、禁手特征可用标志（仅完整 Renju 输入为 1）。Freestyle 由前两项均为 0 表示。索引 4、5 为 PDA 启用标志及按当前执色变号的 `0.5*d`；五子棋无 draw utility 输入。索引 6、7 为 Hex 标识和 Hex 白方行棋标识，五子棋均为零。全局量经无 bias 的线性层投影到 trunk 通道，广播加到首层空间卷积输出。
 
 `environment.forbidden_feature_dropout_prob` 按 KataGomo writer 在最终输出行独立抽样：被选中的 Renju 行将空间 3、4 和全局 3 同时置零；其余规则、执色、棋子、PDA 条件和监督目标保持完整。随机流由局种子独立派生，不消耗尺寸、规则、开局或动作采样的 RNG。搜索、平衡开局的两个根视角及候选评估、固定模型评估均保留完整特征。原始轨迹始终保存完整特征；writer在surprise次数确定后，为每个最终重复行抽样并保存 `forbidden_input:uint8[sum(row_repeats)]`。训练视图展开时应用这些已保存的决定，重复行可不同；shuffle与重启不会再次随机化。开局前缀和末状态不进入这些训练行。
 
@@ -101,9 +104,9 @@ PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bi
 
 搜索时将已占用点和画布外位置 mask 掉，每个网络评估先将 logits 除以 `nn_policy_temperature`，再对可提交动作归一化先验；这个全树 policy 温度同时作用于根和所有非根。六项训练策略 softmax 的域均为有效棋盘上的全部落点：硬 policy 的已占用点目标为零，soft policy 经 epsilon 处理后占用点也有正目标；画布外点不参与归一化。这个搜索与训练的区别需要固定样例验证，不能由不同调用方各自选择。
 
-`training.d4_augmentation` 控制训练 D4，baseline 开启。沿用 SkyZero_V8.1 的 batch 级均匀八对称，按整个画布变换全部空间通道（包括有效棋盘和禁手 mask）与 policy / opponent policy 目标；小棋盘的有效区域可以随变换移动到其他角。全局特征和 WDL 目标不变，原始轨迹不重写。变换发生在 learner 消费 batch 后、联合编译前，结果保持 contiguous；随机流纳入 Torch CPU RNG checkpoint，AMP overflow 消费当前 batch 后继续下一 batch，不重试该变换或前向图。实现见 [symmetry.py](../python/etazero/symmetry.py)。
+`training.d4_augmentation` 控制训练随机增强，baseline 开启。Hex 的行只使用 identity/180，并始终执行白方转置；五子棋使用下述 D4。沿用 SkyZero_V8.1 的 batch 级均匀八对称，按整个画布变换全部空间通道（包括有效棋盘和禁手 mask）与 policy / opponent policy 目标；小棋盘的有效区域可以随变换移动到其他角。全局特征和 WDL 目标不变，原始轨迹不重写。变换发生在 learner 消费 batch 后、联合编译前，结果保持 contiguous；随机流纳入 Torch CPU RNG checkpoint，AMP overflow 消费当前 batch 后继续下一 batch，不重试该变换或前向图。实现见 [symmetry.py](../python/etazero/symmetry.py)。
 
-搜索根由 `root_num_symmetries_to_sample` 控制 D4 集成，取值 1–8；大于 1 时从八种对称无放回均匀抽样，并绕过 NN cache 的读取和写入。变换覆盖整个画布的全部空间输入，全局输入不变，输出 policy 还原到原始动作坐标。每个对称先独立混合 ordinary/短期 optimistic logits，再执行全树温度及合法域 softmax，随后算术平均 policy 概率和 WDL 概率；不平均 logits，多个评估仍只构成一个根初始访问。根从非根子树推进而来时，多对称或 root/leaf optimism 不同时重新评估根，访问数不增加；新增预算为零的复用根也刷新条件。
+搜索根由 `root_num_symmetries_to_sample` 控制有效对称集成，五子棋取值 1–8、Hex 取值 1–2；大于 1 时，五子棋从八种、Hex 从两种有效对称中无放回均匀抽样，并绕过 NN cache 的读取和写入。变换覆盖整个画布的全部空间输入，全局输入不变，输出 policy 还原到原始动作坐标。每个对称先独立混合 ordinary/短期 optimistic logits，再执行全树温度及合法域 softmax，随后算术平均 policy 概率和 WDL 概率；不平均 logits，多个评估仍只构成一个根初始访问。根从非根子树推进而来时，多对称或 root/leaf optimism 不同时重新评估根，访问数不增加；新增预算为零的复用根也刷新条件。
 
 单对称根、叶节点、cheap 根及 Match 由 `nn_randomize` 控制随机 D4；关闭时使用 `nn_symmetry` 指定未命中请求的朝向；已有 cache 仍复用首次输出，强制真实指定朝向须绕 cache。原生 NN 服务只在 cache 未命中后抽朝向，命中直接复用首次推理已还原的输出，不消耗 NN 朝向 RNG。根集成 RNG、NN 服务 RNG 与落子 RNG 分开；线程调度会影响请求次序，不承诺与来源随机序列逐位一致。cache 按未变换的完整输入、全局量、NN policy 温度及有效 optimism 分键，朝向不入 key；raw logits 存储在 canonical 坐标，温度由搜索 softmax 消费。raw 诊断明确指定 identity 并绕 cache，避免诊断调用固定搜索根的首个缓存朝向。实现见 [搜索](../cpp/src/search/search.cpp)、[AlphaZeroState](../cpp/include/etazero/algorithm.h) 与 [NN 服务](../cpp/src/inference/batcher.cpp)。
 
