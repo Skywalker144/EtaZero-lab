@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const columns = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
-const rules = {freestyle: 'Freestyle', standard: 'Standard', renju: 'Renju'};
-const notes = {freestyle: 'Freestyle · 五子或长连获胜。', standard: 'Standard · 恰好五子获胜，长连不计胜。', renju: 'Renju · 黑棋三三、四四、长连判负，恰好五子优先；白棋五子或长连获胜。'};
+const rules = {freestyle: 'Freestyle', standard: 'Standard', renju: 'Renju', hex: 'Hex'};
+const notes = {hex: 'Hex · 黑棋连接上下两边，白棋连接左右两边；按六邻接实际连通判胜。', freestyle: 'Freestyle · 五子或长连获胜。', standard: 'Standard · 恰好五子获胜，长连不计胜。', renju: 'Renju · 黑棋三三、四四、长连判负，恰好五子优先；白棋五子或长连获胜。'};
 let state = null, catalog = null, pending = false, online = false, notice = '';
 let formKey = '', viewTurn = null, highlight = null, catalogRevision = -1;
 let sortField = 'selection_weight', sortDirection = -1;
@@ -73,9 +73,32 @@ function navigate(turn) {
 }
 function renderBoard(game, disabled) {
   const size = game?.board_size || Number($('size').value) || catalog.default_size;
-  const step = 100 / (size + 1);
+  const hex = game ? state.rule === 'hex' : $('rule').value === 'hex';
+  const step = hex ? 78 / (1.5 * size) : 100 / (size + 1);
+  const originX = (100 - 1.5 * (size - 1) * step) / 2;
+  const originY = (100 - Math.sqrt(3) / 2 * (size - 1) * step) / 2;
+  const point = (x, y) => hex ? [originX + (x + y / 2) * step, originY + y * step * Math.sqrt(3) / 2] : [(x + 1) * step, (y + 1) * step];
   const end = step * size;
   let drawing = `<svg viewBox="0 0 100 100" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".12">`;
+  if (hex) {
+    const radius = step / Math.sqrt(3);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const [cx, cy] = point(x, y);
+      const vertices = Array.from({length: 6}, (_, i) => {
+        const angle = (30 + i * 60) * Math.PI / 180;
+        return `${cx + radius * Math.cos(angle)},${cy + radius * Math.sin(angle)}`;
+      }).join(' ');
+      drawing += `<polygon points="${vertices}" fill="var(--board)" stroke="var(--board-line)" stroke-width=".15"/>`;
+    }
+    const corners = [point(0,0), point(size-1,0), point(size-1,size-1), point(0,size-1)];
+    const offsets = [[0,-radius*.8],[radius*.8,0],[0,radius*.8],[-radius*.8,0]];
+    for (let i = 0; i < 4; i++) {
+      const a = corners[i], b = corners[(i+1)%4], [ox,oy] = offsets[i];
+      const d = `M${a[0]+ox},${a[1]+oy}L${b[0]+ox},${b[1]+oy}`;
+      drawing += `<path class="hex-goal" d="${d}" stroke="#303840" stroke-width="1.1"/><path d="${d}" stroke="${i%2?'#f7f7f2':'#303840'}" stroke-width=".65"/>`;
+    }
+    drawing += '</g></svg>';
+  } else {
   for (let i = 1; i <= size; i++) {
     const p = i * step;
     drawing += `<path d="M${step},${p}H${end} M${p},${step}V${end}"/>`;
@@ -92,14 +115,16 @@ function renderBoard(game, disabled) {
     }
   }
   drawing += '</g></svg>';
+  }
   const numbers = new Map((game?.moves || []).map((action, i) => [action, i + 1]));
   for (let action = 0; action < size * size; action++) {
     const stone = game?.board[action] || 0;
     const number = numbers.get(action);
     const last = number && number === game.turn;
     const color = stone === 1 ? 'black' : 'white';
+    const [px, py] = point(action % size, Math.floor(action / size));
     const label = coordinate(action, size) + (stone ? `，${stone === 1 ? '黑' : '白'}棋，第 ${number} 手` : '，空位');
-    drawing += `<button class="board-point" data-action="${action}" aria-label="${label}" style="left:${(action % size + 1) * step}%;top:${(Math.floor(action / size) + 1) * step}%;width:${step * .96}%;height:${step * .96}%" ${disabled || stone ? 'disabled' : ''}>${stone ? `<span class="stone ${color} ${last ? 'last' : ''}">${number}</span>` : ''}</button>`;
+    drawing += `<button class="board-point" data-action="${action}" aria-label="${label}" style="left:${px}%;top:${py}%;width:${step * .96}%;height:${step * .96}%" ${disabled || stone ? 'disabled' : ''}>${stone ? `<span class="stone ${color} ${last ? 'last' : ''}">${number}</span>` : ''}</button>`;
   }
   $('board').innerHTML = drawing;
   const analysis = state.analysis;
@@ -354,7 +379,7 @@ function render() {
   if (game) { analysis_config.board_size = game.board_size; analysis_config.rule = state.rule; }
   if (analysis_config.inference_precision === 'auto') analysis_config.inference_precision = analysis_config.device.startsWith('cuda:') ? 'float16' : 'float32';
   $('engine-config').textContent = JSON.stringify(analysis_config, null, 2);
-  $('opening-config').textContent = JSON.stringify({parameters: state.opening_config || selectedRun()?.opening,
+  $('opening-config').textContent = JSON.stringify({parameters: state.opening_config || ((game ? state.rule : $('rule').value)==='hex' ? selectedRun()?.hex_opening : selectedRun()?.opening),
     ...(opening ? {generated: opening} : {})}, null, 2);
   updateEngineInfo();
   renderSettingsNote();
