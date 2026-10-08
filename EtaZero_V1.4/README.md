@@ -1,6 +1,6 @@
 # EtaZero V1.4
 
-EtaZero 面向 Freestyle、Standard、Renju 五子棋。支持 AlphaZero / PUCT 与 MuZero / PUCT。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 组合尚未实现，配置检查明确拒绝。
+EtaZero 面向 Freestyle、Standard、Renju 五子棋及 Hex。支持 AlphaZero / PUCT 与 MuZero / PUCT。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 组合尚未实现，配置检查明确拒绝。
 
 训练按完整轮次执行自对弈 → shuffle → learner → 模型发布。各阶段内部支持并行对局、GPU 组批与 CUDA Graph 推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
 
@@ -14,7 +14,7 @@ bash scripts/run.sh check-config --config-dir configs/smoke_test
 CONFIG_DIR=configs/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 2
 ```
 
-`baseline` 提供完整起始配置，`smoke_test` 用于快速工程验收；测试本身使用独立的 `tests/fixtures/configs/`，不依赖用户运行配置的取值。设备由配置指定，不自动回退到 CPU。隐藏 GPU 的托管沙箱须在可访问宿主 CUDA 的执行环境运行 CUDA 检查。
+`baseline` 提供五子棋起始配置，`baseline_hex` 提供 Hex 起始配置（参见 [Hex](docs/hex.md)），`smoke_test` 用于快速工程验收；测试本身使用独立的 `tests/fixtures/configs/`，不依赖用户运行配置的取值。设备由配置指定，不自动回退到 CPU。隐藏 GPU 的托管沙箱须在可访问宿主 CUDA 的执行环境运行 CUDA 检查。
 
 ## 配置与训练
 
@@ -77,6 +77,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
 | 查看 replay ratio、训练额度及 selfplay 局数 | [产样规划](docs/implementation.md#训练额度与自对弈产量) |
+| 接入 Hex、理解方向编码、有效对称与首手平衡采样 | [Hex](docs/hex.md) |
 | 调整平衡开局及独立 policy init | [开局机制](docs/algorithms.md#平衡开局与-policy-init) |
 | 查看实验产物和内部状态位置 | [运行目录](docs/implementation.md#运行目录) |
 | 调整配置、继承与本机覆盖 | [配置组织](docs/implementation.md#配置组织) |
