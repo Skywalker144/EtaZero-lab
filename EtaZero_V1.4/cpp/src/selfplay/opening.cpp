@@ -11,7 +11,12 @@ OpeningConfig::OpeningConfig(const Config& c, const std::string& policy_section)
       balance_exponent(c.number("opening.balance_exponent")),
       rejection_probability(c.number("opening.rejection_probability")),
       rejection_probability_fallback(c.number("opening.rejection_probability_fallback")),
-      max_tries(c.integer("opening.max_tries")), policy_init(c.contains(policy_section+".policy_init") || policy_section=="policy_init"
+      max_tries(c.integer("opening.max_tries")),
+      hex_probability(c.contains("hex_opening.probability")?c.number("hex_opening.probability"):-1),
+      hex_make_fair_probability(c.contains("hex_opening.make_fair_probability")?c.number("hex_opening.make_fair_probability"):-1),
+      hex_balance_exponent(c.contains("hex_opening.balance_exponent")?c.number("hex_opening.balance_exponent"):-1),
+      hex_min_accept_rate(c.contains("hex_opening.min_accept_rate")?c.number("hex_opening.min_accept_rate"):-1),
+      policy_init(c.contains(policy_section+".policy_init") || policy_section=="policy_init"
           ? c.boolean(policy_section+".policy_init") : false),
       policy_after(c.contains(policy_section+".policy_after")?c.boolean(policy_section+".policy_after"):true),
       policy_on_failure(c.contains(policy_section+".policy_on_failure")?c.boolean(policy_section+".policy_on_failure"):true),
@@ -23,6 +28,14 @@ OpeningConfig::OpeningConfig(const Config& c, const std::string& policy_section)
         balance_exponent < 0 || balance_exponent > 100 || policy_init_mean < 0 || policy_init_mean > 100 ||
         policy_temperature < 0.1 || policy_temperature > 5)
         throw std::runtime_error("Invalid opening configuration");
+}
+
+double hex_opening_accept_rate(double p,double exponent,double minimum) {
+    if (!std::isfinite(p) || p<0 || p>1 || !std::isfinite(exponent) || exponent<0 || exponent>100 ||
+        !std::isfinite(minimum) || minimum<=0 || minimum>1)
+        throw std::runtime_error("Invalid Hex opening probability/exponent/minimum");
+    double bias=2*p-1;
+    return std::max(std::pow(1-bias*bias,exponent),minimum);
 }
 
 namespace {
@@ -216,6 +229,27 @@ class Initializer {
             }
         }
     }
+    void hex_balanced(Game& game) {
+        if (game.finished() || game.turn()!=0 || game.player()!=1)
+            throw std::runtime_error("Hex opening requires an empty Black-to-move position");
+        if (!random_.coin(config_.hex_make_fair_probability)) return;
+        result_.status=OpeningStatus::Failed;
+        while (true) {
+            check_cancelled();++result_.attempts;
+            int x=random_.uniform_index(game.size()),y=random_.uniform_index(game.size());
+            int action=y*game.canvas()+x;
+            Game candidate=game;candidate.play(action);
+            auto evaluation=white_.evaluate(candidate.observation());
+            double acceptance=hex_opening_accept_rate(evaluation.wdl[0],config_.hex_balance_exponent,config_.hex_min_accept_rate);
+            result_.balance_evaluators.push_back(1);
+            if (!random_.coin(acceptance)) continue;
+            result_.start_value=evaluation.value();
+            if (!std::isfinite(result_.start_value) || std::abs(result_.start_value)>1)
+                throw std::runtime_error("Invalid Hex opening WDL");
+            game=std::move(candidate);result_.actions.push_back(action);result_.balanced_moves=1;
+            result_.status=OpeningStatus::Success;return;
+        }
+    }
     void policy(Game& game) {
         if (game.finished() || config_.policy_init_mean <= 0) return;
         int count = std::max(0, static_cast<int>(std::floor(random_.exponential() * config_.policy_init_mean - 2.0 * game.turn())));
@@ -257,7 +291,13 @@ public:
     OpeningResult run(Game& game) {
         try {
             check_cancelled();
-            if (!game.finished() && config_.probability > 0 && random_.coin(config_.probability)) balanced(game);
+            if (!game.finished() && game.rule()==Rule::HEX) {
+                if (!std::isfinite(config_.hex_probability) || config_.hex_probability<0 || config_.hex_probability>1 ||
+                    !std::isfinite(config_.hex_make_fair_probability) || config_.hex_make_fair_probability<0 || config_.hex_make_fair_probability>1)
+                    throw std::runtime_error("Missing or invalid Hex opening gates");
+                hex_opening_accept_rate(0.5,config_.hex_balance_exponent,config_.hex_min_accept_rate);
+                if (config_.hex_probability>0 && random_.coin(config_.hex_probability)) hex_balanced(game);
+            } else if (!game.finished() && config_.probability > 0 && random_.coin(config_.probability)) balanced(game);
             bool run_policy = result_.status == OpeningStatus::NotAttempted ||
                 (result_.status == OpeningStatus::Success ? config_.policy_after : config_.policy_on_failure);
             if (run_policy && config_.policy_init) policy(game);
