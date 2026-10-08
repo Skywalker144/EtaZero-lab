@@ -302,8 +302,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                         tensor = tensor.pin_memory()
                     tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
             symmetry = int(torch.randint(8, ()).item()) if config['training']['d4_augmentation'] else 0
-            if config['training']['d4_augmentation']:
-                tensors = augment_training_batch(tensors, symmetry)
+            # White Hex canonicalization also applies when augmentation is off.
+            tensors = augment_training_batch(tensors, symmetry)
             optimization.before_step()
             learning_rates = {g["group_name"]: g["lr"] for g in optimizer.param_groups}
             weight_decays = {g["group_name"]: g["weight_decay"] for g in optimizer.param_groups}
