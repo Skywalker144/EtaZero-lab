@@ -82,7 +82,7 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
 
 ## 配置组织
 
-每套配置位于 `configs/<name>/`。训练使用 `run.cfg`、`env.cfg`、`net.cfg`、`selfplay.cfg`、`train.cfg`；`env.cfg` 的 `[environment]` 管理棋盘、规则和训练行的禁手特征 dropout。`selfplay.cfg` 首部 `[search]` 集中完整／cheap 根访问预算、cheap 概率与权重；搜索技巧按独立 section 配置，底部 `[parallelism]`、`[inference]`、`[writer]` 管理执行资源。训练字段以 [config.py](../python/etazero/config.py) 为事实源。独立分析和比赛通过 `analysis.cfg`、`match.cfg` 显式引用公共 `engine.cfg`，字段以 [engine_config.py](../python/etazero/engine_config.py) 为事实源，不读取训练继承链，不参与训练配置身份；引用、覆盖优先级与直接文件入口见 [分析与比赛配置](elo.md#独立配置与搜索预算)。
+每套配置位于 `configs/<name>/`。训练使用 `run.cfg`、`env.cfg`、`net.cfg`、`selfplay.cfg`、`train.cfg`；`env.cfg` 的 `[environment]` 管理棋盘、规则和训练行的禁手特征 dropout；`hex` 使用普通六邻接实际连接规则。`selfplay.cfg` 的 `[hex_opening]` 配置 Hex 首手平衡采样，与五子棋 `[opening]` 独立，详见 [Hex](hex.md)。`selfplay.cfg` 首部 `[search]` 集中完整／cheap 根访问预算、cheap 概率与权重；搜索技巧按独立 section 配置，底部 `[parallelism]`、`[inference]`、`[writer]` 管理执行资源。训练字段以 [config.py](../python/etazero/config.py) 为事实源。独立分析和比赛通过 `analysis.cfg`、`match.cfg` 显式引用公共 `engine.cfg`，字段以 [engine_config.py](../python/etazero/engine_config.py) 为事实源，不读取训练继承链，不参与训练配置身份；引用、覆盖优先级与直接文件入口见 [分析与比赛配置](elo.md#独立配置与搜索预算)。
 
 派生配置在 `run.cfg` 的 `[run]` 中使用 `extends = baseline`，父目录名优先在所选配置的同级解析，找不到时在本版本 `configs/` 下解析，因此实验伞目录中的臂也可直接 `extends = baseline` 或 `minimal_test`。解析次序是父配置、当前配置、当前目录的 `*.cfg.local`；父目录本机覆盖不向子配置传播。继承循环、父目录缺失、未知/重复字段、错误文件归属、非法枚举与范围、非法组合或未实现能力，均在启动 worker 前失败。
 
