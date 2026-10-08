@@ -15,10 +15,10 @@
 |---|---|
 | EtaZero_V0 | 已冻结 |
 | EtaZero_V1 | 已冻结 |
-| EtaZero_V1.1 | 开发中 |
-| EtaZero_V1.2 | 开发中 |
-| EtaZero_V1.3 | 开发中 |
-| EtaZero_V1.4 | 开发中 |
+| EtaZero_V1.1 | 已冻结 |
+| EtaZero_V1.2 | 已冻结 |
+| EtaZero_V1.3 | 已冻结 |
+| EtaZero_V1.4 | 已冻结 |
 | EtaZero_V2 | 开发中 |
 
 ## 修改边界
