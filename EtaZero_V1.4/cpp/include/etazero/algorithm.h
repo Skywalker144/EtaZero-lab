@@ -55,7 +55,7 @@ public:
     bool terminal() const override { return game_.finished(); }
     double terminal_value() const override { return game_.terminal_value(); }
     Evaluation evaluate() const override { return evaluator_.evaluate(game_.observation()); }
-    int symmetry_count() const override { return 8; }
+    int symmetry_count() const override { return game_.rule()==Rule::HEX?2:8; }
     Evaluation evaluate_symmetry(int symmetry) const override {
         return evaluate_symmetry(symmetry,false,1);
     }
