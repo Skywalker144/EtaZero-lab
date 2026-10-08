@@ -113,8 +113,8 @@ def validate_raw(a, source="record", *, deep=True):
         validate_trajectory(a)
     require(len(np.unique(a["game_ids"])) == n, "duplicate game IDs in shard")
     require(((a["sizes"] >= 5) & (a["sizes"] <= canvas) & (lengths <= a["sizes"]**2)).all(), "game sizes/lengths")
-    require(np.isin(a["rules"], [0, 1, 2]).all() and np.isin(a["winners"], [-1, 0, 1]).all() and
-            np.isin(a["reasons"], [0, 1, 2]).all(), "invalid rule/result")
+    require(np.isin(a["rules"], [0, 1, 2, 3]).all() and np.isin(a["winners"], [-1, 0, 1]).all() and
+            np.isin(a["reasons"], [0, 1, 2, 3]).all(), "invalid rule/result")
     if canvas*canvas % 8:
         require((a["observations"][:, :, -1] & ((1 << (8-canvas*canvas % 8))-1) == 0).all(), "nonzero packed tail bits")
     for key in ("policies", "opponent_policies", "opponent_policy_weights", "temperatures", "rewards", "globals", "target_weights", "policy_surprises", "value_surprises", "network_wdl", "search_wdl"):
@@ -206,7 +206,7 @@ def validate_raw(a, source="record", *, deep=True):
         mask = np.zeros((canvas,canvas), np.uint8);mask[:size,:size] = 1
         require(np.array_equal(observation[0],mask) and not (observation*(1-mask)).any() and
                 not (observation[1]*observation[2]).any(), 'invalid side board/padding')
-        require(np.array_equal(a['side_globals'][i], [rule==1,rule==2,-player if rule==2 else 0,rule==2,0,0]),
+        require(np.array_equal(a['side_globals'][i], [rule==1,rule==2,-player if rule==2 else 0,rule==2,0,0,rule==3,rule==3 and player==-1]),
                 'side rule/color globals')
         require(not (observation[3:5]*(observation[1]+observation[2])).any() and
                 not observation[4 if player==1 else 3].any() and
@@ -238,7 +238,9 @@ def validate_raw(a, source="record", *, deep=True):
         renju = a["rules"][i] == 2
         require((globals[:, 0] == (a["rules"][i] == 1)).all() and
                 (globals[:, 1] == renju).all() and
-                (globals[:, 2] == (-players if renju else 0)).all(), "rule/color globals")
+                (globals[:, 2] == (-players if renju else 0)).all() and
+                (globals[:,6] == (a['rules'][i]==3)).all() and
+                (globals[:,7] == ((players==-1) if a['rules'][i]==3 else 0)).all(), "rule/color globals")
         require(np.isin(globals[:, 3], [0, 1]).all() and
                 (renju or not globals[:, 3].any()), "forbidden feature flag")
         require((obs * (1-mask)[None, None]).sum() == 0 and not obs[0, 1:3].any(), "padding/empty opening")
@@ -277,6 +279,10 @@ def validate_raw(a, source="record", *, deep=True):
                             "opponent policy terminal placeholder")
         require((obs[-1, 1] == (board == players[-1])).all() and (obs[-1, 2] == (board == -players[-1])).all(), "final observation")
         winner = a["winners"][i]
+        if a['rules'][i]==3:
+            require(winner!=0 and a['reasons'][i]==3, 'Hex requires a connection winner')
+        else:
+            require(a['reasons'][i]!=3, 'connection result outside Hex')
         require((a["rewards"][lo:hi-1] == 0).all() and a["rewards"][hi-1] == winner*players[-2], "terminal reward")
         require((winner == 0) == (a["reasons"][i] == 0), "draw/result reason mismatch")
         if winner == 0:
