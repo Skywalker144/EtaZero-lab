@@ -1,4 +1,5 @@
 #include "etazero/muzero/search.h"
+#include "etazero/symmetry.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -61,9 +62,9 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl={(v+std::abs(v))/2,1-std::abs(v),(std::abs(v)-v)/2};return result;}
     int max_playouts=options.max_playouts<0?settings_.max_playouts:options.max_playouts;
     if(!max_playouts||(options.should_stop&&options.should_stop())){result.stopped_early=bool(options.should_stop)&&options.should_stop();return result;}
-    int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,7)(random_):settings_.nn_symmetry;
-    mapping_=symmetry_mapping(game.canvas(),symmetry);board_actions_.clear();std::vector<int> root_actions;
     auto obs=game.observation();
+    int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,game.rule()==Rule::HEX?1:7)(random_):settings_.nn_symmetry;
+    mapping_=symmetry_mapping(game.canvas(),input_symmetry(obs,symmetry));board_actions_.clear();std::vector<int> root_actions;
     for(int a=0;a<area;++a){if(obs[a])board_actions_.push_back(a);if(game.legal(a))root_actions.push_back(a);}
     root_=node();remove_noise_=options.remove_root_noise;hint_=options.hint_action;
     auto initial=evaluator_.initial(transform_observation(obs,game.canvas(),mapping_));
