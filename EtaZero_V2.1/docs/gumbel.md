@@ -2,16 +2,16 @@
 
 `agent.algorithm` 仍选择真实规则 AlphaZero 或 latent MuZero。`root_search_algo=gumbel` 使用 Gumbel 根搜索；`nonroot_search_algo=puct` 复用对应模型的现有 PUCT/FPU，`gumbel` 使用论文式 14 的确定性选点。PUCT 根配 Gumbel 非根仍是不允许的项目组合。
 
-四个起始配置分别继承对应的现有配置：
+Gumbel 起始配置按模型、非根策略和棋类分类，继承对应的基础配置：
 
-| 配置 | 模型与规则 |
-|---|---|
-| [baseline_gumbel](../configs/baseline_gumbel/run.cfg) | AlphaZero / 五子棋 |
-| [muzero_gumbel](../configs/muzero_gumbel/run.cfg) | MuZero / 五子棋 |
-| [baseline_gumbel_hex](../configs/baseline_gumbel_hex/run.cfg) | AlphaZero / Hex |
-| [muzero_gumbel_hex](../configs/muzero_gumbel_hex/run.cfg) | MuZero / Hex |
+| 路线 | 非根搜索 | 五子棋 | Hex |
+|---|---|---|---|
+| AlphaZero / Gumbel | Gumbel | [配置](../configs/gazg/run.cfg) | [配置](../configs/gazh/run.cfg) |
+| MuZero / Gumbel | Gumbel | [配置](../configs/gmzg/run.cfg) | [配置](../configs/gmzh/run.cfg) |
+| AlphaZero / Gumbel + PUCT | PUCT | [配置](../configs/gazpg/run.cfg) | [配置](../configs/gazph/run.cfg) |
+| MuZero / Gumbel + PUCT | PUCT | [配置](../configs/gmzpg/run.cfg) | [配置](../configs/gmzph/run.cfg) |
 
-默认根和非根均使用 Gumbel。将 `run.cfg` 的 `agent.nonroot_search_algo` 改为 `puct`，即可复用现有非根 PUCT；评估另在 `engine.cfg` 修改同名字段。在 V2 目录运行 `CONFIG_DIR=configs/baseline_gumbel bash scripts/run.sh`，其他组合替换目录即可。
+`gazg`、`gazh`、`gmzg`、`gmzh` 的根和非根均使用 Gumbel；带 `p` 的配置继承对应 Gumbel 配置，仅将训练和评估的非根策略覆盖为 PUCT。在本版本目录运行 `CONFIG_DIR=configs/gazg bash scripts/run.sh`，其他组合替换目录即可。
 
 ## 根搜索、预算与落子
 
