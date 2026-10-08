@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / 'python'))
 from etazero.config import load_config
 from etazero.network import make_network, init_weights
 from etazero import network as eta_network
+from etazero.schema import GLOBALS, PLANES
 from etazero.optimization import parameter_groups
 
 
@@ -66,7 +67,7 @@ def parameter_mapping(eta, source, architecture):
         conv(e.pre, s.normactconv1)
         conv(e.post, s.normactconv2)
     add(eta.stem.weight, source.conv_spatial.weight, si=(slice(None), slice(0, 5)))
-    add(eta.linear_global.weight, source.linear_global.weight, si=(slice(None), slice(0, 6)))
+    add(eta.linear_global.weight, source.linear_global.weight, si=(slice(None), slice(0, len(GLOBALS))))
     for e, s in zip(eta.blocks, source.blocks, strict=True):
         if architecture == 'plain':
             residual(e, s)
@@ -119,7 +120,7 @@ def parameter_mapping(eta, source, architecture):
 
 def source_outputs(source, obs, globals):
     mask = obs[:, :1]
-    # Only the input projections are adapted to the authorized 5/6 features.
+    # Only the input projections are adapted to EtaZero's feature contract.
     p, v, misc, more, *_ = source(obs * mask, globals)[0]
     # v17 Q adds pure W-L as output six; Go score Q (output seven) is omitted.
     return (p[:, :7 if p.shape[1]==8 else 6, :-1] * mask.flatten(2), v[:, [0, 2, 1]],
@@ -150,11 +151,11 @@ def check_architecture(architecture, device, mc, mp, amp='off', compiled=False, 
         eta_network.init_weights, mp.init_weights = record_eta, record_source
         eta = make_network(config).to(device)
         source = mp.Model(ref_config, pos_len=15).to(device)
-        # Match the authorized 5/6-feature adaptation at the input projections.
+        # Match EtaZero's feature contract at the input projections.
         # Keeping Go's zero-filled 22/19 widths picks different AMP GEMM/conv
         # kernels and rounding despite mathematically identical projections.
-        source.conv_spatial = torch.nn.Conv2d(5,config['network']['channels'],3,padding=1,bias=False).to(device)
-        source.linear_global = torch.nn.Linear(6,config['network']['channels'],bias=False).to(device)
+        source.conv_spatial = torch.nn.Conv2d(len(PLANES),config['network']['channels'],3,padding=1,bias=False).to(device)
+        source.linear_global = torch.nn.Linear(len(GLOBALS),config['network']['channels'],bias=False).to(device)
         source.initialize()
     finally:
         eta_network.init_weights, mp.init_weights = original_eta, original_source
@@ -204,7 +205,7 @@ def check_architecture(architecture, device, mc, mp, amp='off', compiled=False, 
         obs = torch.randn(2, 5, 15, 15, device=device)
         obs[:, 0].fill_(1); obs[0, 0, 11:].zero_(); obs[0, 0, :, 11:].zero_()
         obs.requires_grad_()
-        globals = torch.randn(2, 6, device=device, requires_grad=True)
+        globals = torch.randn(2, len(GLOBALS), device=device, requires_grad=True)
         ref_obs = obs.detach().clone().requires_grad_()
         ref_globals = globals.detach().clone().requires_grad_()
         context = (torch.autocast('cuda',dtype=torch.float16 if amp=='float16' else torch.bfloat16,
@@ -247,7 +248,7 @@ def check_architecture(architecture, device, mc, mp, amp='off', compiled=False, 
     return dict(preset=preset, parameters=sum(p.numel() for p in eta.parameters()),
                 source_config=ref_config, max_forward_abs=max_forward, max_gradient_abs=max_gradient,
                 mapped_parameter_roles=len(pairs), amp=amp, compiled=compiled,
-                oracle_execution='compiled' if compiled else 'eager', source_input_projection_shapes=[5,6],
+                oracle_execution='compiled' if compiled else 'eager', source_input_projection_shapes=[len(PLANES),len(GLOBALS)],
                 predict_q_values=predict_q_values,
                 execution_gaps=execution_gaps,
                 tolerances=dict(forward=[f_rtol,f_atol],gradient=[g_rtol,g_atol]),cases=cases)
