@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 from config_samples import CONFIGS
 import copy
 import math
@@ -40,7 +41,8 @@ def test_d4_mixed_size_masks_features_and_targets():
     policy = obs[:, 3].flatten(1)
     batch = {'obs': obs, 'policy': policy, 'opponent_policy': obs[:,2].flatten(1),
              'opponent_policy_weight': torch.tensor([1.,0.]),
-             'globals': torch.randn(2, 6), 'value': torch.tensor([-1., 1.])}
+             'globals': torch.randn(2, len(GLOBALS)), 'value': torch.tensor([-1., 1.])}
+    batch['globals'][:,6:]=0
     original = {k: v.clone() for k, v in batch.items()}
     variants = []
     for symmetry in range(8):
