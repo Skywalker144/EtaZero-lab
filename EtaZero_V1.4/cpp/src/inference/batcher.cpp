@@ -1,5 +1,6 @@
 #include "etazero/inference.h"
 #include "etazero/schema.h"
+#include "etazero/symmetry.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -49,7 +50,7 @@ std::vector<std::unique_ptr<Backend>> single(std::unique_ptr<Backend> backend) {
 }
 Evaluation Evaluator::evaluate_symmetry(const std::vector<float>& obs,int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) {
     (void)skip_cache;(void)temperature;(void)randomize;(void)optimism; // Generic evaluators use the caller's seeded fallback orientation.
-    auto mapping=symmetry_mapping(obs.size(),symmetry);
+    auto mapping=symmetry_mapping(obs.size(),input_symmetry(obs,symmetry));
     auto transformed=transform_input(obs,mapping);auto output=evaluate(transformed);
     restore_output(output,mapping);return output;
 }
@@ -99,7 +100,7 @@ Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
 Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) {
     if (obs.size() != input_size_) throw std::runtime_error("Inference input shape mismatch");
     if(!std::isfinite(temperature) || temperature<=0)throw std::runtime_error("Invalid NN policy temperature");
-    if(symmetry<0 || symmetry>=8)throw std::runtime_error("Invalid D4 symmetry");
+    input_symmetry(obs,symmetry);
     if(!std::isfinite(optimism) || optimism<0 || optimism>1)throw std::runtime_error("Invalid policy optimism");
     // Unsupported backends have no optimistic output; match the source's absent-head condition.
     if(!backends_[0]->supports_auxiliary())optimism=0;
@@ -145,10 +146,10 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     }
     if(randomize) {
         std::lock_guard<std::mutex> lock(random_mutex_);
-        symmetry=std::uniform_int_distribution<int>(0,7)(random_);
+        symmetry=std::uniform_int_distribution<int>(0,hex_input(obs)?1:7)(random_);
     }
-    request->symmetry=symmetry;
-    const auto& mapping=mappings_[symmetry];
+    request->symmetry=input_symmetry(obs,symmetry);
+    const auto& mapping=mappings_[request->symmetry];
     auto& transformed=request->transformed;transformed.resize(obs.size());
     const size_t area=mapping.size();
     for(int p=0;p<INPUT_PLANES;++p)for(size_t a=0;a<area;++a)
