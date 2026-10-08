@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """Independent normalization properties and MuZero ResNet configuration guards."""
 from config_samples import CONFIGS
 import copy
@@ -32,7 +33,7 @@ def test_resnet_is_independent_of_other_batch_rows_and_train_eval_mode():
     model = MuZeroNet(c)
     obs = torch.randn(2, 5, 6, 6)
     obs[:, 0] = 1; obs[0, 0, 5] = 0; obs[0, 0, :, 5] = 0
-    globals = torch.randn(2, 6)
+    globals = torch.randn(2, len(GLOBALS))
     hidden = model.representation(obs, globals)
     single = model.representation(obs[:1], globals[:1])
     torch.testing.assert_close(hidden[:1], single, rtol=2e-5, atol=2e-6)
