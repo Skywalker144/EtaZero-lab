@@ -33,6 +33,10 @@ class CatalogTests(unittest.TestCase):
         self.data.mkdir()
         for name in ('baseline', 'minimal_test', 'muzero', 'muzero_minimal_test'):
             shutil.copytree(ROOT / 'tests/fixtures/configs' / name, self.root / 'configs' / name)
+        fallback = self.root / 'configs/mzg'
+        fallback.mkdir(parents=True)
+        for mode in ('analysis', 'match'):
+            (fallback / f'{mode}.cfg').write_text(f'@include ../muzero/{mode}.cfg\n')
         self.patch = patch('web.server.ROOT', self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
@@ -95,6 +99,18 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(len(app.catalog()['runs']), 1)
         self.assertEqual(app.snapshot()['catalog_revision'], 1)
         self.assertIsNone(app.snapshot()['game'])
+
+    def test_nested_run_uses_its_corresponding_profile(self):
+        profile = self.root / 'configs/family/board'
+        profile.mkdir(parents=True)
+        (profile / 'engine.cfg').write_text('@include ../../baseline/engine.cfg\n[engine]\nvisits=37\n')
+        for mode in ('analysis', 'match'):
+            (profile / f'{mode}.cfg').write_text(f'@include ../../baseline/{mode}.cfg\n@include engine.cfg\n')
+        model = self.publish('family/board', 1)
+        _, runs = discover_catalog(self.data)
+        run = runs[str(model.parent.parent.parent)]
+        self.assertEqual(run['config_dir'], str(profile))
+        self.assertEqual(run['analysis_config']['visits'], 37)
 
     def test_explicit_model_and_evaluation_override(self):
         model = self.publish('custom', 4, 'muzero')
