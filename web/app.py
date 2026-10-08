@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from etazero.schema import RULES
+from etazero.config import validate_hex_symmetry
 from etazero.storage import load_json
 from .engine import Engine
 
@@ -38,7 +39,8 @@ class App:
             str(path.resolve().parent.parent.parent): dict(
                 id=str(path.resolve().parent.parent.parent), label=path.resolve().parent.parent.parent.name,
                 path=str(path.resolve().parent.parent.parent), algorithm=self.metadata[key].get('algorithm', 'alphazero'),
-                analysis_config=deepcopy(config['analysis']), opening=deepcopy(config.get('opening'))) for key, path in models.items()}
+                analysis_config=deepcopy(config['analysis']), opening=deepcopy(config.get('opening')),
+                hex_opening=deepcopy(config.get('hex_opening'))) for key, path in models.items()}
         self.discover_catalog = discover_catalog
         self.engine: Engine | None = None
         self.condition = Condition()
@@ -148,11 +150,17 @@ class App:
                 opening_kind = payload.get('opening', 'empty')
                 if run.get('opening') is not None:
                     config['opening'] = deepcopy(run['opening'])
+                if run.get('hex_opening') is not None:
+                    config['hex_opening'] = deepcopy(run['hex_opening'])
+                if payload['rule']=='hex': validate_hex_symmetry(config['analysis'])
+                if opening_kind=='balanced' and payload['rule']=='hex' and 'hex_opening' not in config:
+                    raise ValueError('所选配置缺少 match.cfg Hex 平衡开局参数')
                 if opening_kind == 'balanced' and 'opening' not in config:
                     raise ValueError('所选配置缺少 match.cfg 平衡开局参数')
+                opening_profile=config.get('hex_opening' if payload['rule']=='hex' else 'opening')
                 replacement = (self.engine is None or self.engine.process.poll() is not None or
                                selected != self.state['model'] or config['analysis'] != self.state['analysis_config'] or
-                               config.get('opening') != self.state['opening_config'])
+                               opening_profile != self.state['opening_config'])
                 engine = Engine(self.binary, self.models[selected], config) if replacement else self.engine
                 try:
                     if payload['size'] > engine.canvas:
@@ -174,7 +182,7 @@ class App:
                 self.publish(game=reply['state'], game_id=uuid4().hex, analysis=None, model=selected,
                              human=payload['human'], rule=payload['rule'], visits=payload['visits'],
                              mode=payload.get('mode', 'play'), analysis_config=deepcopy(config['analysis']),
-                             opening_kind=opening_kind, opening_config=deepcopy(config.get('opening')))
+                             opening_kind=opening_kind, opening_config=deepcopy(opening_profile))
             elif operation == 'play':
                 reply = self.engine.command(f"play {payload['action']}")
                 # Keep the last complete analysis visible until the next search succeeds.
