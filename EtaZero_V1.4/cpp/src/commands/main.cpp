@@ -444,6 +444,8 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
     } autocast(precision=="float16");
     auto observation=game.observation();const int canvas=game.canvas(),area=game.actions(),size=game.size();
     auto obs=torch::from_blob(observation.data(),{1,INPUT_PLANES,canvas,canvas},torch::kFloat32).to(device);
+    const bool hex_white=game.rule()==Rule::HEX && game.player()==-1;
+    if(hex_white)obs=obs.transpose(2,3).contiguous();
     auto globals=torch::from_blob(observation.data()+INPUT_PLANES*area,{1,GLOBAL_FEATURES},torch::kFloat32).to(device);
     auto network=model.attr("model").toModule();
     auto metadata=model.get_method("metadata")({}).toTuple();
@@ -455,6 +457,7 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
     auto logits=output.toTuple()->elements()[0].toTensor();
     if(logits.dim()!=3 || logits.size(0)!=1 || logits.size(1)<6 || logits.size(2)!=area)
         throw std::runtime_error("Web policy output shape mismatch");
+    if(hex_white)logits=logits.reshape({1,logits.size(1),canvas,canvas}).transpose(2,3).contiguous().reshape({1,logits.size(1),area});
     // Match the training domain: all on-board points, INCLUDING occupied cells.
     // Canonical orientation, temperature 1, without search optimism/noise/ensemble.
     logits=logits[0].narrow(0,0,6).reshape({6,canvas,canvas}).narrow(1,0,size).narrow(2,0,size)
@@ -523,7 +526,7 @@ int analysis_session(const Args& a,const Config& c) {
                     int timeout_ms=web_integer(words[5]);
                     if(timeout_ms<1 || timeout_ms>120000)throw std::runtime_error("Opening timeout must be in [1, 120000] ms");
                     OpeningConfig config(c);
-                    if(config.probability!=1 || config.rejection_probability_fallback>=1)
+                    if(replacement.rule()==Rule::HEX ? (config.hex_probability!=1 || config.hex_make_fair_probability!=1 || config.hex_min_accept_rate<=0) : (config.probability!=1 || config.rejection_probability_fallback>=1))
                         throw std::runtime_error("Balanced openings require probability one and a rejection fallback below one");
                     std::mt19937_64 random(seed);
                     auto started=std::chrono::steady_clock::now();
@@ -596,7 +599,7 @@ int match(const Args& a,const Config& c) {
     auto ea=evaluator(a,c,"match"),eb=evaluator(a,c,"match",true);
     const int size=a.integer("size"),canvas=c.integer("network.canvas");
     OpeningConfig opening(c);
-    if(opening.probability!=1 || opening.rejection_probability_fallback>=1)
+    if(parse_rule(a.get("rule"))==Rule::HEX ? (opening.hex_probability!=1 || opening.hex_make_fair_probability!=1 || opening.hex_min_accept_rate<=0) : (opening.probability!=1 || opening.rejection_probability_fallback>=1))
         throw std::runtime_error("Matches require balanced openings and a rejection fallback below one");
     struct Task {int id,generator,mask;uint64_t seed;bool generated;std::vector<int> moves;};
     std::vector<Task> tasks;std::set<int> ids;
