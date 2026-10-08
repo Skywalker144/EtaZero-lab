@@ -1,3 +1,4 @@
+from etazero.schema import GLOBALS
 """MuZero component checks, independent of the gated selfplay/learner runtime."""
 from config_samples import CONFIGS
 import copy
@@ -30,7 +31,7 @@ def inputs(device='cpu'):
     obs[1, 0] = 1
     obs[:, 1, 0, 0] = 1
     obs[:, 2, 1, 0] = 1
-    globals = torch.tensor([[0, 1, -1, 1, 1, .5]] * 2, dtype=torch.float32, device=device)
+    globals = torch.tensor([[0, 1, -1, 1, 1, .5, 0, 0]] * 2, dtype=torch.float32, device=device)
     return obs, globals
 
 
@@ -118,7 +119,7 @@ def test_independent_trunks_complete_heads_and_mask(dimensions, q, architecture)
         noisy[0, 1:, 5] = 1000
         noisy[0, 1:, :, 5] = -1000
         torch.testing.assert_close(model.representation(noisy, globals), model.representation(obs, globals), rtol=0, atol=0)
-        changed = globals.clone(); changed[:, -1] *= -1
+        changed = globals.clone(); changed[:, 5] *= -1
         assert not torch.equal(model.representation(obs, globals), model.representation(obs, changed))
 
 
