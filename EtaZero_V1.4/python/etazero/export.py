@@ -23,7 +23,7 @@ def example_inputs(canvas, size, rule, moves=()):
     obs[0,:size,:size] = 1
     obs[1] = board==player; obs[2] = board==-player
     globals = np.array([rule=="standard", rule=="renju", -player if rule=="renju" else 0,
-                        rule=="renju",0,0],np.float32)
+                        rule=="renju",0,0,rule=="hex",rule=="hex" and player==-1],np.float32)
     return obs, globals
 
 
