@@ -186,5 +186,16 @@
       "scripts/hex15x3/selfplay.cfg": "6c8a1b8c389cadf7a4a3782f9621e6e5d4129ad607b9d8114fb7320f0ffd16a8",
       "LICENSE": "f81d8b1bf34bdc67dee8690266b2f2559e48f16aabb87db5e408046af0d06dbc"
     }
+  },
+  "Mctx": {
+    "repository": "https://github.com/google-deepmind/mctx",
+    "commit": "428bfb7e1c931715cd3d74f9c65e9991afd86df8",
+    "sha256": {
+      "mctx/_src/action_selection.py": "6b4039bd6a436a5efa67cff6c74026016892f9fd6466f65a62b8b396f1c87b50",
+      "mctx/_src/qtransforms.py": "71b827f5b32b2edfd2ec67ed90f94b2d37f87ab5eb44b3290702ed178e354c99",
+      "mctx/_src/seq_halving.py": "a42351c2a800f9c13755ae03aea12f4ff3422c68779347a6d5516ceffc71faeb",
+      "mctx/_src/policies.py": "3892bf45b18631167a7c508bcb9c5eea269b97c08c97583cec69e95a8cd5d346",
+      "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
   }
 }
