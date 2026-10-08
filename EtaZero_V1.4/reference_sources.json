@@ -169,5 +169,22 @@
       "MuZero_V2/cpp/src/eval_main.cpp": "b4392bc696e34f2c3b37e8ab6763541f1dc54530c90c92a7fe6275d27f0e243b",
       "MuZero_V2/cpp/include/muzero/eval_session.h": "fcf2c512b311a62d5b82099476b1d4f46627afe63bd8f16d4b16a32d756d4383"
     }
+  },
+  "KataGomo_Hex2024": {
+    "repository": "https://github.com/hzyhhzy/KataGomo",
+    "branch": "Hex2024",
+    "commit": "4bbf953596e96a78daa2008811187a61381a886f",
+    "sha256": {
+      "cpp/game/gamelogic.cpp": "234b1d075bb760c62ab5fda0073da03f4fb6ea61da10564f6c789e39f23df698",
+      "cpp/game/randomopening.cpp": "efed8b11a4a5fd0ac240ed5479a7f0d476bc9ac36a8723017d83b1c49d0fa177",
+      "cpp/program/play.cpp": "19901c522324f7fa73ca5dd0b6447fd1427d8e494019f1adef74a3da68ac3460",
+      "cpp/program/playsettings.cpp": "b655043090aac009b374b44d92eaccfc0cf277c3a8b6f9417f9a6562da557f2c",
+      "cpp/neuralnet/nninputs.cpp": "a0944b1704c27556576793ac853e6e49f7eb9b1579e4438a50524381e51e5e48",
+      "cpp/neuralnet/nneval.cpp": "d32c3151e01924f0c833c03370ef6aa35e6cae1cae0f8d67ccc6b4bfdf06840a",
+      "cpp/dataio/trainingwrite.cpp": "5425390bf8f43a04a3c65f950bdf7982d0f118589d7a270e8f67045303c223b6",
+      "python/data_processing_pytorch.py": "5bd1e814da35183af60bacd2f3bc317a66600bc6251af2ba2d9f345bc89118bf",
+      "scripts/hex15x3/selfplay.cfg": "6c8a1b8c389cadf7a4a3782f9621e6e5d4129ad607b9d8114fb7320f0ffd16a8",
+      "LICENSE": "f81d8b1bf34bdc67dee8690266b2f2559e48f16aabb87db5e408046af0d06dbc"
+    }
   }
 }
