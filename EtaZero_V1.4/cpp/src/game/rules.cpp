@@ -1,6 +1,7 @@
 // Renju semantics adapted from MuZero_V2; see THIRD_PARTY.md.
 #include "etazero/rules.h"
 #include <set>
+#include <cstdint>
 #include <stdexcept>
 
 namespace etazero {
@@ -27,10 +28,32 @@ std::array<int, 4> Board::lengths(int action, int player) const {
     return result;
 }
 
+bool Board::hex_connected(int player) const {
+    if (player != 1 && player != -1) throw std::runtime_error("Invalid Hex player");
+    constexpr int dx[] = {0,1,1,0,-1,-1}, dy[] = {-1,-1,0,1,1,0};
+    std::vector<uint8_t> seen(size*size,0);
+    std::vector<int> pending;
+    for (int i=0;i<size;++i) {
+        int a=player==1?i:i*size;
+        if (cells[a]==player) {seen[a]=1;pending.push_back(a);}
+    }
+    while (!pending.empty()) {
+        int a=pending.back();pending.pop_back();int x=a%size,y=a/size;
+        if ((player==1?y:x)==size-1) return true;
+        for (int d=0;d<6;++d) {
+            int xx=x+dx[d],yy=y+dy[d];
+            if (xx<0 || xx>=size || yy<0 || yy>=size) continue;
+            int b=yy*size+xx;
+            if (!seen[b] && cells[b]==player) {seen[b]=1;pending.push_back(b);}
+        }
+    }
+    return false;
+}
+
 Rule parse_rule(const std::string& name) {
     for (int i = 0; i < static_cast<int>(std::size(RULE_NAMES)); ++i)
         if (name == RULE_NAMES[i]) return static_cast<Rule>(i);
-    throw std::runtime_error("Unknown Gomoku rule: " + name);
+    throw std::runtime_error("Unknown game rule: " + name);
 }
 
 namespace {
