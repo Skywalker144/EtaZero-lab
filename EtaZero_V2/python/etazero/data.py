@@ -43,6 +43,7 @@ def validate_raw(a, source="record", *, deep=True):
             raise ValueError(f"{source}: {message}")
     m = metadata(a)
     require(m.get('algorithm', 'alphazero') in ('alphazero', 'muzero'), 'unknown raw algorithm')
+    gumbel = m.get('root_search_algo', 'puct') == 'gumbel'
     muzero = m.get('algorithm') == 'muzero'
     extra = {'trajectory_policy', 'trajectory_q_values', 'trajectory_q_visits'} if muzero else set()
     require(set(a) == set(RAW_DTYPES) | extra, "raw fields do not match schema")
@@ -147,7 +148,8 @@ def validate_raw(a, source="record", *, deep=True):
             ((a['q_visits']>=0)&(a['q_visits']<=32000)).all(), 'invalid Q value/node visits')
     q_rows=np.repeat(np.arange(s),a['row_repeats'][samples])
     require(not a['q_values'][a['q_visits'][q_rows]==0].any(), 'Q value on unvisited child')
-    require(((a['policies'] > 0) <= (a['visits'] > 0)).all(), "policy target on unvisited action")
+    if not gumbel:
+        require(((a['policies'] > 0) <= (a['visits'] > 0)).all(), "policy target on unvisited action")
     require((a['opponent_policies'] >= 0).all() and (a['opponent_policies'].sum(1) > 0).all() and (a['opponent_policies'] <= 30000).all(),
             "invalid opponent policy target")
     require(np.isin(a['opponent_policy_weights'], [0, 1]).all(), "invalid opponent policy weight")
@@ -192,7 +194,7 @@ def validate_raw(a, source="record", *, deep=True):
             np.allclose(a['side_wdl'].sum(1), 1, atol=1e-5), 'invalid side WDL')
     require((a['side_policies'] >= 0).all() and (a['side_policies'] <= 30000).all() and
             (a['side_policies'].sum(1) > 0).all() and (a['side_visits'] >= 0).all() and
-            ((a['side_policies'] > 0) <= (a['side_visits'] > 0)).all(), 'invalid side policy/visits')
+            (gumbel or ((a['side_policies'] > 0) <= (a['side_visits'] > 0)).all()), 'invalid side policy/visits')
     require(np.isin(a['side_forbidden_input'], [0,1]).all(), 'invalid side forbidden flag')
     require((np.abs(a['side_q_values'].astype(np.int32))<=32000).all() and
             ((a['side_q_visits']>=0)&(a['side_q_visits']<=32000)).all(), 'invalid side Q value/node visits')
@@ -213,6 +215,7 @@ def validate_raw(a, source="record", *, deep=True):
                 (rule==2 or not observation[3:5].any()), 'invalid side forbidden perspective')
         legal = (mask & (observation[1]+observation[2]==0)).flatten().astype(bool)
         require(not a['side_visits'][i,~legal].any(), 'side visited masked action')
+        if gumbel:require(not a['side_policies'][i,~legal].any(), 'side policy on occupied/padded point')
         require(not a['side_q_visits'][i,~legal].any(), 'side Q visited masked action')
     sample_lookup = {int(index): row for row, index in enumerate(samples)}
     for i, size in enumerate(a["sizes"]):
@@ -261,6 +264,7 @@ def validate_raw(a, source="record", *, deep=True):
                 require(not a['trajectory_q_visits'][lo+j][~legal.astype(bool)].any(), 'MuZero trajectory Q visited masked action')
             if lo+j in sample_lookup:
                 require((a["visits"][sample_lookup[lo+j]][~legal.astype(bool)] == 0).all(), "search visited masked action")
+                if gumbel:require(not a['policies'][sample_lookup[lo+j]][~legal.astype(bool)].any(), 'policy on occupied/padded point')
                 require(not a['q_visits'][sample_lookup[lo+j]][~legal.astype(bool)].any(), 'Q visited masked action')
             board[y, x] = players[j]
             if lo+j in sample_lookup:

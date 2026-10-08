@@ -10,6 +10,7 @@ import shlex
 from pathlib import Path
 from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_hex_symmetry
 from .schema import RULES
+from .config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_search_combination
 
 ENGINE_FIELDS = dict(playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
@@ -18,6 +19,8 @@ ENGINE_FIELDS = dict(playout_doubling_advantage=float,playout_doubling_advantage
               use_fpu=boolean, fpu_reduction_max=float, root_fpu_reduction_max=float,
               fpu_parent_weight_by_visited_policy_pow=float, use_lcb=boolean,
               lcb_stdevs=float, min_visit_prop_for_lcb=float, policy_target_pruning=boolean, **SEARCH_PARAMETERS)
+ENGINE_FIELDS.update(root_search_algo=str, nonroot_search_algo=str,
+                     **{'gumbel_'+key: value for key, value in GUMBEL_FIELDS.items()})
 
 
 def load_engine_config(source, match=False, environ=None, *, umbrella=False):
@@ -115,6 +118,12 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
                     raw = "0"
                 else:
                     raw = defaults.get(key)
+            if raw is None and group == section:
+                if key in ('root_search_algo', 'nonroot_search_algo'):
+                    raw = 'puct'
+                elif key.startswith('gumbel_'):
+                    value = GUMBEL_DEFAULTS[key.removeprefix('gumbel_')]
+                    raw = str(0 if key == 'gumbel_noise_scale' else value).lower()
             if raw is None:
                 raise ValueError(f'Missing engine field: {group}.{key}')
             try:
@@ -126,6 +135,12 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
 
 def validate_engine_config(config, match=False):
     c = config['match' if match else 'analysis']
+    validate_search_combination(c.get('root_search_algo', 'puct'), c.get('nonroot_search_algo', 'puct'))
+    if c.get('root_search_algo') == 'gumbel':
+        validate_gumbel({key: c.get('gumbel_'+key, 0 if key=='noise_scale' else value)
+                         for key, value in GUMBEL_DEFAULTS.items()})
+        if c['use_graph_search'] or c['reuse_tree']:
+            raise ValueError('Gumbel requires use_graph_search=false and reuse_tree=false')
     for group, values in config.items():
         for key, value in values.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):

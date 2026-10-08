@@ -450,6 +450,7 @@ void RecordWriter::publish() {
          << ",\"shard_id\":" << quote(source_.attempt+":"+std::to_string(source_.worker)+":"+shard)
          << ",\"created_ns\":" << created << ",\"opening_failures\":[";
     for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<quote(b.opening_failures[i]);}meta<<"]";
+    if(source_.gumbel)meta<<",\"root_search_algo\":\"gumbel\",\"nonroot_search_algo\":"<<quote(source_.full_gumbel?"gumbel":"puct");
     if(source_.unroll_steps>0) {
         meta<<",\"algorithm\":\"muzero\",\"unroll_steps\":"<<source_.unroll_steps
             <<",\"root_policy_invalid_mass_sum\":["<<std::setprecision(17);

@@ -18,6 +18,28 @@ def row_target(value):
     return "all" if value.lower() == "all" else int(value)
 
 
+GUMBEL_FIELDS = dict(max_num_considered_actions=int, c_visit=float, c_scale=float,
+                     noise_scale=float, rescale_q_values=boolean, action_selection=str)
+GUMBEL_DEFAULTS = dict(max_num_considered_actions=16, c_visit=50., c_scale=.1,
+                       noise_scale=1., rescale_q_values=True, action_selection='gumbel')
+
+
+def validate_gumbel(c):
+    if (type(c['max_num_considered_actions']) is not int or not 1 <= c['max_num_considered_actions'] <= 625
+            or not math.isfinite(c['c_visit']) or c['c_visit'] < 0
+            or not math.isfinite(c['c_scale']) or c['c_scale'] <= 0
+            or not math.isfinite(c['noise_scale']) or c['noise_scale'] < 0
+            or c['action_selection'] not in ('gumbel', 'visit')):
+        raise ValueError('Invalid Gumbel candidate count, scaling or action selection')
+
+
+def validate_search_combination(root, nonroot):
+    if root not in ('puct', 'gumbel') or nonroot not in ('puct', 'gumbel'):
+        raise ValueError('Invalid algorithm/search enum')
+    if root == 'puct' and nonroot != 'puct':
+        raise ValueError('PUCT root + Gumbel nonroot is not an allowed project combination')
+
+
 # Each section belongs to exactly one file; baseline supplies every required key.
 # run_dir is optional and belongs only to the selected configuration directory.
 SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncertainty_exponent=float, uncertainty_max_weight=float, policy_optimism=float, root_policy_optimism=float, use_noise_pruning=boolean, noise_prune_utility_scale=float, noise_pruning_cap=float, use_graph_search=boolean, graph_search_catch_up_leak_prob=float, max_playouts=int, max_time=float, nn_randomize=boolean, nn_symmetry=int,
@@ -51,6 +73,7 @@ FIELDS = {
     "run": ("run", {"run_dir": str, "seed": int, "max_iteration": int,
                     "max_seconds": float, "cpu_threads": int}),
     "agent": ("run", {"algorithm": str, "root_search_algo": str, "nonroot_search_algo": str}),
+    "gumbel": ("selfplay", GUMBEL_FIELDS),
     "devices": ("run", {"train": str, "selfplay": str}),
     "environment": ("env", {"sizes": str, "size_weights": str, "rules": str, "rule_weights": str,
                               "forbidden_feature_dropout_prob": float}),
@@ -199,6 +222,8 @@ def load_config(directory, run_dir=None):
     values.update(_read(directory, local=True))
     config = {}
     for section, (_, fields) in FIELDS.items():
+        if section == 'gumbel' and values.get(('agent', 'root_search_algo')) != 'gumbel':
+            continue
         if section == 'muzero_training' and not any(s == section for s, _ in values):
             continue
         if section in ('muzero', 'unroll', 'muzero_training') and values.get(('agent', 'algorithm')) != 'muzero':
@@ -210,6 +235,9 @@ def load_config(directory, run_dir=None):
             if section=="reanalysis" and key!="use_reanalyze" and (section,key) not in values and not config[section]["use_reanalyze"]:
                 continue
             if (section, key) not in values:
+                if section == 'gumbel':
+                    config[section][key] = GUMBEL_DEFAULTS[key]
+                    continue
                 defaults = {("run", "run_dir"): "", ("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
                             ("policy_init", "policy_after"): "true", ("policy_init", "policy_on_failure"): "true"}
                 if (section,key) not in defaults:
@@ -305,13 +333,13 @@ def validate(c):
     a = c["agent"]
     if not 0 <= c["run"]["seed"] < 2**64:
         raise ValueError("Run seed must fit uint64")
-    if a["algorithm"] not in ("alphazero", "muzero") or any(
-            a[k] not in ("puct", "gumbel") for k in ("root_search_algo", "nonroot_search_algo")):
+    if a["algorithm"] not in ("alphazero", "muzero"):
         raise ValueError("Invalid algorithm/search enum")
-    if a["root_search_algo"] == "puct" and a["nonroot_search_algo"] == "gumbel":
-        raise ValueError("PUCT root + Gumbel nonroot is not an allowed project combination")
-    if any(a[k] != 'puct' for k in ('root_search_algo', 'nonroot_search_algo')):
-        raise ValueError("Selected algorithm/search combination is not implemented in this version")
+    validate_search_combination(a['root_search_algo'], a['nonroot_search_algo'])
+    if a['root_search_algo'] == 'gumbel':
+        validate_gumbel(c.setdefault('gumbel', GUMBEL_DEFAULTS.copy()))
+        if c['graph_search']['use_graph_search'] or c['search']['reuse_tree']:
+            raise ValueError('Gumbel requires use_graph_search=false and reuse_tree=false')
     if a['algorithm'] == 'muzero':
         from .muzero.network import network_config
         network_config(c)

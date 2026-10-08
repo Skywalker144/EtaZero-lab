@@ -161,8 +161,8 @@ def test_source_identity_excludes_sibling_run_data(tmp_path,monkeypatch):
 @pytest.mark.parametrize("algorithm,root,nonroot,message",[
     ("alphazero","puct","gumbel","not an allowed"),
     ("muzero","puct","puct","explicit muzero and unroll"),
-    ("alphazero","gumbel","puct","not implemented"),
-    ("alphazero","gumbel","gumbel","not implemented"),
+    ("alphazero","gumbel","puct","Gumbel requires"),
+    ("alphazero","gumbel","gumbel","Gumbel requires"),
 ])
 def test_combination_errors(config,algorithm,root,nonroot,message):
     config["agent"]={"algorithm":algorithm,"root_search_algo":root,"nonroot_search_algo":nonroot}

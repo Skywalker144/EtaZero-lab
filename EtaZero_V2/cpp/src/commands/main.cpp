@@ -5,6 +5,7 @@
 #include "etazero/search_limits.h"
 #include "etazero/sampling.h"
 #include "etazero/muzero/search.h"
+#include "etazero/gumbel_search.h"
 #include "etazero/muzero/torch_backend.h"
 #include <csignal>
 #include <charconv>
@@ -158,7 +159,32 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
                                           c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
                                           std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0));
 }
-std::unique_ptr<GameSearch> search_for(InferenceService& evaluator,SearchSettings settings,uint64_t seed) {
+std::unique_ptr<GameSearch> search_for(InferenceService& evaluator,SearchSettings settings,uint64_t seed,const Config& c,const std::string& mode) {
+    std::string prefix=mode=="selfplay"?"agent":mode;
+    std::string root=c.contains(prefix+".root_search_algo")?c.text(prefix+".root_search_algo"):"puct";
+    std::string nonroot=c.contains(prefix+".nonroot_search_algo")?c.text(prefix+".nonroot_search_algo"):"puct";
+    if((root!="puct"&&root!="gumbel")||(nonroot!="puct"&&nonroot!="gumbel")||(root=="puct"&&nonroot!="puct"))
+        throw std::runtime_error("Invalid root/nonroot search combination");
+    if(root=="gumbel") {
+        GumbelSettings g;auto key=[&](const std::string& name){return mode=="selfplay"?"gumbel."+name:mode+".gumbel_"+name;};
+        if(c.contains(key("max_num_considered_actions")))g.max_num_considered_actions=c.integer(key("max_num_considered_actions"));
+        if(c.contains(key("c_visit")))g.c_visit=c.number(key("c_visit"));
+        if(c.contains(key("c_scale")))g.c_scale=c.number(key("c_scale"));
+        g.noise_scale=mode=="selfplay"?1:0;
+        if(c.contains(key("noise_scale")))g.noise_scale=c.number(key("noise_scale"));
+        if(c.contains(key("rescale_q_values")))g.rescale_q_values=c.boolean(key("rescale_q_values"));
+        if(c.contains(key("action_selection"))) {
+            auto behavior=c.text(key("action_selection"));
+            if(behavior!="gumbel"&&behavior!="visit")throw std::runtime_error("Unknown Gumbel action selection");
+            g.sample_visits=behavior=="visit";
+        }
+        if(auto mu=dynamic_cast<muzero::Evaluator*>(&evaluator)) {
+            if(nonroot=="gumbel")return std::make_unique<muzero::GumbelSearch<true>>(*mu,settings,g,seed);
+            return std::make_unique<muzero::GumbelSearch<false>>(*mu,settings,g,seed);
+        }
+        if(nonroot=="gumbel")return std::make_unique<GumbelSearch<true>>(evaluator,settings,g,seed);
+        return std::make_unique<GumbelSearch<false>>(evaluator,settings,g,seed);
+    }
     if(auto mu=dynamic_cast<muzero::Evaluator*>(&evaluator))return std::make_unique<muzero::Search>(*mu,settings,seed);
     return std::make_unique<Search>(evaluator,settings,seed);
 }
@@ -186,6 +212,7 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
     bool random=a.get("evaluator","network")=="random";
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
     if(c.text("agent.algorithm")=="muzero")source.unroll_steps=c.integer("unroll.steps");
+    source.gumbel=c.text("agent.root_search_algo")=="gumbel";source.full_gumbel=c.text("agent.nonroot_search_algo")=="gumbel";
     RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),
                         c.number("writer.first_file_min_random_proportion"),std::stoull(a.get("seed"))^0xA0761D6478BD642FULL);
     std::vector<int> sizes; std::vector<Rule> rules; std::vector<double> sw, rw;
@@ -198,7 +225,7 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
     std::mutex error_mutex; std::exception_ptr error;
     auto loop = [&] {
         try {
-            auto search_owner=search_for(*eval,settings(c,"selfplay"),0);auto& search=*search_owner;
+            auto search_owner=search_for(*eval,settings(c,"selfplay"),0,c,"selfplay");auto& search=*search_owner;
             while (!stop_requested && !failure) {
                 int id = next.fetch_add(1); if (id >= count) break;
                 uint64_t game_seed = mix(seed+id); std::mt19937_64 rng(game_seed);
@@ -360,7 +387,7 @@ int analyze(const Args& a, const Config& c, bool raw) {
         std::cout<<']';
     }
     if (!raw) {
-        auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
+        auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");auto& search=*search_owner;
         auto result=analyze_position(search,c,game);
         std::cout << ",\"action\":" << result.action << ",\"value\":" << result.value << ",\"simulations\":" << result.simulations << ",\"root_visits\":" << result.root_visits
                   << ",\"initial_visits\":" << result.initial_visits << ",\"new_playouts\":" << result.new_playouts << ",\"seconds\":" << result.seconds
@@ -503,7 +530,7 @@ void web_analysis(const SearchResult& result,const Game& game,double seconds,uin
 int analysis_session(const Args& a,const Config& c) {
     torch::jit::Module web_model;
     auto eval=evaluator(a,c,"analysis",false,&web_model);
-    auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")));auto& search=*search_owner;
+    auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");auto& search=*search_owner;
     std::optional<Game> game;
     std::optional<WebOpening> opening;
     std::vector<int> played;
@@ -661,9 +688,9 @@ int match(const Args& a,const Config& c) {
         Game game(size,canvas,parse_rule(a.get("rule")));for(int action:task.moves)game.play(action);
         game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
         auto start=std::chrono::steady_clock::now();uint64_t seed=task.seed^(0xd1b54a32d192ed03ULL*(color+1));
-        auto sa_owner=search_for(*ea,settings(c,"match"),mix(seed));auto& sa=*sa_owner;
+        auto sa_owner=search_for(*ea,settings(c,"match"),mix(seed),c,"match");auto& sa=*sa_owner;
         std::unique_ptr<GameSearch> sb;
-        if(!same_bot)sb=search_for(*eb,settings(c,"match"),mix(seed^0x9e3779b97f4a7c15ULL));
+        if(!same_bot)sb=search_for(*eb,settings(c,"match"),mix(seed^0x9e3779b97f4a7c15ULL),c,"match");
         std::vector<int> actions=task.moves;std::vector<int64_t> visits,initial_visits,new_playouts;
         while(!game.finished()) {
             if(stop_requested)return;
@@ -706,8 +733,11 @@ int main(int argc,char** argv) {
         if(argc<2)throw std::runtime_error("Expected selfplay, worker, analysis, infer or match");
         std::string mode=argv[1]; Args args(argc,argv); Config config(args.get("config"));
         if(mode=="selfplay" || mode=="worker" || mode=="infer")
-            if((config.text("agent.algorithm")!="alphazero" && config.text("agent.algorithm")!="muzero") || config.text("agent.root_search_algo")!="puct" || config.text("agent.nonroot_search_algo")!="puct")
-                throw std::runtime_error("Native executable requires AlphaZero or MuZero with PUCT/PUCT");
+            if((config.text("agent.algorithm")!="alphazero" && config.text("agent.algorithm")!="muzero") ||
+               (config.text("agent.root_search_algo")!="puct" && config.text("agent.root_search_algo")!="gumbel") ||
+               (config.text("agent.nonroot_search_algo")!="puct" && config.text("agent.nonroot_search_algo")!="gumbel") ||
+               (config.text("agent.root_search_algo")=="puct" && config.text("agent.nonroot_search_algo")!="puct"))
+                throw std::runtime_error("Invalid native algorithm/search combination");
         torch::set_num_threads(config.integer(mode=="analysis"?"analysis.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
         if(mode=="selfplay") {ForkPool forks;auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service,forks);service->finish();return code;}

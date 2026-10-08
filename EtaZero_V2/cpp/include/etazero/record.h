@@ -50,7 +50,7 @@ void apply_training_weights(FinishedGame& game,double policy_factor,double value
 // Source trainingwrite.cpp's float32 stochastic rounding, without Go score Q.
 int16_t quantize_q_value(float winloss,std::mt19937_64& rng);
 size_t first_file_row_limit(size_t maximum,double minimum_proportion,double uniform);
-struct Source { std::string run, attempt, model, config, source; int iteration, worker; int unroll_steps=0; };
+struct Source { std::string run, attempt, model, config, source; int iteration, worker; int unroll_steps=0; bool gumbel=false,full_gumbel=false; };
 std::string quote(const std::string& value);
 class RecordWriter {
     struct Buffers;
