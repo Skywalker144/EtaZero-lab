@@ -113,6 +113,8 @@ FIELDS = {
     'opening': ("selfplay", {'probability': float, 'avg_dist_factor': float, 'balance_exponent': float,
                              'rejection_probability': float, 'rejection_probability_fallback': float,
                              'max_tries': int}),
+    'hex_opening': ("selfplay", {'probability': float, 'make_fair_probability': float,
+                                 'balance_exponent': float, 'min_accept_rate': float}),
     'policy_init': ("selfplay", {'policy_init': boolean, 'policy_after': boolean,
                                  'policy_on_failure': boolean, 'policy_init_mean': float,
                                  'policy_temperature': float}),
@@ -244,6 +246,18 @@ def csv(value, cast=str):
     return [cast(x.strip()) for x in value.split(",") if x.strip()]
 
 
+def validate_hex_opening(o, *, match=False):
+    if any(not math.isfinite(v) for v in o.values()) or any(not 0<=o[k]<=1 for k in ('probability','make_fair_probability')) or not 0<=o['balance_exponent']<=100 or not 0<o['min_accept_rate']<=1:
+        raise ValueError('Invalid Hex opening gates, exponent or minimum acceptance rate')
+    if match and (o['probability']!=1 or o['make_fair_probability']!=1):
+        raise ValueError('Hex matches require both balanced opening probabilities to be one')
+
+
+def validate_hex_symmetry(c):
+    if not 1<=c['root_num_symmetries_to_sample']<=2 or not 0<=c['nn_symmetry']<2:
+        raise ValueError('Hex supports two symmetries: identity=0, rotation180=1')
+
+
 # Lower bounds belong to the module that consumes each field.
 NUMERIC_MINIMUMS = {
     'run': (('cpu_threads',), ('seed', 'max_iteration', 'max_seconds')),
@@ -278,6 +292,7 @@ NUMERIC_MINIMUMS = {
     'temperature': (('nn_policy_temperature', 'root_policy_temperature_early', 'root_policy_temperature', 'temperature_halflife'), ('temperature', 'final_temperature', 'temperature_only_below_prob')),
     'dirichlet_noise': (('dirichlet_total_concentration',), ('noise_fraction',)),
     'opening': (('max_tries',), ('probability', 'avg_dist_factor', 'balance_exponent', 'rejection_probability', 'rejection_probability_fallback')),
+    'hex_opening': (('min_accept_rate',), ('probability', 'make_fair_probability', 'balance_exponent')),
     'policy_init': (('policy_temperature',), ('policy_init_mean',)),
     'surprise_weighting': ((), ('policy_surprise_data_weight', 'value_surprise_data_weight')),
     'parallelism': (('game_threads', 'search_threads'), ()),
@@ -352,6 +367,9 @@ def validate(c):
         weights = csv(env[label + "_weights"], float)
         if len(weights) != len(entries) or any(not math.isfinite(x) or x < 0 for x in weights) or not any(x > 0 for x in weights):
             raise ValueError(f"Invalid {label} weights")
+    validate_hex_opening(c['hex_opening'])
+    if 'hex' in rules and csv(env['rule_weights'],float)[rules.index('hex')]>0:
+        validate_hex_symmetry(c['symmetry'])
     if c['dirichlet_noise']['noise_fraction'] > 1 or c['environment']['forbidden_feature_dropout_prob'] > 1:
         raise ValueError("Noise fraction and feature dropout must be <= 1")
     if c['writer']['first_file_min_random_proportion'] > 1:

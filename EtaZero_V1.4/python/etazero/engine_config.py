@@ -8,7 +8,8 @@ import math
 import os
 import shlex
 from pathlib import Path
-from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters
+from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_hex_symmetry
+from .schema import RULES
 
 ENGINE_FIELDS = dict(playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
@@ -27,8 +28,14 @@ def load_engine_config(source, match=False, environ=None, *, umbrella=False):
 
 def load_match_opening_config(source, environ=None, *, umbrella=False):
     """Read match's opening alone, without imposing match search or game budgets."""
-    opening = _load_profile(source, True, environ, umbrella=umbrella, groups=('opening',))['opening']
-    validate_match_opening(opening)
+    profiles = _load_profile(source, True, environ, umbrella=umbrella, groups=('opening',))
+    validate_match_opening(profiles['opening'])
+    return profiles['opening']
+
+
+def load_match_hex_opening_config(source, environ=None, *, umbrella=False):
+    opening = _load_profile(source, True, environ, umbrella=umbrella, groups=('hex_opening',))['hex_opening']
+    validate_hex_opening(opening,match=True)
     return opening
 
 
@@ -44,6 +51,7 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
     fields = {section: dict(ENGINE_FIELDS, **({'games': int, 'game_threads': int} if match else {}))}
     if match:
         fields['opening'] = {**FIELDS['opening'][1], **FIELDS['policy_init'][1]}
+        fields['hex_opening'] = FIELDS['hex_opening'][1]
     values, common = {}, {}
 
     def read(path, ancestors=(), *, local=False):
@@ -96,7 +104,7 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
             continue
         result[group] = {}
         for key, convert in keys.items():
-            override = prefix+('OPENING_' if group == 'opening' else '')+key.upper()
+            override = prefix+((group.upper()+'_') if group in ('opening','hex_opening') else '')+key.upper()
             raw = values.get((group, key), common.get(key) if group == section else None)
             if group == section and key in ENGINE_FIELDS:
                 raw = env.get('ENGINE_'+key.upper(), raw)
@@ -125,7 +133,7 @@ def validate_engine_config(config, match=False):
                     raise ValueError(f'Invalid {group}.{key}')
     if not 0 <= c['seed'] < 2**64 or not 5 <= c['board_size'] <= 25:
         raise ValueError('Invalid engine seed or board size')
-    if c['rule'] not in ('freestyle', 'standard', 'renju'):
+    if c['rule'] not in RULES:
         raise ValueError('Invalid engine rule')
     if not 1 <= c['visits'] <= 2**31-1 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','queue_capacity')) or c['c_puct'] <= 0:
         raise ValueError('Engine requires visits >= 1 and positive execution/search sizes')
@@ -134,6 +142,7 @@ def validate_engine_config(config, match=False):
     if not 0<=c['playout_doubling_advantage']<=math.log2(100) or c['playout_doubling_advantage_player'] not in ('black','white'):
         raise ValueError('Invalid engine PDA condition')
     validate_search_parameters(c)
+    if c['rule']=='hex': validate_hex_symmetry(c)
     if c['device'] != 'cpu' and not (c['device'].startswith('cuda:') and c['device'][5:].isdigit()):
         raise ValueError('Engine device must be cpu or cuda:<index>')
     if c['inference_precision'] not in ('auto', 'float32', 'float16') or (c['device'] == 'cpu' and c['inference_precision'] == 'float16'):
@@ -141,7 +150,8 @@ def validate_engine_config(config, match=False):
     if match:
         if c['games'] < 4 or c['games'] % 4 or c['game_threads'] < 1:
             raise ValueError('Match games must be a positive multiple of four')
-        validate_match_opening(config['opening'])
+        if c['rule']=='hex': validate_hex_opening(config['hex_opening'],match=True)
+        else: validate_match_opening(config['opening'])
 
 
 def validate_match_opening(o):
