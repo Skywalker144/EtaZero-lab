@@ -1,3 +1,4 @@
+#include "etazero/schema.h"
 // Development parity probe; deliberately not an application search/runtime path.
 #include "etazero/muzero/torch_backend.h"
 #include "etazero/schema.h"
@@ -37,7 +38,7 @@ int main(int argc,char** argv) {
         auto shared=std::make_shared<etazero::PreparedModel>(std::move(detected));
         TorchBackend backend("unused",argv[2],6,2,argv[3],shared);
         TorchBackend other(std::string(argv[1])+".must-not-be-opened",argv[2],6,2,argv[3],shared);
-        std::vector<std::vector<float>> obs(2,std::vector<float>(5*36+6,0));
+        std::vector<std::vector<float>> obs(2,std::vector<float>(etazero::INPUT_PLANES*36+etazero::GLOBAL_FEATURES,0));
         for(int i=0;i<2;++i) {
             for(int y=0;y<5+i;++y)for(int x=0;x<5+i;++x)obs[i][y*6+x]=1;
             obs[i][36+0]=1;obs[i][72+6]=1;
