@@ -1,6 +1,6 @@
 # EtaZero V2
 
-EtaZero 面向 Freestyle、Standard、Renju 五子棋及 Hex。支持 AlphaZero / PUCT 与 MuZero / PUCT。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 组合尚未实现，配置检查明确拒绝。
+EtaZero 面向 Freestyle、Standard、Renju 五子棋及 Hex。支持 AlphaZero / MuZero 的 PUCT 与 Gumbel 搜索。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 根配 PUCT 或论文非根选点，详见 [Gumbel](docs/gumbel.md)。
 
 训练按完整轮次执行自对弈 → shuffle → learner → 模型发布。各阶段内部支持并行对局、GPU 组批与 CUDA Graph 推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
 
@@ -27,6 +27,8 @@ CONFIG_DIR=configs/baseline bash scripts/run.sh
 bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照单遍限制；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
 
 MuZero 的网络、展开训练与搜索约束见 [MuZero](docs/muzero.md)。
+
+Gumbel 起始配置为 `baseline_gumbel`、`muzero_gumbel`、`baseline_gumbel_hex` 和 `muzero_gumbel_hex`，分别继承对应模型和规则的配置。根与非根算法独立选择，参数与使用方式见 [Gumbel](docs/gumbel.md)。
 
 ## 续训与评估
 
@@ -86,7 +88,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#alphazero) |
-| 查看算法组合、公共边界和后续 Gumbel 设计 | [算法组合](docs/algorithms.md#算法与搜索组合)、[后续接入](docs/algorithms.md#算法接口与后续设计) |
+| 查看算法组合、公共边界和 Gumbel | [算法组合](docs/algorithms.md#算法与搜索组合)、[算法接口](docs/algorithms.md#算法接口)、[Gumbel](docs/gumbel.md) |
 | 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
 | 查看 V0 历史对齐范围、网络映射和验收证据 | [V0 核查记录](../EtaZero.md#alignment-targets)、[V0 实施记录](../plan.md) |
 | 追溯 V0 工程对齐与分批验收 | [V0 工程核查](../EtaZero.md#engineering-audit)、[V0 验收记录](../plan.md) |

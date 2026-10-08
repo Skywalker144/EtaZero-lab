@@ -1,6 +1,6 @@
 # 算法与搜索设计
 
-本文描述当前 AlphaZero 的算法语义和后续算法边界。运行架构、数据保存与验收见 [运行实现](implementation.md)。AlphaZero / PUCT 和 MuZero / PUCT 已实现，Gumbel 仍属后续设计，网络规模、训练参数与正式实验方案由用户确定。
+本文描述当前 AlphaZero 的算法语义和公共算法边界。运行架构、数据保存与验收见 [运行实现](implementation.md)。AlphaZero / PUCT 和 MuZero / PUCT 已实现，Gumbel 的四个组合已实现，见 [Gumbel](gumbel.md)，网络规模、训练参数与正式实验方案由用户确定。
 
 ## 算法与搜索组合
 
@@ -9,14 +9,14 @@
 | algorithm | root_search_algo | nonroot_search_algo | 目标能力 | 当前状态 |
 |---|---|---|---|---|
 | alphazero | puct | puct | AlphaZero | 已实现 |
-| alphazero | gumbel | puct | Gumbel 根搜索 + PUCT 非根搜索 | 后续实现 |
-| alphazero | gumbel | gumbel | Gumbel 根搜索 + 改进策略非根搜索 | 后续实现 |
+| alphazero | gumbel | puct | Gumbel 根搜索 + PUCT 非根搜索 | 已实现 |
+| alphazero | gumbel | gumbel | Gumbel 根搜索 + 改进策略非根搜索 | 已实现 |
 | muzero | puct | puct | MuZero | 已实现，见 [MuZero](muzero.md) |
-| muzero | gumbel | puct | Gumbel 根搜索 + PUCT 非根搜索 | 后续实现 |
-| muzero | gumbel | gumbel | Gumbel 根搜索 + 改进策略非根搜索 | 后续实现 |
+| muzero | gumbel | puct | Gumbel 根搜索 + PUCT 非根搜索 | 已实现 |
+| muzero | gumbel | gumbel | Gumbel 根搜索 + 改进策略非根搜索 | 已实现 |
 | 任一 | puct | gumbel | 本项目不允许的组合 | 始终拒绝 |
 
-最后一行是用户确定的项目组合约束，不表述为数学上不可能。合法但尚未实现的组合，应报告未实现能力；非法组合应报告组合错误。两者均在启动 worker、分配大块显存或创建训练产物前拦截。
+最后一行是用户确定的项目组合约束，不表述为数学上不可能。不允许的组合及 Gumbel 的图共享/树复用配置在启动时拒绝。
 
 配置格式的定义位置见 [配置组织](implementation.md#配置组织)。选择 Gumbel 根搜索同时选择其根动作决策及训练策略目标，不能只把选点公式换掉而仍隐式沿用 AlphaZero 的目标生成。
 
@@ -253,7 +253,7 @@ Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络�
 
 期望权重可大于 1，按 `floor(weight)+Bernoulli(frac(weight))` 随机取整，只执行一次并保存 `row_repeats`。训练视图按该次数重复样本；当前 policy、opponent policy 与 visits 仅保存正次数位置，每个位置一份，通过 `sample_indices` 对应完整轨迹。零次数位置保留轨迹与轻量诊断；其 policy 若作为采中前一手的 opponent 目标，仍随前一手保存。shuffle 不重新抽样这些权重，训练 loss 不再额外乘同一权重。replay、窗口和产样预算按实际重复后的行数计数，因此不会把大量 cheap 行当作完整监督。随机取整使用每局 RNG；原始权重、两种 surprise、网络/搜索 WDL、cheap 标记及实际次数均保存供核对。
 
-## 算法接口与后续设计
+## 算法接口
 
 ### 公共边界
 
@@ -267,7 +267,7 @@ Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络�
 
 当前 AlphaZero 搜索执行器负责访问统计、并行、预算和回传调用；[SearchState / AlphaZeroState](../cpp/include/etazero/algorithm.h) 负责真实状态、转移和叶推理。MuZero 使用独立的 latent 搜索与推理请求实现，按语义复用数学函数，不将 latent 塞入 AlphaZero 节点。数据服务保留真实轨迹，但 AlphaZero 的采样搜索数组压缩与单行训练视图不适用于 MuZero 连续展开。MuZero 为连续展开保留所有后续目标，具体行为见 [MuZero](muzero.md)。
 
-`SearchResult` 应区分实际动作、训练策略目标、根价值、访问统计和实际预算。Gumbel 接入后允许其训练目标与访问频率不同，不能把公共接口命名为“visit policy”后强制所有算法共用。
+`SearchResult` 区分实际动作、训练策略目标、根价值、访问统计和实际预算。Gumbel 的训练目标可以与访问频率不同，不能把公共接口命名为“visit policy”后强制所有算法共用。
 
 ### MuZero
 
@@ -285,6 +285,4 @@ Gumbel 的根机制覆盖 Gumbel-Top-k 候选、Sequential Halving 预算分配�
 
 根为 Gumbel、非根保留 PUCT 是本项目支持的组合；论文附录 Figure 7 比较了保留原非根选点和使用新非根选点的版本。切换非根策略不能把根训练目标退回访问频率目标。[论文附录 Figure 7](https://davidstarsilver.wordpress.com/wp-content/uploads/2025/04/gumbel-alphazero.pdf#page=16)
 
-后续实现参考作者团队的 [Mctx action selection](https://github.com/google-deepmind/mctx/blob/main/mctx/_src/action_selection.py)、[Q transforms](https://github.com/google-deepmind/mctx/blob/main/mctx/_src/qtransforms.py) 和 [policies](https://github.com/google-deepmind/mctx/blob/main/mctx/_src/policies.py)，实施时固定所用提交。候选不足、极小预算、轮次余数、并列分数和非法动作的处理都属于完整移植范围，不能仅增加一个 Gumbel 采样步骤就宣称算法完成。
-
-实现阶段分别验收根调度、Q completion、改进策略目标、非根策略及其与 AlphaZero / MuZero 模型的组合。实验收益和各组合的比较方案由用户安排。
+实现、固定参考、预算舍入、并行适配、训练目标和配置边界维护于 [Gumbel](gumbel.md)。根调度、Q completion、非根策略及 AZ/MZ 组合分别验收；实验收益和各组合比较由用户安排。

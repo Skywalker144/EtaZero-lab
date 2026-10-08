@@ -6,7 +6,7 @@ MuZero 使用独立的 latent 搜索、initial/recurrent 推理组批及轨迹�
 CONFIG_DIR=configs/muzero bash scripts/run.sh
 ```
 
-该配置使用 ResNet 主干和普通 AdamW，继承 baseline 的训练预算及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 搜索未实现，对应组合明确报错。
+该配置使用 ResNet 主干和普通 AdamW，继承 baseline 的训练预算及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 根及两种非根策略见 [Gumbel](gumbel.md)，沿用同一 latent 推理与展开训练。
 
 展开后的训练行更大，名义训练分片大小由 [MuZero train.cfg](../configs/muzero/train.cfg) 覆盖；派生配置按配置继承规则读取这些字段。shuffle 保留 baseline 的 worker 数和总数组内存预算，按行大小规划有效桶大小。
 

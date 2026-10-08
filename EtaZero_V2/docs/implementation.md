@@ -1,6 +1,6 @@
 # 运行框架与数据链路
 
-本文说明 AlphaZero 与 MuZero 共用的逐轮运行管理和数据基础设施。下述真实棋盘搜索与单状态数据布局属于 AlphaZero；MuZero 的独立 latent 推理、序列布局和训练差异见 [MuZero](muzero.md)。算法语义见 [algorithms.md](algorithms.md)，Gumbel 尚未实现。
+本文说明 AlphaZero 与 MuZero 共用的逐轮运行管理和数据基础设施。下述真实棋盘搜索与单状态数据布局属于 AlphaZero；MuZero 的独立 latent 推理、序列布局和训练差异见 [MuZero](muzero.md)。算法语义见 [algorithms.md](algorithms.md)，Gumbel 的独立搜索策略与目标适配见 [Gumbel](gumbel.md)。
 
 ## 参考来源与边界
 
