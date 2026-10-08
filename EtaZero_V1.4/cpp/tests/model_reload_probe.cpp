@@ -1,3 +1,4 @@
+#include "etazero/schema.h"
 #include "etazero/torch_backend.h"
 #include "etazero/muzero/torch_backend.h"
 #include <ATen/Parallel.h>
@@ -22,7 +23,7 @@ int main(int argc,char** argv) {
         if(argc<6)throw std::runtime_error("Usage: model_reload_probe ALGORITHM DEVICE PRECISION MODELS...");
         at::set_num_threads(1);std::cout<<std::setprecision(10);
         auto prepared=std::make_shared<etazero::PreparedModel>();
-        std::vector<std::vector<float>> obs(5,std::vector<float>(5*36+6));
+        std::vector<std::vector<float>> obs(5,std::vector<float>(etazero::INPUT_PLANES*36+etazero::GLOBAL_FEATURES));
         etazero::InferenceInputs inputs;
         for(int i=0;i<5;++i) {
             for(int y=0;y<6;++y)for(int x=0;x<6;++x)obs[i][y*6+x]=1;
