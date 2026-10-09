@@ -20,7 +20,7 @@ from .runtime import verify_build
 from .storage import atomic_write, load_json, run_lock, save_json, sha256, sync_directory
 
 
-ELO_FIELDS = {'stride': int, 'neighbors': int, 'cross_seconds': float,
+ELO_FIELDS = {'sample_seconds': float, 'neighbors': int, 'cross_seconds': float,
               'final_cross': boolean, 'games_per_pair': int, 'bootstrap_samples': int,
               'anchor': str, 'pair_workers': int}
 
@@ -51,13 +51,14 @@ def load_elo_config(directory, environ=None, overrides=None):
     if set(values) != set(ELO_FIELDS):
         raise ValueError('Missing or unknown Elo configuration fields')
     settings = {key: convert(str(values[key])) for key, convert in ELO_FIELDS.items()}
-    for key in ('stride', 'neighbors', 'pair_workers'):
+    for key in ('neighbors', 'pair_workers'):
         if settings[key] < 1:
             raise ValueError(f'elo.{key} must be positive')
     if settings['bootstrap_samples'] < 2:
         raise ValueError('elo.bootstrap_samples must be at least two')
-    if not math.isfinite(settings['cross_seconds']) or settings['cross_seconds'] <= 0:
-        raise ValueError('elo.cross_seconds must be finite and positive')
+    for key in ('sample_seconds', 'cross_seconds'):
+        if not math.isfinite(settings[key]) or settings[key] <= 0:
+            raise ValueError(f'elo.{key} must be finite and positive')
     PairStore(Path('.'), settings['games_per_pair'])
     return settings
 
@@ -92,11 +93,11 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
     pinned = load_json(anchor_path) if anchor_path.exists() else None
     anchor = settings['anchor'] or (pinned['id'] if pinned else '')
     players = discover_players(Path(data).resolve() if data is not None else directory,
-                               stride=settings['stride'], arms=roots, include_first=False,
+                               sample_seconds=settings['sample_seconds'], arms=roots, include_first=False,
                                required_ids=(anchor,) if anchor else ())
     native_config(config, players)
     schedule = build_schedule(players, settings['neighbors'],
-                              cross_seconds=settings['cross_seconds'], stride=settings['stride'],
+                              cross_seconds=settings['cross_seconds'], sample_seconds=settings['sample_seconds'],
                               final_cross=settings['final_cross'])
     if not anchor:
         reference = [p for p in players if p.arm == players[0].arm]
@@ -110,7 +111,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
     manifest = {'version': 1, 'players': [asdict(p) for p in players], 'config': config,
                 'binary_sha256': verify_build(Path(binary)), 'games_per_pair': settings['games_per_pair'],
                 'anchor': anchor, 'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule],
-                'sampling': {key: settings[key] for key in ('stride', 'neighbors', 'cross_seconds', 'final_cross')},
+                'sampling': {key: settings[key] for key in ('sample_seconds', 'neighbors', 'cross_seconds', 'final_cross')},
                 'execution': {'pair_workers': settings['pair_workers'],
                               'cuda_visible_devices': str(gpu) if gpu is not None else
                               (os.environ if environ is None else environ).get('CUDA_VISIBLE_DEVICES')}}
