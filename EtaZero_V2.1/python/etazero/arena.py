@@ -50,9 +50,21 @@ def save_manifest(path: Path, manifest: dict) -> None:
     write_json(path, manifest)
 
 
+def time_sample_indices(times: list[float], sample_seconds: float) -> list[int]:
+    """Nearest published model to each covered time target, with earlier ties."""
+    if not math.isfinite(sample_seconds) or sample_seconds <= 0:
+        raise ValueError('Sample seconds must be finite and positive')
+    selected = set()
+    for index in range(1, math.floor(times[-1] / sample_seconds)+1):
+        target = index * sample_seconds
+        selected.add(min(range(len(times)), key=lambda i: (abs(times[i]-target), i)))
+    return sorted(selected)
+
+
 def discover_players(root: Path, stride: int = 1, *,
                      arms: list[tuple[str, Path]] | None = None,
-                     include_first: bool = True, required_ids: tuple[str, ...] = ()) -> list[Player]:
+                     include_first: bool = True, required_ids: tuple[str, ...] = (),
+                     sample_seconds: float | None = None) -> list[Player]:
     if stride < 1:
         raise ValueError('Stride must be positive')
     players = []
@@ -81,11 +93,15 @@ def discover_players(root: Path, stride: int = 1, *,
             raise ValueError(f'Committed time does not match state: {arm}')
         if not rows:
             raise ValueError(f'Arm has no committed models: {arm}')
-        for row in rows:
+        selected = (set(time_sample_indices([row['elapsed_seconds'] for row in rows], sample_seconds))
+                    if sample_seconds is not None else
+                    {i for i, row in enumerate(rows) if row['iteration'] % stride == 0})
+        selected.add(len(rows)-1)
+        if include_first:
+            selected.add(0)
+        for i, row in enumerate(rows):
             number = row['iteration']
-            if (number != rows[-1]['iteration'] and number % stride
-                    and not (include_first and number == rows[0]['iteration'])
-                    and f'{name}:{number:08d}' not in required_ids):
+            if i not in selected and f'{name}:{number:08d}' not in required_ids:
                 continue
             model, info = model_info(arm/row['model']['path'])
             if info != row['model']:
@@ -99,7 +115,7 @@ def discover_players(root: Path, stride: int = 1, *,
 
 def build_schedule(players: list[Player], neighbors: int, *,
                    final_cross: bool = False, cross_seconds: float | None = None,
-                   stride: int = 1) -> list[tuple[str, str]]:
+                   stride: int = 1, sample_seconds: float | None = None) -> list[tuple[str, str]]:
     if neighbors < 1:
         raise ValueError('Neighbors must be positive')
     if not players or len({p.id for p in players}) != len(players):
@@ -117,12 +133,19 @@ def build_schedule(players: list[Player], neighbors: int, *,
                 edges.add(tuple(sorted((player.id, other.id))))
     for a, b in combinations(arms.values(), 2):
         if cross_seconds is not None:
-            # Only regular checkpoints participate in fixed-time bridges. Once
-            # both histories bracket a target, extending them cannot move it.
-            stable_a = [p for p in a if p.iteration % stride == 0]
-            stable_b = [p for p in b if p.iteration % stride == 0]
+            # Reconstruct the fixed time samples from the selected models. Each
+            # original nearest model is present, so final/pinned extras cannot
+            # displace it. Only covered grids participate in stable bridges.
+            if sample_seconds is not None:
+                stable_a = [a[i] for i in time_sample_indices([p.seconds for p in a], sample_seconds)]
+                stable_b = [b[i] for i in time_sample_indices([p.seconds for p in b], sample_seconds)]
+                pair_horizon = min(math.floor(a[-1].seconds/sample_seconds),
+                                   math.floor(b[-1].seconds/sample_seconds)) * sample_seconds
+            else:
+                stable_a = [p for p in a if p.iteration % stride == 0]
+                stable_b = [p for p in b if p.iteration % stride == 0]
+                pair_horizon = min(stable_a[-1].seconds, stable_b[-1].seconds) if stable_a and stable_b else 0
             if stable_a and stable_b:
-                pair_horizon = min(stable_a[-1].seconds, stable_b[-1].seconds)
                 for index in range(1, math.floor(pair_horizon / cross_seconds)+1):
                     target = index * cross_seconds
                     left = min(stable_a, key=lambda p: abs(p.seconds-target))
