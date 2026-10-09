@@ -64,6 +64,43 @@ def test_fixed_iteration_sampling_and_bridges_survive_extension_and_new_arm(tmp_
     assert ('a:00000043', 'c:00000002') in extended
 
 
+def test_nearest_time_sampling_ties_deduplication_and_final(tmp_path):
+    history(tmp_path/'a', [27*60, 32*60, 58*60, 63*60])
+    players = discover_players(tmp_path, sample_seconds=1800, include_first=False)
+    assert [(p.iteration, p.seconds) for p in players] == [(2, 32*60), (3, 58*60), (4, 63*60)]
+    history(tmp_path/'a', [28, 32, 70])
+    players = discover_players(tmp_path, sample_seconds=30, include_first=False)
+    assert [p.iteration for p in players] == [1, 3]  # 30 ties; 60 selects final.
+    history(tmp_path/'a', [1, 100, 101])
+    players = discover_players(tmp_path, sample_seconds=20, include_first=False)
+    assert [p.iteration for p in players] == [1, 2, 3]  # Five targets, two fixed models.
+    history(tmp_path/'a', [1, 2])
+    players = discover_players(tmp_path, sample_seconds=20, include_first=False,
+                               required_ids=('a:00000001',))
+    assert [p.iteration for p in players] == [1, 2]  # Short history plus pinned anchor.
+
+
+def test_time_samples_and_bridges_survive_extension_and_new_arm(tmp_path):
+    for arm in ('a', 'b'):
+        history(tmp_path/arm, [5, 9, 12, 19, 22, 29, 32, 35])
+    players = discover_players(tmp_path, sample_seconds=10, include_first=False)
+    assert [p.iteration for p in players if p.arm == 'a'] == [2, 4, 6, 8]
+    edges = build_schedule(players, 2, cross_seconds=20, sample_seconds=10, final_cross=True)
+    # Model at 19 seconds covers the 20-second grid; do not defer this bridge.
+    assert ('a:00000004', 'b:00000004') in edges
+    assert ('a:00000008', 'b:00000008') in edges
+    for arm in ('a', 'b'):
+        history(tmp_path/arm, [5, 9, 12, 19, 22, 29, 32, 35, 38, 42, 47])
+    history(tmp_path/'c', [1, 2])
+    players = discover_players(tmp_path, sample_seconds=10, include_first=False)
+    assert [p.iteration for p in players if p.arm == 'a'] == [2, 4, 6, 9, 11]
+    extended = build_schedule(players, 2, cross_seconds=20, sample_seconds=10, final_cross=True)
+    stable = [edge for edge in edges if not any(p.endswith('00000008') for p in edge)]
+    assert set(stable) <= set(extended)
+    assert ('a:00000011', 'c:00000002') in extended
+    assert ('a:00000009', 'b:00000009') in extended
+
+
 def complete_fake_pair(manifest, pair, directory, limit=None):
     store = PairStore(directory, limit or manifest['games_per_pair'])
     for task in store.tasks(pair_seed(manifest, pair)):
@@ -79,7 +116,7 @@ def complete_fake_pair(manifest, pair, directory, limit=None):
 
 def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
-    (config/'elo.cfg').write_text('[elo]\nstride=8\ncross_seconds=1000\ngames_per_pair=4\nbootstrap_samples=2\n')
+    (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ncross_seconds=1000\ngames_per_pair=4\nbootstrap_samples=2\n')
     (config/'match.cfg').write_text('[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('b', 'c'):
@@ -126,7 +163,7 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
     assert extended['manifest']['anchor'] == first['manifest']['anchor']
     assert perf['reused_games'] == 12 and perf['new_games'] == 36
     assert len(tasks) == 18
-    off_grid = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides={'stride':'10'})
+    off_grid = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides={'sample_seconds':'10'})
     assert first['manifest']['anchor'] in {p['id'] for p in off_grid['manifest']['players']}
 
 
@@ -139,7 +176,7 @@ def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path
     import copy
     original = pair_identity(manifest, pair)
     other = copy.deepcopy(manifest)
-    other.update(anchor='b', sampling={'stride':32}, games_per_pair=40)
+    other.update(anchor='b', sampling={'sample_seconds':32}, games_per_pair=40)
     other['config']['match']['games'] = 40
     other['source_sha256']['elo.py'] = 'new-fit'
     other['players'][0].update(model='/moved/model.pt', seconds=1000)
@@ -185,7 +222,7 @@ def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_pat
 
 def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
-    (config/'elo.cfg').write_text('[elo]\nstride=8\ngames_per_pair=4\nbootstrap_samples=2\n')
+    (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ngames_per_pair=4\nbootstrap_samples=2\n')
     (config/'match.cfg').write_text('[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('a','b'):
@@ -222,12 +259,13 @@ def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_pat
 
 
 def test_shared_profiles_are_independent_and_strict(tmp_path):
-    (tmp_path/'elo.cfg').write_text('[elo]\nstride=4\npair_workers=2\n')
-    (tmp_path/'elo.cfg.local').write_text('[elo]\nstride=5\n')
-    assert load_elo_config(tmp_path, environ={})['stride'] == 5
-    assert load_elo_config(tmp_path, environ={'ELO_STRIDE': '6'})['stride'] == 6
-    assert load_elo_config(tmp_path, environ={'ELO_STRIDE': '6'}, overrides={'stride': '7'})['stride'] == 7
-    for overrides in [{'games_per_pair': '6'}, {'stride': '0'}, {'pair_workers': '0'},
+    (tmp_path/'elo.cfg').write_text('[elo]\nsample_seconds=4\npair_workers=2\n')
+    (tmp_path/'elo.cfg.local').write_text('[elo]\nsample_seconds=5\n')
+    assert load_elo_config(tmp_path, environ={})['sample_seconds'] == 5
+    assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'})['sample_seconds'] == 6
+    assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'}, overrides={'sample_seconds': '7'})['sample_seconds'] == 7
+    for overrides in [{'games_per_pair': '6'}, {'sample_seconds': '0'}, {'pair_workers': '0'},
+                      {'sample_seconds': 'nan'}, {'sample_seconds': 'inf'}, {'sample_seconds': '-1'},
                       {'cross_seconds': 'nan'}, {'cross_seconds': '0'}]:
         with pytest.raises(ValueError):
             load_elo_config(tmp_path, environ={}, overrides=overrides)
@@ -243,7 +281,7 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
 
 def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
-    (config/'elo.cfg').write_text('[elo]\nstride=1\n')
+    (config/'elo.cfg').write_text('[elo]\nsample_seconds=10\n')
     (config/'match.cfg').write_text('[match]\nreuse_tree=false\nuse_graph_search=false\ncache_entries=0\n')
     (config/'untrained').mkdir()
     (config/'untrained/run.cfg').write_text('[run]\nextends=baseline\n')
