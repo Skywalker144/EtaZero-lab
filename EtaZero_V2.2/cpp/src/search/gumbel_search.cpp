@@ -103,7 +103,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     result.simulations=completed_;result.new_playouts=completed_+1;result.root_visits=root_->visits.load()+1;result.stopped_early=stopped_;
     result.network_wdl=root_->initial_wdl;result.network_sample_weight=root_->initial_weight;result.network_value_stdev=root_->initial_stdev;
     result.value=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
-    result.search_wdl={(1-parent.draw+parent.value)/2,parent.draw,(1-parent.draw-parent.value)/2};
+    result.search_wdl=wdl_from_value(parent.value,parent.draw);
     for(size_t i=0;i<actions.size();++i) {
         result.visits[actions[i]]=children[i].visits;
         int index=root_->moves[i].child_index.load();
