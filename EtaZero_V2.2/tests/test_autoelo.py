@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from etazero.arena import Player, PairStore, build_schedule, discover_players, execute_pair, identity, run_arena
+from etazero.arena import Player, PairStore, build_schedule, discover_players, execute_pair, execute_arena, identity, run_arena
 from etazero.autoelo import autoelo_plan, load_elo_config, publish_latest
 from etazero.autoelo import run_autoelo
 from etazero.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pairs
@@ -170,7 +170,7 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
 def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path):
     manifest = {'players': [{'id':'a','sha256':'aa'}, {'id':'b','sha256':'bb'}],
                 'config': {'match': {'seed':1, 'visits':100, 'games':4}},
-                'binary_sha256':'bin', 'execution': {'pair_workers':1},
+                'binary_sha256':'bin', 'execution': {'max_loaded_models':4},
                 'source_sha256': {'engine_config.py':'compiler', 'elo.py':'fit'}}
     pair = {'id':identity(('a','b')), 'players':['a','b']}
     import copy
@@ -181,7 +181,7 @@ def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path
     other['source_sha256']['elo.py'] = 'new-fit'
     other['players'][0].update(model='/moved/model.pt', seconds=1000)
     assert pair_identity(other, pair) == original
-    for group, key, value in [('config', 'visits', 200), ('execution', 'pair_workers', 2),
+    for group, key, value in [('config', 'visits', 200), ('execution', 'max_loaded_models', 8),
                                ('source_sha256', 'engine_config.py', 'changed')]:
         changed = copy.deepcopy(manifest)
         target = changed[group]['match'] if group == 'config' else changed[group]
@@ -259,12 +259,13 @@ def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_pat
 
 
 def test_shared_profiles_are_independent_and_strict(tmp_path):
-    (tmp_path/'elo.cfg').write_text('[elo]\nsample_seconds=4\npair_workers=2\n')
+    (tmp_path/'elo.cfg').write_text('[elo]\nsample_seconds=4\ngame_threads=7\nmax_loaded_models=3\n')
     (tmp_path/'elo.cfg.local').write_text('[elo]\nsample_seconds=5\n')
     assert load_elo_config(tmp_path, environ={})['sample_seconds'] == 5
     assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'})['sample_seconds'] == 6
     assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'}, overrides={'sample_seconds': '7'})['sample_seconds'] == 7
-    for overrides in [{'games_per_pair': '6'}, {'sample_seconds': '0'}, {'pair_workers': '0'},
+    for overrides in [{'games_per_pair': '6'}, {'sample_seconds': '0'}, {'game_threads': '0'},
+                      {'max_loaded_models': '1'}, {'pair_workers': '1'},
                       {'sample_seconds': 'nan'}, {'sample_seconds': 'inf'}, {'sample_seconds': '-1'},
                       {'cross_seconds': 'nan'}, {'cross_seconds': '0'}]:
         with pytest.raises(ValueError):
@@ -291,6 +292,9 @@ def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(
     binary = tmp_path/'binary'; binary.write_bytes(b'test')
     monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary-checksum')
     plan = autoelo_plan(config, binary, data=data, environ={})
+    overridden = autoelo_plan(config, binary, data=data, environ={}, overrides={'game_threads': '7'})
+    assert overridden['manifest']['config']['match']['game_threads'] == 7
+    assert overridden['output'] != plan['output']
     assert plan['summary']['players_per_arm'] == {'a': 3, 'b': 3}
     assert not (data/'elo').exists()
     assert autoelo_plan(config, binary, data=data, environ={})['output'] == plan['output']
@@ -305,25 +309,68 @@ def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(
         autoelo_plan(config, binary, data=data, environ={})
 
 
-def test_concurrent_pairs_cancel_other_workers_and_never_fit_partial_results(tmp_path, monkeypatch):
+def test_shared_arena_never_fits_partial_results(tmp_path, monkeypatch):
     manifest = {'players': [], 'config': {'match': {'seed': 1}}, 'games_per_pair': 4,
                 'pairs': [{'id': identity(i), 'players': []} for i in range(2)]}
     monkeypatch.setattr('etazero.arena.native_config', lambda *_: {})
-    started = threading.Event()
-    stopped = threading.Event()
     calls = []
-    def execute(binary, config, players, store, seed, cancel, environ):
-        if store.directory.name == manifest['pairs'][0]['id']:
-            assert started.wait(3)
-            raise RuntimeError('native failed')
-        started.set()
-        assert cancel.wait(3)
-        stopped.set()
-    monkeypatch.setattr('etazero.arena.execute_pair', execute)
+    def execute(binary, config, output, manifest, limit, cancel, environ):
+        assert limit == 3
+        calls.append(cancel)
+        raise RuntimeError('native failed')
+    monkeypatch.setattr('etazero.arena.execute_arena', execute)
     monkeypatch.setattr('etazero.elo.write_ratings', lambda *_: calls.append(True))
     with pytest.raises(RuntimeError, match='native failed'):
-        run_arena(tmp_path, manifest, Path('/unused'), 10, pair_workers=2)
-    assert stopped.is_set() and calls == []
+        run_arena(tmp_path, manifest, Path('/unused'), 10, max_loaded_models=3)
+    assert len(calls) == 1 and calls[0].is_set()
+
+
+def test_shared_native_routes_pairs_deduplicates_models_and_resumes_one_side(tmp_path):
+    from dataclasses import asdict
+    for arm in ('a', 'b', 'c'):
+        history(tmp_path/arm, [1])
+        # Export IDs must be globally unique, as with real published models.
+        path = tmp_path/arm/'models/1/manifest.json'
+        info = load_json(path); info['id'] = arm; save_json(path, info)
+        row_path = tmp_path/arm/'logs/iterations/000001.json'
+        row = load_json(row_path); row['model'] = info; save_json(row_path, row)
+    players = discover_players(tmp_path)
+    manifest = {'players': [asdict(p) for p in players], 'games_per_pair': 4,
+                'config': {'match': {'seed': 1, 'device': 'cpu', 'board_size': 5, 'rule': 'freestyle'}},
+                'pairs': [{'id': identity(pair), 'players': pair} for pair in
+                          ((players[0].id, players[1].id), (players[0].id, players[2].id))]}
+    output = tmp_path/'results'; output.mkdir()
+    binary = tmp_path/'child'
+    binary.write_text(f'''#!{sys.executable}
+import json,sys
+from pathlib import Path
+args=dict(zip(sys.argv[2::2],sys.argv[3::2]))
+tasks=Path(args['--tasks']).read_text().splitlines()
+partial=not Path(args['--tasks']).with_suffix('.started').exists()
+Path(args['--tasks']).with_suffix('.started').touch()
+for line in tasks:
+ p,a,b,i,seed,g,mask,n,*moves=line.split();i=int(i)
+ if int(n)<0:
+  print(json.dumps(dict(type='opening',pair=p,id=i,seed=int(seed),generator=int(g),moves=[12],value=0)),flush=True)
+ for color in (0,1):
+  if int(mask)&(1<<color):
+   print(json.dumps(dict(type='game',pair=p,id=2*i+color,opening_id=i,black_a=color==0,winner=0,moves=[12,13],seconds=1)),flush=True)
+   if partial: sys.exit(1)
+print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
+''')
+    binary.chmod(0o755)
+    with pytest.raises(RuntimeError, match='Arena exited 1'):
+        execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
+    assert len((output/'models.txt').read_text().splitlines()) == 3
+    first = output/'pairs'/manifest['pairs'][0]['id']/'games/00000000.json'
+    original = first.read_bytes()
+    execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
+    fields = (output/'tasks.txt').read_text().splitlines()[0].split()
+    assert fields[6:8] == ['2', '1']  # Only the missing white side, saved opening.
+    assert first.read_bytes() == original
+    assert sum(len(PairStore(output/'pairs'/p['id'], 4).games()) for p in manifest['pairs']) == 8
+    binary.unlink()  # A fully complete schedule never starts the executable.
+    execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
 
 
 def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path, monkeypatch):
@@ -348,6 +395,32 @@ def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path
         execute_pair(binary, tmp_path/'cfg', players, store, 1, cancel)
     assert time.monotonic()-started < 3
     assert (store.directory/'openings/00000000.json').exists()
+
+
+def test_shared_arena_cancellation_flushes_an_opening(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    pair_id = identity(('a', 'b'))
+    players = [Player(name, name, 1, 1, name, 'hash') for name in ('a', 'b')]
+    manifest = dict(players=[asdict(p) for p in players], games_per_pair=4,
+                    pairs=[dict(id=pair_id, players=['a', 'b'])],
+                    config={'match': {'seed': 1, 'device': 'cpu', 'board_size': 5, 'rule': 'renju'}})
+    binary = tmp_path/'child'
+    binary.write_text(f'#!{sys.executable}\nimport json,time\n'
+        f'print(json.dumps(dict(type="opening",pair="{pair_id}",id=0,generator=0,seed=1,moves=[12],value=0)),flush=True)\n'
+        'time.sleep(5)\n')
+    binary.chmod(0o755)
+    monkeypatch.setattr('etazero.arena.model_info', lambda p: (Path(p), {'id': str(p), 'sha256': 'hash'}))
+    cancel = threading.Event()
+    original = PairStore.accept
+    def accept(self, event):
+        original(self, event)
+        cancel.set()
+    monkeypatch.setattr(PairStore, 'accept', accept)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match='Arena exited'):
+        execute_arena(binary, tmp_path/'cfg', tmp_path, manifest, 2, cancel)
+    assert time.monotonic()-started < 3
+    assert (tmp_path/'pairs'/pair_id/'openings/00000000.json').exists()
 
 
 def test_latest_pointer_and_native_performance_preserve_prior_results(tmp_path):
