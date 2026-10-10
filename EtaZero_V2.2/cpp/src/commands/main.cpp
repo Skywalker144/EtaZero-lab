@@ -7,6 +7,7 @@
 #include "etazero/muzero/search.h"
 #include "etazero/gumbel_search.h"
 #include "etazero/muzero/torch_backend.h"
+#include "etazero/match.h"
 #include <csignal>
 #include <charconv>
 #include <chrono>
@@ -30,7 +31,7 @@ struct Args {
     std::map<std::string, std::string> args;
     Args(int argc, char** argv) {
         const std::set<std::string> allowed{"config","model","model-id","device","games","output","run-id","attempt-id",
-                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream"};
+                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream","models","max-models"};
         for (int i = 2; i < argc; i += 2) {
             std::string name = argv[i];
             if (name.rfind("--",0) != 0 || !allowed.count(name.substr(2)) || i+1 >= argc || !args.emplace(name.substr(2), argv[i+1]).second)
@@ -618,6 +619,40 @@ int analysis_session(const Args& a,const Config& c) {
     }
     eval->finish();return stop_requested?130:0;
 }
+int arena(const Args& a,const Config& c) {
+    std::vector<MatchModel> models;std::set<std::string> ids;
+    std::ifstream model_file(a.get("models"));
+    if(!model_file)throw std::runtime_error("Cannot read arena models");
+    for(std::string line;std::getline(model_file,line);) {
+        std::istringstream row(line);MatchModel m;
+        if(!(row>>std::quoted(m.id)>>std::quoted(m.path)>>m.seed) || !(row>>std::ws).eof() ||
+           m.id.empty() || !ids.insert(m.id).second)throw std::runtime_error("Invalid arena model");
+        models.push_back(std::move(m));
+    }
+    const int size=a.integer("size"),canvas=c.integer("network.canvas");
+    std::vector<MatchTask> tasks;std::ifstream task_file(a.get("tasks"));
+    if(!task_file)throw std::runtime_error("Cannot read arena tasks");
+    for(std::string line;std::getline(task_file,line);) {
+        std::istringstream row(line);MatchTask t{};int count;
+        if(!(row>>t.pair>>t.a>>t.b>>t.id>>t.seed>>t.generator>>t.mask>>count) || count < -1 || count>=size*size)
+            throw std::runtime_error("Invalid arena task");
+        t.generated=count>=0;
+        for(int i=0;i<count;++i) {
+            int move;if(!(row>>move)||move<0||move>=size*size)throw std::runtime_error("Invalid arena move");
+            t.moves.push_back(move/size*canvas+move%size);
+        }
+        if(!(row>>std::ws).eof())throw std::runtime_error("Trailing arena task data");
+        tasks.push_back(std::move(t));
+    }
+    auto precision=c.text("match.inference_precision");
+    if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+    return run_matches(c,size,parse_rule(a.get("rule")),precision,models,tasks,a.integer("max-models"),
+        [&](const MatchModel& m){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
+            args.args["seed"]=std::to_string(m.seed);return evaluator(args,c,"match");},
+        [&](InferenceService& e,uint64_t seed){return search_for(e,settings(c,"match"),seed,c,"match");},
+        [&](const Game& game){return move_temperature(c,"match",game);},
+        []{return stop_requested.load();},std::cout);
+}
 int match(const Args& a,const Config& c) {
     auto match_start=std::chrono::steady_clock::now();
     std::atomic<int> completed_games{0};
@@ -730,7 +765,7 @@ int match(const Args& a,const Config& c) {
 }
 int main(int argc,char** argv) {
     try {
-        if(argc<2)throw std::runtime_error("Expected selfplay, worker, analysis, infer or match");
+        if(argc<2)throw std::runtime_error("Expected selfplay, worker, analysis, infer, match or arena");
         std::string mode=argv[1]; Args args(argc,argv); Config config(args.get("config"));
         if(mode=="selfplay" || mode=="worker" || mode=="infer")
             if((config.text("agent.algorithm")!="alphazero" && config.text("agent.algorithm")!="muzero") ||
@@ -738,7 +773,7 @@ int main(int argc,char** argv) {
                (config.text("agent.nonroot_search_algo")!="puct" && config.text("agent.nonroot_search_algo")!="gumbel") ||
                (config.text("agent.root_search_algo")=="puct" && config.text("agent.nonroot_search_algo")!="puct"))
                 throw std::runtime_error("Invalid native algorithm/search combination");
-        torch::set_num_threads(config.integer(mode=="analysis"?"analysis.cpu_threads":mode=="match"?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
+        torch::set_num_threads(config.integer(mode=="analysis"?"analysis.cpu_threads":(mode=="match"||mode=="arena")?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
         if(mode=="selfplay") {ForkPool forks;auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service,forks);service->finish();return code;}
         if(mode=="worker")return worker(args,config);
@@ -749,6 +784,7 @@ int main(int argc,char** argv) {
         }
         if(mode=="infer")return analyze(args,config,true);
         if(mode=="match")return match(args,config);
+        if(mode=="arena")return arena(args,config);
         throw std::runtime_error("Unknown native command: "+mode);
     } catch(const std::exception& error) {std::cerr<<"EtaZero: "<<error.what()<<'\n';return 1;}
 }
