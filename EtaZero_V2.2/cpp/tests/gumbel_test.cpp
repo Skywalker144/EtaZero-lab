@@ -34,6 +34,15 @@ template<bool Full> void alpha() {
     SearchSettings s{36,4,1,1,0,1,false};s.value_weight_exponent=0;
     GumbelSettings g;g.noise_scale=0;g.max_num_considered_actions=3;g.rescale_q_values=false;g.c_scale=.1;
     GumbelSearch<Full> search(evaluator,s,g,17);Bandit state;
+    struct RoundedDraw : Bandit {
+        Evaluation evaluate() const override{return {{0,0,0},{0,1,1e-8}};}
+    } rounded;
+    SearchRun root_only;root_only.max_visits=1;
+    Search puct(s,17);
+    for(const auto& result:{puct.run(rounded,0,root_only),search.run(rounded,0,root_only)}) {
+        for(double p:result.search_wdl)check(std::isfinite(p)&&p>=0&&p<=1,"Search emitted a negative WDL target");
+        check(std::abs(std::accumulate(result.search_wdl.begin(),result.search_wdl.end(),0.0)-1)<1e-12,"Search emitted unnormalized WDL");
+    }
     for(int budget:{0,1,2,3,7,17,31,200}) {
         SearchRun o;o.max_visits=budget+1;auto result=search.run(state,0,o);
         check(result.simulations==budget&&result.root_visits==budget+1,"AZ exact edge/root budget");
