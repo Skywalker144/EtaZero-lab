@@ -22,7 +22,7 @@ from .storage import atomic_write, load_json, run_lock, save_json, sha256, sync_
 
 ELO_FIELDS = {'sample_seconds': float, 'neighbors': int, 'cross_seconds': float,
               'final_cross': boolean, 'games_per_pair': int, 'bootstrap_samples': int,
-              'anchor': str, 'pair_workers': int}
+              'anchor': str, 'game_threads': int, 'max_loaded_models': int}
 
 
 def config_directory(directory):
@@ -51,9 +51,11 @@ def load_elo_config(directory, environ=None, overrides=None):
     if set(values) != set(ELO_FIELDS):
         raise ValueError('Missing or unknown Elo configuration fields')
     settings = {key: convert(str(values[key])) for key, convert in ELO_FIELDS.items()}
-    for key in ('neighbors', 'pair_workers'):
+    for key in ('neighbors', 'game_threads'):
         if settings[key] < 1:
             raise ValueError(f'elo.{key} must be positive')
+    if settings['max_loaded_models'] < 2:
+        raise ValueError('elo.max_loaded_models must be at least two')
     if settings['bootstrap_samples'] < 2:
         raise ValueError('elo.bootstrap_samples must be at least two')
     for key in ('sample_seconds', 'cross_seconds'):
@@ -82,6 +84,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
     config = load_engine_config(directory, match=True, environ=environ, umbrella=True)
     # Elo owns the number of games; match.cfg supplies only the match protocol.
     config['match']['games'] = settings['games_per_pair']
+    config['match']['game_threads'] = settings['game_threads']
     if gpu is not None and config['match']['device'] != 'cpu':
         config['match']['device'] = 'cuda:0'
     if arms is None and data is None:
@@ -112,7 +115,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
                 'binary_sha256': verify_build(Path(binary)), 'games_per_pair': settings['games_per_pair'],
                 'anchor': anchor, 'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule],
                 'sampling': {key: settings[key] for key in ('sample_seconds', 'neighbors', 'cross_seconds', 'final_cross')},
-                'execution': {'pair_workers': settings['pair_workers'],
+                'execution': {'max_loaded_models': settings['max_loaded_models'],
                               'cuda_visible_devices': str(gpu) if gpu is not None else
                               (os.environ if environ is None else environ).get('CUDA_VISIBLE_DEVICES')}}
     manifest['source_sha256'] = {name: sha256(Path(__file__).parent/name)
@@ -161,6 +164,7 @@ def run_autoelo(plan, binary):
         save_json(output/'plan.json', plan)
         save_json(output/'status.json', {'status': 'running'})
         started = time.monotonic()
+        previous_stats = set((output/'performance').glob('*.json'))
         prepared = False
         try:
             before = prepare_pairs(base, output, plan['manifest'])
@@ -171,7 +175,7 @@ def run_autoelo(plan, binary):
             if visibility is not None:
                 env['CUDA_VISIBLE_DEVICES'] = visibility
             result = run_arena(output, plan['manifest'], Path(binary),
-                               plan['settings']['bootstrap_samples'], plan['settings']['pair_workers'], env)
+                               plan['settings']['bootstrap_samples'], plan['settings']['max_loaded_models'], env)
         except BaseException as error:
             save_json(output/'status.json', {'status': 'interrupted' if isinstance(error, KeyboardInterrupt)
                       else 'failed', 'error': str(error)})
@@ -184,8 +188,10 @@ def run_autoelo(plan, binary):
         performance = {'seconds': seconds, 'new_games': count,
                        'reused_games': before,
                        'new_games_per_second': count/seconds if seconds else 0,
-                       'pair_workers': plan['settings']['pair_workers'],
-                       'native_stats': [load_json(p) for p in sorted((output/'pairs').glob('*/performance/*.json'))]}
+                       'game_threads': plan['settings']['game_threads'],
+                       'max_loaded_models': plan['settings']['max_loaded_models'],
+                       'native_stats': [load_json(p) for p in sorted(
+                           set((output/'performance').glob('*.json')) - previous_stats)]}
         record = output/'invocations'/f'{uuid.uuid4().hex}.json'
         save_json(record, performance, immutable=True)
         save_json(output/'status.json', {'status': 'complete', 'performance': str(record)})

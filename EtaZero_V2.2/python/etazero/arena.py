@@ -8,8 +8,8 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from threading import Event, Thread
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import ROOT, native_text
 from .engine_config import load_engine_config
@@ -335,33 +335,112 @@ def native_config(config, players):
     return {**config, 'network': {'canvas': canvas}}
 
 
+def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
+                  max_loaded_models: int, cancel: Event, environ: dict | None = None) -> None:
+    """One native process, model services shared across every pending pair."""
+    players = {p['id']: Player(**p) for p in manifest['players']}
+    stores, models, indices, assignments = {}, [], {}, []
+    profile = manifest['config']['match']
+    for pair in manifest['pairs']:
+        store = PairStore(output/'pairs'/pair['id'], manifest['games_per_pair'])
+        store.games()
+        seed = (profile['seed'] + int(pair['id'][:16], 16)) % (1 << 64)
+        tasks = store.tasks(seed)
+        if not tasks:
+            continue
+        stores[pair['id']] = store
+        slots = []
+        for player_id in pair['players']:
+            player = players[player_id]
+            path, info = model_info(player.model)
+            if info['sha256'] != player.sha256:
+                raise ValueError(f'Model changed: {path}')
+            key = info['id']
+            if key in indices:
+                previous = models[indices[key]]
+                if previous['sha256'] != player.sha256 or previous['path'] != str(path):
+                    raise ValueError(f'Model identity collision: {key}')
+            else:
+                indices[key] = len(models)
+                model_seed = (profile['seed'] + int(identity((key, player.sha256))[:16], 16)) % (1 << 64)
+                models.append(dict(id=key, path=str(path), sha256=player.sha256, seed=model_seed))
+            slots.append(indices[key])
+        for task in tasks:
+            suffix = '-1' if task['moves'] is None else f"{len(task['moves'])} " + ' '.join(map(str, task['moves']))
+            assignments.append(f"{pair['id']} {slots[0]} {slots[1]} {task['id']} {task['seed']} "
+                               f"{task['generator']} {task['mask']} {suffix}\n")
+    if not assignments or cancel.is_set():
+        return
+    def quoted(value):
+        if '\n' in value or '\r' in value:
+            raise ValueError('Native model fields cannot contain line breaks')
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    model_path, task_path = output/'models.txt', output/'tasks.txt'
+    model_path.write_text(''.join(f"{quoted(m['id'])} {quoted(m['path'])} {m['seed']}\n" for m in models))
+    task_path.write_text(''.join(assignments))
+    statistics = []
+    def accept(event):
+        if event['type'] in ('model_stats', 'arena_stats'):
+            statistics.append(event)
+            return
+        pair_id = event.pop('pair')
+        stores[pair_id].accept(event)
+        if event['type'] == 'game':
+            print(f"  pair={pair_id[:12]} game={event['id']} complete", flush=True)
+    with (output/'native.log').open('a') as log:
+        process = subprocess.Popen([str(binary), 'arena', '--config', str(config),
+            '--models', str(model_path), '--tasks', str(task_path), '--max-models', str(max_loaded_models),
+            '--device', profile['device'], '--size', str(profile['board_size']), '--rule', profile['rule']],
+            stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True, env=environ)
+        done = Event()
+        def watch_cancel():
+            while not done.wait(0.1):
+                if cancel.is_set():
+                    stop_process(process)
+                    return
+        watcher = Thread(target=watch_cancel)
+        watcher.start()
+        try:
+            for line in process.stdout:
+                accept(json.loads(line))
+            code = process.wait()
+            if code:
+                raise RuntimeError(f'Arena exited {code}: {output / "native.log"}')
+        finally:
+            stopper = Thread(target=stop_process, args=(process,))
+            stopper.start()
+            try:
+                for line in process.stdout:
+                    accept(json.loads(line))
+            finally:
+                process.stdout.close(); stopper.join(); done.set(); watcher.join()
+                write_json(output/'performance'/f'{uuid.uuid4().hex}.json', {'events': statistics})
+    for pair_id, store in stores.items():
+        seed = (profile['seed'] + int(pair_id[:16], 16)) % (1 << 64)
+        if store.tasks(seed):
+            raise RuntimeError('Arena exited without completing its assignments')
+
+
 def run_arena(output: Path, manifest: dict, binary: Path, samples: int,
-              pair_workers: int = 1, environ: dict | None = None) -> dict:
-    """Bounded concurrent C++ matches; cancel and flush all children on failure."""
-    if pair_workers < 1:
-        raise ValueError('Pair workers must be positive')
+              max_loaded_models: int = 32, environ: dict | None = None) -> dict:
+    """Global native game pool; persist partial results and never fit an incomplete schedule."""
+    if max_loaded_models < 2:
+        raise ValueError('Arena needs at least two resident model slots')
+    execution = dict(manifest.get('execution', {}))
+    if execution.get('max_loaded_models', max_loaded_models) != max_loaded_models:
+        raise ValueError('Arena model limit differs from manifest')
+    manifest = {**manifest, 'execution': {**execution, 'max_loaded_models': max_loaded_models}}
     players = [Player(**p) for p in manifest['players']]
     native = native_config(manifest['config'], players)
     with run_lock(output/'arena.lock'):
         save_manifest(output/'manifest.json', manifest)
         config_path = output/'resolved.cfg'
         config_path.write_text(native_text(native))
-        by_id = {p.id: p for p in players}
         cancel = Event()
-        executor = ThreadPoolExecutor(max_workers=pair_workers)
         try:
-            futures = []
-            for pair in manifest['pairs']:
-                store = PairStore(output/'pairs'/pair['id'], manifest['games_per_pair'])
-                seed = (manifest['config']['match']['seed'] + int(pair['id'][:16], 16)) % (1 << 64)
-                futures.append(executor.submit(execute_pair, binary, config_path,
-                               tuple(by_id[p] for p in pair['players']), store, seed, cancel, environ))
-            for count, future in enumerate(as_completed(futures), 1):
-                future.result()
-                print(f'completed pairs={count}/{len(futures)}', flush=True)
+            execute_arena(binary, config_path, output, manifest, max_loaded_models, cancel, environ)
         finally:
             cancel.set()
-            executor.shutdown(wait=True, cancel_futures=True)
         from .elo import write_ratings
         return write_ratings(output, samples)
 
@@ -401,6 +480,8 @@ def main():
     parser.add_argument('--games', type=int, help='Games per pair; defaults to match.cfg')
     parser.add_argument('--anchor', default='')
     parser.add_argument('--bootstrap-samples', type=int, default=300)
+    parser.add_argument('--game-threads', type=int, default=512)
+    parser.add_argument('--max-loaded-models', type=int, default=32)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--fit-only', action='store_true')
     args = parser.parse_args()
@@ -413,6 +494,9 @@ def main():
             write_ratings(output, args.bootstrap_samples)
         return
     config = load_engine_config(args.config_dir, match=True)
+    if args.game_threads < 1 or args.max_loaded_models < 2:
+        parser.error('game-threads must be positive and max-loaded-models at least two')
+    config['match']['game_threads'] = args.game_threads
     if args.games is None:
         args.games = config['match']['games']
     binary = args.binary.resolve()
@@ -428,13 +512,14 @@ def main():
     PairStore(output, args.games)
     manifest = {'version': 1, 'players': [asdict(p) for p in players], 'config': config,
                 'binary_sha256': verify_build(binary), 'games_per_pair': args.games, 'anchor': anchor,
-                'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule]}
+                'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule],
+                'execution': {'max_loaded_models': args.max_loaded_models}}
     print(f'players={len(players)} pairs={len(schedule)} games={len(schedule)*args.games} anchor={anchor}', flush=True)
     if args.dry_run:
         print(json.dumps(manifest, indent=2))
         return
     install_signals()
-    run_arena(output, manifest, binary, args.bootstrap_samples)
+    run_arena(output, manifest, binary, args.bootstrap_samples, args.max_loaded_models)
 
 
 if __name__ == '__main__':
