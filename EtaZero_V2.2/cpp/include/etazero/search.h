@@ -91,6 +91,8 @@ struct SearchResult {
     std::vector<int64_t> q_visits;
     std::vector<float> q_values;
 };
+// Reported WDL probabilities, with KataGo's floating-point boundary handling.
+WDL wdl_from_value(double value, double draw);
 std::vector<int16_t> quantize_policy(const std::vector<double>& weights);
 struct SearchEdgeSnapshot {
     int action, perspective, pending;
