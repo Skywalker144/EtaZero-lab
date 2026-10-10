@@ -80,7 +80,8 @@ bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估�
 | `games_per_pair` | 每对总局数，必须为四的正倍数 |
 | `bootstrap_samples` | 成对开局 bootstrap 重采样次数 |
 | `anchor` | Elo 零点模型 ID；空值复用结果根的 `anchor.json`，首次选择首臂最早的采样模型 |
-| `pair_workers` | 同时运行的 C++ 模型对进程数 |
+| `game_threads` | 整个 Elo 赛程的 C++ 对局／开局工作线程上限，覆盖 `match.cfg` 的同名字段 |
+| `max_loaded_models` | 同时驻留的模型服务上限，至少为二；控制权重、CUDA Graph、缓存和 MuZero latent 的显存压力 |
 
 采样目标为 `sample_seconds` 的正整数倍，默认间隔半小时。仅对累计训练时间已覆盖的目标，在所有已提交模型中选择时间最近者；距离相同时选择较早轮次。同一个模型命中多个目标时去重，最后模型强制保留。横轴仍使用模型所属轮次实际累计净墙钟，不将模型时间改写为目标网格时间；一轮超过采样间隔时不能保证每个目标都有不同模型。延长训练后，旧临时末点退出当前采样，其原始比赛保留。固定 anchor 即使不再被新采样网格选中也保留，模型内容改变或参考臂缺失明确拒绝；显式 anchor 可改变本次图的零点，不重写默认固定参考。
 
@@ -96,16 +97,21 @@ bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估�
 
 每次调用显示 `reused_games`，性能记录保存复用局数和新增局数。全部完成才拟合并原子更新 `elo/latest`，当前图入口为 `elo/latest/elo.png`。
 
-每套结果保存 `plan.json`、`manifest.json`、`resolved.cfg`、`status.json`，以及 `pairs/` 的开局、逐局赛果与 native 日志；失败不发布新的 latest。`invocations/` 保存每次调用的性能记录，恢复调用另存。
+每套结果保存 `plan.json`、`manifest.json`、`resolved.cfg`、`status.json`，以及 `pairs/` 的开局与逐局赛果；共享进程日志保存为结果目录的 `native.log`，失败不发布新的 latest。`invocations/` 保存每次调用的性能记录，恢复调用另存。
 
 ## C++ 并行与性能观测
 
-Python 只规划、调度 native 进程和落盘；棋规、开局、搜索、对局和 GPU 组批推理均在 C++。先用多局并发产生独立请求，不把最大 batch 当作实际请求量。每对比赛的 `game_threads` 超过局数不会增加并发；可提高 `pair_workers` 同时运行多对，但每对加载双方模型服务，增加显存、CPU 和 CUDA 上下文成本。不同模型对进程目前不共享推理队列或权重。
+Python 只规划、启动一个 native arena 进程和落盘；棋规、开局、搜索、对局和 GPU 组批推理均在 C++。autoelo/arena 将缺失的开局和单局提交到全局工作池，任意棋局结束后立即领取下一任务。开局完成并输出后，两局换色比赛即可启动，不等待其他开局或所属模型对完成。配对仍决定赛程、种子、结果目录与 bootstrap 分组，不作为执行屏障。
+
+同一模型身份的请求跨 pair 合并到一个推理服务，复用权重、CUDA Graph 和缓存；不同权重分别组批。同身份必须对应相同模型内容与路径。赛程模型数超过 `max_loaded_models` 时，调度器优先选择共享模型的任务组成驻留窗口；窗口内全局异步补局，窗口结束才安全切换模型，以避免 CUDA Graph capture 与其他推理重叠。相邻窗口共用的模型继续驻留。此上限是模型数量而非显存字节预算，大网络或 MuZero 仍需按显存调整。
+
+独立 `match` 保留一对模型的执行入口，`match.game_threads` 为该对的局数上限；autoelo 使用独立 `elo.game_threads`，不继承训练 selfplay。独立 `arena` 使用 `--game-threads` 和 `--max-loaded-models`。可通过 `ELO_GAME_THREADS`、`ELO_MAX_LOADED_MODELS` 或对应 autoelo 命令行参数覆盖。提高线程数需要足够的缺失任务，并不保证每个模型的 batch 同比例增长。
 
 | 配置位置 | 参数 | 作用 |
 |---|---|---|
-| `elo.cfg` | `pair_workers` | 整个赛程同时运行的模型对数量 |
-| `match.cfg` | `game_threads` | 每对 C++ 并发局数，开局生成也使用此上限 |
+| `elo.cfg` | `game_threads` | 全局开局／对局工作线程数 |
+| `elo.cfg` | `max_loaded_models` | 驻留模型服务数量上限 |
+| `match.cfg` | `game_threads` | 独立 match 的并发局数；autoelo 覆盖此值 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `search_threads` | 每局树内搜索线程，可能改变并行搜索轨迹 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `max_batch` | 每个模型服务的一批请求上限 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `server_threads` | 每个模型的推理服务线程；过多服务可能分散 batch，MuZero latent 固定路由到创建它的服务 |
@@ -113,6 +119,6 @@ Python 只规划、调度 native 进程和落盘；棋规、开局、搜索、�
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `cpu_threads` | LibTorch CPU 算子线程数，区别于对局和搜索线程 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `queue_capacity` | 推理待处理队列配置，不是 batch 大小 |
 
-先保留单搜索线程和单推理服务，调节模型对及对局并发，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件；树内线程、随机 D4 请求调度与缓存可能影响赛果。
+先保留单搜索线程和单推理服务，调节全局对局并发和模型驻留上限，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件。共享模型服务按模型身份与比赛种子初始化 NN 随机数；调度、缓存与服务重载可能改变随机 D4 的分配及具体赛果，逐局结果不保证跨并发配置一致。赛程、每对局数、成对开局、搜索预算与拟合定义保持独立。
 
-C++ 每次输出 `match_stats`，记录包含模型加载、开局和对局的耗时、完成局数，以及双方请求数、batch 数、最大实际 batch、队列等待和缓存统计，保存在 `pairs/<配对>/performance/`。autoelo 每次调用的 `invocations/` 记录新增局数、总耗时、吞吐及 native 统计；总耗时包含比赛校验与恢复扫描、拟合和绘图，不等于纯 GPU 推理吞吐。
+共享 C++ arena 输出每次模型驻留的 `model_stats`（请求数、batch 数、最大实际 batch、队列等待、缓存统计）与 `arena_stats`（完成局数、总耗时、模型加载耗时、开局加对局耗时、加载次数和驻留窗口数），保存在结果目录的 `performance/`。独立 match 仍输出双方 `match_stats`，保存在对应 pair 的 `performance/`。autoelo 每次调用的 `invocations/` 只汇总本次调用新产生的 native 统计，并记录新增／复用局数、总耗时和吞吐；总耗时包含比赛校验、恢复扫描、拟合和绘图，不等于纯 GPU 推理吞吐。
