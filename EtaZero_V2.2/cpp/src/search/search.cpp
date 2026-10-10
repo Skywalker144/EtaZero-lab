@@ -582,8 +582,8 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     if(actions.size()!=stats.size())throw std::runtime_error("Root child stats are incomplete");
     if(total!=root_->visits.load())throw std::runtime_error("Search has inconsistent completed root visits");
     result.network_wdl=root_->initial_wdl;result.network_sample_weight=root_->initial_weight;result.network_value_stdev=root_->initial_stdev;
-    auto parent=snapshot(*root_);result.value=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;double d=parent.draw;
-    result.search_wdl={(1-d+result.value)/2,d,(1-d-result.value)/2};
+    auto parent=snapshot(*root_);result.value=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
+    result.search_wdl=wdl_from_value(parent.value,parent.draw);
     if(total==0) {
         result.policy=result.move_policy=result.search_policy;
         result.policy_target=quantize_policy(result.policy);
