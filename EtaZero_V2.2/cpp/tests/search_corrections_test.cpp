@@ -51,6 +51,30 @@ int main(int argc,char**) {
                 else return 1;
             }return 0;
         }
+        // Preserve the W-L statistic, limiting draw mass to the remaining
+        // probability budget, as in KataGo's ReportedSearchValues.
+        auto ordinary=wdl_from_value(.4,.2);
+        near(ordinary[0],.6,"Ordinary WDL win");near(ordinary[1],.2,"Ordinary WDL draw");near(ordinary[2],.2,"Ordinary WDL loss");
+        for(double value:{-1.0-1e-8,-1.0,-7.4e-9,0.0,7.4e-9,1.0,1.0+1e-8}) {
+            for(double draw:{-1e-8,0.0,.5,1.0,1.0+1e-8}) {
+                auto wdl=wdl_from_value(value,draw);
+                for(double p:wdl)check(std::isfinite(p)&&p>=0&&p<=1,"Reported probability outside [0,1]");
+                near(wdl[0]+wdl[1]+wdl[2],1,"Reported WDL mass");
+                auto reversed=wdl_from_value(-value,draw);
+                for(int j=0;j<3;++j)near(wdl[j],reversed[2-j],"WDL player reversal");
+            }
+        }
+        auto rounded=wdl_from_value(-7.4e-9,1.0);
+        near(rounded[0],0,"Near-certain draw produced negative win target");
+        near(rounded[2],7.4e-9,"W-L changed while correcting draw roundoff");
+        for(auto invalid: {std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+            for(bool value_is_bad:{false,true}) {
+                bool rejected=false;
+                try{wdl_from_value(value_is_bad?invalid:0,value_is_bad?0:invalid);}
+                catch(const std::runtime_error&){rejected=true;}
+                check(rejected,"Nonfinite search statistics silently clamped");
+            }
+        }
         auto s=settings();s.use_uncertainty=true;
         near(uncertainty_weight(0,true,s),8,"Zero error cap");near(uncertainty_weight(.5,true,s),8.0/17,"Error standard deviation used directly");
         near(uncertainty_weight(.5,false,s),1,"Absent error capability fallback");
