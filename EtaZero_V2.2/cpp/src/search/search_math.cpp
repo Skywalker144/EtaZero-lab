@@ -4,6 +4,15 @@
 #include <numeric>
 
 namespace etazero {
+WDL wdl_from_value(double value,double draw) {
+    if(!std::isfinite(value) || !std::isfinite(draw))throw std::runtime_error("Nonfinite search WDL statistics");
+    // KataGo ReportedSearchValues: roundoff in separately accumulated W-L
+    // and draw statistics must not create negative probability targets.
+    value=std::clamp(value,-1.0,1.0);
+    draw=std::clamp(draw,0.0,1.0-std::abs(value));
+    return {std::clamp((1.0-draw+value)/2,0.0,1.0),draw,
+            std::clamp((1.0-draw-value)/2,0.0,1.0)};
+}
 std::vector<double> policy_temperature_distribution(const std::vector<double>& weights,double temperature) {
     if(weights.empty() || !std::isfinite(temperature) || temperature<=0)throw std::runtime_error("Invalid policy temperature");
     double maximum=0;
