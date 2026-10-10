@@ -138,7 +138,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     result.simulations=completed;result.new_playouts=completed+1;result.root_visits=root_->stats.visits;result.stopped_early=stopped;
     result.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
     result.network_wdl=root_->initial;result.network_sample_weight=root_->initial_weight;result.network_value_stdev=root_->stdev;
-    auto p=root_->stats;result.value=p.value;result.search_weight=p.weight;result.search_weight_sq=p.weight_sq;result.search_wdl={(1-p.draw+p.value)/2,p.draw,(1-p.draw-p.value)/2};
+    auto p=root_->stats;result.value=p.value;result.search_weight=p.weight;result.search_weight_sq=p.weight_sq;result.search_wdl=wdl_from_value(p.value,p.draw);
     for(const auto& e:root_->edges){result.network_policy[e.action]=e.prior;result.search_policy[e.action]=e.search_prior;}
     auto stats=children(*root_);std::vector<int> actions;
     for(size_t i:root_->expansion_order){const auto& e=root_->edges[i];if(e.child&&e.child->ready){actions.push_back(e.action);result.visits[e.action]=result.q_visits[e.action]=e.child->stats.visits;result.q_values[e.action]=-e.child->stats.value;}}
