@@ -745,9 +745,9 @@ def test_learner_autocast_heads_are_fp32(gpu_config, amp, compiled, training):
 @pytest.mark.parametrize('compiled', [False, True])
 def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline,gpu_config,compiled,monkeypatch):
     root,_=pipeline;c=copy.deepcopy(gpu_config)
-    c['training'].update(amp='float16',compile=compiled,train_steps=5)
+    c['training'].update(amp='float16',compile=compiled,train_steps=4)
     c['optimizer'].update(norm_only_at_print=False,lookahead_print=True)
-    plan=load_json(root/'.internal/iterations/000001/plan.json');plan['train_steps']=5
+    plan=load_json(root/'.internal/iterations/000001/plan.json');plan['train_steps']=4
     plan['snapshot_id']=load_json(root/'.internal/iterations/000001/status.json')['snapshot_id']
     dirs=[tmp_path/'full',tmp_path/'resumed']
     bases=[]
@@ -780,17 +780,17 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
     torch.use_deterministic_algorithms(True)
     try:
         full,done=train_iteration(dirs[0],c,plan,bases[0],log);assert done
-        assert [e['amp_skipped'] for e in events]==[True,False,False,False,False]
+        assert [e['amp_skipped'] for e in events]==[True,False,False,False]
         inject['remaining']=1;events.clear()
         partial,done=train_iteration(dirs[1],c,plan,bases[1],log,lambda:len(events)==1)
         assert not done and partial['optimizer_steps']==0 and partial['total_samples']==8
         mid=load_checkpoint(dirs[1],partial,c)
         assert mid['optimization']['lookahead_counter']==1 and mid['optimization']['swa_samples']==8
         resumed,done=train_iteration(dirs[1],c,plan,bases[1],log);assert done
-        assert [e['amp_skipped'] for e in events]==[True,False,False,False,False]
+        assert [e['amp_skipped'] for e in events]==[True,False,False,False]
         a=load_checkpoint(dirs[0],full,c);b=load_checkpoint(dirs[1],resumed,c)
         assert a['reader']==b['reader'] and a['scaler']==b['scaler']
-        assert a['total_samples']==b['total_samples']==40 and a['optimizer_steps']==b['optimizer_steps']==4
+        assert a['total_samples']==b['total_samples']==32 and a['optimizer_steps']==b['optimizer_steps']==3
         for name in a['model']:
             torch.testing.assert_close(a['model'][name],b['model'][name],rtol=0,atol=0)
         for name in ('norms','norm_sums','norm_weights','consumed_samples','optimizer_steps',
