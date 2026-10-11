@@ -125,7 +125,7 @@ def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Pa
         effective = load_json(saved) if saved.is_file() else {}
         algorithm = info.get('algorithm', effective.get('agent', {}).get('algorithm', 'alphazero'))
         source = config_dir or (mapped if mapped and (mapped / 'analysis.cfg').is_file() else
-                                ROOT / 'configs' / ('mzg' if algorithm == 'muzero' else 'baseline'))
+                                ROOT / 'configs' / ('mz_g' if algorithm == 'muzero' else 'baseline'))
         config = load_engine_config(source)
         if not config_dir and source != mapped:
             config['analysis']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))

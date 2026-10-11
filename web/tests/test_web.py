@@ -33,7 +33,7 @@ class CatalogTests(unittest.TestCase):
         self.data.mkdir()
         for name in ('baseline', 'minimal_test', 'muzero', 'muzero_minimal_test'):
             shutil.copytree(ROOT / 'tests/fixtures/configs' / name, self.root / 'configs' / name)
-        fallback = self.root / 'configs/mzg'
+        fallback = self.root / 'configs/mz_g'
         fallback.mkdir(parents=True)
         for mode in ('analysis', 'match'):
             (fallback / f'{mode}.cfg').write_text(f'@include ../muzero/{mode}.cfg\n')

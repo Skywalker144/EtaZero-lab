@@ -6,12 +6,12 @@ Gumbel 起始配置按模型、非根策略和棋类分类，继承对应的基�
 
 | 路线 | 非根搜索 | 五子棋 | Hex |
 |---|---|---|---|
-| AlphaZero / Gumbel | Gumbel | [配置](../configs/gazg/run.cfg) | [配置](../configs/gazh/run.cfg) |
-| MuZero / Gumbel | Gumbel | [配置](../configs/gmzg/run.cfg) | [配置](../configs/gmzh/run.cfg) |
-| AlphaZero / Gumbel + PUCT | PUCT | [配置](../configs/gazpg/run.cfg) | [配置](../configs/gazph/run.cfg) |
-| MuZero / Gumbel + PUCT | PUCT | [配置](../configs/gmzpg/run.cfg) | [配置](../configs/gmzph/run.cfg) |
+| AlphaZero / Gumbel | Gumbel | [配置](../configs/gazg_g/run.cfg) | [配置](../configs/gazg_h/run.cfg) |
+| MuZero / Gumbel | Gumbel | [配置](../configs/gmzg_g/run.cfg) | [配置](../configs/gmzg_h/run.cfg) |
+| AlphaZero / Gumbel + PUCT | PUCT | [配置](../configs/gazp_g/run.cfg) | [配置](../configs/gazp_h/run.cfg) |
+| MuZero / Gumbel + PUCT | PUCT | [配置](../configs/gmzp_g/run.cfg) | [配置](../configs/gmzp_h/run.cfg) |
 
-`gazg`、`gazh`、`gmzg`、`gmzh` 的根和非根均使用 Gumbel；带 `p` 的配置继承对应 Gumbel 配置，仅将训练和评估的非根策略覆盖为 PUCT。在本版本目录运行 `CONFIG_DIR=configs/gazg bash scripts/run.sh`，其他组合替换目录即可。
+`gazg_g`、`gazg_h`、`gmzg_g`、`gmzg_h` 的根和非根均使用 Gumbel；带 `p` 的配置继承对应 Gumbel 配置，仅将训练和评估的非根策略覆盖为 PUCT。在本版本目录运行 `CONFIG_DIR=configs/gazg_g bash scripts/run.sh`，其他组合替换目录即可。
 
 ## 根搜索、预算与落子
 

@@ -10,7 +10,7 @@ bash web/webui.sh
 
 默认递归扫描该版本整个 `data/`，发现包含 `config/effective.json` 或 `models/` 的运行目录，包括实验伞目录下的嵌套运行。先选择“配置目录”，再选择“权重代数”；代数对应训练 iteration，按数值倒序排列，默认选择 `models/current.json` 指向的当前发布权重，没有发布指针时选择最新一代。尚未发布权重的目录显示“暂无权重”，不能创建棋局。存在可用的 `checks/minimal_test` 时默认选中它，否则选择首个有权重的目录；`--model` 可指定初始选择。
 
-支持 AlphaZero 和 MuZero 已发布模型。运行路径相对于 `data/` 映射到同版本 `configs/`，加载对应 `analysis.cfg` 的显式引用、公共 `engine.cfg`、本机与 `ENGINE_*` / `ANALYSIS_*` 覆盖；找不到对应配置时，按模型算法使用 `baseline` 或 `mzg` 评估配置，默认棋盘尺寸取模型画布或保存的配置。`--config-dir` 可统一覆盖评估配置，须满足所选模型的搜索约束。MuZero 使用原生 latent 搜索，评估配置要求关闭图搜索和树复用、根对称数为 1。
+支持 AlphaZero 和 MuZero 已发布模型。运行路径相对于 `data/` 映射到同版本 `configs/`，加载对应 `analysis.cfg` 的显式引用、公共 `engine.cfg`、本机与 `ENGINE_*` / `ANALYSIS_*` 覆盖；找不到对应配置时，按模型算法使用 `baseline` 或 `mz_g` 评估配置，默认棋盘尺寸取模型画布或保存的配置。`--config-dir` 可统一覆盖评估配置，须满足所选模型的搜索约束。MuZero 使用原生 latent 搜索，评估配置要求关闭图搜索和树复用、根对称数为 1。
 
 点击“创建棋局”加载模型；“刷新模型”重新扫描目录和权重，无需重启服务，保留当前选择、棋局和已加载模型。切换配置目录会填入该目录的默认棋盘、棋规和预算，新模型与评估配置在重开棋局后生效。
 
