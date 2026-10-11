@@ -278,7 +278,7 @@ Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络�
 
 完整接入必须覆盖 representation、dynamics、prediction、初始与 recurrent 组批、latent 生命周期、搜索备份、展开长度、价值 / 策略目标、梯度缩放以及终局与展开末端处理。真实环境只负责实际动作执行和监督来源，不能在 latent 树内调用 AlphaZero 的棋规转移代替 dynamics。
 
-通用 MuZero 定义包含对奖励、价值和策略的学习；具体棋类适配是否使用 reward 分支、采用何种目标和 mask，以用户指定的移植来源为准。框架接口不能因第一轮棋类 AlphaZero 而永久写死零奖励或真实终局检测。[MuZero 原文](https://arxiv.org/pdf/1911.08265)
+通用 MuZero 定义包含对奖励、价值和策略的学习；具体棋类适配是否使用 reward 分支、采用何种目标和 mask，以用户指定的移植来源为准。MuZero 使用独立 latent 搜索接口，不通过 AlphaZero 的真实棋盘终局接口。[MuZero 原文](https://arxiv.org/pdf/1911.08265)
 
 ### Gumbel 根搜索与非根搜索
 
