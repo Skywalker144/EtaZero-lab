@@ -17,8 +17,8 @@ def test_diagnostic_means_use_only_measured_committed_updates(tmp_path):
     events=[update('old',1),a,a,b,skipped,latest,update('abandoned',1,step_losses=[999.,999.]),
             dict(event='iteration_complete',iteration=1,unique_rows=10,total_samples=64),
             dict(event='iteration_complete',iteration=2,unique_rows=20,total_samples=80)]
-    path=tmp_path/'logs/events.jsonl';path.parent.mkdir(parents=True)
-    path.write_text(''.join(json.dumps(e)+'\n' for e in events))
+    from test_experiment import journal
+    journal(tmp_path, events)
     first,last=[round_history(tmp_path,i,n,0) for i,n in ((1,4),(2,1))]
     assert first['steps']==4 and first['step_loss_updates']==3
     assert first['step_losses']==[4.,8.]
