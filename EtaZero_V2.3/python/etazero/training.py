@@ -14,6 +14,7 @@ from .reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
 from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sync_directory
 from .symmetry import augment_batch
+from .training_metrics import TrainingMetrics
 
 
 def model_identity(config):
@@ -87,13 +88,14 @@ def load_checkpoint(run_dir, reference, config, device="cpu"):
 
 
 def commit_checkpoint(run_dir, config, model, optimizer, scaler, iteration, step, total_steps,
-                      reader_state, optimization):
+                      reader_state, optimization, training_metrics=None):
     identity = f"iteration_{iteration:06d}_step_{step:08d}_{uuid.uuid4().hex}"
     path = Path("checkpoints")/(identity+".pt")
     value = {"id": identity, "contract": CONTRACT_ID, "resume_config": resume_config(config),
              **model_identity(config), "model": model.state_dict(), "optimizer": optimizer.state_dict(),
              "optimization": optimization.state_dict(), "scaler": scaler.state_dict(), "rng": rng_state(), "reader": reader_state,
              "iteration": iteration, "step": step, "total_steps": total_steps,
+             "training_metrics": TrainingMetrics().state if training_metrics is None else training_metrics.state,
              "total_samples": optimization.consumed_samples, "optimizer_steps": optimization.optimizer_steps,
              "source_id":load_json(Path(run_dir)/".internal/session.json")["source_id"] if (Path(run_dir)/".internal/session.json").exists() else None}
     atomic_write(Path(run_dir)/path, lambda p: torch.save(value,p), immutable=True)
@@ -169,6 +171,32 @@ def initialize(run_dir, config, weights=None):
 LOSS_NAMES=('loss','policy_loss','opponent_policy_loss','soft_policy_loss',
             'soft_opponent_policy_loss','value_loss','td_value_long_loss','td_value_mid_loss',
             'td_value_short_loss','long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')
+
+
+def finish_optimizer_step(parameters, optimizer, scaler, grad_norm, cap, packed, loss_count):
+    """Launch the update before the single diagnostic transfer; fail before publishing state.
+
+    GradScaler has already recorded elementwise overflow in unscale_. Clipping an
+    overflowing gradient does not change its skip decision. A fatal loss/norm may
+    contaminate this in-memory update, so callers MUST abort without checkpointing.
+    The packed tensor snapshots the pre-update scale, which update() mutates.
+    """
+    torch.nn.utils.clip_grads_with_norm_(parameters, cap, grad_norm)
+    scaler.step(optimizer)
+    scaler.update()
+    values = packed.tolist()
+    if not all(math.isfinite(v) for v in values[:loss_count]):
+        raise FloatingPointError('Nonfinite loss')
+    scale_before, found_inf = values[-2:] if scaler.is_enabled() else (1., 0.)
+    if scale_before <= 0 or not math.isfinite(scale_before):
+        raise FloatingPointError('Invalid AMP loss scale')
+    skipped = found_inf != 0
+    if not math.isfinite(values[loss_count]):
+        if not scaler.is_enabled():
+            raise FloatingPointError('Nonfinite gradients')
+        if not skipped:
+            raise FloatingPointError('Nonfinite gradient norm despite finite unscaled gradients')
+    return values, skipped
 
 
 def validate_epoch(snapshot,model,forward,config,iteration,device,log):
@@ -260,6 +288,18 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
                          config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,no_repeat_files=True)
     step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
+    round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
+    if round_metrics.state['steps'] != step:
+        raise ValueError('Metric counters differ from the learner cursor')
+    window_metrics = TrainingMetrics()
+    last_fields = {}
+
+    def flush_metrics():
+        nonlocal window_metrics
+        if window_metrics.state['steps']:
+            log('update', **last_fields, **window_metrics.summary(), round_metrics=round_metrics.summary())
+            window_metrics = TrainingMetrics()
+
     ends=subepoch_ends(plan['train_steps'],min(config['training']['sub_epochs'],plan['train_steps']))
     if not progress:
         optimization.begin_round()
@@ -328,27 +368,28 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             amp_status = ([scaler._get_scale_async(),
                            sum(scaler._found_inf_per_device(optimizer).values())]
                           if scaler.is_enabled() else [])
-            values = torch.stack([x.detach() for x in components] +
+            packed = torch.stack([x.detach() for x in components] +
                                  [grad_norm / optimization.backward_scale] +
-                                 list(module_norms.values()) + diagnostics_tensors + amp_status).tolist()
-            if not all(math.isfinite(v) for v in values[:len(components)]):
-                raise FloatingPointError(f"Nonfinite loss at iteration {iteration}, step {step+1}")
-            finite_norm = math.isfinite(values[len(components)])
-            scale_before, found_inf = values[-2:] if amp_status else (1., 0.)
-            if scale_before <= 0 or not math.isfinite(scale_before):
-                raise FloatingPointError("Invalid AMP loss scale")
-            skipped = found_inf != 0
-            if finite_norm:
-                torch.nn.utils.clip_grads_with_norm_(parameters, optimization.gradient_cap(config['training']['gradient_clip']), grad_norm)
-            elif not scaler.is_enabled():
-                raise FloatingPointError(f"Nonfinite gradients at iteration {iteration}, step {step+1}")
-            elif not skipped:
-                raise FloatingPointError("Nonfinite gradient norm despite finite unscaled gradients")
-            scaler.step(optimizer)
-            scaler.update()
+                                 list(module_norms.values()) + diagnostics_tensors + amp_status)
+            cap = optimization.gradient_cap(config['training']['gradient_clip'])
+            try:
+                values, skipped = finish_optimizer_step(parameters, optimizer, scaler, grad_norm,
+                                                         cap, packed, len(components))
+                diagnostic_end = len(values)-len(amp_status)
+                # Unroll losses must be finite even when GradScaler skips gradients.
+                start = len(components)+1+len(module_norms)
+                if not all(math.isfinite(v) for v in values[start:diagnostic_end]):
+                    raise FloatingPointError('Nonfinite unroll loss')
+            except FloatingPointError as error:
+                log('training_failure', iteration=iteration, step=step+1, reason=str(error))
+                if hasattr(log, 'flush'):
+                    log.flush()
+                raise FloatingPointError(f'{error} at iteration {iteration}, step {step+1}') from error
+            scale_before = values[-2] if amp_status else 1.
             if skipped:
                 log("amp_overflow", iteration=iteration, step=step+1,
-                    scale_before=scale_before, scale_after=scaler.get_scale(), skipped=True)
+                    scale_before=scale_before, scale_after=scaler.get_scale(), skipped=True,
+                    grad_norm=values[len(components)])
             optimization.after_step(successful=not skipped)
             step += 1; total += 1
             if step == plan['train_steps']:
@@ -362,18 +403,26 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                     diagnostics['grad_norms']=dict(zip(module_norms,values[start:start+len(module_norms)]))
             loss_names=LOSS_NAMES
             if model.predict_q_values:loss_names+=('q_winloss_loss',)
-            log('update',iteration=iteration,step=step,total_steps=total,
+            measured_losses = dict(zip(loss_names, values))
+            measured_norm = values[len(components)]
+            clipped = measured_norm * optimization.backward_scale > cap
+            for accumulator in (round_metrics, window_metrics):
+                accumulator.add(measured_losses, measured_norm, skipped, clipped, **diagnostics)
+            last_fields = dict(iteration=iteration,step=step,total_steps=total,
                 optimizer_steps=optimization.optimizer_steps,total_samples=optimization.consumed_samples,
                 subepoch=optimization.subepoch,subepoch_batches=optimization.subepoch_batches,
-                **dict(zip((*loss_names,'grad_norm'),values)),amp_skipped=skipped,
-                **diagnostics,
-                symmetry=symmetry, learning_rates=learning_rates,weight_decays=weight_decays,
+                amp_skipped=skipped,symmetry=symmetry,learning_rates=learning_rates,weight_decays=weight_decays,
                 lookahead_counter=optimization.counter,swa_samples=optimization.swa_count)
+            checkpoint_every = config['training']['checkpoint_every']
+            save_due = (bool(checkpoint_every and step % checkpoint_every == 0)
+                        or step == plan['train_steps'] or stopping())
+            if step % config['training']['log_every'] == 0 or save_due:
+                flush_metrics()
             del loss,pl,opl,spl,sopl,vl,components,tensors,step_losses
             if step==plan['train_steps']:
                 validate_epoch(reader.snapshot,model,forward,config,iteration,device,log)
-            if step % config["training"]["checkpoint_every"] == 0 or step == plan["train_steps"] or stopping():
-                reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization)
+            if save_due:
+                reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization,round_metrics)
                 log("checkpoint",iteration=iteration,checkpoint=reference)
                 if hasattr(log,'flush'):
                     log.flush()
@@ -381,7 +430,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                 unsaved = False
         # Commit consumed batches, including scaler skips, at a normal stop.
         if unsaved:
-            reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization)
+            flush_metrics()
+            reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization,round_metrics)
             log("checkpoint",iteration=iteration,checkpoint=reference)
             if hasattr(log,'flush'):
                 log.flush()

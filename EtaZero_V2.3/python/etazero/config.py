@@ -85,7 +85,7 @@ FIELDS = {
                                   "learning_rate": float, "weight_decay": float}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
                            'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
-                           "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
+                           "log_every": int, "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
                            "replay_ratio": float, "d4_augmentation": boolean, "soft_policy_weight_scale": float, "disable_optimistic_policy": boolean}),
     "optimizer": ("train", {"kind": str, "lr_scale": float, "lr_warmup": boolean,
                              "head_lr_factor": float, "noreg_lr_factor": float,
@@ -302,7 +302,7 @@ NUMERIC_MINIMUMS = {
     'muzero': (('latent_channels', 'dynamics_channels', 'prediction_channels'), ('dynamics_blocks', 'prediction_blocks')),
     'unroll': (('steps',), ('hidden_gradient_scale',)),
     'muzero_training': (('learning_rate',), ('weight_decay',)),
-    'training': (('train_steps', 'batch_size', 'sub_epochs', 'checkpoint_every', 'checkpoint_keep', 'replay_ratio'), ('prefetch_depth', 'max_validation_samples', 'gradient_clip', 'soft_policy_weight_scale')),
+    'training': (('train_steps', 'batch_size', 'sub_epochs', 'log_every', 'checkpoint_keep', 'replay_ratio'), ('checkpoint_every', 'prefetch_depth', 'max_validation_samples', 'gradient_clip', 'soft_policy_weight_scale')),
     'optimizer': (('lr_scale', 'head_lr_factor', 'noreg_lr_factor', 'norm_interval', 'lookahead_k', 'lookahead_alpha', 'swa_scale'), ('input_wd_factor', 'normal_wd_factor', 'normal_attn_wd_factor', 'swa_period_samples')),
     'replay': (('min_rows', 'taper_exponent', 'keep_target_rows', 'max_rows'), ('expand_per_row', 'taper_scale')),
     'shuffle': (('workers', 'group_rows', 'bucket_rows', 'training_shard_rows', 'waves', 'memory_mb', 'snapshot_keep'), ()),
@@ -502,7 +502,7 @@ def resume_config(config):
     """State/layout requirements, independent of paths and execution resources."""
     sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'optimizer', 'training')
     result = {name: dict(config[name]) for name in sections if name in config}
-    for key in ('checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
+    for key in ('log_every','checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
                 'max_validation_samples','randomize_validation_files'):
         result['training'].pop(key, None)
     result['optimizer'].pop('lookahead_print', None)

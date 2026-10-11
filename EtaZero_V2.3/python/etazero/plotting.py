@@ -78,43 +78,15 @@ def round_history(run_dir, iteration, final_step, offset):
         history[iteration] = {'iteration': iteration, 'steps': 0, 'total_rows': event['unique_rows'],
                               **statistics.get(iteration, {}), 'total_samples': event['total_samples'],
                               'phases': phases.get(iteration, {})}
-    for event in updates.values():
-        row = history.setdefault(event['iteration'], {'iteration': event['iteration'], 'steps': 0,
-                                                      'phases': phases.get(event['iteration'], {})})
-        row['steps'] += 1
-        skipped = event.get('amp_skipped', False)
-        row['amp_skipped_steps'] = row.get('amp_skipped_steps', 0) + int(skipped)
-        row['gradient_steps'] = row.get('gradient_steps', 0) + int(not skipped)
-        for metric in METRICS:
-            # Preserve overflow norms in the raw journal; they are not finite
-            # gradient measurements for the round's plotted mean.
-            if metric == 'grad_norm' and skipped:
-                continue
-            row[metric] = row.get(metric, 0) + event[metric]
-        if 'q_winloss_loss' in event:
-            row['q_winloss_loss']=row.get('q_winloss_loss',0)+event['q_winloss_loss']
-        if 'step_losses' in event:
-            measured=event['step_losses']
-            total=row.setdefault('step_losses',[0.0]*len(measured))
-            if len(total)!=len(measured):raise ValueError('Unroll length changed within a training round')
-            row['step_losses']=[a+b for a,b in zip(total,measured)]
-            row['step_loss_updates']=row.get('step_loss_updates',0)+1
-        if 'grad_norms' in event and not skipped:
-            totals=row.setdefault('grad_norms',dict.fromkeys((k for k,_,_ in MODULE_GRADIENTS),0.0))
-            for key in totals:totals[key]+=event['grad_norms'][key]
-            row['module_gradient_steps']=row.get('module_gradient_steps',0)+1
+    if final_step:
+        final = updates.get(final_step)
+        if final is None or final['round_metrics']['steps'] != final_step:
+            raise ValueError('Round metrics do not cover the final learner cursor')
+        row = history.setdefault(iteration, {'iteration': iteration, 'phases': phases.get(iteration, {})})
+        # All-batch sums are restored with the checkpoint. The latest final-cursor
+        # record replaces abandoned attempts, independent of print cadence.
+        row.update(final['round_metrics'])
     for row in history.values():
-        if row['steps']:
-            for metric in METRICS:
-                if metric == 'grad_norm':
-                    row[metric] = row.get(metric, 0) / row['gradient_steps'] if row['gradient_steps'] else float('nan')
-                else:
-                    row[metric] /= row['steps']
-            if 'q_winloss_loss' in row:row['q_winloss_loss']/=row['steps']
-            if 'step_losses' in row:
-                row['step_losses']=[v/row['step_loss_updates'] for v in row['step_losses']]
-            if 'grad_norms' in row:
-                row['grad_norms']={k:v/row['module_gradient_steps'] for k,v in row['grad_norms'].items()}
         # Validation has no update ID. Only completed rounds can expose the
         # latest attempt's result; a new plan clears an abandoned attempt.
         if row['iteration'] in completed and row['iteration'] in validation:
@@ -125,8 +97,6 @@ def round_history(run_dir, iteration, final_step, offset):
         row['queue_wait_us'] = sum(e['queue_wait_us'] for e in counters)
         row['submitted'] = sum(e['submitted'] for e in counters)
         row['cache_hits'] = sum(e['cache_hits'] for e in counters)
-    if len(updates) != final_step or set(updates) != set(range(1, final_step+1)):
-        raise ValueError('Round metrics do not cover the final learner cursor')
     return history[iteration]
 
 
