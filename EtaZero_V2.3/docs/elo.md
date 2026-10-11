@@ -6,7 +6,7 @@
 
 [engine.cfg](../configs/baseline/engine.cfg) 的 `[engine]` 定义公共搜索、推理、棋盘和种子默认值。[analysis.cfg](../configs/baseline/analysis.cfg) 的 `[analysis]` 只覆盖分析用途的差异；[match.cfg](../configs/baseline/match.cfg) 的 `[match]` 增加局数、对局并发及必要的模式覆盖，`[opening]` 管理五子棋比赛开局，`[hex_opening]` 管理 Hex 比赛开局。Hex 两个开局门必须为 1；局面分析不自动生成开局，见 [Hex](hex.md)。两种模式共用字段定义、校验和 C++ 搜索参数转换，解析后只保存本次模式的完整生效配置。配置改变不影响训练配置身份。
 
-在文件首部用 `@include engine.cfg` 或 `@include ../baseline/analysis.cfg` 显式引用公共文件和父模式；相对路径以引用文件为基准，含空格的路径加引号。引用按顺序读取，再应用当前文件。`[analysis]` / `[match]` 覆盖公共 `[engine]` 值。随后依次应用所选文件目录的 `engine.cfg.local`、所选模式文件的 `.local`、公共 `ENGINE_<字段>` 环境覆盖、模式 `ANALYSIS_<字段>` / `MATCH_<字段>` 覆盖；五子棋开局使用 `MATCH_OPENING_<字段>`，Hex 开局使用 `MATCH_HEX_OPENING_<字段>`。父文件的 `.local` 不自动传播。缺失文件、引用循环、未知或重复字段明确报错。训练 `run.cfg` 的继承链和训练环境变量不参与加载。
+在文件首部用 `@include engine.cfg` 或 `@include ../baseline/analysis.cfg` 显式引用公共文件和父模式；相对路径以引用文件为基准，含空格的路径加引号。引用按顺序读取，再应用当前文件。`[analysis]` / `[match]` 覆盖公共 `[engine]` 值。随后依次应用所选文件目录的 `engine.cfg.local`、所选模式文件的 `.local`、公共 `ENGINE_<字段>` 环境覆盖、模式 `ANALYSIS_<字段>` / `MATCH_<字段>` 覆盖；五子棋开局使用 `MATCH_OPENING_<字段>`，Hex 开局使用 `MATCH_HEX_OPENING_<字段>`。父文件的 `.local` 不自动传播。缺失文件、引用循环、未知或重复字段明确报错。文件引用语法与训练共用解析器；训练文件和训练环境变量不参与模式配置加载。
 
 命令可用 `--config /path/to/analysis.cfg` 或 `--config /path/to/match.cfg` 直接加载独立文件，也可用 `--config-dir` 选择对应模式文件所在目录；两者互斥。字段事实源是 [engine_config.py](../python/etazero/engine_config.py)。
 
@@ -34,6 +34,8 @@ bash scripts/run.sh analysis --config configs/baseline/analysis.cfg --model /pat
 ```
 
 每对模型局数为四的正倍数。以A或B作为参考黑方的开局各占一半（任务 `generator` 表示参考黑方模型），另一个模型为参考白方。每次balance尝试随机选参考botB/botW评估两个根视角与全部候选；可选policy init每手按当前棋盘执色选参考模型。参数遵循固定KataGomo：Match平衡指数10，policy init默认关闭，开启时显式mean、温度缺省1。开局记录保存参考黑方及实际balance/policy模型索引（0黑/1白）。同一个已生成开局交换A/B执黑／执白下两局，棋盘颜色和Renju规则不变。这是EtaZero的成对换色协议，第二侧不重新生成开局；与KataGomo逐局独立初始化区分。只接受成功且非终局的开局。无认输、无提前截断，按真实棋规结束。每局保存完整落子、胜者、时间与逐手根访问数。
+
+普通 `match` 与 `arena` 共用 [比赛执行器](../cpp/src/commands/match.cpp) 和 Python 子进程事件收集逻辑。普通 match 保留两侧独立推理服务与种子，并在全部缺失开局生成后开始比赛；arena 在同一模型驻留窗口内将开局与对局任务混合调度。
 
 开局和单局完成后分别原子落盘，重启只安排缺失的一侧或新开局。中断的半局重跑，同开局已完成的一侧保持不变。相同输出目录可以用 `--games` 增加成对开局，不能减少目标；模型、搜索条件、种子、二进制或配对身份变化时使用新输出目录。训练采用整轮提交，比赛采用逐开局／逐局提交，两者边界独立。
 
@@ -117,7 +119,7 @@ Python 只规划、启动一个 native arena 进程和落盘；棋规、开局�
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `server_threads` | 每个模型的推理服务线程；过多服务可能分散 batch，MuZero latent 固定路由到创建它的服务 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `batch_wait_us` | 填充 batch 的最大等待窗口 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `cpu_threads` | LibTorch CPU 算子线程数，区别于对局和搜索线程 |
-| `engine.cfg`，可由 `match.cfg` 覆盖 | `queue_capacity` | 推理待处理队列配置，不是 batch 大小 |
+| `engine.cfg`，可由 `match.cfg` 覆盖 | `muzero_queue_capacity` | MuZero 推理待处理队列上限；AlphaZero 使用无容量门槛的入队方式 |
 
 先保留单搜索线程和单推理服务，调节全局对局并发和模型驻留上限，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件。共享模型服务按模型身份与比赛种子初始化 NN 随机数；调度、缓存与服务重载可能改变随机 D4 的分配及具体赛果，逐局结果不保证跨并发配置一致。赛程、每对局数、成对开局、搜索预算与拟合定义保持独立。
 
