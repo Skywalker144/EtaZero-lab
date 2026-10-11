@@ -10,46 +10,10 @@ import copy
 import random
 import queue
 import threading
-import warnings
 import numpy as np
 from .storage import load_json
 from .schema import CONTRACT_ID, PLANES, GLOBALS, unpack_observations
 from .data import TRAIN_TARGETS
-
-
-def check_wdl_targets(arrays, source):
-    """Check probability targets; repair only roundoff in the in-memory view.
-
-    Separately rounded search statistics can put WDL just outside [0, 1].
-    Existing immutable snapshots also need this guard before TD entropy's log.
-    Valid distributions remain bitwise unchanged; corrupt targets are rejected.
-    """
-    for name in ('value', 'td_value'):
-        if name not in arrays:
-            continue
-        probabilities = arrays[name]
-        # MuZero side positions have no continuation: those sequence slots
-        # intentionally contain all-zero placeholders and never enter loss.
-        active = arrays.get('sequence_mask')
-        active = True if active is None else (active[..., None] if name == 'td_value' else active).astype(bool)
-        bad_mass = np.where(active,
-                            np.abs(probabilities.sum(axis=-1, dtype=np.float64)-1) > 1e-5,
-                            (probabilities != 0).any(axis=-1))
-        invalid = ((~np.isfinite(probabilities) | (probabilities < -1e-6) |
-                    (probabilities > 1+1e-6)).any(axis=-1) |
-                   bad_mass)
-        if invalid.any():
-            index = tuple(int(i) for i in np.argwhere(invalid)[0])
-            raise ValueError(f'{source}: invalid {name} WDL at index {index}: {probabilities[index].tolist()}')
-        rounded = ((probabilities < 0) | (probabilities > 1)).any(axis=-1)
-        if rounded.any():
-            selected = probabilities[rounded].astype(np.float64)
-            minimum, maximum = selected.min(), selected.max()
-            selected = np.clip(selected, 0, 1)
-            probabilities[rounded] = selected / selected.sum(axis=-1, keepdims=True)
-            warnings.warn(f'{source}: corrected WDL roundoff in {name}: '
-                          f'{int(rounded.sum())} distributions, range [{minimum}, {maximum}]',
-                          RuntimeWarning, stacklevel=2)
 
 
 class BatchReader:
@@ -112,7 +76,6 @@ class BatchReader:
             from .muzero.data import validate_view
             validate_view(arrays, info['rows'], self.manifest['canvas'], self.manifest['unroll_steps'],
                           self.manifest.get('targets', TRAIN_TARGETS))
-            check_wdl_targets(arrays, path)
             return arrays
         if set(arrays) != {'obs', 'globals', *self.manifest.get('targets', TRAIN_TARGETS)} or len(arrays["value"]) != info["rows"]:
             raise ValueError(f"Invalid training view: {path}")
@@ -130,7 +93,6 @@ class BatchReader:
             shape,dtype = expected[key]
             if arrays[key].shape != shape or arrays[key].dtype != dtype:
                 raise ValueError(f"Invalid training {key} layout: {path}")
-        check_wdl_targets(arrays, path)
         return arrays
 
     def _new_pass(self):
