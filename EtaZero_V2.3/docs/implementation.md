@@ -170,7 +170,7 @@ learner 固定单遍消费：随机排列文件，每个文件在本轮快照中
 
 后台batch队列和CUDA上传stream有界。每batch携带消费游标，包括文件order、已结束文件、文件/行位置、pass、RNG、repeat模式、split与batch大小；checkpoint取已消费游标，包含AMP skip。源generator在pop文件时记用过，本地额外保留文件内游标以恢复后续完整batch。未消费的预取可丢弃重读。两个pinned槽通过event防止DMA覆盖，record_stream保证GPU生命周期。
 
-训练与验证 reader 在文件加载时检查 value / TD 的 WDL 概率。非有限值、超过 `1e-6` 的边界越界或超过 `1e-5` 的概率和误差报错并标明文件与索引。仅对容差内越出 `[0,1]` 的分布，在内存中截断并重新归一化，输出包含字段、数量和原始范围的警告；有效目标不变，原始对局和快照文件不改写，恢复游标也不变。MuZero 无后续轨迹的 masked slot 保留全零占位目标。
+训练与验证 reader 在文件加载时保留字段、shape 和 dtype 校验，不对 value / TD 做整文件 WDL 扫描或自动修复。搜索端 `wdl_from_value` 负责截断舍入越界并输出合法概率；TD 目标由概率的凸组合产生。MuZero 无后续轨迹的 masked slot 保留全零占位目标。learner 每 batch 检查 loss 与梯度；此检查不替代离线数据质量检查，也不提供历史损坏数据的兼容修复。
 
 `training.skip_validation` 控制验证；true 对应同步来源 SKIP_VALIDATE 分支。启用时MD5原始文件basename的前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation；目录和模型代次不影响所属分区。writer以独立OS随机流生成64位十六进制basename，不消耗game RNG。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest持久记录源文件分区与输出文件行数。验证payload位于同一个原子data目录的validation子目录，回收及重建同时覆盖两个分区。
 
@@ -218,11 +218,11 @@ remaining_credit = available_credit - actual_steps * B
 
 FP16 缩放溢出由 GradScaler 跳过当前 optimizer 更新并降低 scale，然后消费下一 batch，不保留图、不重试。当前 batch 的前向统计、随机流、reader 游标、样本与 Lookahead/SWA 时钟正常推进，成功更新数单独累计；每次溢出记录 `amp_overflow`，batch 日志记录 `amp_skipped`。训练 autocast 只影响主干，policy/value heads 和 loss 显式关闭 autocast 并使用 FP32。BF16 / FP32 的非有限梯度及非有限 loss 直接失败。
 
-`training.checkpoint_every` 按本轮消费 batch 数定期保存 checkpoint；轮末及正常停止也会保存，间隔单位是消费 batch，而非成功更新、对局或 iteration。
+`training.checkpoint_every=0` 关闭轮内周期保存，轮末及正常停止仍保存；正值按本轮消费 batch 数定期保存。间隔单位是消费 batch，而非成功更新、对局或 iteration。异常失败不保存当前状态；进程被强制杀死时，从上次持久化游标重算。
 
-checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均值的累积和/权重、Lookahead slow 权重与计数、SWA 权重/buffers/采样累积、AMP scaler、本轮及分段消费 batch、分段位置、累计消费样本与成功更新计数、Python / NumPy / Torch / CUDA RNG、数据读取状态、iteration 和本轮步数、恢复所需配置条件和源码身份。warmup 由已恢复的消费样本计数推导；optimizer 组保存当前 LR/WD，轮内恢复不额外刷新，保留 5/50 batch 时点。使用唯一文件名，不覆盖历史产物，持久化后才原子更新 learner 指针。
+checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均值的累积和/权重、Lookahead slow 权重与计数、SWA 权重/buffers/采样累积、AMP scaler、本轮训练指标累积和/计数/峰值、本轮及分段消费 batch、分段位置、累计消费样本与成功更新计数、Python / NumPy / Torch / CUDA RNG、数据读取状态、iteration 和本轮步数、恢复所需配置条件和源码身份。warmup 由已恢复的消费样本计数推导；optimizer 组保存当前 LR/WD，轮内恢复不额外刷新，保留 5/50 batch 时点。使用唯一文件名，不覆盖历史产物，持久化后才原子更新 learner 指针。
 
-每 batch 的 loss、全模型范数、展开 loss 与 AMP 状态共用一次诊断回传。FP16 复用 GradScaler 在 unscale 时计算的非有限标志判断跳步，不为判断跳步单独读取更新前后的 scale；异常溢出日志仍读取实际更新后 scale。非有限 loss、有限梯度导致的范数溢出与 BF16/FP32 非有限梯度仍明确失败。两个 GradScaler 内部访问接口由实际 CUDA 跳步与续训测试验证，升级 PyTorch 时须重验。
+每 batch 的 loss、全模型范数、展开 loss 与 AMP 状态先打包为更新前快照，再提交梯度裁剪、optimizer step 与 scaler update，最后做一次诊断回传。正常更新的数学顺序不变；致命异常可能已污染内存中的这一步，因此在 Lookahead/SWA、消费计数与任何 checkpoint 发布之前记录 `training_failure` 并终止，异常内存状态不续用。FP16 复用 GradScaler 在 unscale 时计算的非有限标志判断跳步，不为判断跳步单独读取更新前后的 scale；异常溢出日志仍读取实际更新后 scale。非有限 loss、有限梯度导致的范数溢出与 BF16/FP32 非有限梯度仍明确失败。两个 GradScaler 内部访问接口由实际 CUDA 跳步与续训测试验证，升级 PyTorch 时须重验。
 
 整轮成功提交并发布后，以 `.internal/state.json` 和 `.internal/checkpoints.json` 清理训练状态：只保留 `training.checkpoint_keep` 个最近轮末 `.pt`（初始化也计入），当前未完成轮不清理。不维护历史父链 sidecar 和逐 batch UUID 集合；日志、逐轮指标、推理模型与原始对局保留，绘图和旧模型评估不依赖已删除的 `.pt`。
 
@@ -300,13 +300,13 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 
 ## 训练图与性能图
 
-[plotting.py](../python/etazero/plotting.py) 根据已提交的 `logs/iterations/*.json` 绘图。AlphaZero 的 `training.png` 使用深色三行两列布局：顶部为胜负和局长，中部固定分为策略 loss 与价值 loss，底部为梯度范数和 NN 缓存命中率。策略组包含六项普通／对手、soft 和 optimistic policy；价值组包含主 value、三个 TD value、短期价值误差及启用时的 Q。两组图例在面板内分两列显示，分量全为正时使用对数纵轴；总 loss 和有效行数／局保留在日志中，不单独占用概览面板。总局长包含开局动作，有效行数排除开局并按采样次数计数；自对弈和缓存命中率横轴为迭代完成时的累计有效行数，包含 iteration 0 的 bootstrap，刻度采用 `1.2e5` 形式的紧凑科学计数。缓存命中率为该轮各 worker 的 cache hits 总数／submitted requests 总数，只显示有网络请求的已完成轮次，随机冷启动不填零。loss 与梯度横轴为轮末累计训练样本量，采用同样的紧凑科学计数法；样本量取已提交 checkpoint 的消费计数，重复训练同一样本和 AMP 跳步均计入，验证不计入。loss 按该轮已提交消费 batch 取算术均值，包含 AMP 跳步，无平滑；梯度均值只使用成功更新的有限范数，原始 overflow 范数仍在日志中，聚合同时记录跳步与有效梯度 batch 数。梯度范数为整个网络裁剪前平均 loss 的 L2 范数；每条 loss 曲线为已乘训练系数的 batch 均值，Q关闭时十一项之和等于总loss，Q开启时另有`q_winloss_loss`曲线并计入总loss；关闭时不伪造零值曲线。优化器解耦衰减不计入 loss。
+[plotting.py](../python/etazero/plotting.py) 根据已提交的 `logs/iterations/*.json` 绘图。AlphaZero 的 `training.png` 使用深色三行两列布局：顶部为胜负和局长，中部固定分为策略 loss 与价值 loss，底部为梯度范数和 NN 缓存命中率。策略组包含六项普通／对手、soft 和 optimistic policy；价值组包含主 value、三个 TD value、短期价值误差及启用时的 Q。两组图例在面板内分两列显示，分量全为正时使用对数纵轴；总 loss 和有效行数／局保留在日志中，不单独占用概览面板。总局长包含开局动作，有效行数排除开局并按采样次数计数；自对弈和缓存命中率横轴为迭代完成时的累计有效行数，包含 iteration 0 的 bootstrap，刻度采用 `1.2e5` 形式的紧凑科学计数。缓存命中率为该轮各 worker 的 cache hits 总数／submitted requests 总数，只显示有网络请求的已完成轮次，随机冷启动不填零。loss 与梯度横轴为轮末累计训练样本量，采用同样的紧凑科学计数法；样本量取已提交 checkpoint 的消费计数，重复训练同一样本和 AMP 跳步均计入，验证不计入。loss 按该轮已提交消费 batch 取算术均值，包含 AMP 跳步，无平滑；梯度均值只使用成功更新的有限范数，原始 overflow 范数在即时 `amp_overflow` 日志中，聚合同时记录跳步与有效梯度 batch 数、裁剪次数、最大 loss 和最大有限梯度范数。梯度范数为整个网络裁剪前平均 loss 的 L2 范数；每条 loss 曲线为已乘训练系数的 batch 均值，Q关闭时十一项之和等于总loss，Q开启时另有`q_winloss_loss`曲线并计入总loss；关闭时不伪造零值曲线。优化器解耦衰减不计入 loss。
 
 `training.png` 的各进度面板顶部增加 `Elapsed time (h)` 辅助轴，按对应的样本计数标注最多四个实际轮末累计时间；刻度位置来自记录，不假设恒定吞吐。不增加样本的轮次在同一横坐标使用最近一次提交时间。时间口径与训练预算／Elo 相同，包含自对弈、shuffle、learner 和导出等轮次开销，排除编译、绘图、暂停与启动恢复；缺少计时记录时不伪造时间轴。
 
 `loss.png` 使用四列面板，逐项展示总 loss 与实际启用的所有分量，标题下共用一份 Train／Validation 图例；蓝色实线为训练、红色无 marker 实线为验证。横轴与概览中的 loss 一致，为采用紧凑科学计数法的累计训练样本量。每个面板单独决定纵轴范围，正值使用对数刻度。验证取已完成轮次最后一次尝试的 `validation` 事件；新的 `plan` 清除该轮先前尝试的验证记录，当前未提交轮次不显示。无验证事件或无完整验证 batch 时留空，不填零且不跨缺测轮连接曲线。训练为轮内已提交消费 batch 的均值，验证为轮末 raw 模型 eval/no_grad 的样本均值，二者时点、模型状态与数据不同，差距不能直接全部归因于过拟合。验证不会替代已发布 SWA 模型的棋力评估。
 
-每轮汇总自对弈统计、去重后的推理计数与最终消费游标覆盖的训练更新。同一 step 的恢复重算以最后一次日志为准；轮内游标覆盖的所有 step 必须齐全。state 之外的候选指标不显示。原始日志中间损坏会报错，仅末尾未完成 JSON 可忽略。
+`training.log_every` 控制 `update` 日志频率，周期保存、轮末和正常停止也会输出不足一个间隔的尾段。每个 batch 都进入累积，日志顶层 loss/norm 是该区间均值，`steps` 是区间消费数，时钟、LR/WD、symmetry 与 `amp_skipped` 是末 batch 状态；`round_metrics` 保存本轮全部消费 batch 的累计汇总。指标原始累积和随 checkpoint 恢复，不依靠稀疏日志重建。每轮汇总自对弈统计、去重后的推理计数与最终游标对应的最新 `round_metrics`；其消费数必须与最终游标一致，恢复重算遗留的旧日志不叠加。state 之外的候选指标不显示。原始日志中间损坏会报错，仅末尾未完成 JSON 可忽略。
 
 `logs/performance.png` 单独显示各阶段已结算尝试的累计净墙钟、有效行／自对弈秒、已提交训练样本／训练秒，以及 NN 平均 batch、每请求排队微秒和缓存命中率。训练耗时包含对象创建、数据等待、计算和 checkpoint 等开销。未结算的 SIGKILL 阶段缺少净耗时，不进入分母；当前未完成训练轮次也不显示吞吐，因此这些图不能直接作为完整跨中断端到端性能比较。推理计数按 iteration、attempt、worker 去重。bootstrap 使用 random evaluator，未发生网络组批时相关面板无值。
 
