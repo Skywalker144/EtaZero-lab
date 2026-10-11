@@ -82,6 +82,22 @@ def test_experiment_initializes_and_schedules_all_arms(tmp_path, monkeypatch):
 
 
 def journal(root, events):
+    # Synthetic per-batch fixtures are serialized as the current accumulated format.
+    from etazero.training_metrics import TrainingMetrics
+    seen = {}
+    for event in events:
+        if event['event'] != 'update':
+            continue
+        batches = seen.setdefault(event['iteration'], {})
+        batches[event['step']] = event
+        metrics = TrainingMetrics()
+        for step, batch in sorted(batches.items()):
+            if step > event['step']:
+                continue
+            metrics.add({k: batch[k] for k in METRICS if k != 'grad_norm'},
+                        batch['grad_norm'], batch.get('amp_skipped', False), False,
+                        batch.get('step_losses'), batch.get('grad_norms'))
+        event['round_metrics'] = metrics.summary()
     path = root/'logs/events.jsonl'; path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(''.join(json.dumps(e)+'\n' for e in events))
     return path
