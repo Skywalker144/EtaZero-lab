@@ -74,28 +74,70 @@ function navigate(turn) {
 function renderBoard(game, disabled) {
   const size = game?.board_size || Number($('size').value) || catalog.default_size;
   const hex = game ? state.rule === 'hex' : $('rule').value === 'hex';
-  const step = hex ? 78 / (1.5 * size) : 100 / (size + 1);
+  // Keep SVG units isotropic; HTML hit targets use the same geometry.
+  const step = hex ? 88 / (1.5 * (size - 1) + 2.8) : 100 / (size + 1);
+  const radius = step / Math.sqrt(3);
+  const height = hex ? Math.sqrt(3) / 2 * (size - 1) * step + 3.8 * radius + 10 : 100;
   const originX = (100 - 1.5 * (size - 1) * step) / 2;
-  const originY = (100 - Math.sqrt(3) / 2 * (size - 1) * step) / 2;
+  const originY = (height - Math.sqrt(3) / 2 * (size - 1) * step) / 2;
   const point = (x, y) => hex ? [originX + (x + y / 2) * step, originY + y * step * Math.sqrt(3) / 2] : [(x + 1) * step, (y + 1) * step];
   const end = step * size;
-  let drawing = `<svg viewBox="0 0 100 100" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".12">`;
+  $('board').classList.toggle('hex-board', hex);
+  $('board').style.aspectRatio = `100 / ${height}`;
+  $('board').style.setProperty('--hex-unit', `${step}cqw`);
+  $('board').setAttribute('aria-label', hex ? 'Hex 棋盘，黑棋连接上下边，白棋连接左右边' : '五子棋棋盘');
+  let drawing = `<svg viewBox="0 0 100 ${height}" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".12">`;
   if (hex) {
-    const radius = step / Math.sqrt(3);
-    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-      const [cx, cy] = point(x, y);
-      const vertices = Array.from({length: 6}, (_, i) => {
-        const angle = (30 + i * 60) * Math.PI / 180;
-        return `${cx + radius * Math.cos(angle)},${cy + radius * Math.sin(angle)}`;
-      }).join(' ');
-      drawing += `<polygon points="${vertices}" fill="var(--board)" stroke="var(--board-line)" stroke-width=".15"/>`;
+    const vertex = (x, y, i) => {
+      const [cx, cy] = point(x, y), angle = (30 + i * 60) * Math.PI / 180;
+      return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+    };
+    // Follow the exposed cell edges so goal rails never cross playable cells.
+    const edges = [[], [], [], []];
+    for (let i = 0; i < size; i++) {
+      edges[0].push(...[3, 4, 5].map(v => vertex(i, 0, v)));
+      edges[1].push(...[5, 0].map(v => vertex(size - 1, i, v)));
+      edges[2].push(...[0, 1, 2].map(v => vertex(size - 1 - i, size - 1, v)));
+      edges[3].push(...[2, 3].map(v => vertex(0, size - 1 - i, v)));
     }
-    const corners = [point(0,0), point(size-1,0), point(size-1,size-1), point(0,size-1)];
-    const offsets = [[0,-radius*.8],[radius*.8,0],[0,radius*.8],[-radius*.8,0]];
-    for (let i = 0; i < 4; i++) {
-      const a = corners[i], b = corners[(i+1)%4], [ox,oy] = offsets[i];
-      const d = `M${a[0]+ox},${a[1]+oy}L${b[0]+ox},${b[1]+oy}`;
-      drawing += `<path class="hex-goal" d="${d}" stroke="#303840" stroke-width="1.1"/><path d="${d}" stroke="${i%2?'#f7f7f2':'#303840'}" stroke-width=".65"/>`;
+    // One offset contour gives adjacent goal bands the exact same corner seam.
+    // Independent round-capped strokes overlap at the four colour transitions.
+    const sides = edges.map(edge => edge.filter((p, i) => !i || Math.hypot(p[0] - edge[i - 1][0], p[1] - edge[i - 1][1]) > 1e-8));
+    const contour = sides.flatMap(side => side.slice(0, -1));
+    const outer = contour.map((p, i) => {
+      const previous = contour[(i + contour.length - 1) % contour.length];
+      const next = contour[(i + 1) % contour.length];
+      const normal = (a, b) => {
+        const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        return [(b[1] - a[1]) / length, (a[0] - b[0]) / length];
+      };
+      const a = normal(previous, p), b = normal(p, next);
+      const scale = step * .11 / (1 + a[0] * b[0] + a[1] * b[1]);
+      return [p[0] + (a[0] + b[0]) * scale, p[1] + (a[1] + b[1]) * scale];
+    });
+    drawing += '</g><g stroke="var(--hex-rail-outline)" stroke-width=".07" stroke-linejoin="round">';
+    let offset = 0;
+    sides.forEach((side, i) => {
+      const outside = side.map((_, j) => outer[(offset + j) % outer.length]);
+      drawing += `<path class="hex-goal" d="M${side.concat(outside.reverse()).join('L')}Z" fill="${i % 2 ? '#faf9f5' : '#343b43'}"/>`;
+      offset += side.length - 1;
+    });
+    drawing += '</g><g class="hex-cells" stroke="var(--hex-line)" stroke-width=".13" stroke-linejoin="round">';
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const vertices = Array.from({length: 6}, (_, i) => vertex(x, y, i).join(',')).join(' ');
+      drawing += `<polygon points="${vertices}" fill="var(--hex-cell)"/>`;
+    }
+    drawing += `</g><g class="hex-coordinates" fill="var(--muted)" font-family="ui-monospace,monospace" font-size="${Math.min(2.1, step * .30)}" text-anchor="middle" dominant-baseline="central">`;
+    for (let i = 0; i < size; i++) {
+      for (const [x, y, dx, dy, label] of [
+        [i, 0, 0, -1.55 * radius, columns[i]],
+        [i, size - 1, 0, 1.55 * radius, columns[i]],
+        [0, i, -.98 * step, 0, size - i],
+        [size - 1, i, .98 * step, 0, size - i],
+      ]) {
+        const [cx, cy] = point(x, y);
+        drawing += `<text x="${cx + dx}" y="${cy + dy}">${label}</text>`;
+      }
     }
     drawing += '</g></svg>';
   } else {
@@ -124,7 +166,7 @@ function renderBoard(game, disabled) {
     const color = stone === 1 ? 'black' : 'white';
     const [px, py] = point(action % size, Math.floor(action / size));
     const label = coordinate(action, size) + (stone ? `，${stone === 1 ? '黑' : '白'}棋，第 ${number} 手` : '，空位');
-    drawing += `<button class="board-point" data-action="${action}" aria-label="${label}" style="left:${px}%;top:${py}%;width:${step * .96}%;height:${step * .96}%" ${disabled || stone ? 'disabled' : ''}>${stone ? `<span class="stone ${color} ${last ? 'last' : ''}">${number}</span>` : ''}</button>`;
+    drawing += `<button class="board-point" data-action="${action}" aria-label="${label}" style="left:${px}%;top:${py / height * 100}%;width:${step * .96}%;height:${step * .96 / height * 100}%" ${disabled || stone ? 'disabled' : ''}>${stone ? `<span class="stone ${color} ${last ? 'last' : ''}">${number}</span>` : ''}</button>`;
   }
   $('board').innerHTML = drawing;
   const analysis = state.analysis;
