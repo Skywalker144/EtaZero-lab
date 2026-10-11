@@ -3,19 +3,18 @@
 Profiles explicitly include their engine and parent profiles. The selected mode
 is flattened once for native consumers and provenance; no training files are read.
 """
-import configparser
 import math
 import os
-import shlex
 from pathlib import Path
 from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_hex_symmetry
 from .schema import RULES
+from .config_files import read_config_file
 from .config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_search_combination
 
 ENGINE_FIELDS = dict(playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
               temperature=float, temperature_early=float, max_batch=int, server_threads=int, cache_entries=int,
-              inference_precision=str, batch_wait_us=int, queue_capacity=int,
+              inference_precision=str, batch_wait_us=int, muzero_queue_capacity=int,
               use_fpu=boolean, fpu_reduction_max=float, root_fpu_reduction_max=float,
               fpu_parent_weight_by_visited_policy_pow=float, use_lcb=boolean,
               lcb_stdevs=float, min_visit_prop_for_lcb=float, policy_target_pruning=boolean, **SEARCH_PARAMETERS)
@@ -57,38 +56,15 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
         fields['hex_opening'] = FIELDS['hex_opening'][1]
     values, common = {}, {}
 
-    def read(path, ancestors=(), *, local=False):
-        path = path.resolve()
-        if path in ancestors:
-            raise ValueError('Engine configuration include cycle: ' + ' -> '.join(map(str, (*ancestors, path))))
-        lines, includes = [], []
-        for line in path.read_text().splitlines():
-            if line.lstrip().startswith('@include'):
-                if any(v.lstrip().startswith('[') for v in lines):
-                    raise ValueError(f'@include must precede sections: {path}')
-                tokens = shlex.split(line, comments=True)
-                if len(tokens) != 2 or tokens[0] != '@include':
-                    raise ValueError(f'Invalid engine include: {path}: {line}')
-                includes.append(path.parent/tokens[1])
+    def read(path, *, local=False):
+        # Local engine fields override the selected mode in file/include order.
+        entries = read_config_file(path, {'engine': ENGINE_FIELDS, **fields},
+                                   section_aliases={'engine': section} if local else None)
+        for (group, key), value in entries.items():
+            if group == 'engine':
+                common[key] = value
             else:
-                lines.append(line)
-        for included in includes:
-            read(included, (*ancestors, path), local=local)
-        parser = configparser.ConfigParser(interpolation=None, strict=True)
-        parser.read_string('\n'.join(lines))
-        if parser.defaults():
-            raise ValueError(f'DEFAULT fields are not supported: {path}')
-        for group in parser.sections():
-            keys = ENGINE_FIELDS if group == 'engine' else fields.get(group)
-            if keys is None:
-                raise ValueError(f'Unknown engine section: {path}: {group}')
-            for key, value in parser.items(group):
-                if key not in keys:
-                    raise ValueError(f'Unknown engine key: {path}: {group}.{key}')
-                if group == 'engine' and not local:
-                    common[key] = value
-                else:
-                    values[section if group == 'engine' else group, key] = value
+                values[group, key] = value
     if umbrella:
         # An experiment may omit a match profile and use the default protocol.
         read(ROOT/'configs/baseline'/f'{section}.cfg')
@@ -150,7 +126,7 @@ def validate_engine_config(config, match=False):
         raise ValueError('Invalid engine seed or board size')
     if c['rule'] not in RULES:
         raise ValueError('Invalid engine rule')
-    if not 1 <= c['visits'] <= 2**31-1 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','queue_capacity')) or c['c_puct'] <= 0:
+    if not 1 <= c['visits'] <= 2**31-1 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','muzero_queue_capacity')) or c['c_puct'] <= 0:
         raise ValueError('Engine requires visits >= 1 and positive execution/search sizes')
     if c['lcb_stdevs'] <= 0 or c['fpu_parent_weight_by_visited_policy_pow'] < 0 or c['min_visit_prop_for_lcb'] > 1:
         raise ValueError('Invalid engine FPU/LCB settings')

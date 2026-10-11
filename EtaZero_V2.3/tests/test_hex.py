@@ -29,6 +29,7 @@ def hex_config(algorithm='alphazero'):
     c['game_forks'].update(early_fork_game_prob=0,fork_game_prob=0)
     if algorithm=='muzero':
         c['agent']['algorithm']='muzero'
+        c['inference']['muzero_queue_capacity']=32
         c['muzero']=dict(latent_channels=16,dynamics_channels=24,dynamics_blocks=1,prediction_channels=24,prediction_blocks=1)
         c['unroll']=dict(steps=2,hidden_gradient_scale=.5)
         c['symmetry']['root_num_symmetries_to_sample']=1

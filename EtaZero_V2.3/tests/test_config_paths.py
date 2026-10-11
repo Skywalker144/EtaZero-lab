@@ -1,5 +1,5 @@
 """Output paths follow the selected config, independent of inheritance and launch cwd."""
-from config_samples import CONFIGS
+from config_samples import CONFIGS, derive_config
 from pathlib import Path
 import shutil
 
@@ -57,12 +57,12 @@ def test_config_local_and_cli_output_precedence(version,monkeypatch):
 
 def test_external_config_requires_its_own_output(version):
     directory=version/'external';directory.mkdir()
-    run=directory/'run.cfg';run.write_text('[run]\nextends=smoke_test\n')
+    derive_config(directory, version/'configs/smoke_test')
     with pytest.raises(ValueError,match='requires an explicit run_dir'):
         load_config(directory)
     output=version/'external_data'
     assert load_config(directory,run_dir=output)['run']['run_dir']==str(output)
-    run.write_text('[run]\nextends=smoke_test\nrun_dir=data/external\n')
+    derive_config(directory, version/'configs/smoke_test', 'run_dir=data/external\n')
     assert load_config(directory)['run']['run_dir']==str(version/'data/external')
 
 
@@ -72,7 +72,7 @@ def test_symlinks_are_resolved_before_arm_overlap_checks(version):
     (version/'data/alias').symlink_to(version/'data/shared',target_is_directory=True)
     directory=version/'configs/autoexp_example'
     for name,output in [('arm_a','shared'),('arm_b','alias')]:
-        (directory/name/'run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir=data/{output}\n')
+        derive_config(directory/name, version/'configs/smoke_test', f'run_dir=data/{output}\n')
     with pytest.raises(ValueError,match='non-overlapping'):
         experiment_plan(directory,environ={},work_dir=version/'work')
 
@@ -91,70 +91,49 @@ def test_experiment_arms_match_standalone_paths_and_survive_relocation(version):
     assert not (version/'work').exists() and not (version/'data').exists()
 
 
-def derived(version, name, parent, overrides=''):
-    directory = version/'configs'/name
-    directory.mkdir(parents=True)
-    (directory/'run.cfg').write_text(f'[run]\nextends={parent}\n{overrides}')
-    return directory
 
-
-def test_qualified_parents_start_at_configs_and_preserve_child_output(version):
-    parent = derived(version, 'family/base', 'baseline', 'seed=19\nrun_dir=data/parent\n')
+def test_nested_includes_resolve_from_each_file_and_ignore_parent_local(version, monkeypatch):
+    parent = derive_config(version/'configs/family/base', version/'configs/baseline',
+                           'seed=19\nrun_dir=data/parent\n')
     (parent/'run.cfg.local').write_text('[run]\nseed=99\n')
-    # A same-named path beneath the child's siblings cannot shadow a qualified path.
-    derived(version, 'group/family/base', 'baseline', 'seed=23\n')
-    child = derived(version, 'group/child', 'family/base')
+    middle = derive_config(version/'configs/other/middle', parent)
+    child = derive_config(version/'configs/group/child', middle)
+    caller = version/'caller'; caller.mkdir(); monkeypatch.chdir(caller)
     result = load_config(child)
     assert result['run']['seed'] == 19
     assert result['run']['run_dir'] == str(version/'data/group/child')
-    assert fingerprint(result) == fingerprint(load_config(child, run_dir=version/'data/group/child'))
     (child/'run.cfg.local').write_text('[run]\nseed=31\n')
     assert load_config(child)['run']['seed'] == 31
 
 
-def test_bare_parent_names_resolve_beside_each_declaring_config(version):
-    # Both levels contain a "base"; a nested parent must use its own sibling.
-    derived(version, 'selected/base', 'baseline', 'seed=23\n')
-    derived(version, 'other/base', 'baseline', 'seed=19\n')
-    derived(version, 'other/middle', 'base')
-    child = derived(version, 'selected/child', 'other/middle')
-    assert load_config(child)['run']['seed'] == 19
+def test_training_includes_order_and_own_values_win(version):
+    child = derive_config(version/'configs/child', version/'configs/baseline')
+    (child/'first.cfg').write_text('[run]\nseed=19\nmax_iteration=3\n')
+    (child/'second.cfg').write_text('[run]\nseed=23\nmax_iteration=5\n')
+    (child/'run.cfg').write_text('@include ../baseline/run.cfg\n@include first.cfg\n'
+                                  '@include second.cfg\n[run]\nseed=31\n')
+    result = load_config(child)
+    assert result['run']['seed'] == 31
+    assert result['run']['max_iteration'] == 5
 
 
-def test_qualified_parent_is_independent_of_launch_directory(version, monkeypatch):
-    derived(version, 'nested/parent', 'baseline', 'seed=19\n')
-    child = derived(version, 'nested/child', 'nested/parent')
-    caller = version/'caller'
-    caller.mkdir()
-    monkeypatch.chdir(caller)
-    assert load_config(child)['run']['seed'] == 19
-
-
-def test_cycles_across_qualified_and_bare_parents_are_rejected(version):
-    child = derived(version, 'family/child', 'other/parent')
-    derived(version, 'other/parent', 'sibling')
-    derived(version, 'other/sibling', 'family/child')
-    with pytest.raises(ValueError, match='inheritance cycle'):
+def test_training_include_cycle_is_diagnostic(version):
+    child = derive_config(version/'configs/child', version/'configs/baseline')
+    (child/'run.cfg').write_text('@include nested.cfg\n')
+    (child/'nested.cfg').write_text('@include run.cfg\n')
+    with pytest.raises(ValueError, match='include cycle'):
         load_config(child)
 
 
-@pytest.mark.parametrize('parent', ['/tmp/config', '../baseline', 'family/../baseline', './baseline', '.'])
-def test_parent_paths_reject_absolute_and_dot_components(version, parent):
-    child = derived(version, 'child', parent)
-    with pytest.raises(ValueError, match='extends must name'):
+def test_missing_training_include_is_diagnostic(version):
+    child = derive_config(version/'configs/child', version/'configs/baseline')
+    (child/'run.cfg').write_text('@include missing.cfg\n')
+    with pytest.raises(FileNotFoundError, match='missing.cfg'):
         load_config(child)
 
 
-def test_missing_qualified_parent_is_diagnostic(version):
-    child = derived(version, 'child', 'missing/parent')
-    with pytest.raises(ValueError, match='Missing configuration directory/run.cfg:.*missing/parent'):
-        load_config(child)
-
-
-def test_qualified_parent_cannot_escape_configs_through_symlink(version):
-    outside = version/'outside'
-    shutil.copytree(version/'configs/baseline', outside)
-    (version/'configs/alias').symlink_to(outside, target_is_directory=True)
-    child = derived(version, 'child', 'alias/')
-    with pytest.raises(ValueError, match='must stay under configs'):
+def test_included_training_file_preserves_section_ownership(version):
+    child = derive_config(version/'configs/child', version/'configs/baseline')
+    (child/'run.cfg').write_text('@include ../baseline/selfplay.cfg\n')
+    with pytest.raises(ValueError, match='Wrong section/file ownership'):
         load_config(child)

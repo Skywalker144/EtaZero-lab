@@ -156,7 +156,7 @@ protected:
     std::array<Sync,64> locks_;
     std::atomic<size_t> next_node_{0};
     std::atomic<int> pending_count_{0};
-    struct Visit { Node* parent;Edge* edge;Transition transition;bool increment_edge=true; };
+    struct Visit { Node* parent;Edge* edge;int perspective;bool increment_edge=true; };
     struct ThreadState {
         std::unique_ptr<SearchState> state;
         std::vector<Visit> path;

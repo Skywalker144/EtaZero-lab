@@ -48,7 +48,8 @@ def small_config():
     c['search']['reuse_tree'] = False
     c['graph_search']['use_graph_search'] = False
     c['symmetry']['root_num_symmetries_to_sample'] = 1
-    c['inference'].update(cache_entries=8, server_threads=2)
+    c['inference'].update(cache_entries=8, server_threads=2,
+                          muzero_queue_capacity=defaults['inference']['muzero_queue_capacity'])
     c['training']['skip_validation'] = True
     validate(c)
     return c
@@ -183,7 +184,7 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
     c = small_config(); c['training']['batch_size'] = 4
     c['writer'].update(shard_rows=8, first_file_min_random_proportion=.15)
     c['parallelism'].update(game_threads=1, search_threads=1)
-    c['inference']['queue_capacity'] = 1
+    c['inference']['muzero_queue_capacity'] = 1
     c['side_positions']['side_position_prob'] = .6
     c['reanalysis']=dict(use_reanalyze=True,reanalyze_prop=.5,reanalyze_policy_surprise_weight=1,
                         reanalyze_value_surprise_weight=0,reanalyze_surprise_exponent=1,reanalyze_use_outcome_targets=False)

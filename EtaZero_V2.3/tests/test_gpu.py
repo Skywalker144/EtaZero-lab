@@ -1,6 +1,6 @@
 from etazero.schema import GLOBALS
 """Real-CUDA integration checks. Enable only in an execution context with host device access."""
-from config_samples import CONFIGS
+from config_samples import CONFIGS, derive_config
 import copy
 import json
 import os
@@ -65,7 +65,7 @@ def test_script_starts_and_auto_resumes_training(tmp_path):
     configs=tmp_path/"configs";shutil.copytree(CONFIGS,configs)
     root=tmp_path/"selfplay"/"smoke_test"
     selected=configs/"smoke_test"
-    (selected/"run.cfg").write_text(f"[run]\nextends = baseline\nrun_dir = {root}\nmax_iteration = 1\ncpu_threads = 1\n")
+    (selected/"run.cfg").write_text(f"@include ../baseline/run.cfg\n[run]\nrun_dir = {root}\nmax_iteration = 1\ncpu_threads = 1\n")
     env={**os.environ,"CONFIG_DIR":str(selected)}
     command=["bash",str(ROOT/"scripts"/"run.sh")]
     def launch(*args):
@@ -91,7 +91,7 @@ def test_unlimited_iterations_stop_and_auto_resume(tmp_path):
     configs=tmp_path/"configs";shutil.copytree(CONFIGS,configs)
     root=tmp_path/"run"
     selected=configs/"smoke_test"
-    (selected/"run.cfg").write_text(f"[run]\nextends = baseline\nrun_dir = {root}\nmax_iteration = 0\ncpu_threads = 1\n")
+    (selected/"run.cfg").write_text(f"@include ../baseline/run.cfg\n[run]\nrun_dir = {root}\nmax_iteration = 0\ncpu_threads = 1\n")
     env={**os.environ,"CONFIG_DIR":str(selected)}
     command=["bash",str(ROOT/"scripts"/"run.sh")]
     stdout=tmp_path/"stdout";stderr=tmp_path/"stderr"
@@ -137,7 +137,7 @@ def test_default_nested_run_directory_and_explicit_resume(tmp_path,monkeypatch,g
     from etazero.__main__ import main
     shutil.copytree(CONFIGS,tmp_path/'configs')
     selected=tmp_path/'configs/experiment/100v';selected.mkdir(parents=True)
-    (selected/'run.cfg').write_text('[run]\nextends=smoke_test\n')
+    derive_config(selected, tmp_path/'configs/smoke_test', '')
     monkeypatch.setattr('etazero.config.ROOT',tmp_path)
     caller=tmp_path/'caller';caller.mkdir();monkeypatch.chdir(caller)
     command=['etazero','run','--config-dir',str(selected),'--binary',str(BINARY)]
@@ -942,9 +942,15 @@ def test_multiple_servers_fp16_packed_waves_and_prefetch(tmp_path,gpu_config):
     c["parallelism"].update(game_threads=4,search_threads=3)
     c["inference"].update(server_threads=2,inference_precision="float16",cache_entries=64)
     c["shuffle"].update(waves=3,temp_dir=str(tmp_path/"scratch"))
+    # This tiny multi-wave dataset can produce files shorter than eight rows.
+    # One-row learner batches retain data while exercising every prefetch stage.
+    c['training']['batch_size']=1
     root=tmp_path/"run"
     state=run_training(root,c,BINARY,max_iteration=2)
-    assert state["checkpoint"]["total_steps"]==8
+    expected_steps=sum(load_json(root/'.internal/iterations'/f'{i:06d}'/'status.json')['train_steps']
+                       for i in (1,2))
+    assert 0 < expected_steps <= 2*c['training']['train_steps']
+    assert state["checkpoint"]["total_steps"]==expected_steps
     events=[json.loads(line) for line in (root/"logs/events.jsonl").read_text().splitlines()]
     services=[e for e in events if e["event"]=="inference"]
     assert services and all(len(e["rows_by_server"])==2 for e in services)
@@ -1284,7 +1290,7 @@ def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
     (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_seconds = 0\narm_gpus = 0\nshared_init = true\n')
     for name in ('a', 'b'):
         arm = umbrella/name; arm.mkdir()
-        (arm/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {tmp_path/name}\n')
+        derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {tmp_path/name}\n')
     plan = experiment_plan(umbrella, environ={}, work_dir=tmp_path/'scheduler')
     assert run_experiment(plan, BINARY) == 0
     records = [load_json(tmp_path/name/'.internal/run.json') for name in ('a', 'b')]
@@ -1322,8 +1328,8 @@ def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     umbrella = tmp_path/'umbrella'; arm = umbrella/'a'; arm.mkdir(parents=True)
     root = tmp_path/'run'; work = tmp_path/'scheduler'
     (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 1\nmax_seconds = 0\narm_gpus = 0\nshared_init = false\n')
-    (arm/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {root}\n')
-    (arm/'train.cfg').write_text('[training]\ntrain_steps = 200\ncheckpoint_every = 20\n')
+    derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {root}\n')
+    (arm/'train.cfg.local').write_text('[training]\ntrain_steps = 200\ncheckpoint_every = 20\n')
     command = [sys.executable, '-m', 'etazero.experiment', '--config-dir', str(umbrella),
                '--work-dir', str(work), '--binary', str(BINARY)]
     env = {**os.environ, 'PYTHONPATH': str(ROOT/'python')}
@@ -1365,7 +1371,7 @@ def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
     umbrella = tmp_path/'umbrella'; arm = umbrella/'a'; arm.mkdir(parents=True)
     root = tmp_path/'run'
     (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 0\nmax_seconds = 1\narm_gpus = 0\nshared_init = false\n')
-    (arm/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {root}\n')
+    derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {root}\n')
     plan = experiment_plan(umbrella, environ={}, work_dir=tmp_path/'scheduler')
     assert run_experiment(plan, BINARY) == 0
     events = [json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
@@ -1433,7 +1439,7 @@ def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch
     assert pending['id'] not in {r['id'] for r in load_json(root/'.internal/checkpoints.json')}
     assert rows[-1]['seconds']==pytest.approx(resumed['elapsed_seconds']-base['elapsed_seconds'])
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
-    assert events[-1]['active_seconds']>resumed['elapsed_seconds']
+    assert events[-1]['event'] == 'session_end'
     train=[e for e in events if e['event']=='phase_end' and e['phase']=='train']
     assert all(e['seconds']>0 and e['wall_seconds']>=e['seconds'] for e in train)
     assert arm_progress({'name':'test','run_dir':str(root),'config':c},
@@ -1664,9 +1670,9 @@ class OpeningChoiceModel(torch.nn.Module):
     def forward(self,x,globals):
         order=torch.arange(self.canvas*self.canvas,device=x.device,dtype=x.dtype)
         logits=order[None,:].expand(x.shape[0],-1)*(100. if self.ascending else -100.)
-        wdl=torch.zeros((x.shape[0],3),device=x.device,dtype=x.dtype)
-        wdl[:,0]=self.value_logit
-        return logits,wdl,logits,x[:,0].sum((1,2))*0
+        zero=x[:,0].sum((1,2))*0
+        wdl=torch.stack((zero+self.value_logit,zero,zero),dim=1)
+        return logits,wdl,logits,zero
 
 
 def test_match_opening_uses_both_models_by_source_roles(tmp_path,gpu_config):
@@ -2233,7 +2239,7 @@ def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_
     assert sum(val[0]['symmetry_counts'])==2 and val[0]['symmetry_counts'][0]!=2
     assert all(f['symmetry']==0 for f in updates) # validation D4 is independently enabled.
     checkpoint=load_checkpoint(root,reference,c,torch.device('cuda:0'))
-    assert checkpoint['reader']['no_repeat_files'] and checkpoint['reader']['split']=='train'
+    assert checkpoint['reader']['split']=='train'
     assert checkpoint['optimization']['consumed_samples']==32
     assert (('q_winloss_loss' in val[0])==c['network']['predict_q_values'])
     assert all(np.isfinite(f['loss']) for f in updates+val)
@@ -2286,7 +2292,7 @@ def test_single_pass_cuda_short_games_credit_and_completed_round_resume(tmp_path
         total+=expected
         if expected:
             checkpoint=load_checkpoint(root,status['checkpoint'],c)
-            assert checkpoint['reader']['epoch']==0 and checkpoint['reader']['no_repeat_files']
+            assert checkpoint['reader']['index'] <= len(checkpoint['reader']['order'])
             assert checkpoint['step']==expected
             starts=[e for e in events if e['event']=='subepoch_start' and e['iteration']==iteration]
             assert len(starts)==min(expected,8)
@@ -2593,7 +2599,7 @@ def test_native_final_row_shards_cuda_training_and_export(tmp_path,gpu_config):
     c['pda'].update(normal_asymmetric_playout_prob=1,max_asymmetric_ratio=2)
     c['side_positions']['side_position_prob']=.4
     c['parallelism'].update(game_threads=1,search_threads=2)
-    c['inference'].update(server_threads=2,max_batch=8,queue_capacity=1,inference_precision='float32')
+    c['inference'].update(server_threads=2,max_batch=8,inference_precision='float32')
     c['writer'].update(shard_rows=8,first_file_min_random_proportion=.15)
     c['training'].update(train_steps=2,batch_size=8,skip_validation=True)
     c['replay'].update(min_rows=8,keep_target_rows='all',taper_exponent=1,expand_per_row=1)

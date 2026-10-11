@@ -1,5 +1,6 @@
 """Strict, directory-based INI configuration. Native consumers receive resolved values."""
 import configparser
+from .config_files import read_config_file
 import hashlib
 import json
 import math
@@ -145,7 +146,7 @@ FIELDS = {
                                         'value_surprise_data_weight': float, 'use_search_value_surprise': boolean}),
     'parallelism': ("selfplay", {'game_threads': int, 'search_threads': int}),
     'inference': ("selfplay", {'server_threads': int, 'max_batch': int, 'inference_precision': str,
-                               'cache_entries': int, 'batch_wait_us': int, 'queue_capacity': int}),
+                               'cache_entries': int, 'batch_wait_us': int, 'muzero_queue_capacity': int}),
     'writer': ("selfplay", {'writer_queue': int, 'shard_rows': int, 'first_file_min_random_proportion': float}),
 }
 FILES = tuple(dict.fromkeys(v[0] for v in FIELDS.values()))
@@ -174,59 +175,18 @@ def _read(directory, local=False):
     values = {}
     for name in FILES:
         path = directory / (name + ".cfg" + (".local" if local else ""))
-        if not path.exists():
-            continue
-        parser = configparser.ConfigParser(interpolation=None, strict=True)
-        parser.read_string(path.read_text())
-        if parser.defaults():
-            raise ValueError(f"DEFAULT fields are not supported: {path}")
-        for section in parser.sections():
-            if section not in FIELDS or FIELDS[section][0] != name:
-                raise ValueError(f"Wrong section/file ownership: {path}: [{section}]")
-            for key, value in parser.items(section):
-                if section == "run" and key == "extends" and not local:
-                    values[(section, key)] = value
-                    continue
-                if key not in FIELDS[section][1]:
-                    raise ValueError(f"Unknown key: {path}: {section}.{key}")
-                values[(section, key)] = value
+        if path.exists():
+            fields = {section: keys for section, (owner, keys) in FIELDS.items() if owner == name}
+            values.update(read_config_file(path, fields, local_only=(("run", "run_dir"),)))
     return values
 
 
 def load_config(directory, run_dir=None):
     directory = Path(directory).resolve()
-    configs_root = (ROOT / "configs").resolve()
-
-    def inherit(current, ancestors):
-        if current in ancestors:
-            raise ValueError(f"Configuration inheritance cycle: {current}")
-        if not (current / "run.cfg").exists():
-            raise ValueError(f"Missing configuration directory/run.cfg: {current}")
-        values = _read(current)
-        parent = values.pop(("run", "extends"), None)
-        result = {}
-        if parent:
-            parent_path = Path(parent)
-            if parent_path.is_absolute() or any(part in (".", "..") for part in parent.split("/")):
-                raise ValueError("extends must name a directory or a path relative to configs/ without . or ..")
-            if "/" in parent:
-                # Qualified paths always start at configs/, independent of the child.
-                parent_dir = (configs_root / parent_path).resolve()
-                if not parent_dir.is_relative_to(configs_root):
-                    raise ValueError("extends path must stay under configs/")
-            else:
-                # Bare names prefer siblings of each declaring configuration.
-                parent_dir = (current.parent / parent_path).resolve()
-                if not (parent_dir / "run.cfg").is_file():
-                    parent_dir = (configs_root / parent_path).resolve()
-            result.update(inherit(parent_dir, ancestors + [current]))
-            # Output locations belong to the selected config, not its parent.
-            result.pop(("run", "run_dir"), None)
-        result.update(values)
-        # Machine overrides are deliberately applied only at the selected directory.
-        return result
-
-    values = inherit(directory, [])
+    if not (directory / "run.cfg").is_file():
+        raise ValueError(f"Missing configuration directory/run.cfg: {directory}")
+    values = _read(directory)
+    # Only the selected directory supplies machine overrides and output paths.
     values.update(_read(directory, local=True))
     config = {}
     for section, (_, fields) in FIELDS.items():
@@ -240,6 +200,8 @@ def load_config(directory, run_dir=None):
             continue
         config[section] = {}
         for key, convert in fields.items():
+            if section == "inference" and key == "muzero_queue_capacity" and values.get(("agent", "algorithm")) != "muzero":
+                continue
             if section=="reanalysis" and key!="use_reanalyze" and (section,key) not in values and not config[section]["use_reanalyze"]:
                 continue
             if (section, key) not in values:
@@ -332,7 +294,7 @@ NUMERIC_MINIMUMS = {
     'policy_init': (('policy_temperature',), ('policy_init_mean',)),
     'surprise_weighting': ((), ('policy_surprise_data_weight', 'value_surprise_data_weight')),
     'parallelism': (('game_threads', 'search_threads'), ()),
-    'inference': (('server_threads', 'max_batch', 'queue_capacity'), ('cache_entries', 'batch_wait_us')),
+    'inference': (('server_threads', 'max_batch', 'muzero_queue_capacity'), ('cache_entries', 'batch_wait_us')),
     'writer': (('writer_queue', 'shard_rows'), ('first_file_min_random_proportion',)),
 }
 
@@ -376,6 +338,8 @@ def validate(c):
         positive, nonnegative = NUMERIC_MINIMUMS.get(section, ((),()))
         for keys, allow_zero in ((positive,False),(nonnegative,True)):
             for key in keys:
+                if section == "inference" and key == "muzero_queue_capacity" and a["algorithm"] != "muzero":
+                    continue
                 if section == 'search' and key in ('cheap_search_visits','cheap_search_target_weight') and c['search']['cheap_search_probs'] == 0:
                     continue
                 value = fields[key]

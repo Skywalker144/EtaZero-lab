@@ -219,8 +219,8 @@ void Search::evaluate_node(Node& node,const SearchState& state,int worker,int sy
                 std::uniform_int_distribution<int>(0,state.symmetry_count()-1)(inference_random_[worker]):settings_.nn_symmetry;
         }
         if(symmetry>=state.symmetry_count())throw std::runtime_error("NN symmetry exceeds state support");
-        auto output=state.evaluate_symmetry(symmetry,symmetries>1,settings_.nn_policy_temperature,
-                                           symmetries==1 && settings_.nn_randomize,optimism);
+        auto output=state.evaluate({symmetry,symmetries>1,settings_.nn_policy_temperature,
+                                    symmetries==1 && settings_.nn_randomize,optimism});
         if(output.logits.size()!=policy.size())throw std::runtime_error("Bad leaf policy shape");
         if(i==0)auxiliary=output.has_auxiliary;
         if(auxiliary!=output.has_auxiliary)throw std::runtime_error("D4 auxiliary capabilities disagree");
@@ -411,17 +411,16 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             choice=candidates[std::uniform_int_distribution<size_t>(0,candidates.size()-1)(rng)];
             }
             Edge* edge=&child_edge(*node,choice);
-            auto transition=state.move(node->moves[choice].action);
-            if(transition.reward!=0 || transition.discount!=1 ||
-               (transition.perspective!=1 && transition.perspective!=-1))throw std::runtime_error("WDL AlphaZero search requires zero reward and unit discount");
+            int perspective=state.move(node->moves[choice].action);
+            if(perspective!=1 && perspective!=-1)throw std::runtime_error("WDL search perspective must be +1 or -1");
             Node* child=edge->child.load(std::memory_order_acquire);
             if(!child) {
                 Node* candidate=find_node(state);Node* expected=nullptr;
                 if(edge->child.compare_exchange_strong(expected,candidate,std::memory_order_release,std::memory_order_acquire))child=candidate;
                 else child=expected; // Unused racing candidates are collected with the table.
             }
-            path.push_back({node,edge,transition,true});++edge->pending;++child->pending;++pending_count_;
-            int expected=0,perspective=int(transition.perspective);
+            path.push_back({node,edge,perspective,true});++edge->pending;++child->pending;++pending_count_;
+            int expected=0;
             edge->perspective.compare_exchange_strong(expected,perspective);
             if(expected!=0 && expected!=perspective)throw std::runtime_error("Inconsistent edge perspective");
             if(settings_.graph_search && catch_up(*edge,*child,worker)) {
@@ -433,7 +432,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             node=child;
         }
         while(!path.empty()) {
-            auto p=path.back();value=p.transition.reward+p.transition.discount*p.transition.perspective*value;
+            auto p=path.back();value=p.perspective*value;
             if(!std::isfinite(value))throw std::runtime_error("Nonfinite search backup");
             if(p.increment_edge)++p.edge->n;
             ++p.parent->visits;recompute(*p.parent,1);

@@ -22,7 +22,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                 const std::vector<MatchModel>& models,std::vector<MatchTask>& tasks,int max_models,
                 const MatchEvaluatorFactory& evaluator,const MatchSearchFactory& search,
                 const std::function<double(const Game&)>& temperature,const std::function<bool()>& stopped,
-                std::ostream& output) {
+                std::ostream& output,bool single_pair) {
     const auto started=Clock::now();const int canvas=c.integer("network.canvas");
     const int threads=c.integer("match.game_threads");
     if(threads<1 || max_models<2)throw std::runtime_error("Invalid arena concurrency/model limit");
@@ -46,15 +46,18 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
         std::vector<int> local;for(int a:actions)local.push_back(a/canvas*size+a%canvas);array(out,local);
     };
     std::map<size_t,std::unique_ptr<InferenceService>> resident;
+    std::map<size_t,std::string> pair_stats;
     std::vector<bool> assigned(tasks.size(),false);
     int completed=0,windows=0,loads=0;double load_seconds=0,play_seconds=0;
     auto release=[&](size_t index) {
         auto& service=*resident.at(index);service.finish();
-        std::ostringstream row;row<<"{\"type\":\"model_stats\",\"model\":"<<quote(models[index].id)
-            <<",\"requests\":"<<service.requests.load()<<",\"batches\":"<<service.batches.load()
+        std::ostringstream row;row<<'{';
+        if(!single_pair)row<<"\"type\":\"model_stats\",\"model\":"<<quote(models[index].id)<<',';
+        row<<"\"requests\":"<<service.requests.load()<<",\"batches\":"<<service.batches.load()
             <<",\"max_batch\":"<<service.max_observed_batch.load()<<",\"queue_wait_us\":"<<service.wait_microseconds.load()
             <<",\"submitted\":"<<service.submitted.load()<<",\"cache_hits\":"<<service.cache_hits.load()<<'}';
-        emit(row.str());resident.erase(index);
+        if(single_pair)pair_stats[index]=row.str();else emit(row.str());
+        resident.erase(index);
     };
     while(!stopped()) {
         // Fill a residency window, favoring pairs sharing already selected models.
@@ -91,7 +94,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             const auto& t=tasks[i];if(!selected.count(t.a)||!selected.count(t.b))continue;
             assigned[i]=true;
             if(!t.generated)ready.push_back({i,-1});
-            else for(int color=0;color<2;++color)if(t.mask&(1<<color))ready.push_back({i,color});
+            else if(!single_pair)for(int color=0;color<2;++color)if(t.mask&(1<<color))ready.push_back({i,color});
         }
         std::mutex mutex;std::condition_variable changed;
         size_t active=0;std::atomic<bool> failed{false};std::exception_ptr error;
@@ -106,8 +109,9 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                 if(result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced match opening failed: "+result.failure);
                 if(game.finished())continue;
                 t.moves=result.actions;t.generated=true;
-                std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"opening\",\"pair\":"<<quote(t.pair)
-                    <<",\"id\":"<<t.id<<",\"generator\":"<<t.generator<<",\"seed\":"<<t.seed
+                std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"opening\"";
+                if(!single_pair)row<<",\"pair\":"<<quote(t.pair);
+                row<<",\"id\":"<<t.id<<",\"generator\":"<<t.generator<<",\"seed\":"<<t.seed
                     <<",\"attempts\":"<<result.attempts<<",\"balanced_moves\":"<<result.balanced_moves
                     <<",\"policy_moves\":"<<result.policy_moves<<",\"value\":"<<result.start_value<<",\"moves\":";
                 moves(row,t.moves);row<<",\"reference_black_a\":"<<(t.generator==0?"true":"false")
@@ -122,7 +126,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             Game game(size,canvas,rule);for(int a:t.moves)game.play(a);
             game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
             auto start=Clock::now();uint64_t seed=t.seed^(0xd1b54a32d192ed03ULL*(color+1));
-            bool same=t.a==t.b;auto sa=search(ea,mix(seed));
+            bool same=models[t.a].id==models[t.b].id;auto sa=search(ea,mix(seed));
             auto sb=same?std::unique_ptr<GameSearch>{}:search(eb,mix(seed^0x9e3779b97f4a7c15ULL));
             std::vector<int> actions=t.moves;std::vector<int64_t> visits,initial,new_playouts;
             while(!game.finished()) {
@@ -135,8 +139,9 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                 initial.push_back(result.initial_visits);new_playouts.push_back(result.new_playouts);
                 sa->advance(result.action);if(sb)sb->advance(result.action);
             }
-            std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"game\",\"pair\":"<<quote(t.pair)
-                <<",\"id\":"<<2*t.id+color<<",\"opening_id\":"<<t.id<<",\"black_a\":"<<(color==0?"true":"false")
+            std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"game\"";
+            if(!single_pair)row<<",\"pair\":"<<quote(t.pair);
+            row<<",\"id\":"<<2*t.id+color<<",\"opening_id\":"<<t.id<<",\"black_a\":"<<(color==0?"true":"false")
                 <<",\"winner\":"<<game.winner()<<",\"seconds\":"<<elapsed(start)<<",\"root_visits\":";
             array(row,visits);row<<",\"initial_visits\":";array(row,initial);row<<",\"new_playouts\":";array(row,new_playouts);
             row<<",\"same_bot\":"<<(same?"true":"false")<<",\"inference_precision\":"<<quote(precision)<<",\"moves\":";
@@ -155,7 +160,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                     auto& t=tasks[job.task];auto& ea=*resident.at(t.a);auto& eb=*resident.at(t.b);
                     if(job.color<0)generate(t,ea,eb);else play(t,job.color,ea,eb);
                     {std::lock_guard<std::mutex> lock(mutex);
-                        if(job.color<0 && t.generated && !stop())
+                        if(!single_pair && job.color<0 && t.generated && !stop())
                             for(int color=1;color>=0;--color)if(t.mask&(1<<color))ready.push_front({job.task,color});
                         --active;
                     }
@@ -166,18 +171,32 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                 changed.notify_all();
             }
         };
-        auto playing=Clock::now();std::vector<std::thread> workers;
-        const auto worker_count=std::min<size_t>(threads,2*ready.size());
-        try {for(size_t i=0;i<worker_count;++i)workers.emplace_back(loop);}
-        catch(...) {{std::lock_guard<std::mutex> lock(mutex);failed=true;}changed.notify_all();for(auto& w:workers)w.join();throw;}
-        for(auto& w:workers)w.join();play_seconds+=elapsed(playing);
-        if(error)std::rethrow_exception(error);
+        auto execute_jobs=[&] {
+            auto playing=Clock::now();std::vector<std::thread> workers;
+            const auto worker_count=std::min<size_t>(threads,(single_pair?1:2)*ready.size());
+            try {for(size_t i=0;i<worker_count;++i)workers.emplace_back(loop);}
+            catch(...) {{std::lock_guard<std::mutex> lock(mutex);failed=true;}changed.notify_all();for(auto& w:workers)w.join();throw;}
+            for(auto& w:workers)w.join();play_seconds+=elapsed(playing);
+            if(error)std::rethrow_exception(error);
+        };
+        execute_jobs();
+        if(single_pair && !stop()) {
+            // Preserve match's barrier and game order, including resumed openings.
+            for(size_t i:pending)if(assigned[i] && tasks[i].generated)
+                for(int color=0;color<2;++color)if(tasks[i].mask&(1<<color))ready.push_back({i,color});
+            execute_jobs();
+        }
         for(auto& item:resident)item.second->drain();
     }
     while(!resident.empty())release(resident.begin()->first);
-    std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"arena_stats\",\"games\":"<<completed
+    std::ostringstream row;row<<std::setprecision(17);
+    if(single_pair)row<<"{\"type\":\"match_stats\",\"games\":"<<completed
+        <<",\"seconds\":"<<elapsed(started)<<",\"inference_a\":"<<(pair_stats.count(0)?pair_stats.at(0):"{}")
+        <<",\"inference_b\":"<<(pair_stats.count(1)?pair_stats.at(1):"{}")<<'}';
+    else row<<"{\"type\":\"arena_stats\",\"games\":"<<completed
         <<",\"seconds\":"<<elapsed(started)<<",\"load_seconds\":"<<load_seconds<<",\"play_seconds\":"<<play_seconds
-        <<",\"model_loads\":"<<loads<<",\"model_windows\":"<<windows<<'}';emit(row.str());
+        <<",\"model_loads\":"<<loads<<",\"model_windows\":"<<windows<<'}';
+    emit(row.str());
     return stopped()?130:0;
 }
 }

@@ -12,8 +12,8 @@ struct Bandit : SearchState {
     bool legal(int a) const override{return action<0&&a>=0&&a<3;}
     bool terminal() const override{return action>=0;}
     double terminal_value() const override{return action==0?-.8:action==1?.2:.6;}
-    Evaluation evaluate() const override{return {{std::log(.5),std::log(.3),std::log(.2)},{.55,0,.45}};}
-    Transition move(int a) override{action=a;return {0,1,-1};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{return {{std::log(.5),std::log(.3),std::log(.2)},{.55,0,.45}};}
+    int move(int a) override{action=a;return -1;}
 };
 struct State : muzero::Latent {int depth=0;};
 struct TestMuBackend : muzero::Backend {
@@ -35,7 +35,7 @@ template<bool Full> void alpha() {
     GumbelSettings g;g.noise_scale=0;g.max_num_considered_actions=3;g.rescale_q_values=false;g.c_scale=.1;
     GumbelSearch<Full> search(evaluator,s,g,17);Bandit state;
     struct RoundedDraw : Bandit {
-        Evaluation evaluate() const override{return {{0,0,0},{0,1,1e-8}};}
+        Evaluation evaluate(SearchEvaluation = {}) const override{return {{0,0,0},{0,1,1e-8}};}
     } rounded;
     SearchRun root_only;root_only.max_visits=1;
     Search puct(s,17);

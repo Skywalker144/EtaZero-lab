@@ -44,14 +44,16 @@ def test_catalog_materializes_each_npz_member_once(tmp_path, monkeypatch):
         catalog.close()
 
 
-def test_reader_repeated_passes_do_not_hash_files(tmp_path, monkeypatch):
+def test_reader_single_pass_does_not_hash_files(tmp_path, monkeypatch):
     import etazero.storage as storage
     snapshot = id_snapshot(tmp_path, [4, 4])
     monkeypatch.setattr(storage, 'sha256', lambda p: pytest.fail('Reader must not hash internal shards'))
     reader = BatchReader(snapshot, 4, 1, 13)
     try:
-        for _ in range(6):
+        for _ in range(2):
             assert len(reader.next()['value']) == 4
+        with pytest.raises(StopIteration):
+            reader.next()
     finally:
         reader.close()
 

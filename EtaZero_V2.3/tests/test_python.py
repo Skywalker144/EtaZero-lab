@@ -1,5 +1,5 @@
 from etazero.schema import GLOBALS
-from config_samples import CONFIGS
+from config_samples import CONFIGS, derive_config
 from collections import Counter
 import copy
 import json
@@ -102,7 +102,7 @@ def test_configuration_inheritance_and_fail_fast(tmp_path,config,monkeypatch):
     with pytest.raises(ValueError,match="ownership"):
         load_config(current)
     (current/"net.cfg.local").unlink()
-    (tmp_path/"configs"/"baseline"/"run.cfg").write_text("[run]\nextends=smoke_test\n")
+    (tmp_path/"configs"/"baseline"/"run.cfg").write_text("@include ../smoke_test/run.cfg\n")
     with pytest.raises(ValueError,match="cycle"):
         load_config(current)
 
@@ -518,6 +518,31 @@ def test_journal_barrier_and_failure(tmp_path,monkeypatch):
             broken.close()
 
 
+def test_journal_idle_has_no_periodic_writes(tmp_path, monkeypatch):
+    from etazero.runtime import Journal
+    import threading
+    synced = threading.Event()
+    sync = os.fsync
+    def tracked_sync(fd):
+        sync(fd)
+        synced.set()
+    monkeypatch.setattr('etazero.runtime.os.fsync', tracked_sync)
+    journal = Journal(tmp_path)
+    try:
+        journal('update', step=1)
+        assert synced.wait(3), 'Queued events must become durable without an explicit barrier'
+        journal.flush()
+        path = tmp_path/'logs/events.jsonl'
+        before = path.read_bytes()
+        synced.clear()
+        assert not synced.wait(1.1), 'An idle journal must not write or sync periodic records'
+        assert path.read_bytes() == before
+        assert 'active_seconds' not in json.loads(before)
+    finally:
+        journal.close()
+    assert json.loads(path.read_text().splitlines()[-1])['event'] == 'session_end'
+
+
 def test_inference_normalization_keeps_mask_and_model_state(config):
     model=make_network(config)
     probes=[example_inputs(6,size,rule,(0,6,1)) for size in (5,6) for rule in ('freestyle','standard','renju')]
@@ -800,8 +825,8 @@ def test_search_enhancement_validation(config,section,key,value):
 def test_reduce_visits_config_inheritance_and_independent_pcr(tmp_path, config):
     selected = tmp_path / 'child'
     selected.mkdir()
-    (selected / 'run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path / "run"}\n')
-    (selected / 'selfplay.cfg').write_text('[reduce_visits]\nreduce_visits_threshold=.7\nreduced_visits_min=3\n[search]\nfull_search_visits=8\ncheap_search_visits=4\n')
+    derive_config(selected, CONFIGS/'smoke_test', f'run_dir={tmp_path / "run"}\n')
+    (selected / 'selfplay.cfg.local').write_text('[reduce_visits]\nreduce_visits_threshold=.7\nreduced_visits_min=3\n[search]\nfull_search_visits=8\ncheap_search_visits=4\n')
     inherited = load_config(selected)
     assert inherited['reduce_visits']['reduce_visits_threshold'] == .7
     assert inherited['reduce_visits']['reduced_visits_min'] == 3

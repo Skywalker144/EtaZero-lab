@@ -46,6 +46,16 @@ def test_local_and_environment_precedence_and_scope(profiles):
     assert load_engine_config(profiles,environ={'ENGINE_VISITS':'47'})['analysis']['visits']==47
 
 
+@pytest.mark.parametrize('mode', ['analysis', 'match'])
+def test_local_includes_keep_file_override_order_across_engine_and_mode(profiles, mode):
+    (profiles/'common.cfg').write_text(f'[engine]\nvisits=17\n[{mode}]\nvisits=23\n')
+    local = profiles/f'{mode}.cfg.local'
+    local.write_text('@include common.cfg\n[engine]\nvisits=31\n')
+    assert load_engine_config(profiles, mode == 'match', environ={})[mode]['visits'] == 31
+    local.write_text(f'@include common.cfg\n[{mode}]\nvisits=37\n[engine]\nvisits=41\n')
+    assert load_engine_config(profiles, mode == 'match', environ={})[mode]['visits'] == 41
+
+
 def test_training_identity_does_not_read_engine_files(tmp_path,monkeypatch):
     shutil.copytree(CONFIGS,tmp_path/'configs')
     monkeypatch.setattr('etazero.config.ROOT',tmp_path)
@@ -59,9 +69,9 @@ def test_training_identity_does_not_read_engine_files(tmp_path,monkeypatch):
 @pytest.mark.parametrize('contents,error',[
     ('@include absent.cfg\n','No such file'),
     ('@include analysis.cfg\n','include cycle'),
-    ('@include\n','Invalid engine include'),
+    ('@include\n','Invalid include'),
     ('[analysis]\n@include engine.cfg\n','must precede sections'),
-    ('@include engine.cfg\n[engine]\ngames=4\n','Unknown engine key'),
+    ('@include engine.cfg\n[engine]\ngames=4\n','Unknown key'),
     ('@include engine.cfg\n[DEFAULT]\nvisits=3\n','DEFAULT fields'),
     ('@include engine.cfg\n[analysis]\nvisits=nan\n','analysis.visits'),
 ])

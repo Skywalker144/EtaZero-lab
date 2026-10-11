@@ -2,10 +2,13 @@
 #include "game.h"
 #include "inference.h"
 namespace etazero {
-// Search consumes these operations without assuming a real board, zero reward,
-// or a particular network method. First-round support is only AlphaZeroState.
-struct Transition {
-    double reward = 0, discount = 1, perspective = -1;
+// WDL search over terminal-outcome games: no intermediate reward or discount.
+struct SearchEvaluation {
+    int symmetry = 0;
+    bool skip_cache = false;
+    double policy_temperature = 1;
+    bool randomize = false;
+    double optimism = 0;
 };
 class SearchState {
 public:
@@ -17,27 +20,14 @@ public:
     virtual bool legal(int action) const = 0;
     virtual bool terminal() const = 0;
     virtual double terminal_value() const = 0;
-    virtual Evaluation evaluate() const = 0;
-    virtual int symmetry_count() const { return 1; }
     // Policy logits are returned in the original action coordinates.
-    virtual Evaluation evaluate_symmetry(int symmetry) const {
-        if(symmetry!=0)throw std::runtime_error("State does not support D4 evaluation");
-        return evaluate();
-    }
-    virtual Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature) const {
-        (void)skip_cache; (void)policy_temperature;
-        return evaluate_symmetry(symmetry);
-    }
-    virtual Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature, bool randomize) const {
-        (void)randomize;return evaluate_symmetry(symmetry,skip_cache,policy_temperature);
-    }
-    virtual Evaluation evaluate_symmetry(int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) const {
-        (void)optimism;return evaluate_symmetry(symmetry,skip_cache,temperature,randomize);
-    }
+    virtual Evaluation evaluate(SearchEvaluation options = {}) const = 0;
+    virtual int symmetry_count() const { return 1; }
     // Exact situation identity includes all rule/history/input conditions that affect continuations.
     // Unsupported state adapters must refuse graph search explicitly.
     virtual std::string graph_key() const { throw std::runtime_error("State does not support graph search"); }
-    virtual Transition move(int action) = 0;
+    // Return +1 for the same value perspective, -1 when the player changes.
+    virtual int move(int action) = 0;
 };
 class AlphaZeroState final : public SearchState {
     Game game_;
@@ -54,19 +44,10 @@ public:
     bool legal(int action) const override { return game_.legal(action); }
     bool terminal() const override { return game_.finished(); }
     double terminal_value() const override { return game_.terminal_value(); }
-    Evaluation evaluate() const override { return evaluator_.evaluate(game_.observation()); }
     int symmetry_count() const override { return game_.rule()==Rule::HEX?2:8; }
-    Evaluation evaluate_symmetry(int symmetry) const override {
-        return evaluate_symmetry(symmetry,false,1);
-    }
-    Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature) const override {
-        return evaluator_.evaluate_symmetry(game_.observation(),symmetry,skip_cache,policy_temperature);
-    }
-    Evaluation evaluate_symmetry(int symmetry, bool skip_cache, double policy_temperature, bool randomize) const override {
-        return evaluator_.evaluate_symmetry(game_.observation(),symmetry,skip_cache,policy_temperature,randomize);
-    }
-    Evaluation evaluate_symmetry(int symmetry,bool skip_cache,double temperature,bool randomize,double optimism) const override {
-        return evaluator_.evaluate_symmetry(game_.observation(),symmetry,skip_cache,temperature,randomize,optimism);
+    Evaluation evaluate(SearchEvaluation options = {}) const override {
+        return evaluator_.evaluate_symmetry(game_.observation(),options.symmetry,options.skip_cache,
+                                           options.policy_temperature,options.randomize,options.optimism);
     }
     std::string graph_key() const override {
         // NOVC Gomoku only adds stones: repetitions/ko/pass/history-based adjudication do not occur.
@@ -83,10 +64,10 @@ public:
         for(int8_t cell:game_.board().cells)key.push_back(static_cast<char>(cell));
         return key;
     }
-    Transition move(int action) override {
+    int move(int action) override {
         int parent=game_.player();game_.play(action);
         // Exact terminal values supply the outcome; no duplicated terminal reward.
-        return {0,1,parent==game_.player()?1.0:-1.0};
+        return parent==game_.player()?1:-1;
     }
 };
 }

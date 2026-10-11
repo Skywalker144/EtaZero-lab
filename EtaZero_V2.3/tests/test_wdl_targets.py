@@ -35,13 +35,13 @@ def test_reader_resume_preserves_targets_without_scanning_or_repair(tmp_path, sp
     arrays['td_value'][5] = [-5e-11, 1., 7e-9]
     np.savez(path, **arrays)
     digest = sha256(path)
-    reader = BatchReader(snapshot, 4, 1, 17, no_repeat_files=True, split=split)
+    reader = BatchReader(snapshot, 4, 1, 17, split=split)
     try:
         reader.next()
         cursor = reader.state()
     finally:
         reader.close()
-    resumed = BatchReader(snapshot, 4, 1, 99, cursor, no_repeat_files=True, split=split)
+    resumed = BatchReader(snapshot, 4, 1, 99, cursor, split=split)
     try:
         batch = resumed.next()
         assert batch['globals'][:, 5].tolist() == [4, 5, 6, 7]

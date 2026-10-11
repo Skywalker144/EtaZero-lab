@@ -1,4 +1,4 @@
-from config_samples import CONFIGS
+from config_samples import CONFIGS, derive_config
 from pathlib import Path
 import sys
 import threading
@@ -276,7 +276,7 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
     assert match['match']['game_threads'] == 20 and not match['match']['reuse_tree']
     assert load_config(CONFIGS / 'muzero') == training
     (tmp_path/'match.cfg').write_text('[match]\nunknown=1\n')
-    with pytest.raises(ValueError, match='Unknown engine key'):
+    with pytest.raises(ValueError, match='Unknown key'):
         load_engine_config(tmp_path, match=True, umbrella=True, environ={})
 
 
@@ -285,7 +285,7 @@ def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(
     (config/'elo.cfg').write_text('[elo]\nsample_seconds=10\n')
     (config/'match.cfg').write_text('[match]\nreuse_tree=false\nuse_graph_search=false\ncache_entries=0\n')
     (config/'untrained').mkdir()
-    (config/'untrained/run.cfg').write_text('[run]\nextends=baseline\n')
+    derive_config(config/'untrained', CONFIGS/'smoke_test', '')
     data = tmp_path/'data'
     history(data/'a', [10, 20, 30])
     history(data/'b', [12, 24, 36], 'muzero')
@@ -442,9 +442,9 @@ def test_autoexp_invokes_elo_only_after_success_and_keeps_actual_arm_paths(tmp_p
     directory = tmp_path/'configs'; directory.mkdir()
     (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=2\nmax_seconds=0\narm_gpus=2\nshared_init=false\nautoelo=true\n')
     (directory/'a').mkdir()
-    (directory/'a/run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path/"custom-output"}\n')
+    derive_config(directory/'a', CONFIGS/'smoke_test', f'run_dir={tmp_path/"custom-output"}\n')
     (directory/'b').mkdir()
-    (directory/'b/run.cfg').write_text(f'[run]\nextends=smoke_test\nrun_dir={tmp_path/"another-output"}\n')
+    derive_config(directory/'b', CONFIGS/'smoke_test', f'run_dir={tmp_path/"another-output"}\n')
     plan = experiment_plan(directory, environ={}, work_dir=tmp_path/'controller')
     binary = tmp_path/'binary'; binary.write_bytes(b'binary')
     monkeypatch.setattr('etazero.runtime.verify_build', lambda _: 'hash')

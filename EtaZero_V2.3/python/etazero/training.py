@@ -209,7 +209,7 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
         log('validation',iteration=iteration,samples=0,batches=0,reason='no_complete_validation_batch')
         return
     reader=BatchReader(snapshot,batch_size,config['training']['prefetch_depth'],
-                       config['run']['seed']+iteration,no_repeat_files=True,split='validation',
+                       config['run']['seed']+iteration,split='validation',
                        shuffle_files=config['training']['randomize_validation_files'])
     # Independent stream keeps validation from changing the learner's next RNG
     # state. The source promises uniform D4, not a shared seeded draw sequence.
@@ -286,7 +286,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     scaler.load_state_dict(checkpoint["scaler"])
     restore_rng(checkpoint["rng"])
     reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
-                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,no_repeat_files=True)
+                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None)
     step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
     round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
     if round_metrics.state['steps'] != step:

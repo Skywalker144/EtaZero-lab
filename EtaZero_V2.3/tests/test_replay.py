@@ -39,11 +39,11 @@ def id_snapshot(root,counts,validation=False):
 def test_complete_file_prefixes_no_repeat_exhaustion_resume_and_prefetch(tmp_path):
     counts=[0,1,3,4,5,9,17];snapshot=id_snapshot(tmp_path,counts)
     expected=[[i*100+j for j in range(start,start+4)] for i,n in enumerate(counts) for start in range(0,n//4*4,4)]
-    reader=BatchReader(snapshot,4,3,17,no_repeat_files=True)
+    reader=BatchReader(snapshot,4,3,17)
     prepared=BatchPrefetcher(reader,2);actual=[]
     try:
         first,state=prepared.next();actual.append(first['globals'][:,5].tolist())
-        resumed=BatchReader(snapshot,4,1,999,state,no_repeat_files=True)
+        resumed=BatchReader(snapshot,4,1,999,state)
         try:
             while True:
                 try:batch,cursor=prepared.next()
@@ -56,7 +56,7 @@ def test_complete_file_prefixes_no_repeat_exhaustion_resume_and_prefetch(tmp_pat
                 with pytest.raises(StopIteration):resumed.next()
             exhausted=resumed.state()
         finally:resumed.close()
-        again=BatchReader(snapshot,4,1,1,exhausted,no_repeat_files=True)
+        again=BatchReader(snapshot,4,1,1,exhausted)
         try:
             with pytest.raises(StopIteration):again.next()
         finally:again.close()
@@ -67,16 +67,16 @@ def test_complete_file_prefixes_no_repeat_exhaustion_resume_and_prefetch(tmp_pat
         BatchReader(snapshot,100,1,1)
 
 
-def test_repeat_gap_order_retains_each_file_and_drops_tails(tmp_path):
-    snapshot=id_snapshot(tmp_path,[5]*9);reader=BatchReader(snapshot,4,2,11)
-    try:
-        orders=[]
-        for _ in range(5):
-            orders.append([int(reader.next()['globals'][0,5]//100) for _ in range(9)])
-            assert sorted(orders[-1])==list(range(9))
-        for prev,current in zip(orders,orders[1:]):
-            assert min(9+current.index(i)-prev.index(i) for i in range(9))>=3
-    finally:reader.close()
+def test_reference_repeat_gap_order_retains_each_file():
+    import random
+    from reference.replay_order import repeat_order
+    rng = random.Random(11)
+    previous = list(range(9))
+    for _ in range(5):
+        current = repeat_order(previous, rng)
+        assert sorted(current) == list(range(9))
+        assert min(9 + current.index(i) - previous.index(i) for i in range(9)) >= 3
+        previous = current
 
 
 def test_capped_random_and_actual_mtime_window_range():

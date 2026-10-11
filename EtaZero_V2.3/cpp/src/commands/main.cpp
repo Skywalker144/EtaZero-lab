@@ -105,7 +105,7 @@ template<class T> void array(std::ostream& out, const std::vector<T>& values) {
     out << '['; bool first = true;
     for (auto x : values) { if (!first) out << ','; out << x; first = false; } out << ']';
 }
-std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode, bool second = false,
+std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode,
                                           torch::jit::Module* web_model = nullptr,
                                           std::shared_ptr<PreparedModel> prepared = nullptr) {
     std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "analysis" ? "analysis" : mode;
@@ -121,7 +121,7 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         // Selfplay already knows the algorithm and loads during backend preparation.
         torch::Device device(a.get("device"));c10::cuda::OptionalCUDAGuard guard;
         if(device.is_cuda())guard.set_device(device);
-        detected_model=torch::jit::load(a.get(second?"model-b":"model"),device);
+        detected_model=torch::jit::load(a.get("model"),device);
         detected_model->eval();
         if(device.is_cuda())c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
         auto metadata=detected_model->get_method("metadata")({}).toTuple();
@@ -139,26 +139,26 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
             else {
                 auto precision=c.text(prefix+".inference_precision");
                 if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
-                models.push_back(std::make_unique<muzero::TorchBackend>(a.get(second?"model-b":"model"),a.get("device"),canvas,batch,precision,
+                models.push_back(std::make_unique<muzero::TorchBackend>(a.get("model"),a.get("device"),canvas,batch,precision,
                     prepared));
             }
         }
         return std::make_unique<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),
             c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
             c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
-            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0),c.integer(prefix+".queue_capacity"));
+            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))),c.integer(prefix+".muzero_queue_capacity"));
     }
     if(algorithm!="alphazero")throw std::runtime_error("Unknown model algorithm");
     for (int i=0;i<c.integer(prefix+".server_threads");++i) {
         if(kind=="random")backends.push_back(std::make_unique<RandomBackend>(canvas,std::stoull(a.get("seed"))));
-        else backends.push_back(std::make_unique<TorchBackend>(a.get(second ? "model-b" : "model"),a.get("device"),canvas,batch,
+        else backends.push_back(std::make_unique<TorchBackend>(a.get("model"),a.get("device"),canvas,batch,
                                                          c.text(prefix+".inference_precision"),prepared));
     }
-    return std::make_unique<BatchEvaluator>(std::move(backends), a.get(second ? "model-b-id" : "model-id"), canvas,
-                                          batch, c.integer(prefix+".queue_capacity"), c.integer(prefix+".batch_wait_us"),
+    return std::make_unique<BatchEvaluator>(std::move(backends), a.get("model-id"), canvas,
+                                          batch, c.integer(prefix+".batch_wait_us"),
                                           c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
                                           c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
-                                          std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")))^(second?0xd1b54a32d192ed03ULL:0));
+                                          std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))));
 }
 std::unique_ptr<GameSearch> search_for(InferenceService& evaluator,SearchSettings settings,uint64_t seed,const Config& c,const std::string& mode) {
     std::string prefix=mode=="selfplay"?"agent":mode;
@@ -341,7 +341,7 @@ int worker(const Args& base,const Config& config) {
         for(const char* key:{"model","model-id","games","output","attempt-id","iteration","seed","evaluator"})request.args[key]=read_field();
         if(!cached || model!=request.get("model-id") || path!=request.get("model") || request.get("evaluator")=="random") {
             cached.reset();prepared->offload();auto started=std::chrono::steady_clock::now();
-            cached=evaluator(request,config,"selfplay",false,nullptr,prepared);
+            cached=evaluator(request,config,"selfplay",nullptr,prepared);
             model=request.get("model-id");path=request.get("model");
             if(request.get("evaluator")=="network") {
                 const auto& timing=prepared->timing;
@@ -530,7 +530,7 @@ void web_analysis(const SearchResult& result,const Game& game,double seconds,uin
 }
 int analysis_session(const Args& a,const Config& c) {
     torch::jit::Module web_model;
-    auto eval=evaluator(a,c,"analysis",false,&web_model);
+    auto eval=evaluator(a,c,"analysis",&web_model);
     auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");auto& search=*search_owner;
     std::optional<Game> game;
     std::optional<WebOpening> opening;
@@ -654,21 +654,17 @@ int arena(const Args& a,const Config& c) {
         []{return stop_requested.load();},std::cout);
 }
 int match(const Args& a,const Config& c) {
-    auto match_start=std::chrono::steady_clock::now();
-    std::atomic<int> completed_games{0};
-    const bool same_bot=a.get("model-id")==a.get("model-b-id");
-    if(same_bot && a.get("model")!=a.get("model-b"))throw std::runtime_error("Match model identity collision");
-    auto ea=evaluator(a,c,"match"),eb=evaluator(a,c,"match",true);
+    if(a.get("model-id")==a.get("model-b-id") && a.get("model")!=a.get("model-b"))
+        throw std::runtime_error("Match model identity collision");
+    const uint64_t seed=std::stoull(a.get("seed",c.text("match.seed")));
+    std::vector<MatchModel> models{{a.get("model-id"),a.get("model"),seed},
+        {a.get("model-b-id"),a.get("model-b"),seed^0xd1b54a32d192ed03ULL}};
     const int size=a.integer("size"),canvas=c.integer("network.canvas");
-    OpeningConfig opening(c);
-    if(parse_rule(a.get("rule"))==Rule::HEX ? (opening.hex_probability!=1 || opening.hex_make_fair_probability!=1 || opening.hex_min_accept_rate<=0) : (opening.probability!=1 || opening.rejection_probability_fallback>=1))
-        throw std::runtime_error("Matches require balanced openings and a rejection fallback below one");
-    struct Task {int id,generator,mask;uint64_t seed;bool generated;std::vector<int> moves;};
-    std::vector<Task> tasks;std::set<int> ids;
+    std::vector<MatchTask> tasks;std::set<int> ids;
     std::ifstream input(a.get("tasks"));
     if(!input)throw std::runtime_error("Cannot read match tasks");
     for(std::string line;std::getline(input,line);) {
-        std::istringstream row(line);Task t{};int count;
+        std::istringstream row(line);MatchTask t{};t.a=0;t.b=1;int count;
         if(!(row>>t.id>>t.seed>>t.generator>>t.mask>>count) || t.id<0 || t.generator!=t.id%2 ||
            t.mask<1 || t.mask>3 || count < -1 || count>=size*size || !ids.insert(t.id).second)
             throw std::runtime_error("Invalid match task");
@@ -680,88 +676,16 @@ int match(const Args& a,const Config& c) {
         if(!(row>>std::ws).eof() || game.finished())throw std::runtime_error("Invalid opening task");
         tasks.push_back(std::move(t));
     }
-    std::mutex output;
-    auto write_moves=[&](std::ostream& out,const std::vector<int>& moves) {
-        std::vector<int> local;for(int move:moves)local.push_back(move/canvas*size+move%canvas);array(out,local);
-    };
-    auto workers=[&](int count,const std::function<void(int)>& work) {
-        std::atomic<int> next{0};std::atomic<bool> failed{false};std::mutex mutex;std::exception_ptr error;
-        std::vector<std::thread> threads;
-        auto loop=[&]{try{while(!stop_requested && !failed){int i=next++;if(i>=count)break;work(i);}}
-            catch(...){failed=true;std::lock_guard<std::mutex> lock(mutex);if(!error)error=std::current_exception();}};
-        try{for(int i=0;i<std::min(count,c.integer("match.game_threads"));++i)threads.emplace_back(loop);}
-        catch(...){failed=true;for(auto& t:threads)t.join();throw;}
-        for(auto& t:threads)t.join();if(error)std::rethrow_exception(error);
-    };
-    workers(tasks.size(),[&](int index){
-        auto& task=tasks[index];if(task.generated)return;
-        std::mt19937_64 random(task.seed);
-        for(int retry=0;retry<100;++retry) {
-            if(stop_requested)return;
-            Game game(size,canvas,parse_rule(a.get("rule")));
-            auto result=initialize_opening(game,opening,task.generator==0?*ea:*eb,task.generator==0?*eb:*ea,random,[]{return stop_requested.load();});
-            if(result.status==OpeningStatus::Interrupted)return;
-            if(result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced match opening failed: "+result.failure);
-            if(game.finished())continue;
-            task.moves=result.actions;task.generated=true;
-            std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"opening\",\"id\":"<<task.id
-                <<",\"generator\":"<<task.generator<<",\"seed\":"<<task.seed<<",\"attempts\":"<<result.attempts
-                <<",\"balanced_moves\":"<<result.balanced_moves<<",\"policy_moves\":"<<result.policy_moves
-                <<",\"value\":"<<result.start_value<<",\"moves\":";
-            write_moves(row,task.moves);row<<",\"reference_black_a\":"<<(task.generator==0?"true":"false")
-                <<",\"balance_evaluators\":";array(row,result.balance_evaluators);
-            row<<",\"policy_evaluators\":";array(row,result.policy_evaluators);row<<'}';
-            std::lock_guard<std::mutex> lock(output);std::cout<<row.str()<<std::endl;return;
-        }
-        throw std::runtime_error("100 consecutive terminal openings");
-    });
-    std::vector<std::pair<size_t,int>> games;
-    for(size_t i=0;i<tasks.size();++i)if(tasks[i].generated)
-        for(int color=0;color<2;++color)if(tasks[i].mask&(1<<color))games.emplace_back(i,color);
-    workers(games.size(),[&](int index){
-        auto [task_index,color]=games[index];const auto& task=tasks[task_index];
-        Game game(size,canvas,parse_rule(a.get("rule")));for(int action:task.moves)game.play(action);
-        game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
-        auto start=std::chrono::steady_clock::now();uint64_t seed=task.seed^(0xd1b54a32d192ed03ULL*(color+1));
-        auto sa_owner=search_for(*ea,settings(c,"match"),mix(seed),c,"match");auto& sa=*sa_owner;
-        std::unique_ptr<GameSearch> sb;
-        if(!same_bot)sb=search_for(*eb,settings(c,"match"),mix(seed^0x9e3779b97f4a7c15ULL),c,"match");
-        std::vector<int> actions=task.moves;std::vector<int64_t> visits,initial_visits,new_playouts;
-        while(!game.finished()) {
-            if(stop_requested)return;
-            SearchRun options;options.clear_before_search=same_bot;options.should_stop=[]{return stop_requested.load();};
-            auto& bot=same_bot || ((game.player()==1)==(color==0))?sa:*sb;
-            auto result=bot.run(game,move_temperature(c,"match",game),options);
-            if(stop_requested)return;
-            if(result.action<0)throw std::runtime_error("Match search has no move: zero playout budget");
-            game.play(result.action);actions.push_back(result.action);visits.push_back(result.root_visits);
-            initial_visits.push_back(result.initial_visits);new_playouts.push_back(result.new_playouts);
-            sa.advance(result.action);if(sb)sb->advance(result.action);
-        }
-        double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-        std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"game\",\"id\":"<<2*task.id+color
-            <<",\"opening_id\":"<<task.id<<",\"black_a\":"<<(color==0?"true":"false")
-            <<",\"winner\":"<<game.winner()<<",\"seconds\":"<<seconds<<",\"root_visits\":";
-        array(row,visits);row<<",\"initial_visits\":";array(row,initial_visits);row<<",\"new_playouts\":";array(row,new_playouts);
-        auto precision=c.text("match.inference_precision");
-        if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
-        row<<",\"same_bot\":"<<(same_bot?"true":"false")<<",\"inference_precision\":"<<quote(precision)<<",\"moves\":";write_moves(row,actions);row<<'}';
-        std::lock_guard<std::mutex> lock(output);std::cout<<row.str()<<std::endl;
-        ++completed_games;
-    });
-    ea->finish();eb->finish();
-    auto inference_stats=[](InferenceService& service) {
-        std::cout<<"{\"requests\":"<<service.requests.load()<<",\"batches\":"<<service.batches.load()
-                 <<",\"max_batch\":"<<service.max_observed_batch.load()
-                 <<",\"queue_wait_us\":"<<service.wait_microseconds.load()
-                 <<",\"submitted\":"<<service.submitted.load()<<",\"cache_hits\":"<<service.cache_hits.load()<<'}';
-    };
-    std::cout<<std::setprecision(17)<<"{\"type\":\"match_stats\",\"games\":"<<completed_games.load()
-             <<",\"seconds\":"<<std::chrono::duration<double>(std::chrono::steady_clock::now()-match_start).count()
-             <<",\"inference_a\":";inference_stats(*ea);
-    std::cout<<",\"inference_b\":";inference_stats(*eb);std::cout<<'}'<<std::endl;
-    return stop_requested?130:0;
+    auto precision=c.text("match.inference_precision");
+    if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+    return run_matches(c,size,parse_rule(a.get("rule")),precision,models,tasks,2,
+        [&](const MatchModel& m){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
+            args.args["seed"]=std::to_string(m.seed);return evaluator(args,c,"match");},
+        [&](InferenceService& e,uint64_t search_seed){return search_for(e,settings(c,"match"),search_seed,c,"match");},
+        [&](const Game& game){return move_temperature(c,"match",game);},
+        []{return stop_requested.load();},std::cout,true);
 }
+
 }
 int main(int argc,char** argv) {
     try {

@@ -12,18 +12,19 @@ struct AuxState : SearchState {
     bool legal(int a) const override{return !terminal() && a>=0 && a<2;}
     bool terminal() const override{return depth==2;}
     double terminal_value() const override{return draw?0:1;}
-    Evaluation evaluate() const override{return {{std::log(9),0},{.6,.2,.2},{0,std::log(9)},error,auxiliary};}
-    Evaluation evaluate_symmetry(int,bool,double,bool,double optimism) const override {
-        if(seen)seen->push_back({depth,optimism});return evaluate();
+    Evaluation evaluate(SearchEvaluation options = {}) const override {
+        if(seen)seen->push_back({depth,options.optimism});
+        return {{std::log(9),0},{.6,.2,.2},{0,std::log(9)},error,auxiliary};
     }
     std::string graph_key() const override{return std::to_string(depth);}
-    Transition move(int a) override{check(legal(a),"Illegal aux action");++depth;return {0,1,1};}
+    int move(int a) override{check(legal(a),"Illegal aux action");++depth;return 1;}
 };
 struct SymmetricAux : AuxState {
     std::unique_ptr<SearchState> clone() const override{return std::make_unique<SymmetricAux>(*this);}
     int symmetry_count() const override{return 8;}
-    Evaluation evaluate_symmetry(int symmetry,bool,double,bool,double) const override {
-        auto result=evaluate();result.shortterm_value_stdev=(symmetry+1)/8.0;
+    Evaluation evaluate(SearchEvaluation options = {}) const override {
+        int symmetry=options.symmetry;
+        auto result=AuxState::evaluate(options);result.shortterm_value_stdev=(symmetry+1)/8.0;
         result.optimistic_logits={0,double(symmetry)/2};return result;
     }
 };
@@ -112,7 +113,7 @@ int main(int argc,char**) {
         noise.use_noise_pruning=false;near(noise_pruned_weights(children,noise)[1],20,"Noise pruning disabled path");
         {
             std::vector<std::unique_ptr<Backend>> backends;backends.push_back(std::make_unique<AuxBackend>());
-            BatchEvaluator batch(std::move(backends),"aux",5,4,8,0,1024);Game game(5,5,Rule::RENJU);auto obs=game.observation();
+            BatchEvaluator batch(std::move(backends),"aux",5,4,0,1024);Game game(5,5,Rule::RENJU);auto obs=game.observation();
             auto a=batch.evaluate_symmetry(obs,5,false,1,false,.2);auto hit=batch.evaluate_symmetry(obs,1,false,1,false,.2);
             check(a.logits==hit.logits && batch.requests==1 && batch.cache_hits==1,"Optimism cache hit changed canonical output");
             auto b=batch.evaluate_symmetry(obs,1,false,1,false,1);check(batch.requests==2 && b.logits!=a.logits,"Optimism condition missing from cache key");

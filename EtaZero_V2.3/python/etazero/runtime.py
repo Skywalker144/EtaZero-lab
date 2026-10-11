@@ -42,33 +42,26 @@ class Journal:
     def __init__(self, root):
         self.path = Path(root)/"logs/events.jsonl"
         self.path.parent.mkdir(parents=True,exist_ok=True)
-        self.previous = 0
         if self.path.exists():
             with self.path.open("rb+") as file:
                 valid_end = 0
                 while line := file.readline():
                     try:
-                        event = json.loads(line)
+                        json.loads(line)
                     except json.JSONDecodeError:
                         if file.read(1):
                             raise ValueError("Corrupt journal before its trailing partial record")
                         file.truncate(valid_end)
                         break
                     valid_end = file.tell()
-                    self.previous = max(self.previous,event["active_seconds"])
-        self.start = time.monotonic()
         self.changed = threading.Condition()
         self.queue = deque()
         self.issued = self.written = self.durable = self.barrier = 0
         self.closing = False;self.failure=None
         self.thread = threading.Thread(target=self._write_loop,daemon=True);self.thread.start()
 
-    def active(self):
-        return self.previous + time.monotonic()-self.start
-
     def __call__(self,event,**fields):
-        payload={"event":event,"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                 "active_seconds":self.active(),**fields}
+        payload={"event":event,"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),**fields}
         line = json.dumps(payload,sort_keys=True)+'\n'
         with self.changed:
             self.changed.wait_for(lambda:len(self.queue)<1024 or self.failure or self.closing)
@@ -97,19 +90,16 @@ class Journal:
             with self.path.open('a') as file:
                 while True:
                     with self.changed:
+                        dirty = self.written > self.durable
                         self.changed.wait_for(lambda:self.queue or self.closing or self.barrier>self.durable,
-                                              timeout=max(0,1-(time.monotonic()-last_sync)))
+                                              timeout=max(0,1-(time.monotonic()-last_sync)) if dirty else None)
                         items=list(self.queue);self.queue.clear();self.changed.notify_all()
                         closing=self.closing
                     if items:
                         file.write(''.join(line for _,line in items));file.flush()
                         self.written=items[-1][0]
                     now=time.monotonic()
-                    if now-last_sync>=1 or closing or self.barrier>self.durable:
-                        if now-last_sync>=1 and not closing:
-                            heartbeat={'event':'heartbeat','utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                       'active_seconds':self.active()}
-                            file.write(json.dumps(heartbeat,sort_keys=True)+'\n')
+                    if self.written>self.durable and (now-last_sync>=1 or closing or self.barrier>self.durable):
                         file.flush();os.fsync(file.fileno());last_sync=time.monotonic()
                         with self.changed:
                             self.durable=self.written;self.changed.notify_all()

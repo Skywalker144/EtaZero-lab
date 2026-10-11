@@ -49,15 +49,15 @@ struct ConcurrentBackend : IdentityBackend {
         return IdentityBackend::evaluate(inputs);
     }
 };
-struct ArithmeticState : SearchState {
+struct InvalidPerspectiveState : SearchState {
     int depth=0;
-    std::unique_ptr<SearchState> clone() const override { return std::make_unique<ArithmeticState>(*this); }
+    std::unique_ptr<SearchState> clone() const override { return std::make_unique<InvalidPerspectiveState>(*this); }
     int actions() const override { return 1; }
     bool legal(int a) const override { return a==0&&!terminal(); }
     bool terminal() const override { return depth==2; }
     double terminal_value() const override { return -1; }
-    Evaluation evaluate() const override { return {{0},wdl(0.6)}; }
-    Transition move(int) override { ++depth;return {0.2,0.5,1}; }
+    Evaluation evaluate(SearchEvaluation = {}) const override { return {{0},wdl(0.6)}; }
+    int move(int) override { ++depth;return 0; }
 };
 struct FailedLeaf : Evaluator {
     std::atomic<int> calls{0};
@@ -74,8 +74,8 @@ struct BanditState : SearchState {
     bool legal(int a) const override {return !terminal() && a%3!=0;}
     bool terminal() const override {return depth==1;}
     double terminal_value() const override {return heterogeneous?action/100.0:0;}
-    Evaluation evaluate() const override {return {std::vector<double>(100,0),wdl(0)};}
-    Transition move(int a) override {++depth;action=a;return {0,1,1};}
+    Evaluation evaluate(SearchEvaluation = {}) const override {return {std::vector<double>(100,0),wdl(0)};}
+    int move(int a) override {++depth;action=a;return 1;}
 };
 struct BroadState : SearchState {
     int depth=0;
@@ -84,8 +84,8 @@ struct BroadState : SearchState {
     bool legal(int a) const override {return a>=0 && a<96 && !terminal();}
     bool terminal() const override {return depth==5;}
     double terminal_value() const override {return 0;}
-    Evaluation evaluate() const override {return {std::vector<double>(96,0),wdl(0)};}
-    Transition move(int) override {++depth;return {0,1,1};}
+    Evaluation evaluate(SearchEvaluation = {}) const override {return {std::vector<double>(96,0),wdl(0)};}
+    int move(int) override {++depth;return 1;}
 };
 void compare_exhaustive_bandit(bool heterogeneous) {
     BanditState state(heterogeneous);std::vector<int64_t> expected(100,0);std::mt19937_64 rng(42);
@@ -116,7 +116,7 @@ int main() {
             std::vector<std::unique_ptr<Backend>> invalid;
             for(int i=0;i<2;++i)invalid.push_back(i==missing?nullptr:std::make_unique<IdentityBackend>());
             bool rejected=false;
-            try {BatchEvaluator service(std::move(invalid),"invalid",5,1,1,0,0);}
+            try {BatchEvaluator service(std::move(invalid),"invalid",5,1,0,0);}
             catch(const std::runtime_error& error) {rejected=std::string(error.what())=="Null inference backend";}
             check(rejected,"Null backend rejected before capability access or server startup");
         }
@@ -226,9 +226,9 @@ int main() {
                 check(rejected,"Random evaluator rejects invalid spatial and nonfinite global features");
             }
         }
-        ArithmeticState state;Search generic(one,9);bool unsupported=false;
+        InvalidPerspectiveState state;Search generic(one,9);bool unsupported=false;
         try {generic.run(state,0);}catch(const std::runtime_error&){unsupported=true;}
-        check(unsupported && generic.pending()==0,"WDL search rejects unsupported reward/discount adapters");
+        check(unsupported && generic.pending()==0,"WDL search rejects invalid value perspectives");
         SearchSettings many{31,4,1.5,1,0.25,0.3,true};KnownEvaluator pe(0,0);
         Search ps(pe,many,4);auto pr=ps.run(empty,1);int64_t sum=0;for(auto n:pr.visits)sum+=n;
         check(sum==31&&pr.simulations==31&&ps.pending()==0,"Parallel exact budget and rollback");
@@ -249,7 +249,7 @@ int main() {
         wide.reset(7);check(wide.pending()==0,"Reset after parallel reclamation");
         std::atomic<int> entered{0};std::vector<std::unique_ptr<Backend>> concurrent;
         for(int i=0;i<2;++i)concurrent.push_back(std::make_unique<ConcurrentBackend>(entered));
-        BatchEvaluator services(std::move(concurrent),"m",5,1,1,0,0);
+        BatchEvaluator services(std::move(concurrent),"m",5,1,0,0);
         std::vector<std::thread> service_callers;std::atomic<int> serviced{0};
         for(int i=0;i<2;++i)service_callers.emplace_back([&]{services.evaluate(empty.observation());++serviced;});
         for(auto& t:service_callers)t.join();services.finish();
@@ -258,24 +258,24 @@ int main() {
         // Once one takes it, the other waiters must return to waiting for work.
         std::vector<std::unique_ptr<Backend>> waiting_backends;
         for(int i=0;i<4;++i)waiting_backends.push_back(std::make_unique<NonemptyBackend>());
-        BatchEvaluator waiting(std::move(waiting_backends),"waiting",5,8,1,5000,0);
+        BatchEvaluator waiting(std::move(waiting_backends),"waiting",5,8,5000,0);
         for(int i=0;i<32;++i)check(waiting.evaluate(empty.observation()).value()==1,"Timed multi-server request output");
         waiting.drain();waiting.finish();
         check(waiting.requests==32 && waiting.batches==32,"Timed services must dispatch exactly the submitted requests");
-        // Keep the server unavailable while callers enqueue. forcePush must
-        // permit a batch larger than the nominal capacity, even at capacity=1.
+        // Keep the server unavailable while callers enqueue. All callers may
+        // enter the queue before their results are available.
         std::atomic<bool> queue_ready{false};std::vector<std::unique_ptr<Backend>> gated;
         gated.push_back(std::make_unique<GatedBackend>(queue_ready));
-        BatchEvaluator force_queue(std::move(gated),"force",5,8,1,100000,0);
+        BatchEvaluator force_queue(std::move(gated),"force",5,8,100000,0);
         std::vector<std::thread> force_callers;
         for(int i=0;i<8;++i)force_callers.emplace_back([&]{force_queue.evaluate(empty.observation());});
         auto queue_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
         while(force_queue.submitted<8 && std::chrono::steady_clock::now()<queue_deadline)std::this_thread::yield();
         queue_ready=true;
         for(auto& t:force_callers)t.join();force_queue.finish();
-        check(force_queue.requests==8 && force_queue.max_observed_batch>1,"forcePush does not enforce nominal queue capacity");
+        check(force_queue.requests==8 && force_queue.max_observed_batch>1,"forcePush accepts concurrent callers for batching");
         std::vector<std::unique_ptr<Backend>> identity;identity.push_back(std::make_unique<IdentityBackend>());
-        BatchEvaluator cache(std::move(identity),"m",5,1,2,0,1);
+        BatchEvaluator cache(std::move(identity),"m",5,1,0,1);
         auto obs=empty.observation();cache.evaluate(obs);cache.evaluate(obs);
         check(cache.requests==1 && cache.cache_hits==1,"Identical network inputs hit the cache");
         obs[0]=0;check(cache.evaluate(obs).value()==0,"Collision must compare full input key");
@@ -284,7 +284,7 @@ int main() {
         check(cache.requests==4,"Rule feature belongs to cache key");cache.finish();
         std::vector<std::unique_ptr<Backend>> broken_backends;
         for(int i=0;i<2;++i)broken_backends.push_back(std::make_unique<BrokenBackend>());
-        BatchEvaluator broken(std::move(broken_backends),"test",5,8,2,1000,0);
+        BatchEvaluator broken(std::move(broken_backends),"test",5,8,1000,0);
         std::vector<std::thread> callers;std::atomic<int> errors{0};
         for(int i=0;i<12;++i)callers.emplace_back([&]{try{broken.evaluate(empty.observation());}catch(...){++errors;}});
         for(auto& t:callers)t.join();check(errors==12,"All inference waiters are awakened on failure");

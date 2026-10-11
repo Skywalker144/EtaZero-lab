@@ -48,7 +48,6 @@ public:
 };
 class BatchEvaluator final : public InferenceService {
     struct Request {
-        uint64_t id;
         const BatchEvaluator* owner=nullptr;
         const std::vector<float>* observation=nullptr;
         std::vector<float> transformed;
@@ -79,7 +78,7 @@ class BatchEvaluator final : public InferenceService {
     int symmetry_;
     std::mt19937_64 random_;
     std::mutex random_mutex_;
-    size_t max_batch_, capacity_, input_size_;
+    size_t max_batch_, input_size_;
     int wait_us_;
     std::mutex mutex_;
     std::condition_variable changed_;
@@ -91,9 +90,9 @@ class BatchEvaluator final : public InferenceService {
     void serve(size_t index);
 public:
     BatchEvaluator(std::unique_ptr<Backend> backend, std::string model, int canvas,
-                   size_t max_batch, size_t capacity, int wait_us);
+                   size_t max_batch, int wait_us);
     BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, std::string model, int canvas,
-                   size_t max_batch, size_t capacity, int wait_us, size_t cache_entries,
+                   size_t max_batch, int wait_us, size_t cache_entries,
                    bool randomize=false, int symmetry=0, uint64_t seed=0);
     ~BatchEvaluator() override;
     Evaluation evaluate(const std::vector<float>& observation) override;

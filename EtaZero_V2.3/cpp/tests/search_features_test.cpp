@@ -15,8 +15,8 @@ struct TwoMoveState : SearchState {
     bool legal(int a) const override{return action<0 && a>=0 && a<2;}
     bool terminal() const override{return action>=0;}
     double terminal_value() const override{return lcb_case?(action==0?0:1):(action==0?0.8:-1);}
-    Evaluation evaluate() const override{return {{std::log(lcb_case?0.98:0.8),std::log(lcb_case?0.02:0.2)},{0.2,0.3,0.5}};}
-    Transition move(int a) override{action=a;return {0,1,1};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{return {{std::log(lcb_case?0.98:0.8),std::log(lcb_case?0.02:0.2)},{0.2,0.3,0.5}};}
+    int move(int a) override{action=a;return 1;}
 };
 struct LineState : SearchState {
     int depth=0;mutable int* calls;
@@ -26,15 +26,16 @@ struct LineState : SearchState {
     bool legal(int a) const override{return a==0 && !terminal();}
     bool terminal() const override{return depth>=20;}
     double terminal_value() const override{return 0;}
-    Evaluation evaluate() const override{++*calls;return {{0},{0.7,0.2,0.1}};}
-    Transition move(int) override{++depth;return {0,1,-1};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{++*calls;return {{0},{0.7,0.2,0.1}};}
+    int move(int) override{++depth;return -1;}
 };
 struct SymmetryState : TwoMoveState {
     std::vector<int>* seen;
     explicit SymmetryState(std::vector<int>& s):seen(&s){}
     std::unique_ptr<SearchState> clone() const override{return std::make_unique<SymmetryState>(*this);}
     int symmetry_count() const override{return 8;}
-    Evaluation evaluate_symmetry(int symmetry) const override {
+    Evaluation evaluate(SearchEvaluation options = {}) const override {
+        int symmetry=options.symmetry;
         seen->push_back(symmetry);
         return {symmetry%2?std::vector<double>{0,std::log(3)}:std::vector<double>{std::log(9),0},
                 {0.1+0.1*symmetry,0.1,0.8-0.1*symmetry}};
@@ -45,7 +46,8 @@ struct SymmetryLineState : LineState {
     SymmetryLineState(int& count,std::vector<std::pair<int,int>>& s):LineState(count),seen(&s){}
     std::unique_ptr<SearchState> clone() const override{return std::make_unique<SymmetryLineState>(*this);}
     int symmetry_count() const override{return 8;}
-    Evaluation evaluate_symmetry(int symmetry) const override {
+    Evaluation evaluate(SearchEvaluation options = {}) const override {
+        int symmetry=options.symmetry;
         ++*calls;seen->push_back({depth,symmetry});
         return {{0},{0.1+0.1*symmetry,0.1,0.8-0.1*symmetry}};
     }
@@ -77,8 +79,8 @@ struct DeepTemperatureState : SearchState {
     bool legal(int a) const override{return !terminal() && a>=0 && a<(depth==0?1:2);}
     bool terminal() const override{return depth==2;}
     double terminal_value() const override{return 0;}
-    Evaluation evaluate() const override{return {{std::log(9),0},{0,1,0}};}
-    Transition move(int a) override{if(depth==1)chosen->push_back(a);++depth;return {0,1,-1};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{return {{std::log(9),0},{0,1,0}};}
+    int move(int a) override{if(depth==1)chosen->push_back(a);++depth;return -1;}
 };
 }
 int main(){
@@ -185,11 +187,11 @@ int main(){
         sorted=seen;std::sort(sorted.begin(),sorted.end());check(sorted.size()==4 && std::adjacent_find(sorted.begin(),sorted.end())==sorted.end(),"Partial ensemble uses distinct symmetries");
         CoordinateEvaluator coordinates;Game padded(5,6,Rule::RENJU);padded.play(1);padded.play(6);
         AlphaZeroState real_state(padded,coordinates);
-        auto reflected=real_state.evaluate_symmetry(5);
+        auto reflected=real_state.evaluate({5});
         near(reflected.logits[0],0.05,"Policy restored from reflected canvas coordinates");
         check(coordinates.input[36+4]==1 && coordinates.input[72+11]==1 && coordinates.input[0]==0 && coordinates.input[1]==1,
               "D4 moves stones and board mask across full padded canvas");
-        auto rotated=real_state.evaluate_symmetry(1);near(rotated.logits[1],0.24,"Inverse 90-degree action mapping");
+        auto rotated=real_state.evaluate({1});near(rotated.logits[1],0.24,"Inverse 90-degree action mapping");
         check(coordinates.input[5*36+2]==-1 && coordinates.input[5*36+3]==1,"D4 preserves rule globals");
         std::vector<int> cold_actions,hot_actions;DeepTemperatureState cold_state(cold_actions),hot_state(hot_actions);
         SearchSettings deep{8,1,1.5,1,0,6.75,false};Search cold(deep,42);cold.run(cold_state,0);
@@ -215,7 +217,7 @@ int main(){
         // Explicit orientations restore coordinates; a cache hit reuses the first
         // canonical output, and ensemble requests neither read nor replace it.
         std::vector<std::unique_ptr<Backend>> backends;backends.push_back(std::make_unique<CoordinateBackend>());
-        BatchEvaluator cached(std::move(backends),"coordinate",6,8,32,0,1024);
+        BatchEvaluator cached(std::move(backends),"coordinate",6,8,0,1024);
         auto canonical=padded.observation();
         auto first=cached.evaluate_symmetry(canonical,5);
         auto hit=cached.evaluate_symmetry(canonical,1);
@@ -239,8 +241,8 @@ int main(){
         cached.finish();
         std::vector<std::unique_ptr<Backend>> r1,r2;
         r1.push_back(std::make_unique<CoordinateBackend>());r2.push_back(std::make_unique<CoordinateBackend>());
-        BatchEvaluator random_cached(std::move(r1),"random",6,8,32,0,1024,true,0,47);
-        BatchEvaluator random_control(std::move(r2),"random",6,8,32,0,1024,true,0,47);
+        BatchEvaluator random_cached(std::move(r1),"random",6,8,0,1024,true,0,47);
+        BatchEvaluator random_control(std::move(r2),"random",6,8,0,1024,true,0,47);
         auto random_first=random_cached.evaluate(canonical);
         check(random_first.logits==random_control.evaluate(canonical).logits,"NN RNG is reproducible with fixed request order");
         for(int i=0;i<10;++i)check(random_cached.evaluate(canonical).logits==random_first.logits,"Random cache hits reuse original output");

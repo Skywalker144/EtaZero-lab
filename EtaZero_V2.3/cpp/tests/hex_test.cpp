@@ -57,7 +57,7 @@ int main(){
         opening.hex_make_fair_probability=0;Game empty(5,7,Rule::HEX);auto none=initialize_opening(empty,opening,black,white,random);check(none.status==OpeningStatus::NotAttempted && none.attempts==0 && empty.turn()==0,"Fair gate may leave the board empty");
         opening.hex_make_fair_probability=1;auto interrupted=initialize_opening(empty,opening,black,white,random,[]{return true;});check(interrupted.status==OpeningStatus::Interrupted,"Hex opening is cancellable");
         Game position(5,7,Rule::HEX);position.play(1);auto obs=position.observation();
-        auto backend=std::make_unique<Coordinates>();auto* probe=backend.get();BatchEvaluator evaluator(std::move(backend),"hex",7,8,32,0);
+        auto backend=std::make_unique<Coordinates>();auto* probe=backend.get();BatchEvaluator evaluator(std::move(backend),"hex",7,8,0);
         auto result=evaluator.evaluate_symmetry(obs,0,true);
         check(probe->seen.back()[2*49+7]==1 && probe->seen.back()[2*49+1]==0,"White input is transposed before model");
         for(int a=0;a<49;++a)check(result.logits[a]==(a%7)*7+a/7,"White output is restored to physical coordinates");

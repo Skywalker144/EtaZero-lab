@@ -244,6 +244,40 @@ class PairStore:
         return rows
 
 
+def _run_native(command, log_path, accept, cancel, environ):
+    """Persist events while running and draining an interrupted native match process."""
+    with log_path.open('a') as log:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True,
+                                   start_new_session=True, env=environ)
+        done = Event()
+        def watch_cancel():
+            while not done.wait(0.1):
+                if cancel.is_set():
+                    stop_process(process)
+                    return
+        watcher = Thread(target=watch_cancel) if cancel is not None else None
+        if watcher is not None:
+            watcher.start()
+        try:
+            for line in process.stdout:
+                accept(json.loads(line))
+            code = process.wait()
+            if code:
+                raise RuntimeError(f'{command[1].title()} exited {code}: {log_path}')
+        finally:
+            stopper = Thread(target=stop_process, args=(process,))
+            stopper.start()
+            try:
+                for line in process.stdout:
+                    accept(json.loads(line))
+            finally:
+                process.stdout.close()
+                stopper.join()
+                done.set()
+                if watcher is not None:
+                    watcher.join()
+
+
 def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], store: PairStore,
                  seed: int, cancel: Event | None = None, environ: dict | None = None) -> None:
     if cancel is not None and cancel.is_set():
@@ -258,47 +292,20 @@ def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], sto
         f"{t['id']} {t['seed']} {t['generator']} {t['mask']} " +
         ('-1' if t['moves'] is None else f"{len(t['moves'])} " + ' '.join(map(str, t['moves']))) + '\n'
         for t in tasks))
-    with (store.directory / 'native.log').open('a') as log:
-        a, b = players
-        profile = json.loads((store.directory.parents[1]/'manifest.json').read_text())['config']['match']
-        process = subprocess.Popen([str(binary), 'match', '--config', str(config),
-                                   '--model', a.model, '--model-id', model_info(a.model)[1]['id'],
-                                   '--model-b', b.model, '--model-b-id', model_info(b.model)[1]['id'],
-                                   '--device', profile['device'], '--size', str(profile['board_size']),
-                                   '--rule', profile['rule'], '--tasks', str(task_path)],
-                                   stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True,
-                                   env=environ)
-        done = Event()
-        def watch_cancel():
-            while not done.wait(0.1):
-                if cancel.is_set():
-                    stop_process(process)
-                    return
-        watcher = Thread(target=watch_cancel) if cancel is not None else None
-        if watcher is not None:
-            watcher.start()
-        try:
-            for line in process.stdout:
-                event = json.loads(line)
-                store.accept(event)
-                if event['type'] == 'game':
-                    completed += 1
-                    print(f"  {a.id} vs {b.id} games={completed}/{store.total}", flush=True)
-            code = process.wait()
-            if code:
-                raise RuntimeError(f'Match exited {code}: {store.directory / "native.log"}')
-        finally:
-            stopper = Thread(target=stop_process, args=(process,))
-            stopper.start()
-            try:
-                for line in process.stdout:
-                    store.accept(json.loads(line))
-            finally:
-                process.stdout.close()
-                stopper.join()
-                done.set()
-                if watcher is not None:
-                    watcher.join()
+    a, b = players
+    profile = json.loads((store.directory.parents[1]/'manifest.json').read_text())['config']['match']
+    def accept(event):
+        nonlocal completed
+        store.accept(event)
+        if event['type'] == 'game':
+            completed += 1
+            print(f"  {a.id} vs {b.id} games={completed}/{store.total}", flush=True)
+    _run_native([str(binary), 'match', '--config', str(config),
+                 '--model', a.model, '--model-id', model_info(a.model)[1]['id'],
+                 '--model-b', b.model, '--model-b-id', model_info(b.model)[1]['id'],
+                 '--device', profile['device'], '--size', str(profile['board_size']),
+                 '--rule', profile['rule'], '--tasks', str(task_path)],
+                store.directory/'native.log', accept, cancel, environ)
     if store.tasks(seed):
         raise RuntimeError('Match exited without completing its assignments')
 
@@ -387,34 +394,13 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
         stores[pair_id].accept(event)
         if event['type'] == 'game':
             print(f"  pair={pair_id[:12]} game={event['id']} complete", flush=True)
-    with (output/'native.log').open('a') as log:
-        process = subprocess.Popen([str(binary), 'arena', '--config', str(config),
-            '--models', str(model_path), '--tasks', str(task_path), '--max-models', str(max_loaded_models),
-            '--device', profile['device'], '--size', str(profile['board_size']), '--rule', profile['rule']],
-            stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True, env=environ)
-        done = Event()
-        def watch_cancel():
-            while not done.wait(0.1):
-                if cancel.is_set():
-                    stop_process(process)
-                    return
-        watcher = Thread(target=watch_cancel)
-        watcher.start()
-        try:
-            for line in process.stdout:
-                accept(json.loads(line))
-            code = process.wait()
-            if code:
-                raise RuntimeError(f'Arena exited {code}: {output / "native.log"}')
-        finally:
-            stopper = Thread(target=stop_process, args=(process,))
-            stopper.start()
-            try:
-                for line in process.stdout:
-                    accept(json.loads(line))
-            finally:
-                process.stdout.close(); stopper.join(); done.set(); watcher.join()
-                write_json(output/'performance'/f'{uuid.uuid4().hex}.json', {'events': statistics})
+    try:
+        _run_native([str(binary), 'arena', '--config', str(config),
+                     '--models', str(model_path), '--tasks', str(task_path), '--max-models', str(max_loaded_models),
+                     '--device', profile['device'], '--size', str(profile['board_size']), '--rule', profile['rule']],
+                    output/'native.log', accept, cancel, environ)
+    finally:
+        write_json(output/'performance'/f'{uuid.uuid4().hex}.json', {'events': statistics})
     for pair_id, store in stores.items():
         seed = (profile['seed'] + int(pair_id[:16], 16)) % (1 << 64)
         if store.tasks(seed):

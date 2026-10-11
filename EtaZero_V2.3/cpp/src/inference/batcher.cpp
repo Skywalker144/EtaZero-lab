@@ -55,14 +55,14 @@ Evaluation Evaluator::evaluate_symmetry(const std::vector<float>& obs,int symmet
     restore_output(output,mapping);return output;
 }
 BatchEvaluator::BatchEvaluator(std::unique_ptr<Backend> backend, std::string model, int canvas,
-                               size_t max_batch, size_t capacity, int wait_us)
-    : BatchEvaluator(single(std::move(backend)), std::move(model), canvas, max_batch, capacity, wait_us, 0) {}
+                               size_t max_batch, int wait_us)
+    : BatchEvaluator(single(std::move(backend)), std::move(model), canvas, max_batch, wait_us, 0) {}
 BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, std::string model, int canvas,
-                               size_t max_batch, size_t capacity, int wait_us, size_t cache_entries,bool randomize,int symmetry,uint64_t seed)
+                               size_t max_batch, int wait_us, size_t cache_entries,bool randomize,int symmetry,uint64_t seed)
     : backends_(std::move(backends)), cache_(cache_entries), model_(std::move(model)),
       randomize_(randomize),symmetry_(symmetry),random_(seed),max_batch_(max_batch),
-      capacity_(capacity), input_size_(INPUT_PLANES * canvas * canvas + GLOBAL_FEATURES), wait_us_(wait_us) {
-    if (backends_.empty() || model_.empty() || !max_batch || !capacity || wait_us < 0 || symmetry<0 || symmetry>=8)
+      input_size_(INPUT_PLANES * canvas * canvas + GLOBAL_FEATURES), wait_us_(wait_us) {
+    if (backends_.empty() || model_.empty() || !max_batch || wait_us < 0 || symmetry<0 || symmetry>=8)
         throw std::runtime_error("Invalid inference service configuration");
     for (auto& b : backends_) if (!b) throw std::runtime_error("Null inference backend");
     for(const auto& backend:backends_)if(backend->supports_auxiliary()!=backends_[0]->supports_auxiliary())
@@ -155,14 +155,13 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     for(int p=0;p<INPUT_PLANES;++p)for(size_t a=0;a<area;++a)
         transformed[p*area+mapping[a]]=obs[p*area+a];
     std::copy(obs.begin()+INPUT_PLANES*area,obs.end(),transformed.begin()+INPUT_PLANES*area);
-    static std::atomic<uint64_t> next{0};
-    request->id=next.fetch_add(1);request->owner=this;request->observation=&transformed;
+    request->owner=this;request->observation=&transformed;
     request->submitted = std::chrono::steady_clock::now();
     {std::lock_guard<std::mutex> lock(request->mutex);request->done=false;request->error=nullptr;}
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        // KataGo forcePush accepts pending queries beyond the nominal queue
-        // capacity. Only the result wait blocks the caller, not queue admission.
+        // Like KataGo forcePush, only the result wait blocks the caller.
+        // Outstanding synchronous callers bound the number of queued requests.
         if (failure_) std::rethrow_exception(failure_);
         if (closing_) throw std::runtime_error("Inference service is closing");
         queue_.push_back(request);

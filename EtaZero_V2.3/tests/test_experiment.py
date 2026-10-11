@@ -1,4 +1,4 @@
-from config_samples import CONFIGS
+from config_samples import CONFIGS, derive_config
 import copy
 import json
 from pathlib import Path
@@ -22,7 +22,7 @@ def umbrella(tmp_path):
     (directory/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_seconds = 0\narm_gpus = 0\nshared_init = true\nautoelo = false\n')
     for name in ('a', 'b'):
         arm = directory/name; arm.mkdir()
-        (arm/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {tmp_path/name}\n')
+        derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {tmp_path/name}\n')
     return directory
 
 
@@ -44,7 +44,7 @@ def test_plan_is_read_only_and_resolves_inheritance(tmp_path):
     with pytest.raises(ValueError, match='nonnegative'):
         experiment_plan(directory, environ={'MAX_TIME_SECONDS': 'nan'})
     with pytest.raises(ValueError, match='non-overlapping'):
-        (directory/'b/run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {tmp_path/"a/subdir"}\n')
+        derive_config(directory/'b', CONFIGS/'smoke_test', f'run_dir = {tmp_path/"a/subdir"}\n')
         experiment_plan(directory, environ={})
 
 
@@ -209,7 +209,7 @@ def test_budget_completion_requires_matching_run(tmp_path):
     save_json(root/'.internal/run.json', {'config': arm['config'], 'config_id': fingerprint(arm['config']),
                                           'weights_initialization': None})
     save_json(root/'.internal/state.json', {'iteration': 2, 'elapsed_seconds': 0})
-    journal(root, [{'event': 'heartbeat', 'active_seconds': 10}])
+    journal(root, [{'event': 'session_start', 'utc': '2026-01-01T00:00:00+00:00'}])
     assert arm_progress(arm, plan['settings']) == 'pending'
     save_json(root/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
     assert arm_progress(arm, plan['settings']) == 'complete'
@@ -258,7 +258,7 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
     for name, arm_seed in [('0_new', None), ('c', seed)]:
         arm_dir = directory/name; arm_dir.mkdir()
         extra = f'seed = {arm_seed}\n' if arm_seed is not None else ''
-        (arm_dir/'run.cfg').write_text(f'[run]\nextends = smoke_test\nrun_dir = {tmp_path/name}\n'+extra)
+        derive_config(arm_dir, CONFIGS/'smoke_test', f'run_dir = {tmp_path/name}\n'+extra)
     started.clear(); capsys.readouterr()
     expanded = experiment_plan(directory, environ=env, work_dir=work)
     assert run_experiment(expanded, binary) == 0

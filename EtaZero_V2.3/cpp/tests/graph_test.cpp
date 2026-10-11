@@ -15,9 +15,9 @@ struct Diamond : SearchState {
     bool legal(int a) const override{return !terminal() && a>=0 && a<(phase==0?2:1);}
     bool terminal() const override{return phase==3;}
     double terminal_value() const override{return 1;}
-    Evaluation evaluate() const override{++(*calls)[phase];if(phase==2 && fail->load())throw std::runtime_error("graph leaf failure");return {{0,0},{0.6,0.2,0.2}};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{++(*calls)[phase];if(phase==2 && fail->load())throw std::runtime_error("graph leaf failure");return {{0,0},{0.6,0.2,0.2}};}
     std::string graph_key() const override{return phase==1?(branch?"right":"left"):phase==0?"root":phase==2?"shared":"terminal";}
-    Transition move(int a) override{check(legal(a),"Diamond illegal move");if(!phase)branch=a;++phase;return {0,1,1};}
+    int move(int a) override{check(legal(a),"Diamond illegal move");if(!phase)branch=a;++phase;return 1;}
 };
 struct Cycle : SearchState {
     bool at_root=true;
@@ -26,18 +26,18 @@ struct Cycle : SearchState {
     bool legal(int a) const override{return a==0;}
     bool terminal() const override{return false;}
     double terminal_value() const override{return 0;}
-    Evaluation evaluate() const override{return {{0},{0.6,0.2,0.2}};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{return {{0},{0.6,0.2,0.2}};}
     std::string graph_key() const override{return at_root?"cycle_root":"cycle";}
-    Transition move(int) override{at_root=false;return {0,1,-1};}
+    int move(int) override{at_root=false;return -1;}
 };
 struct Wide : Cycle {
     std::string path;
     std::unique_ptr<SearchState> clone() const override{return std::make_unique<Wide>(*this);}
     int actions() const override{return 8;}
     bool legal(int a) const override{return a>=0 && a<8;}
-    Evaluation evaluate() const override{return {std::vector<double>(8,0),{0.5,0,0.5}};}
+    Evaluation evaluate(SearchEvaluation = {}) const override{return {std::vector<double>(8,0),{0.5,0,0.5}};}
     std::string graph_key() const override{return path;}
-    Transition move(int a) override{path.push_back(char('0'+a));return {0,1,-1};}
+    int move(int a) override{path.push_back(char('0'+a));return -1;}
 };
 struct Unsupported : Cycle {
     std::string graph_key() const override{return SearchState::graph_key();}

@@ -18,6 +18,7 @@ from etazero.config import load_config
 from etazero.shuffle import desired_window,_groups,resource_plan,validation_file
 from etazero.reader import BatchReader
 from test_replay import id_snapshot
+from replay_order import repeat_order
 
 
 def module(path,name):
@@ -71,7 +72,7 @@ def main():
                     expected=[names.index(Path(oracle.pop()).name) for _ in names]
                     assert reader.order==expected and reader.random.getstate()==generator.random.getstate();orders+=1
                     for _ in range(10):
-                        reader.used=reader.order[:];reader.index=len(reader.order);reader._new_pass()
+                        reader.order=repeat_order(reader.order,reader.random)
                         expected=oracle._reshuffle_for_new_epoch()
                         expected=[names.index(Path(p).name) for p in expected]
                         assert reader.order==expected and reader.random.getstate()==generator.random.getstate();orders+=1
@@ -89,7 +90,7 @@ def main():
                         scoreDistrN=np.zeros((n,52),np.int8),valueTargetsNCHW=np.zeros((n,5,5,5),np.int8))
             path=root/f'go_{i}.npz';np.savez_compressed(path,**arrays);paths.append(str(path))
         for size in [1,2,4,8,16]:
-            reader=BatchReader(snapshot,size,2,1,no_repeat_files=True,shuffle_files=False)
+            reader=BatchReader(snapshot,size,2,1,shuffle_files=False)
             oracle=data_processing_pytorch.read_npz_training_data(paths,size,1,0,5,torch.device('cpu'),False,False,mc,prefetch_depth=2)
             try:
                 for expected in oracle:

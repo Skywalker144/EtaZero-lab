@@ -57,11 +57,11 @@ int main() {
             "rejection_probability=0.995\nrejection_probability_fallback=0.8\nmax_tries=20\n";}
         Config c(path.string());
         std::vector<MatchModel> models{{"slow","",1},{"fast","",2},{"third","",3}};
-        auto run=[&](State& state,std::vector<MatchTask> tasks,int capacity,std::ostream& out) {
+        auto run=[&](State& state,std::vector<MatchTask> tasks,int capacity,std::ostream& out,bool single_pair=false) {
             return run_matches(c,5,Rule::FREESTYLE,"float32",models,tasks,capacity,
                 [&](const MatchModel& m){return std::make_unique<Service>(state,m.id);},
                 [&](InferenceService&,uint64_t){return std::make_unique<FirstLegal>(state);},
-                [](const Game&){return 0.;},[]{return false;},out);
+                [](const Game&){return 0.;},[]{return false;},out,single_pair);
         };
         State pipeline;pipeline.block_opening=true;std::ostringstream out;
         run(pipeline,{{"slow",0,0,0,0,3,10,false,{}},{"fast",1,1,0,0,3,11,false,{}},
@@ -75,6 +75,22 @@ int main() {
         check(bounded.peak==2 && bounded.loads==3 && bounded.live==0,"Bounded residency retains the common model");
         check(occurrences(resumed.str(),"\"type\":\"opening\"")==0,"Saved openings never regenerated");
         check(occurrences(resumed.str(),"\"type\":\"game\"")==3,"Resume runs only missing colors");
+        State pair;std::ostringstream pair_output;
+        // Duplicate model identity still gets two separately seeded services.
+        models[1].id=models[0].id;
+        run(pair,{{"",0,1,0,0,3,10,false,{}},{"",0,1,1,1,3,11,false,{}},
+                  {"",0,1,2,0,2,12,true,{12}}},2,pair_output,true);
+        const auto rows=pair_output.str();
+        check(pair.loads==2 && pair.live==0,"Single pair retains two inference services");
+        check(occurrences(rows,"\"type\":\"opening\"")==2,"Single pair only generates missing openings");
+        check(rows.rfind("\"type\":\"opening\"")<rows.find("\"type\":\"game\""),"Single pair generates all openings before playing");
+        check(occurrences(rows,"\"same_bot\":true")==5,"Same model identity selects one search for both colors");
+        check(rows.find("\"pair\"")==std::string::npos && rows.find("\"model_stats\"")==std::string::npos,
+              "Single pair keeps its event format");
+        check(rows.find("\"type\":\"match_stats\",\"games\":5")!=std::string::npos &&
+              rows.find("\"inference_a\":{")!=std::string::npos && rows.find("\"inference_b\":{")!=std::string::npos,
+              "Single pair records per-side inference statistics");
+        models[1].id="fast";
         State failure;failure.fail_search=true;std::ostringstream partial;bool threw=false;
         try{run(failure,{{"ab",0,1,0,0,3,10,true,{12}}},2,partial);}
         catch(const std::runtime_error& e){threw=std::string(e.what())=="Injected search failure";}
