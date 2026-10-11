@@ -7,6 +7,7 @@
   --action:#e0e0db;--action-hover:#d4d4ce;--action-line:#cacac3;
   --check-line:#999992;--check-fill:#74746d;--check-mark:#fff;
   --track:#deded8;--progress:#96968d;--thumb:#75756e;
+  --hex-cell:#f3ede1;--hex-line:#b9ad97;--hex-rail-outline:#b0aaa0;
   --board:#cfbea3;--board-line:#9b896e;--board-label:#655740;--board-star:#7b6a4f;
 }
 :root[data-theme="dark"] {
@@ -15,6 +16,7 @@
   --action:#3c3c3b;--action-hover:#474745;--action-line:#555551;
   --check-line:#74746f;--check-fill:#5c5c57;--check-mark:#f0f0eb;
   --track:#3e3e3a;--progress:#8e8e85;--thumb:#c1c1b8;
+  --hex-cell:#3c3b36;--hex-line:#747065;--hex-rail-outline:#85837b;
   --board:#c5b397;--board-line:#8f8069;--board-label:#574c3b;--board-star:#6b5b45;
 }
 * {box-sizing:border-box}
@@ -93,6 +95,13 @@ pre {font-size:11px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;
 .board.white-turn .board-point:not(:disabled):hover::after {background:white;opacity:.6}
 .board-point.highlight {outline:2px solid #526b8c;outline-offset:1px}
 .board-point .overlay-value {display:grid;place-items:center;position:absolute;inset:4%;border-radius:25%;font:10px ui-monospace,monospace;color:#173b40}
+.hex-board {background:var(--subtle);container-type:inline-size;border:1px solid var(--line)}
+.hex-board .board-point .stone {width:80%;height:80%;font-size:clamp(5px,calc(var(--hex-unit) * .27),13px)}
+.hex-board .board-point .last {outline:2px solid #bd7840;outline-offset:1px}
+.hex-board.hide-numbers .stone {font-size:0}
+.hex-board.hide-numbers .last::before {content:"";width:22%;height:22%;border-radius:50%;background:#bd7840}
+.hex-board .board-point .overlay-value {border-radius:50%;font-size:clamp(4px,calc(var(--hex-unit) * .23),10px)}
+.hex-board .board-point.highlight {outline-color:var(--accent)}
 .board-footer {display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0;font-size:12px;color:var(--muted);flex-wrap:wrap}
 .check {display:flex;align-items:center;gap:8px;font-size:12px;white-space:nowrap;min-height:28px;cursor:pointer}
 .check input {appearance:none;-webkit-appearance:none;display:grid;place-content:center;flex-shrink:0;width:16px;height:16px;min-height:0;padding:0;margin:0;border:1px solid var(--check-line);border-radius:5px;background:transparent;cursor:pointer;transition:background .15s,border-color .15s}
