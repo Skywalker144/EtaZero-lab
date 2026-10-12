@@ -100,6 +100,9 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
 
 
 def optimizer_for(model, config):
+    if 'plain_optimizer' in config:
+        from .plain_optimization import optimizer_for as plain_optimizer
+        return plain_optimizer(model, config['optimizer']['kind'], config['plain_optimizer'])
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.optimization import optimizer_for as muzero_optimizer
         return muzero_optimizer(model, config)
@@ -115,8 +118,8 @@ def optimizer_for(model, config):
 
 
 def optimization_for(model, config, optimizer, state=None):
-    if not config.get('muzero_training', {}).get('katago_optimizer', True):
-        from .muzero.optimization import PlainOptimization
+    if 'plain_optimizer' in config or not config.get('muzero_training', {}).get('katago_optimizer', True):
+        from .plain_optimization import PlainOptimization
         return PlainOptimization(model, config, optimizer, state)
     return Optimization(model, config, optimizer, state)
 
