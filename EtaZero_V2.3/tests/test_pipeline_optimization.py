@@ -203,12 +203,15 @@ def test_multiple_rounds_plot_after_each_commit_and_on_resume(tmp_path,monkeypat
 
 
 @HOST_CUDA
-@pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
+@pytest.mark.parametrize('algorithm', ['alphazero', 'plain_alphazero', 'muzero'])
 def test_controller_resumes_saved_batch_without_repeating_selfplay(tmp_path, monkeypatch, algorithm):
     import etazero.training as training
     from test_muzero_pipeline import small_config
     torch.set_num_threads(1)
     c = small_config() if algorithm == 'muzero' else load_config(CONFIGS/'smoke_test')
+    if algorithm == 'plain_alphazero':
+        c['plain_optimizer'] = dict(learning_rate=.002, weight_decay=.0007)
+        c['optimizer']['kind'] = 'adamw'
     c['training'].update(compile=False, checkpoint_every=1)
     c['inference']['inference_precision'] = 'float16'
     monkeypatch.setattr(Controller, 'plot', lambda *a, **k: None)
@@ -269,7 +272,9 @@ def test_controller_resumes_saved_batch_without_repeating_selfplay(tmp_path, mon
         for key in ('model', 'optimizer', 'optimization', 'scaler', 'reader', 'rng'):
             equal(left[key], right[key])
         events = [json.loads(line) for line in (roots[1]/'logs/events.jsonl').read_text().splitlines()]
-        assert [e['step'] for e in events if e['event'] == 'update' and e['iteration'] == 2] == [1, 2, 3, 4]
+        budget = load_json(roots[1]/'.internal/iterations/000002/status.json')['train_steps']
+        assert budget > 1
+        assert [e['step'] for e in events if e['event'] == 'update' and e['iteration'] == 2] == list(range(1, budget + 1))
         assert load_json(roots[1]/'config/effective.json') == changed
     finally:
         torch.use_deterministic_algorithms(deterministic)
