@@ -84,6 +84,7 @@ FIELDS = {
     "unroll": ("train", {"steps": int, "hidden_gradient_scale": float}),
     "muzero_training": ("train", {"auxiliary_losses": boolean, "katago_optimizer": boolean,
                                   "learning_rate": float, "weight_decay": float}),
+    "plain_optimizer": ("train", {"learning_rate": float, "weight_decay": float}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
                            'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "log_every": int, "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
@@ -194,6 +195,8 @@ def load_config(directory, run_dir=None):
             continue
         if section == 'muzero_training' and not any(s == section for s, _ in values):
             continue
+        if section == 'plain_optimizer' and not any(s == section for s, _ in values):
+            continue
         if section in ('muzero', 'unroll', 'muzero_training') and values.get(('agent', 'algorithm')) != 'muzero':
             if any(s == section for s, _ in values):
                 raise ValueError(f'{section} configuration requires agent.algorithm = muzero')
@@ -264,6 +267,7 @@ NUMERIC_MINIMUMS = {
     'muzero': (('latent_channels', 'dynamics_channels', 'prediction_channels'), ('dynamics_blocks', 'prediction_blocks')),
     'unroll': (('steps',), ('hidden_gradient_scale',)),
     'muzero_training': (('learning_rate',), ('weight_decay',)),
+    'plain_optimizer': (('learning_rate',), ('weight_decay',)),
     'training': (('train_steps', 'batch_size', 'sub_epochs', 'log_every', 'checkpoint_keep', 'replay_ratio'), ('checkpoint_every', 'prefetch_depth', 'max_validation_samples', 'gradient_clip', 'soft_policy_weight_scale')),
     'optimizer': (('lr_scale', 'head_lr_factor', 'noreg_lr_factor', 'norm_interval', 'lookahead_k', 'lookahead_alpha', 'swa_scale'), ('input_wd_factor', 'normal_wd_factor', 'normal_attn_wd_factor', 'swa_period_samples')),
     'replay': (('min_rows', 'taper_exponent', 'keep_target_rows', 'max_rows'), ('expand_per_row', 'taper_scale')),
@@ -305,6 +309,8 @@ def validate(c):
         raise ValueError("Run seed must fit uint64")
     if a["algorithm"] not in ("alphazero", "muzero"):
         raise ValueError("Invalid algorithm/search enum")
+    if 'plain_optimizer' in c and a['algorithm'] != 'alphazero':
+        raise ValueError('plain_optimizer requires AlphaZero; MuZero uses muzero_training')
     validate_search_combination(a['root_search_algo'], a['nonroot_search_algo'])
     if a['root_search_algo'] == 'gumbel':
         validate_gumbel(c.setdefault('gumbel', GUMBEL_DEFAULTS.copy()))
@@ -464,7 +470,7 @@ def write_native(config, path):
 
 def resume_config(config):
     """State/layout requirements, independent of paths and execution resources."""
-    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'optimizer', 'training')
+    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'plain_optimizer', 'optimizer', 'training')
     result = {name: dict(config[name]) for name in sections if name in config}
     for key in ('log_every','checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
                 'max_validation_samples','randomize_validation_files'):
