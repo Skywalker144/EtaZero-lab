@@ -206,6 +206,8 @@ L_base = mean_t[0.72 * CE(WDL_target, WDL_pred)
 
 令 `z` 为第七输出pre-tanh，`n` 为量化后的node visits，`w=sqrt(n)`、`m=(n!=0)`、`p=(1+Q_target)/2`。来源纯W−L分量为 `L_Q = mean[1.5 * sum_a(w_a * BCEWithLogits(2*m_a*z_a,p_a)) / (1+sum_a w_a)]`；无数据行loss与Q梯度为0，side行即使完整主局标志为0也参与。W−L的tanh解释不在loss前显式计算。score Q因五子棋无对应语义而去除；Q不供native搜索消费。量化使用每局独立固定种子流，避免影响对局/禁手增强随机流；删去Go score量化及其Rand后不宣称来源随机序列相同。独立对照入口为 [check_katago_q.py](../tests/reference/check_katago_q.py) 与 [Q测试](../tests/test_qvalues.py)。
 
+AlphaZero 的 `train.cfg` 可添加 `[plain_optimizer]`，用 `learning_rate`、`weight_decay` 启用普通优化路径，优化器仍由 `[optimizer] kind` 选择。该路径与 MuZero 普通优化模式共用 [plain_optimization.py](../python/etazero/plain_optimization.py)：全部参数使用固定 LR/WD、batch 均值反传，不启用 KataGo 分组调度、warmup、Lookahead 或 SWA；`training.gradient_clip=0` 表示不裁剪，正值指定平均梯度上限，发布当前模型。优化器状态与训练计数正常保存和恢复。MuZero 继续使用 `[muzero_training]` 配置普通优化模式。以下描述未设置 `[plain_optimizer]` 时的默认配方。
+
 优化器参照固定来源 [KataGo train.py](/home/sky/RL/SkyZero/KataGo/python/train.py) 的 fson 分支，默认 SGD（momentum 0.9），支持 AdamW（CUDA fused）。输入权重、残差权重、残差/输入 BN gamma、相应 bias、head 权重及 head bias 分组，所有参数必须恰好归组一次；最终 masked BN 的 gamma/bias 按输出组处理。具体 LR、WD 系数、batch scaling、warmup 和范数自适应公式集中在 [optimization.py](../python/etazero/optimization.py)，不在文档维护第二套常量表。Transformer fixup/ReLU按七组规则单独处理attention衰减与RMSNorm；未接入 Muon/NorMuon/Aurora、自动或自定义 LR schedule。
 
 总 loss 为上式加三个 TD、长期/短期 optimistic 和短期价值误差分量的平均值，启用Q时再加上述Q分量；实际反向使用 `batch_size * L`，与来源的 batch 求和尺度一致。默认梯度上限按优化器、batch 与 LR scale 计算；`training.gradient_clip > 0` 则以平均梯度尺度覆盖上限。梯度日志仍为裁剪前平均 loss 的梯度范数。SGD 的衰减加入优化器梯度，AdamW 的衰减解耦施加，均不重复加入 loss。价值目标来自真实终局，未完成对局不会凭空补零价值。
