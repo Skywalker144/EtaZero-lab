@@ -624,9 +624,13 @@ def test_learner_resume_matches_uninterrupted_updates(tmp_path,pipeline,gpu_conf
 
 
 @pytest.mark.parametrize('kind', ['sgd', 'adamw'])
-def test_optimizer_checkpoint_d4_and_swa_export(tmp_path,pipeline,gpu_config,kind):
-    root,_=pipeline
+def test_optimizer_checkpoint_d4_and_swa_export(tmp_path,gpu_config,kind):
     c=copy.deepcopy(gpu_config);c['optimizer']['kind']=kind
+    # Provision enough data for five distinct batches; the shared smoke
+    # snapshot may only contain its four scheduled training batches.
+    c['replay']['min_rows']=8*c['training']['batch_size']
+    root=tmp_path/'source'
+    run_training(root,c,BINARY,max_iteration=1)
     plan=load_json(root/'.internal/iterations'/'000001'/'plan.json')
     plan['snapshot_id']=load_json(root/'.internal/iterations'/'000001'/'status.json')['snapshot_id']
     plan['train_steps']=5
@@ -662,6 +666,33 @@ def test_optimizer_checkpoint_d4_and_swa_export(tmp_path,pipeline,gpu_config,kin
     info=export_model(destinations[0],c,full)
     assert info['weights']=='swa' and info['swa_samples']==2
     assert verify_export(destinations[0],info,c['network']['canvas'])==info
+
+
+@pytest.mark.parametrize('amp', ['off', 'float16'])
+def test_plain_alphazero_compiled_pipeline_and_resume(tmp_path, gpu_config, amp):
+    c = copy.deepcopy(gpu_config)
+    c['plain_optimizer'] = dict(learning_rate=.002, weight_decay=.0007)
+    c['optimizer']['kind'] = 'adamw'
+    c['training'].update(amp=amp, compile=True, gradient_clip=4)
+    root = tmp_path/'plain'
+    state = run_training(root, c, BINARY, max_iteration=2)
+    saved = load_checkpoint(root, state['checkpoint'], c)
+    initial = load_checkpoint(root, load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'], c)
+    assert not torch.equal(initial['model']['stem.weight'], saved['model']['stem.weight'])
+    assert saved['optimization']['optimizer_steps'] > 0
+    assert saved['optimization']['swa'] is None and 'slow' not in saved['optimization']
+    updates = [json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()
+               if json.loads(line)['event'] == 'update']
+    assert updates
+    for row in updates:
+        assert row['learning_rates'] == {'all': .002}
+        assert row['weight_decays'] == {'all': .0007}
+        assert row['swa_samples'] == row['lookahead_counter'] == 0
+    manifest = load_json(root/Path(state['model']['path']).parent/'manifest.json')
+    assert manifest['weights'] == 'model' and manifest['swa_samples'] == 0
+    verify_export(root, manifest, c['network']['canvas'])
+    assert run_training(root, c, BINARY, max_iteration=2) == state
+    assert_compiled_partial_resume(tmp_path, root, c)
 
 
 @pytest.mark.parametrize('amp',['float16','bfloat16'])
