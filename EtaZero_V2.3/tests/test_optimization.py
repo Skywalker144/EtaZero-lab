@@ -167,6 +167,35 @@ def test_optimizer_validation(config):
             validate(changed)
 
 
+def test_plain_config_roundtrip_initialization_and_resume_identity(tmp_path, config):
+    from config_samples import derive_config
+    from etazero.config import resume_config
+    from etazero.experiment import initialization_key, write_arm_config
+    directory = derive_config(tmp_path/'plain', CONFIGS/'smoke_test')
+    with (directory/'train.cfg').open('a') as handle:
+        handle.write('[optimizer]\nkind=adamw\n[plain_optimizer]\nlearning_rate=.007\nweight_decay=.002\n')
+    c = load_config(directory, run_dir=tmp_path/'output')
+    assert c['plain_optimizer'] == dict(learning_rate=.007, weight_decay=.002)
+    assert initialization_key(c) == initialization_key(config)
+    assert resume_config(c) != resume_config(config)
+    write_arm_config(c, tmp_path/'resolved')
+    assert load_config(tmp_path/'resolved') == c
+    changed = copy.deepcopy(c); changed['plain_optimizer']['learning_rate'] *= 2
+    assert resume_config(changed) != resume_config(c)
+    for key, value in [('learning_rate', 0), ('learning_rate', float('nan')), ('weight_decay', -1)]:
+        changed = copy.deepcopy(c); changed['plain_optimizer'][key] = value
+        with pytest.raises(ValueError, match=f'plain_optimizer.{key}'):
+            validate(changed)
+    c['plain_optimizer']['weight_decay'] = 0
+    validate(c)
+    muzero = load_config(CONFIGS/'raw_muzero'); muzero['plain_optimizer'] = c['plain_optimizer']
+    with pytest.raises(ValueError, match='MuZero uses muzero_training'):
+        validate(muzero)
+    (directory/'train.cfg').write_text((directory/'train.cfg').read_text().replace('weight_decay=.002\n', ''))
+    with pytest.raises(ValueError, match='Missing required key: plain_optimizer.weight_decay'):
+        load_config(directory, run_dir=tmp_path/'output')
+
+
 def small_optimization(config):
     """A scalar weight gives hand-calculable norms and slow/fast updates."""
     model = torch.nn.Linear(1, 1, bias=False)
