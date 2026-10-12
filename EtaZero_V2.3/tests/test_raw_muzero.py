@@ -74,8 +74,12 @@ def test_basic_loss_hand_calculation_and_auxiliary_independence():
 
 
 @pytest.mark.parametrize('kind', ['adamw', 'sgd'])
-def test_plain_optimizer_matches_torch_and_resumes(kind):
-    c = load_config(CONFIGS / 'raw_muzero'); c['optimizer']['kind'] = kind
+@pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
+def test_plain_optimizer_matches_torch_and_resumes(kind, algorithm):
+    c = load_config(CONFIGS / ('smoke_test' if algorithm == 'alphazero' else 'raw_muzero'))
+    if algorithm == 'alphazero':
+        c['plain_optimizer'] = dict(learning_rate=.001, weight_decay=.0003)
+    c['optimizer']['kind'] = kind
     model = torch.nn.Linear(2, 1); reference = copy.deepcopy(model)
     opt = optimizer_for(model, c); control = optimization_for(model, c, opt)
     options = dict(lr=.001, weight_decay=.0003)
