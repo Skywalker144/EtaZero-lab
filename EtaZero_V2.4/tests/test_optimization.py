@@ -159,7 +159,7 @@ def test_lookahead_swa_and_round_boundary(config):
 
 
 def test_optimizer_validation(config):
-    for key, value in [('kind', 'muon'), ('lookahead_alpha', 0), ('lookahead_alpha', 1.1),
+    for key, value in [('kind', 'unsupported'), ('lookahead_alpha', 0), ('lookahead_alpha', 1.1),
                        ('swa_scale', 0.5), ('norm_interval', 0), ('lr_scale', float('nan'))]:
         changed = copy.deepcopy(config)
         changed['optimizer'][key] = value
