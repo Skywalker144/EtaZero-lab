@@ -17,6 +17,7 @@ from etazero.config import ROOT,load_config
 from etazero.network import make_network
 from etazero.optimization import Optimization,optimizer_for
 from etazero.training import commit_checkpoint,load_checkpoint
+from etazero.training_metrics import TrainingMetrics
 
 
 def check():
@@ -48,12 +49,23 @@ def check():
     optimization.begin_round();optimization.after_step(successful=False)
     scaler=torch.amp.GradScaler('cuda',enabled=False)
     cursor={'independent':'consumed cursor'}
+    metrics=TrainingMetrics()
+    metrics.add({'loss':2.},float('inf'),True,False,step_losses=[.5,1.5])
     with tempfile.TemporaryDirectory() as directory:
-        reference=commit_checkpoint(directory,config,model,optimizer,scaler,1,1,1,cursor,optimization)
+        reference=commit_checkpoint(directory,config,model,optimizer,scaler,1,1,1,cursor,optimization,metrics)
         saved=load_checkpoint(directory,reference,config)
         expected={'id','contract','resume_config','network_config','model','optimizer','optimization','scaler','rng','reader',
-                  'iteration','step','total_steps','total_samples','optimizer_steps','source_id'}
+                  'iteration','step','total_steps','total_samples','optimizer_steps','source_id','training_metrics'}
         assert set(saved)==expected and saved['reader']==cursor and saved['optimizer_steps']==0 and saved['total_samples']==8
+        assert saved['training_metrics']==metrics.state
+        restored_metrics=TrainingMetrics(saved['training_metrics'])
+        assert restored_metrics.summary()['amp_skipped_steps']==1
+        assert restored_metrics.summary()['gradient_steps']==0
+        # A post-resume batch extends the persisted sums without losing or
+        # counting the skipped batch's gradients.
+        for accumulator in (metrics,restored_metrics):
+            accumulator.add({'loss':4.},3.,False,False,step_losses=[1.,3.],grad_norms={'dynamics':3.})
+        assert restored_metrics.summary()==metrics.summary()
         assert set(saved['rng'])=={'python','numpy','torch','cuda'}
         assert set(saved['optimization'])>={'slow','lookahead_counter','swa','swa_samples','consumed_samples','optimizer_steps',
                'round_batches','subepoch','subepoch_batches'}
