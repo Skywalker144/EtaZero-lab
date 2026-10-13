@@ -85,6 +85,8 @@ FIELDS = {
     "muzero_training": ("train", {"auxiliary_losses": boolean, "katago_optimizer": boolean,
                                   "learning_rate": float, "weight_decay": float}),
     "plain_optimizer": ("train", {"learning_rate": float, "weight_decay": float}),
+    "brenorm": ("train", {"avg_momentum": float, "target_rmax": float,
+                           "target_dmax": float, "adjustment_scale": float}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
                            'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "log_every": int, "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
@@ -197,12 +199,22 @@ def load_config(directory, run_dir=None):
             continue
         if section == 'plain_optimizer' and not any(s == section for s, _ in values):
             continue
+        if section == 'brenorm' and not any(s == section for s, _ in values):
+            continue
         if section in ('muzero', 'unroll', 'muzero_training') and values.get(('agent', 'algorithm')) != 'muzero':
             if any(s == section for s, _ in values):
                 raise ValueError(f'{section} configuration requires agent.algorithm = muzero')
             continue
         config[section] = {}
         for key, convert in fields.items():
+            if section == 'network' and key in ('channels', 'blocks') and (section, key) not in values:
+                from .katago_configs import is_preset, resolve
+                architecture = values.get(('network', 'architecture'), '')
+                if values.get(('agent', 'algorithm')) == 'alphazero' and is_preset(architecture):
+                    preset = resolve(architecture)
+                    config[section][key] = (preset['trunk_num_channels'] if key == 'channels'
+                                            else len(preset['block_kind']))
+                    continue
             if section == "inference" and key == "muzero_queue_capacity" and values.get(("agent", "algorithm")) != "muzero":
                 continue
             if section=="reanalysis" and key!="use_reanalyze" and (section,key) not in values and not config[section]["use_reanalyze"]:
@@ -355,8 +367,25 @@ def validate(c):
         raise ValueError('training.sub_epochs cannot exceed the baseline round batch budget')
     env, net = c["environment"], c["network"]
     # MuZero ResNet keeps the NBT head width rules; the AZ presets are unchanged.
-    network_widths(net["channels"], 'nbt' if a['algorithm'] == 'muzero' else net['architecture'])
-    if a['algorithm']=='alphazero' and net['predict_q_values'] and net['architecture']!='transformer':
+    from .katago_configs import is_preset, resolve, validate_dimensions
+    named = a['algorithm'] == 'alphazero' and is_preset(net['architecture'])
+    if named:
+        preset = resolve(net['architecture'])
+        validate_dimensions(preset)
+        for key, actual in (('channels', preset['trunk_num_channels']), ('blocks', len(preset['block_kind']))):
+            if net[key] != actual:
+                raise ValueError(f"{net['architecture']} fixes network.{key}={actual}, got {net[key]}")
+        if net['predict_q_values'] and preset['version'] < 17:
+            raise ValueError('predict_q_values requires a KataGo v17 preset')
+    else:
+        network_widths(net["channels"], 'nbt' if a['algorithm'] == 'muzero' else net['architecture'])
+    if 'brenorm' in c:
+        if not named or preset['norm_kind'] not in ('brenorm', 'fixbrenorm'):
+            raise ValueError('brenorm configuration requires a named KataGo batch-renorm preset')
+        brn = c['brenorm']
+        if not 0 < brn['avg_momentum'] <= 1 or brn['target_rmax'] < 1 or brn['target_dmax'] < 0 or brn['adjustment_scale'] <= 0:
+            raise ValueError('Invalid batch-renorm schedule')
+    if a['algorithm']=='alphazero' and not named and net['predict_q_values'] and net['architecture']!='transformer':
         raise ValueError('predict_q_values requires the v17 Transformer preset')
     if net['architecture'] == 'plain' and net['blocks'] != 10:
         raise ValueError('plain requires b10c128-fson-mish: channels=128, blocks=10')
@@ -468,7 +497,7 @@ def write_native(config, path):
 
 def resume_config(config):
     """State/layout requirements, independent of paths and execution resources."""
-    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'plain_optimizer', 'optimizer', 'training')
+    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'plain_optimizer', 'brenorm', 'optimizer', 'training')
     result = {name: dict(config[name]) for name in sections if name in config}
     for key in ('log_every','checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
                 'max_validation_samples','randomize_validation_files'):
