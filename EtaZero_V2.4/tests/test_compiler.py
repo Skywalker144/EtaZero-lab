@@ -6,6 +6,19 @@ import pytest
 from etazero import compiler
 
 
+def test_muon_kernel_compilation_is_counted_with_eager_network(monkeypatch):
+    config = dict(training=dict(compile=False), optimizer=dict(kind='muon'))
+    monkeypatch.delenv('KATAGO_MUON_BATCHED_NS', raising=False)
+    assert compiler.compilation_enabled(config)
+    monkeypatch.setenv('KATAGO_MUON_BATCHED_NS', '0')
+    assert not compiler.compilation_enabled(config)
+    config['training']['compile'] = True
+    assert compiler.compilation_enabled(config)
+    config['training']['compile'] = False
+    config['optimizer']['kind'] = 'sgd'
+    assert not compiler.compilation_enabled(config)
+
+
 def test_cache_defaults_apply_before_torch_and_preserve_overrides(tmp_path):
     env={k:v for k,v in os.environ.items() if k not in ('TORCHINDUCTOR_CACHE_DIR','TRITON_CACHE_DIR')}
     env['XDG_CACHE_HOME']=str(tmp_path)
