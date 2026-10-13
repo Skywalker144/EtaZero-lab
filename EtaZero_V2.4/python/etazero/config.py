@@ -332,9 +332,8 @@ def validate(c):
                           ('fpu','use_fpu'), ('reanalysis','use_reanalyze'), ('reduce_visits','reduce_visits')):
         if not c[section][flag]:
             inactive.add(section)
-    if c['opening']['probability'] == 0: inactive.add('opening')
-    if not any(c['policy_init'][k] for k in ('policy_init','policy_after','policy_on_failure')):
-        inactive.add('policy_init')
+    # Opening/policy-init/fork objects are constructed even when disabled;
+    # retain their native numeric constraints at configuration load time.
     for section, fields in c.items():
         for key, value in fields.items():
             if isinstance(value, (int,float)) and not isinstance(value,bool) and not math.isfinite(value):
@@ -400,7 +399,7 @@ def validate(c):
         raise ValueError('Invalid hint/game fork probability')
     if hints['hint_positions_prob']>0 and not hints['positions_file']:
         raise ValueError('Enabled hint sampling requires positions_file')
-    if (forks['early_fork_game_prob'] > 0 or forks['fork_game_prob'] > 0) and (not 1<=forks['fork_game_min_choices']<=min(forks['early_fork_game_max_choices'],forks['fork_game_max_choices']) or max(forks['early_fork_game_max_choices'],forks['fork_game_max_choices'])>100 or forks['early_fork_game_expected_move_prop']>1):
+    if not 1<=forks['fork_game_min_choices']<=min(forks['early_fork_game_max_choices'],forks['fork_game_max_choices']) or max(forks['early_fork_game_max_choices'],forks['fork_game_max_choices'])>100 or forks['early_fork_game_expected_move_prop']>1:
         raise ValueError('Invalid game fork candidate range')
     ra=c['reanalysis']
     if ra['use_reanalyze']:
@@ -426,10 +425,9 @@ def validate(c):
     opening, policy_init = c["opening"], c["policy_init"]
     if any(opening[k] > 1 for k in ("probability", "rejection_probability", "rejection_probability_fallback")):
         raise ValueError("Opening probabilities must be in [0,1]")
-    if 'opening' not in inactive and (opening["max_tries"] > 1000 or any(opening[k] > 100 for k in
-            ("avg_dist_factor", "balance_exponent"))):
+    if opening["max_tries"] > 1000 or any(opening[k] > 100 for k in ("avg_dist_factor", "balance_exponent")):
         raise ValueError("Invalid opening configuration")
-    if 'policy_init' not in inactive and (policy_init['policy_init_mean'] > 100 or not .1 <= policy_init['policy_temperature'] <= 5):
+    if policy_init['policy_init_mean'] > 100 or not .1 <= policy_init['policy_temperature'] <= 5:
         raise ValueError('Invalid policy init configuration')
     r, s = c["replay"], c["shuffle"]
     if not 0 < r["taper_exponent"]:
@@ -475,6 +473,7 @@ def resume_config(config):
     for key in ('log_every','checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
                 'max_validation_samples','randomize_validation_files'):
         result['training'].pop(key, None)
-    result['optimizer'].pop('lookahead_print', None)
+    # lookahead_print selects norm samples and therefore adaptive weight decay.
+    # It is part of optimizer identity even though its name suggests logging.
     result['seed'] = config['run']['seed']
     return result
