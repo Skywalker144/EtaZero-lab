@@ -1,4 +1,3 @@
-from etazero.schema import GLOBALS
 """Real-CUDA integration checks. Enable only in an execution context with host device access."""
 from config_samples import CONFIGS, derive_config
 import copy
@@ -21,6 +20,7 @@ from etazero.export import example_inputs, export_model, verify_export
 from etazero.network import make_network, inference_network, MaskedBatchNorm
 from etazero.optimization import Optimization, inference_weights
 from etazero.runtime import run_training
+from etazero.schema import GLOBALS
 from etazero.storage import load_json, save_json, sha256
 from etazero.training import initialize, load_checkpoint, train_iteration, optimizer_for, commit_checkpoint, restore_rng
 
@@ -45,6 +45,34 @@ def assert_preserved(root, files):
         else:
             archived=list((root/'.internal/discarded').glob('*/'+str(path.relative_to(root))))
             assert len(archived)==1 and sha256(archived[0])==digest
+
+
+def assert_training_budget(root, state, config):
+    """Check actual single-pass consumption and successful optimizer updates."""
+    events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
+    updates=[e for e in events if e['event']=='update']
+    consumed=0
+    for iteration in range(1,state['iteration']):
+        directory=root/'.internal/iterations'/f'{iteration:06d}'
+        plan=load_json(directory/'plan.json');status=load_json(directory/'status.json')
+        manifest=load_json(root/'snapshots'/status['snapshot_id']/'manifest.json')
+        # Per-file tails are discarded, so floor(total rows / B) is insufficient.
+        batches=sum(file['rows']//plan['batch_size'] for file in manifest['files'])
+        assert status['snapshot_batches']==batches
+        caps=[plan['train_steps'],batches]
+        if iteration>=2:
+            credit=plan['train_credit']+status['new_rows']*plan['replay_ratio']
+            assert status['available_credit']==pytest.approx(credit)
+            caps.append(int(credit//plan['batch_size']))
+        assert status['train_steps']==min(caps)
+        assert sum(e['steps'] for e in updates if e['iteration']==iteration)==status['train_steps']
+        consumed+=status['train_steps']
+    assert 0<consumed<=config['training']['train_steps']*(state['iteration']-1)
+    assert state['checkpoint']['total_steps']==consumed
+    assert state['checkpoint']['total_samples']==consumed*config['training']['batch_size']
+    assert state['checkpoint']['optimizer_steps']==consumed-sum(e['amp_skipped_steps'] for e in updates)
+    assert all(np.isfinite(e['loss']) and (e['amp_skipped'] or np.isfinite(e['grad_norm'])) for e in updates)
+    return updates
 
 
 @pytest.fixture(scope="module")
@@ -167,13 +195,46 @@ def test_random_pda_bootstrap_and_cuda_training(tmp_path,gpu_config):
     c['search']['cheap_search_visits']=12
     c['reduce_visits']['reduced_visits_min']=12
     state=run_training(tmp_path,c,BINARY,max_iteration=2)
-    assert state['checkpoint']['total_steps']==2*c['training']['train_steps']
+    assert_training_budget(tmp_path,state,c)
     assert state['model'] is not None
     for iteration in range(3):
         shards=list((tmp_path/'selfplay'/f'iteration_{iteration:06d}').rglob('*.npz'))
+        if iteration==1 and not shards:
+            # Bootstrap may already satisfy the cold-start threshold; the
+            # first learner round then consumes it without generating games.
+            plan=load_json(tmp_path/'.internal/iterations/000001/plan.json')
+            assert plan['start_rows']>=plan['target_rows']
+            continue
         assert shards
         globals_=np.concatenate([read_raw(path)['globals'] for path in shards])
-        assert np.any((globals_[:,-1]!=0) & (globals_[:,-1]!=np.floor(globals_[:,-1])))
+        pda_half=globals_[:,GLOBALS.index('pda_half_doublings')]
+        assert np.any((pda_half!=0) & (pda_half!=np.floor(pda_half)))
+
+
+@pytest.mark.parametrize('lookahead_print',[False,True])
+def test_resume_norm_sampling_identity_and_disabled_sampling_pipeline(tmp_path,gpu_config,lookahead_print):
+    c=copy.deepcopy(gpu_config)
+    c['optimizer'].update(norm_only_at_print=False,lookahead_alpha=.5,lookahead_print=lookahead_print)
+    c['opening']['probability']=0
+    c['policy_init'].update(policy_init=False,policy_after=False,policy_on_failure=False)
+    c['game_forks'].update(early_fork_game_prob=0,fork_game_prob=0)
+    state=run_training(tmp_path,c,BINARY,max_iteration=1)
+    assert_training_budget(tmp_path,state,c)
+    saved=load_checkpoint(tmp_path,state['checkpoint'],c)
+    assert saved['resume_config']['optimizer']['lookahead_print']==lookahead_print
+    preserved={p:sha256(p) for folder in ('selfplay','checkpoints','models')
+               for p in (tmp_path/folder).rglob('*') if p.is_file()}
+    changed=copy.deepcopy(c);changed['optimizer']['lookahead_print']=not lookahead_print
+    with pytest.raises(ValueError,match='Resume model/optimizer/data configuration differs'):
+        run_training(tmp_path,changed,BINARY,resume=True,max_iteration=2)
+    with pytest.raises(ValueError,match='Checkpoint identity/configuration mismatch'):
+        load_checkpoint(tmp_path,state['checkpoint'],changed)
+    assert load_json(tmp_path/'.internal/state.json')==state
+    assert all(sha256(p)==digest for p,digest in preserved.items())
+    assert run_training(tmp_path,c,BINARY,resume=True,max_iteration=1)==state
+    resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)
+    assert_training_budget(tmp_path,resumed,c)
+    assert resumed['checkpoint']['total_steps']>state['checkpoint']['total_steps']
 
 
 def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
@@ -217,14 +278,11 @@ def test_b5c192nbt_compiled_11x11_pipeline(tmp_path,gpu_config,amp):
     c['training'].update(compile=True,amp=amp)
     c['shuffle']['group_rows']=512  # One complete 11x11 game can exceed smoke's 128-row cap.
     state=run_training(tmp_path,c,BINARY,max_iteration=2)
-    assert state['checkpoint']['total_steps']==8 and state['checkpoint']['total_samples']==64
+    assert_training_budget(tmp_path,state,c)
     saved=load_checkpoint(tmp_path,state['checkpoint'],c)
     assert saved['model']['value_head.hidden.weight'].shape==(80,96)
     assert saved['model']['policy_head.out.weight'].shape==(6,32,1,1)
-    updates=[json.loads(line) for line in (tmp_path/'logs/events.jsonl').read_text().splitlines()]
-    updates=[e for e in updates if e['event']=='update']
-    assert len(updates)==8 and all(np.isfinite(e['loss']) and (e['amp_skipped'] or np.isfinite(e['grad_norm'])) for e in updates)
-    assert saved['optimizer_steps']==8-sum(e['amp_skipped'] for e in updates)
+    assert saved['optimizer_steps']==state['checkpoint']['optimizer_steps']
     info=load_json(tmp_path/Path(state['model']['path']).parent/'manifest.json')
     assert info['weights']=='swa'
     assert verify_export(tmp_path,info,c['network']['canvas'])==info
@@ -241,7 +299,7 @@ def test_b10c128_plain_mixed_sizes_compiled_pipeline_and_resume(tmp_path,gpu_con
     root=tmp_path/'pipeline'
     state=run_training(root,c,BINARY,max_iteration=2)
     saved=load_checkpoint(root,state['checkpoint'],c)
-    assert state['checkpoint']['total_steps']==8 and state['checkpoint']['total_samples']==64
+    assert_training_budget(root,state,c)
     assert saved['model']['blocks.4.pre.conv.conv.weight'].shape==(96,128,3,3)
     assert saved['model']['blocks.7.pre.conv.conv_global.weight'].shape==(32,128,3,3)
     assert saved['model']['value_head.hidden.weight'].shape==(80,96)
@@ -249,10 +307,7 @@ def test_b10c128_plain_mixed_sizes_compiled_pipeline_and_resume(tmp_path,gpu_con
     initial=load_checkpoint(root,load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'],c)
     assert not torch.equal(initial['model']['stem.weight'],saved['model']['stem.weight'])
     assert not torch.equal(initial['model']['blocks.4.pre.conv.linear.weight'],saved['model']['blocks.4.pre.conv.linear.weight'])
-    updates=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
-    updates=[e for e in updates if e['event']=='update']
-    assert len(updates)==8 and all(np.isfinite(e['loss']) and (e['amp_skipped'] or np.isfinite(e['grad_norm'])) for e in updates)
-    assert saved['optimizer_steps']==8-sum(e['amp_skipped'] for e in updates)
+    assert saved['optimizer_steps']==state['checkpoint']['optimizer_steps']
     manifest=load_json(root/Path(state['model']['path']).parent/'manifest.json')
     assert manifest['weights']=='swa'
     assert verify_export(root,manifest,c['network']['canvas'])==manifest
@@ -284,7 +339,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
     root=tmp_path/'pipeline'
     state=run_training(root,c,BINARY,max_iteration=2)
     saved=load_checkpoint(root,state['checkpoint'],c)
-    assert state['checkpoint']['total_steps']==8 and state['checkpoint']['total_samples']==64
+    updates=assert_training_budget(root,state,c)
     assert saved['model']['value_head.hidden.weight'].shape==(64,96)
     assert saved['model']['policy_head.out.weight'].shape==(6+int(predict_q_values),32,1,1)
     assert not any('running_' in name for name in saved['model'])
@@ -295,16 +350,13 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
     # SGD update in this tiny run can be smaller than a stored weight's ULP.
     # Require actual attention gradients rather than inventing a weight-change
     # threshold, increasing the LR or replacing the source initialization.
-    assert len(attention_gradients)==8
+    assert len(attention_gradients)==state['checkpoint']['total_steps']
     assert any(torch.isfinite(g) and g>0 for g in attention_gradients[1:])
     groups={g['group_name']:g for g in saved['optimizer']['param_groups']}
     assert set(groups)=={'input','normal','normal_attn','normal_gamma','noreg','output','output_noreg'}
     scale=(8/256)**0.5 if kind=='adamw' else 8/256
     assert groups['normal_attn']['weight_decay']==pytest.approx((0.005 if kind=='adamw' else 1e-6)*0.5*scale)
-    events=[json.loads(l) for l in (root/'logs/events.jsonl').read_text().splitlines()]
-    updates=[x for x in events if x['event']=='update']
-    assert len(updates)==8 and all(np.isfinite(e['loss']) and (e['amp_skipped'] or np.isfinite(e['grad_norm'])) for e in updates)
-    assert saved['optimizer_steps']==8-sum(e['amp_skipped'] for e in updates)
+    assert saved['optimizer_steps']==state['checkpoint']['optimizer_steps']
     assert all(('q_winloss_loss' in e)==predict_q_values for e in updates)
     if predict_q_values:
         assert all(e['q_winloss_loss']>0 for e in updates)
@@ -1208,7 +1260,7 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
     for i in range(5):
         size=5+i%2;spatial[i,0,:size,:size]=1
         spatial[i,1,0,i]=1;spatial[i,2,1,i]=1
-        globals[i]=torch.tensor([i%2,i%3==0,-1 if i%3==0 else 0,i%3==0,i%2,.25*i],device='cuda')
+        globals[i,:6]=torch.tensor([i%2,i%3==0,-1 if i%3==0 else 0,i%3==0,i%2,.25*i],device='cuda')
     with torch.inference_mode(),torch.autocast('cuda',enabled=precision=='float16',dtype=torch.float16):
         for turn,n in enumerate((1,3,5,2,1,4,3)):
             indices=[(turn+i)%5 for i in range(n)]
@@ -2238,7 +2290,7 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
                                    lambda event,**fields:events.append({'event':event,**fields}))
     assert done and reference['total_samples']==16 and reference['optimizer_steps']==2
     learned=load_checkpoint(root,reference,c)['model']['linear_global.weight']
-    assert learned.shape[1]==6 and not torch.equal(learned[:,4:6],original[:,4:6])
+    assert learned.shape[1]==len(GLOBALS) and not torch.equal(learned[:,4:6],original[:,4:6])
     write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference)
     assert verify_export(root,info,c['network']['canvas'])==info and all(np.isfinite(e['loss']) for e in events if e['event']=='update')
     assert all(('q_winloss_loss' in e)==predict_q_values for e in events if e['event']=='update')
