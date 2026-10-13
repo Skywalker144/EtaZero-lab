@@ -208,9 +208,11 @@ L_base = mean_t[0.72 * CE(WDL_target, WDL_pred)
 
 AlphaZero 的 `train.cfg` 可添加 `[plain_optimizer]`，用 `learning_rate`、`weight_decay` 启用普通优化路径，优化器仍由 `[optimizer] kind` 选择。该路径与 MuZero 普通优化模式共用 [plain_optimization.py](../python/etazero/plain_optimization.py)：全部参数使用固定 LR/WD、batch 均值反传，不启用 KataGo 分组调度、warmup、Lookahead 或 SWA；`training.gradient_clip=0` 表示不裁剪，正值指定平均梯度上限，发布当前模型。优化器状态与训练计数正常保存和恢复。MuZero 继续使用 `[muzero_training]` 配置普通优化模式。以下描述未设置 `[plain_optimizer]` 时的默认配方。
 
-优化器参照固定来源 [KataGo train.py](/home/sky/RL/SkyZero/KataGo/python/train.py) 的 fson 分支，默认 SGD（momentum 0.9），支持 AdamW（CUDA fused）。输入权重、残差权重、残差/输入 BN gamma、相应 bias、head 权重及 head bias 分组，所有参数必须恰好归组一次；最终 masked BN 的 gamma/bias 按输出组处理。具体 LR、WD 系数、batch scaling、warmup 和范数自适应公式集中在 [optimization.py](../python/etazero/optimization.py)，不在文档维护第二套常量表。Transformer fixup/ReLU按七组规则单独处理attention衰减与RMSNorm；未接入 Muon/NorMuon/Aurora、自动或自定义 LR schedule。
+优化器参照固定来源 [KataGo train.py](/home/sky/RL/SkyZero/KataGo/python/train.py) 的 fson 分支，默认 SGD（momentum 0.9），支持 AdamW（CUDA fused）和 `optimizer.kind=muon`。输入权重、残差权重、残差/输入 BN gamma、相应 bias、head 权重及 head bias 分组，所有参数必须恰好归组一次；最终 masked BN 的 gamma/bias 按输出组处理。具体 LR、WD 系数、batch scaling、warmup 和范数自适应公式集中在 [optimization.py](../python/etazero/optimization.py)，不在文档维护第二套常量表。Transformer fixup/ReLU按七组规则单独处理attention衰减与RMSNorm；未开放 NorMuon/Aurora、自动或自定义 LR schedule。
 
-总 loss 为上式加三个 TD、长期/短期 optimistic 和短期价值误差分量的平均值，启用Q时再加上述Q分量；实际反向使用 `batch_size * L`，与来源的 batch 求和尺度一致。默认梯度上限按优化器、batch 与 LR scale 计算；`training.gradient_clip > 0` 则以平均梯度尺度覆盖上限。梯度日志仍为裁剪前平均 loss 的梯度范数。SGD 的衰减加入优化器梯度，AdamW 的衰减解耦施加，均不重复加入 loss。价值目标来自真实终局，未完成对局不会凭空补零价值。
+[Muon](../python/etazero/muon.py) 使用注册来源的单设备 `SingleDeviceMuonWithAuxAdam`：`normal`、`normal_attn` 的矩阵和卷积权重使用 Nesterov momentum 与 BF16 Newton–Schulz 正交化，卷积展平为 `[out, in*kh*kw]`；输入、输出和归一化/bias 组使用辅助 Adam。两条更新路径均采用解耦 weight decay，辅助 Adam 的衰减语义属于 AdamW。KataGo 配方采用来源的 Muon 分组 LR/WD 与梯度上限，保留 warmup、范数自适应、Lookahead/SWA；普通优化模式只沿用参数分工，所有组仍使用配置的固定 LR/WD 与均值反传。来源的可选通道范数衰减下限默认关闭，本地未开放该配置。
+
+总 loss 为上式加三个 TD、长期/短期 optimistic 和短期价值误差分量的平均值，启用Q时再加上述Q分量；实际反向使用 `batch_size * L`，与来源的 batch 求和尺度一致。默认梯度上限按优化器、batch 与 LR scale 计算；`training.gradient_clip > 0` 则以平均梯度尺度覆盖上限。梯度日志仍为裁剪前平均 loss 的梯度范数。SGD 的衰减加入优化器梯度，AdamW/Muon 的衰减解耦施加，均不重复加入 loss。价值目标来自真实终局，未完成对局不会凭空补零价值。
 
 Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；每个分段开始重置同步计数但不复制权重；完整训练轮结束丢弃未同步的 fast 权重，保留优化器状态、消费计数和成功更新计数。`training.sub_epochs`默认1，可将实际batch预算按floor等分为非空分段，实际步数较少时减少段数；分段计数与整轮batch计数分别保存，LR/WD和范数采样仍沿整轮时钟。该单遍与训练额度预算是用户适配，不照抄来源文件概率预算。来源epoch末复制slow后到下个subepoch才重置counter，本地轮末立即将counter归零；下一段的优化执行一致。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
 
