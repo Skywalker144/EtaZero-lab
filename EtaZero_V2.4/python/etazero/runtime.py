@@ -17,7 +17,7 @@ import time
 import uuid
 import warnings
 from .config import ROOT, csv, fingerprint, resume_config, write_native
-from .compiler import WorkTimer
+from .compiler import WorkTimer, compilation_enabled
 from .data import Catalog
 from .native import NativeWorker
 from .export import export_model, verify_export
@@ -251,6 +251,10 @@ class Controller:
                      timing_basis='committed_wall_excluding_compile_and_plot',
                      compiler_cache={key:os.environ[key] for key in ('TORCHINDUCTOR_CACHE_DIR','TRITON_CACHE_DIR')},
                      **provenance())
+        if c['optimizer']['kind'] == 'muon':
+            self.journal('optimizer_execution', kind='muon', environment={key: os.environ[key] for key in
+                         ('KATAGO_MUON_BATCHED_NS', 'KATAGO_MUON_NS_BATCH_SIZE',
+                          'KATAGO_MUON_NS_COMPILE_MODE', 'KATAGO_AUX_ADAM_FOREACH') if key in os.environ})
         if resume:
             info=load_json(root/".internal/run.json")
             if resume_config(info['config']) != resume_config(c):
@@ -303,7 +307,7 @@ class Controller:
             iteration=state["iteration"];directory=root/".internal/iterations"/f"{iteration:06d}";directory.mkdir(exist_ok=True)
             timing_path = directory/'timing.json'
             previous_timing = load_json(timing_path) if timing_path.exists() else dict(seconds=0.,wall_seconds=0.,compile_seconds=0.)
-            timer=WorkTimer(c['training']['compile'])
+            timer=WorkTimer(compilation_enabled(c))
             try:
                 plan_path,status_path=directory/"plan.json",directory/"status.json"
                 if plan_path.exists():
@@ -434,7 +438,7 @@ class Controller:
 
     def phase(self,name,iteration,function):
         self.journal("phase_start",phase=name,iteration=iteration)
-        timer=WorkTimer(self.config['training']['compile'])
+        timer=WorkTimer(compilation_enabled(self.config))
         succeeded=False
         try:
             value=function();succeeded=True
