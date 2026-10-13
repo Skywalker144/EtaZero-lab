@@ -1,20 +1,23 @@
 """Resumable paired matches and equal committed-time Elo, adapted from MuZero_V2."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import hashlib
 from itertools import combinations
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 import uuid
 from threading import Event, Thread
+from tqdm.auto import tqdm
 
 from .config import ROOT, native_text
 from .engine_config import load_engine_config
 from .analysis import model_info
-from .runtime import verify_build
+from .build import verify_build
 from .process import install_signals, stop_process
 from .storage import run_lock, write_json
 
@@ -27,6 +30,7 @@ class Player:
     seconds: float
     model: str
     sha256: str
+    sample_horizon: float | None = None
 
 
 def file_hash(path: Path) -> str:
@@ -50,15 +54,26 @@ def save_manifest(path: Path, manifest: dict) -> None:
     write_json(path, manifest)
 
 
-def time_sample_indices(times: list[float], sample_seconds: float) -> list[int]:
+def time_sample_indices(times: list[float], sample_seconds: float, *,
+                        horizon: float | None = None) -> list[int]:
     """Nearest published model to each covered time target, with earlier ties."""
     if not math.isfinite(sample_seconds) or sample_seconds <= 0:
         raise ValueError('Sample seconds must be finite and positive')
     selected = set()
-    for index in range(1, math.floor(times[-1] / sample_seconds)+1):
+    for index in range(1, math.floor((times[-1] if horizon is None else horizon) / sample_seconds)+1):
         target = index * sample_seconds
         selected.add(min(range(len(times)), key=lambda i: (abs(times[i]-target), i)))
     return sorted(selected)
+
+
+def inspect_models(paths):
+    """Check each unique file once per stage, with bounded parallel hashing."""
+    paths = list(dict.fromkeys(paths))
+    workers = min(4, len(os.sched_getaffinity(0)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(zip(paths, tqdm(pool.map(model_info, paths), total=len(paths),
+                                   desc='Validate models', unit='model', dynamic_ncols=True,
+                                   disable=None)))
 
 
 def discover_players(root: Path, stride: int = 1, *,
@@ -67,7 +82,8 @@ def discover_players(root: Path, stride: int = 1, *,
                      sample_seconds: float | None = None) -> list[Player]:
     if stride < 1:
         raise ValueError('Stride must be positive')
-    players = []
+    candidates = []
+    sample_horizons = {}
     if arms is None:
         paths = [root] if (root/'.internal/state.json').is_file() else sorted(root.iterdir())
         arms = [(p.name, p) for p in paths if (p/'.internal/state.json').is_file()]
@@ -93,21 +109,33 @@ def discover_players(root: Path, stride: int = 1, *,
             raise ValueError(f'Committed time does not match state: {arm}')
         if not rows:
             raise ValueError(f'Arm has no committed models: {arm}')
-        selected = (set(time_sample_indices([row['elapsed_seconds'] for row in rows], sample_seconds))
-                    if sample_seconds is not None else
-                    {i for i, row in enumerate(rows) if row['iteration'] % stride == 0})
-        selected.add(len(rows)-1)
+        if sample_seconds is not None:
+            times = [row['elapsed_seconds'] for row in rows]
+            sample_horizons[name] = times[-1]
+            selected = set(time_sample_indices(times, sample_seconds))
+            # Keep a short history usable, but avoid a near-duplicate tail point
+            # when a fixed target already represents the end of training.
+            if not selected or times[-1] - times[max(selected)] > sample_seconds / 2:
+                selected.add(len(rows)-1)
+        else:
+            selected = {i for i, row in enumerate(rows) if row['iteration'] % stride == 0}
+            selected.add(len(rows)-1)
         if include_first:
             selected.add(0)
         for i, row in enumerate(rows):
             number = row['iteration']
             if i not in selected and f'{name}:{number:08d}' not in required_ids:
                 continue
-            model, info = model_info(arm/row['model']['path'])
-            if info != row['model']:
-                raise ValueError(f'Model differs from committed record: {model}')
-            players.append(Player(f'{name}:{number:08d}', name, number, row['elapsed_seconds'],
-                                  str(model), info['sha256']))
+            candidates.append((name, arm, row))
+    infos = inspect_models([arm/row['model']['path'] for _, arm, row in candidates])
+    players = []
+    for name, arm, row in candidates:
+        number = row['iteration']
+        model, info = infos[arm/row['model']['path']]
+        if info != row['model']:
+            raise ValueError(f'Model differs from committed record: {model}')
+        players.append(Player(f'{name}:{number:08d}', name, number, row['elapsed_seconds'],
+                              str(model), info['sha256'], sample_horizons.get(name)))
     if len(players) < 2:
         raise ValueError('Need at least two committed models')
     return players
@@ -133,14 +161,17 @@ def build_schedule(players: list[Player], neighbors: int, *,
                 edges.add(tuple(sorted((player.id, other.id))))
     for a, b in combinations(arms.values(), 2):
         if cross_seconds is not None:
-            # Reconstruct the fixed time samples from the selected models. Each
-            # original nearest model is present, so final/pinned extras cannot
-            # displace it. Only covered grids participate in stable bridges.
+            # Preserve the original coverage even when the final model is
+            # omitted and the nearest fixed sample lies before its target.
             if sample_seconds is not None:
-                stable_a = [a[i] for i in time_sample_indices([p.seconds for p in a], sample_seconds)]
-                stable_b = [b[i] for i in time_sample_indices([p.seconds for p in b], sample_seconds)]
-                pair_horizon = min(math.floor(a[-1].seconds/sample_seconds),
-                                   math.floor(b[-1].seconds/sample_seconds)) * sample_seconds
+                horizon_a = a[-1].seconds if a[-1].sample_horizon is None else a[-1].sample_horizon
+                horizon_b = b[-1].seconds if b[-1].sample_horizon is None else b[-1].sample_horizon
+                stable_a = [a[i] for i in time_sample_indices([p.seconds for p in a], sample_seconds,
+                                                            horizon=horizon_a)]
+                stable_b = [b[i] for i in time_sample_indices([p.seconds for p in b], sample_seconds,
+                                                            horizon=horizon_b)]
+                pair_horizon = min(math.floor(horizon_a/sample_seconds),
+                                   math.floor(horizon_b/sample_seconds)) * sample_seconds
             else:
                 stable_a = [p for p in a if p.iteration % stride == 0]
                 stable_b = [p for p in b if p.iteration % stride == 0]
@@ -325,8 +356,9 @@ def load_results(output: Path) -> tuple[dict, list[dict]]:
 
 def native_config(config, players):
     canvases = set()
+    infos = inspect_models([player.model for player in players])
     for player in players:
-        _, info = model_info(player.model)
+        _, info = infos[player.model]
         if info['sha256'] != player.sha256:
             raise ValueError(f'Model changed: {player.model}')
         canvases.add(info['canvas'])
@@ -348,9 +380,13 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
     players = {p['id']: Player(**p) for p in manifest['players']}
     stores, models, indices, assignments = {}, [], {}, []
     profile = manifest['config']['match']
+    # Pair count can greatly exceed model count; do not rehash both weights
+    # for every edge in the comparison graph.
+    infos = inspect_models([player.model for player in players.values()])
+    completed = 0
     for pair in manifest['pairs']:
         store = PairStore(output/'pairs'/pair['id'], manifest['games_per_pair'])
-        store.games()
+        completed += len(store.games())
         seed = (profile['seed'] + int(pair['id'][:16], 16)) % (1 << 64)
         tasks = store.tasks(seed)
         if not tasks:
@@ -359,7 +395,7 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
         slots = []
         for player_id in pair['players']:
             player = players[player_id]
-            path, info = model_info(player.model)
+            path, info = infos[player.model]
             if info['sha256'] != player.sha256:
                 raise ValueError(f'Model changed: {path}')
             key = info['id']
@@ -386,21 +422,48 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
     model_path.write_text(''.join(f"{quoted(m['id'])} {quoted(m['path'])} {m['seed']}\n" for m in models))
     task_path.write_text(''.join(assignments))
     statistics = []
-    def accept(event):
-        if event['type'] in ('model_stats', 'arena_stats'):
-            statistics.append(event)
-            return
-        pair_id = event.pop('pair')
-        stores[pair_id].accept(event)
-        if event['type'] == 'game':
-            print(f"  pair={pair_id[:12]} game={event['id']} complete", flush=True)
-    try:
-        _run_native([str(binary), 'arena', '--config', str(config),
-                     '--models', str(model_path), '--tasks', str(task_path), '--max-models', str(max_loaded_models),
-                     '--device', profile['device'], '--size', str(profile['board_size']), '--rule', profile['rule']],
-                    output/'native.log', accept, cancel, environ)
-    finally:
-        write_json(output/'performance'/f'{uuid.uuid4().hex}.json', {'events': statistics})
+    total = len(manifest['pairs'])*manifest['games_per_pair']
+    with tqdm(total=total, initial=completed, desc='Arena games', unit='game',
+              dynamic_ncols=True, disable=None) as progress:
+        def accept(event):
+            nonlocal completed
+            if event['type'] == 'arena_progress':
+                stage = event['stage']
+                if stage == 'loading':
+                    progress.set_postfix_str(f"window={event['window']} preparing 0/{event['models']} models")
+                    if progress.disable:
+                        print(f"arena: window={event['window']} preparing {event['models']} models "
+                              f"with {event['workers']} load workers", flush=True)
+                elif stage == 'model_ready':
+                    progress.set_postfix_str(f"window={event['window']} prepared {event['loaded']}/{event['models']} models")
+                elif stage == 'playing':
+                    progress.set_postfix_str(f"window={event['window']} playing")
+                    if progress.disable:
+                        print(f"arena: window={event['window']} ready in {event['seconds']:.2f}s; "
+                              f"games={completed}/{total}", flush=True)
+                statistics.append(event)
+                return
+            if event['type'] in ('model_prepared', 'model_stats', 'arena_stats'):
+                statistics.append(event)
+                return
+            pair_id = event.pop('pair')
+            store = stores[pair_id]
+            new_game = (event['type'] == 'game' and
+                        not (store.directory/'games'/f"{event['id']:08d}.json").exists())
+            store.accept(event)
+            if new_game:
+                completed += 1
+                progress.update(1)
+                if progress.disable and (completed % 100 == 0 or completed == total):
+                    print(f'arena: games={completed}/{total}', flush=True)
+        try:
+            _run_native([str(binary), 'arena', '--config', str(config),
+                         '--models', str(model_path), '--tasks', str(task_path), '--max-models', str(max_loaded_models),
+                         '--model-load-workers', str(manifest.get('execution', {}).get('model_load_workers', 4)),
+                         '--device', profile['device'], '--size', str(profile['board_size']), '--rule', profile['rule']],
+                        output/'native.log', accept, cancel, environ)
+        finally:
+            write_json(output/'performance'/f'{uuid.uuid4().hex}.json', {'events': statistics})
     for pair_id, store in stores.items():
         seed = (profile['seed'] + int(pair_id[:16], 16)) % (1 << 64)
         if store.tasks(seed):
@@ -415,6 +478,8 @@ def run_arena(output: Path, manifest: dict, binary: Path, samples: int,
     execution = dict(manifest.get('execution', {}))
     if execution.get('max_loaded_models', max_loaded_models) != max_loaded_models:
         raise ValueError('Arena model limit differs from manifest')
+    if execution.get('model_load_workers', 4) < 1:
+        raise ValueError('Arena model load workers must be positive')
     manifest = {**manifest, 'execution': {**execution, 'max_loaded_models': max_loaded_models}}
     players = [Player(**p) for p in manifest['players']]
     native = native_config(manifest['config'], players)
@@ -468,6 +533,7 @@ def main():
     parser.add_argument('--bootstrap-samples', type=int, default=300)
     parser.add_argument('--game-threads', type=int, default=512)
     parser.add_argument('--max-loaded-models', type=int, default=32)
+    parser.add_argument('--model-load-workers', type=int, default=4)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--fit-only', action='store_true')
     args = parser.parse_args()
@@ -480,8 +546,8 @@ def main():
             write_ratings(output, args.bootstrap_samples)
         return
     config = load_engine_config(args.config_dir, match=True)
-    if args.game_threads < 1 or args.max_loaded_models < 2:
-        parser.error('game-threads must be positive and max-loaded-models at least two')
+    if args.game_threads < 1 or args.max_loaded_models < 2 or args.model_load_workers < 1:
+        parser.error('game-threads and model-load-workers must be positive and max-loaded-models at least two')
     config['match']['game_threads'] = args.game_threads
     if args.games is None:
         args.games = config['match']['games']
@@ -499,7 +565,8 @@ def main():
     manifest = {'version': 1, 'players': [asdict(p) for p in players], 'config': config,
                 'binary_sha256': verify_build(binary), 'games_per_pair': args.games, 'anchor': anchor,
                 'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule],
-                'execution': {'max_loaded_models': args.max_loaded_models}}
+                'execution': {'max_loaded_models': args.max_loaded_models,
+                              'model_load_workers': args.model_load_workers}}
     print(f'players={len(players)} pairs={len(schedule)} games={len(schedule)*args.games} anchor={anchor}', flush=True)
     if args.dry_run:
         print(json.dumps(manifest, indent=2))

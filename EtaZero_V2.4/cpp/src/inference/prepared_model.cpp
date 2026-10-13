@@ -51,6 +51,9 @@ void copy_tensors(torch::jit::Module& target,const torch::jit::Module& source) {
     }
 }
 }
+PreparedModel::PreparedModel(torch::jit::Module module,bool preload_layout):supplied_(std::move(module)) {
+    if(preload_layout)supplied_layout_=layout(*supplied_);
+}
 torch::jit::Module PreparedModel::prepare(const std::string& path,const torch::Device& device,
                                         const std::string& precision) {
     if(ready_)return *module_;
@@ -60,7 +63,8 @@ torch::jit::Module PreparedModel::prepare(const std::string& path,const torch::D
     timing={};auto started=Clock::now();
     auto incoming=supplied_?std::move(*supplied_):torch::jit::load(path,torch::kCPU);
     supplied_.reset();incoming.eval();
-    auto signature=layout(incoming);
+    auto signature=supplied_layout_?std::move(*supplied_layout_):layout(incoming);
+    supplied_layout_.reset();
     timing.load_seconds=elapsed(started);started=Clock::now();
     timing.reused_runtime=module_.has_value() && signature==layout_ && precision==precision_;
     if(timing.reused_runtime)copy_tensors(*module_,incoming);
@@ -81,6 +85,22 @@ torch::jit::Module PreparedModel::prepare(const std::string& path,const torch::D
     if(device.is_cuda())c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
     timing.weights_seconds=elapsed(started);ready_=true;
     return *module_;
+}
+std::shared_ptr<PreparedModel> PreparedModel::clone_runtime() const {
+    if(!module_)throw std::runtime_error("Cannot clone an unprepared model runtime");
+    c10::InferenceMode inference;
+    auto copy=std::make_shared<PreparedModel>();
+    copy->module_=module_->deepcopy(torch::kCPU);
+    copy->layout_=layout_;copy->precision_=precision_;
+    return copy;
+}
+bool PreparedModel::reuse_runtime(const PreparedModel& source,const std::string& precision) {
+    if(ready_ || !supplied_layout_ || !source.module_ || *supplied_layout_!=source.layout_ ||
+       precision!=source.precision_)return false;
+    c10::InferenceMode inference;
+    module_=source.module_->deepcopy(torch::kCPU);
+    layout_=source.layout_;precision_=source.precision_;
+    return true;
 }
 void PreparedModel::offload() {
     if(module_) {

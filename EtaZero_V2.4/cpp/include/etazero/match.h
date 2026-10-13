@@ -12,7 +12,8 @@ struct MatchTask {
     bool generated;
     std::vector<int> moves;
 };
-using MatchEvaluatorFactory = std::function<std::unique_ptr<InferenceService>(const MatchModel&)>;
+using MatchEventSink = std::function<void(const std::string&)>;
+using MatchEvaluatorFactory = std::function<std::unique_ptr<InferenceService>(const MatchModel&,const MatchEventSink&)>;
 using MatchSearchFactory = std::function<std::unique_ptr<GameSearch>(InferenceService&,uint64_t)>;
 
 // Pair identity is only for persistence. Arena openings and games share one pool.
@@ -22,5 +23,6 @@ int run_matches(const Config& config, int size, Rule rule, const std::string& pr
                 const std::vector<MatchModel>& models, std::vector<MatchTask>& tasks,
                 int max_models, const MatchEvaluatorFactory& evaluator,
                 const MatchSearchFactory& search, const std::function<double(const Game&)>& temperature,
-                const std::function<bool()>& stopped, std::ostream& output, bool single_pair = false);
+                const std::function<bool()>& stopped, std::ostream& output, bool single_pair = false,
+                int model_load_workers = 1);
 }

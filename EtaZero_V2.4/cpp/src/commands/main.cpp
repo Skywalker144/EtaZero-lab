@@ -31,7 +31,7 @@ struct Args {
     std::map<std::string, std::string> args;
     Args(int argc, char** argv) {
         const std::set<std::string> allowed{"config","model","model-id","device","games","output","run-id","attempt-id",
-                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream","models","max-models"};
+                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream","models","max-models","model-load-workers"};
         for (int i = 2; i < argc; i += 2) {
             std::string name = argv[i];
             if (name.rfind("--",0) != 0 || !allowed.count(name.substr(2)) || i+1 >= argc || !args.emplace(name.substr(2), argv[i+1]).second)
@@ -107,7 +107,8 @@ template<class T> void array(std::ostream& out, const std::vector<T>& values) {
 }
 std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, const std::string& mode,
                                           torch::jit::Module* web_model = nullptr,
-                                          std::shared_ptr<PreparedModel> prepared = nullptr) {
+                                          std::shared_ptr<PreparedModel> prepared = nullptr,
+                                          torch::jit::Module* supplied_model = nullptr) {
     std::string prefix = (mode == "infer" || mode == "selfplay") ? "inference" : mode == "analysis" ? "analysis" : mode;
     int batch = c.integer(prefix+".max_batch"), canvas = c.integer("network.canvas");
     std::vector<std::unique_ptr<Backend>> backends;
@@ -121,7 +122,7 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         // Selfplay already knows the algorithm and loads during backend preparation.
         torch::Device device(a.get("device"));c10::cuda::OptionalCUDAGuard guard;
         if(device.is_cuda())guard.set_device(device);
-        detected_model=torch::jit::load(a.get("model"),device);
+        detected_model=supplied_model?*supplied_model:torch::jit::load(a.get("model"),device);
         detected_model->eval();
         if(device.is_cuda())c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
         auto metadata=detected_model->get_method("metadata")({}).toTuple();
@@ -646,12 +647,32 @@ int arena(const Args& a,const Config& c) {
     }
     auto precision=c.text("match.inference_precision");
     if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+    const int load_workers=parse_integer(a.get("model-load-workers","4"),"--model-load-workers");
+    if(load_workers<1)throw std::runtime_error("Model load workers must be positive");
+    std::mutex cuda_preparation;
+    std::vector<std::shared_ptr<PreparedModel>> runtimes;
     return run_matches(c,size,parse_rule(a.get("rule")),precision,models,tasks,a.integer("max-models"),
-        [&](const MatchModel& m){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
-            args.args["seed"]=std::to_string(m.seed);return evaluator(args,c,"match");},
+        [&](const MatchModel& m,const MatchEventSink& emit){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
+            args.args["seed"]=std::to_string(m.seed);
+            // Deserialization and layout inspection are CPU-only and independent.
+            // CUDA allocations, warmup and capture stay isolated from other models.
+            auto started=std::chrono::steady_clock::now();
+            c10::InferenceMode inference;
+            auto model=torch::jit::load(m.path,torch::kCPU);model.eval();
+            auto prepared=std::make_shared<PreparedModel>(model,true);
+            double cpu_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+            std::lock_guard<std::mutex> lock(cuda_preparation);
+            bool reused=false;
+            for(const auto& runtime:runtimes)if(prepared->reuse_runtime(*runtime,precision)){reused=true;break;}
+            auto service=evaluator(args,c,"match",nullptr,prepared,&model);
+            if(!reused)runtimes.push_back(prepared->clone_runtime());
+            std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"model_prepared\",\"model\":"<<quote(m.id)
+                <<",\"cpu_seconds\":"<<cpu_seconds<<",\"weights_seconds\":"<<prepared->timing.weights_seconds
+                <<",\"graph_seconds\":"<<prepared->timing.graph_seconds<<",\"reused_runtime\":"<<(reused?"true":"false")<<'}';
+            emit(row.str());return service;},
         [&](InferenceService& e,uint64_t seed){return search_for(e,settings(c,"match"),seed,c,"match");},
         [&](const Game& game){return move_temperature(c,"match",game);},
-        []{return stop_requested.load();},std::cout);
+        []{return stop_requested.load();},std::cout,false,load_workers);
 }
 int match(const Args& a,const Config& c) {
     if(a.get("model-id")==a.get("model-b-id") && a.get("model")!=a.get("model-b"))
@@ -679,7 +700,7 @@ int match(const Args& a,const Config& c) {
     auto precision=c.text("match.inference_precision");
     if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
     return run_matches(c,size,parse_rule(a.get("rule")),precision,models,tasks,2,
-        [&](const MatchModel& m){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
+        [&](const MatchModel& m,const MatchEventSink&){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
             args.args["seed"]=std::to_string(m.seed);return evaluator(args,c,"match");},
         [&](InferenceService& e,uint64_t search_seed){return search_for(e,settings(c,"match"),search_seed,c,"match");},
         [&](const Game& game){return move_temperature(c,"match",game);},

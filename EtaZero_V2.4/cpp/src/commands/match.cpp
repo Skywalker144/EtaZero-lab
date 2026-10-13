@@ -22,10 +22,10 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                 const std::vector<MatchModel>& models,std::vector<MatchTask>& tasks,int max_models,
                 const MatchEvaluatorFactory& evaluator,const MatchSearchFactory& search,
                 const std::function<double(const Game&)>& temperature,const std::function<bool()>& stopped,
-                std::ostream& output,bool single_pair) {
+                std::ostream& output,bool single_pair,int model_load_workers) {
     const auto started=Clock::now();const int canvas=c.integer("network.canvas");
     const int threads=c.integer("match.game_threads");
-    if(threads<1 || max_models<2)throw std::runtime_error("Invalid arena concurrency/model limit");
+    if(threads<1 || max_models<2 || model_load_workers<1)throw std::runtime_error("Invalid arena concurrency/model limit");
     OpeningConfig opening(c);
     if(rule==Rule::HEX ? (opening.hex_probability!=1 || opening.hex_make_fair_probability!=1 || opening.hex_min_accept_rate<=0)
                       : (opening.probability!=1 || opening.rejection_probability_fallback>=1))
@@ -82,11 +82,45 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             auto index=it++->first;if(!selected.count(index))release(index);
         }
         const auto loading=Clock::now();
-        for(size_t index:selected)if(!resident.count(index)) {
-            if(stopped())break;
-            resident.emplace(index,evaluator(models[index]));++loads;
+        std::vector<size_t> missing;
+        for(size_t index:selected)if(!resident.count(index))missing.push_back(index);
+        const auto load_workers=std::min<size_t>(missing.size(),single_pair?1:model_load_workers);
+        auto progress=[&](const char* stage,size_t loaded) {
+            if(single_pair)return;
+            std::ostringstream row;row<<"{\"type\":\"arena_progress\",\"stage\":"<<quote(stage)
+                <<",\"window\":"<<windows+1<<",\"loaded\":"<<loaded<<",\"models\":"<<missing.size()
+                <<",\"workers\":"<<load_workers<<",\"seconds\":"<<elapsed(loading)<<'}';
+            emit(row.str());
+        };
+        progress("loading",0);
+        std::vector<std::unique_ptr<InferenceService>> loaded(missing.size());
+        std::atomic<size_t> next{0};std::atomic<bool> load_failed{false};
+        std::mutex load_mutex;std::exception_ptr load_error;size_t ready_models=0;
+        auto load=[&] {
+            try {
+                while(!stopped() && !load_failed) {
+                    size_t slot=next.fetch_add(1);if(slot>=missing.size())return;
+                    loaded[slot]=evaluator(models[missing[slot]],emit);
+                    std::lock_guard<std::mutex> lock(load_mutex);progress("model_ready",++ready_models);
+                }
+            } catch(...) {
+                std::lock_guard<std::mutex> lock(load_mutex);load_failed=true;
+                if(!load_error)load_error=std::current_exception();
+            }
+        };
+        if(load_workers<=1)load();
+        else {
+            std::vector<std::thread> loaders;
+            try {for(size_t i=0;i<load_workers;++i)loaders.emplace_back(load);}
+            catch(...) {load_failed=true;for(auto& worker:loaders)worker.join();throw;}
+            for(auto& worker:loaders)worker.join();
+        }
+        if(load_error)std::rethrow_exception(load_error);
+        for(size_t slot=0;slot<missing.size();++slot)if(loaded[slot]) {
+            resident.emplace(missing[slot],std::move(loaded[slot]));++loads;
         }
         load_seconds+=elapsed(loading);if(stopped())break;
+        progress("playing",ready_models);
         ++windows;
         struct Job {size_t task;int color;}; // color=-1 generates an opening.
         std::deque<Job> ready;
