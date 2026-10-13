@@ -72,7 +72,7 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 
 [learner](../python/etazero/muzero/training.py) 采用来源中的梯度边界：根 loss 梯度系数 1，未来各步为 `1/K`；第二次及以后 dynamics 前按 `unroll.hidden_gradient_scale` 缩放 hidden 梯度，首次 representation→dynamics 不缩放。前向 loss 日志记录未缩放的各步损失和，反向系数不改变日志值。KataGo 优化器模式保留 batch 总和反传，普通优化器模式使用 batch 均值；consumed samples 计真实起点，不能当作展开状态数与 AlphaZero 比较。
 
-编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。NBT 的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW、Lookahead 和 SWA；representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组。普通优化模式对两种主干使用统一 LR/weight decay，不使用上述分组、Lookahead 或 SWA。两种主干均接入 AMP、checkpoint 和验证调度。
+编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。NBT 的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW/Muon、Lookahead 和 SWA；representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
 
 ## KataGo 工程机制的适用边界
 
