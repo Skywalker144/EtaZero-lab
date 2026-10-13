@@ -38,4 +38,3 @@
 - 用户提到KataGo，就是~/RL/SkyZero/KataGo
 - 用户提到KataGomo，就是~/RL/SkyZero/KataGomo
 - 用户提到SkyZero，就是~/RL/SkyZero/SkyZero_V7.19或者V8.1
-- 用户提到MuZero，就是~/RL/MuZero
