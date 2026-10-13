@@ -8,6 +8,7 @@ from scipy.optimize import minimize
 from scipy.special import expit
 from tqdm.auto import trange
 
+from .plotting import BLUE, GREEN, GREY, ORANGE, RED, THEME
 from .storage import atomic_path, write_json
 
 
@@ -140,37 +141,38 @@ def write_ratings(output: Path, samples: int = 300) -> dict:
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    figure, axis = plt.subplots(figsize=(11, 6.5))
-    arms = defaultdict(list)
-    for row in result['ratings']:
-        arms[row['arm']].append(row)
-    # Distinct hues first; avoid adjacent dark/light variants of one hue.
-    colors = ('#0072B2', '#E68600', '#009E73', '#7B2CBF', '#D62728',
-              '#222222', '#00A6B2', '#CC3A8C', '#8C564B', '#A38B00')
-    markers = ('o', 's', '^', 'D', 'v', 'P', 'X', '<', '>', 'h')
-    for index, (arm, rows) in enumerate(sorted(arms.items())):
-        rows.sort(key=lambda r: r['seconds'])
-        hours = [r['seconds'] / 3600 for r in rows]
-        line, = axis.plot(hours, [r['elo'] for r in rows], marker=markers[index % len(markers)],
-                          color=colors[index % len(colors)], markersize=4, label=arm)
-        axis.fill_between(hours, [r['lower'] for r in rows], [r['upper'] for r in rows],
-                          color=line.get_color(), alpha=0.08)
-    config = manifest['config']['match']
-    axis.set(xlabel='Cumulative committed training wall time (hours)',
-             ylabel=f"Relative Elo ({manifest['anchor']} = 0)",
-             title=f"{config['board_size']}×{config['board_size']} {config['rule'].capitalize()} · "
-                   f"{config['visits']} visits · {len(games):,} games")
-    axis.axhline(0, color='black', linewidth=0.8, alpha=0.4)
-    axis.grid(alpha=0.2)
-    axis.legend(fontsize=9)
-    note = 'Shading: 95% paired-opening bootstrap; fixed evaluation search for every model.'
-    if result['separated_pairs']:
-        note += '\nSwept pairings present: rating magnitudes and intervals can be prior-sensitive.'
-    figure.text(0.5, 0.015, note, ha='center', fontsize=8)
-    figure.tight_layout(rect=(0, 0.065, 1, 1))
-    for suffix in ('png', 'svg'):
-        with atomic_path(output / f'elo.{suffix}') as temporary:
-            figure.savefig(temporary, format=suffix, dpi=160)
-    plt.close(figure)
+    with matplotlib.rc_context(THEME):
+        figure, axis = plt.subplots(figsize=(11, 6.5))
+        arms = defaultdict(list)
+        for row in result['ratings']:
+            arms[row['arm']].append(row)
+        # Distinct hues first; avoid adjacent dark/light variants of one hue.
+        colors = (BLUE, ORANGE, GREEN, '#c678dd', RED,
+                  GREY, '#56b6c2', '#e58ac4', '#c69c7b', '#e5c07b')
+        markers = ('o', 's', '^', 'D', 'v', 'P', 'X', '<', '>', 'h')
+        for index, (arm, rows) in enumerate(sorted(arms.items())):
+            rows.sort(key=lambda r: r['seconds'])
+            hours = [r['seconds'] / 3600 for r in rows]
+            line, = axis.plot(hours, [r['elo'] for r in rows], marker=markers[index % len(markers)],
+                              color=colors[index % len(colors)], markersize=4, label=arm)
+            axis.fill_between(hours, [r['lower'] for r in rows], [r['upper'] for r in rows],
+                              color=line.get_color(), alpha=0.16)
+        config = manifest['config']['match']
+        axis.set(xlabel='Cumulative committed training wall time (hours)',
+                 ylabel=f"Relative Elo ({manifest['anchor']} = 0)",
+                 title=f"{config['board_size']}×{config['board_size']} {config['rule'].capitalize()} · "
+                       f"{config['visits']} visits · {len(games):,} games")
+        axis.axhline(0, color=GREY, linewidth=0.8, alpha=0.5)
+        axis.grid(alpha=0.55)
+        axis.legend(fontsize=9)
+        note = 'Shading: 95% paired-opening bootstrap; fixed evaluation search for every model.'
+        if result['separated_pairs']:
+            note += '\nSwept pairings present: rating magnitudes and intervals can be prior-sensitive.'
+        figure.text(0.5, 0.015, note, ha='center', fontsize=8)
+        figure.tight_layout(rect=(0, 0.065, 1, 1))
+        for suffix in ('png', 'svg'):
+            with atomic_path(output / f'elo.{suffix}') as temporary:
+                figure.savefig(temporary, format=suffix, dpi=160)
+        plt.close(figure)
     print(f"Elo: {output / 'elo.png'}", flush=True)
     return result
