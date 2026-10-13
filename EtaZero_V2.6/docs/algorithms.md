@@ -100,7 +100,7 @@ Transformer使用fixup七参数组，attention投影单列 `normal_attn`，RMSNo
 
 PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bias、Mish、上述三项池化和线性层，广播加入局部特征，再经过 bias、Mish 和 1×1 输出；全局信息进入最终非线性之前，因此不会成为被 softmax 抵消的统一偏移。ValueHead 使用 1×1、bias、Mish 后的均值，拼接 `mean`、`mean × (sqrt(area)-14)/10`、`mean × ((sqrt(area)-14)²/100-0.1)`，经隐藏层、Mish 和线性输出 WDL；这三个均值保留源尺寸条件化形式，不使用最大值。固定尺寸下它们携带相同空间信息，混合尺寸时为价值层提供尺寸条件。Transformer的上述head激活使用ReLU；两个卷积预设使用Mish。这三个 EtaZero 入口省略 Go pass、score/ownership 等辅助头，不提供 RepVGG 额外卷积或双输出头训练；完整来源名称的对应机制见 [网络配置](networks.md)。`network.predict_q_values=true` 仅在Transformer v17添加第七个纯W−L Q输出，Go score Q不适用；缺省false及v15保留六输出。
 
-训练 policy logits 为 `[N,6,canvas²]`，顺序为 policy、opponent policy、soft policy、soft opponent policy、长期 optimistic、短期 optimistic，定义见 [schema.py](../python/etazero/schema.py)；价值为当前玩家视角的 W/D/L 三分类 logits `[N,3]`。导出保留六平面的卷积计算形状，并向 native 返回主/短期 optimistic logits `[N,canvas²]`、主 WDL logits `[N,3]` 和误差标准差 `[N]`。训练用终局 WDL one-hot 的交叉熵；native 推理在 FP32 中 softmax 得到概率，`v = W-L`。网络在各前激活处应用有效棋盘 mask，BatchNorm 和池化排除 padding；实现见 [network.py](../python/etazero/network.py)。搜索保留网络原始 WDL、回传的 WDL 均值和 `W-L` 二阶矩；和棋概率在换视角时保持，胜负概率互换。
+训练 policy logits 为 `[N,6,canvas²]`，顺序为 policy、opponent policy、soft policy、soft opponent policy、长期 optimistic、短期 optimistic，定义见 [schema.py](../python/etazero/schema.py)；价值为当前玩家视角的 W/D/L 三分类 logits `[N,3]`。导出保留六平面的卷积计算形状，并向 native 返回主/短期 optimistic logits `[N,canvas²]`、主 WDL logits `[N,3]` 和误差标准差 `[N]`。训练用终局 WDL one-hot 的交叉熵；native 推理在 FP32 中 softmax 得到概率，`v = W-L`。网络在各前激活处应用有效棋盘 mask，BatchNorm 和池化排除 padding；实现见 [network.py](../python/etazero/network.py)。搜索保留网络原始 WDL、回传的 WDL 均值，以及独立的搜索效用均值与二阶矩；和棋概率在换视角时保持，胜负概率互换。
 
 搜索时将已占用点和画布外位置 mask 掉，每个网络评估先将 logits 除以 `nn_policy_temperature`，再对可提交动作归一化先验；这个全树 policy 温度同时作用于根和所有非根。六项训练策略 softmax 的域均为有效棋盘上的全部落点：硬 policy 的已占用点目标为零，soft policy 经 epsilon 处理后占用点也有正目标；画布外点不参与归一化。这个搜索与训练的区别需要固定样例验证，不能由不同调用方各自选择。
 
@@ -114,13 +114,13 @@ PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bi
 
 - AlphaZero 在每个搜索深度使用真实棋盘转移和真实规则判定，网络阶段不使用随机 rollout 替代叶节点评估；冷启动仅将 evaluator 替换为高斯随机 policy/WDL logits（WDL 经 softmax），仍保留真实规则搜索、精确模拟预算与终局监督。
 - `v(s)` 始终表示状态 `s` 的当前行棋方的期望结果，胜 / 和 / 负对应 `+1 / 0 / -1`。
-- 边的 `Q(s,a)`、价值和及二阶矩使用父状态 `s` 的行棋方视角。沿路径回传时按实际玩家转换符号；测试必须覆盖一手获胜、禁手判负和多层回传。
+- 边的搜索 `Q(s,a)`、效用和及二阶矩使用父状态 `s` 的行棋方视角；启用 SubtreeValueBias 时，搜索效用与纯 W−L 分开保存。沿路径回传时按实际玩家转换符号；训练 Q 只读取纯 W−L。
 - 真实终局直接返回精确结果，不继续调用网络。AlphaZero 的本轮备份使用终局结果监督，不再叠加一份相同的终局奖励。
 - 搜索输出 WDL 时，按 KataGo `ReportedSearchValues` 将 W−L 限于 `[-1,1]`，和棋概率限于 `[0,1−|W−L|]`，再换算并限制胜负概率到 `[0,1]`；非有限统计直接报错。AlphaZero / MuZero 的 PUCT 与 Gumbel 共用此边界，防止独立浮点累计产生负概率训练目标，不改动树内选择与备份统计。
 
 ### PUCT 与搜索预算
 
-节点保留完成访问数、W−L 与和棋概率的加权均值、价值二阶矩、权重和与权重平方和；边保留完成访问数和在途数。子统计按边访问数／子节点访问数换算。PUCT 使用完成子权重总和 `T` 和对应子权重 `W_a`：
+节点保留完成访问数、W−L 与和棋概率的加权均值、独立效用均值与二阶矩、权重和与权重平方和；边保留完成访问数和在途数。子统计按边访问数／子节点访问数换算。PUCT 使用完成子权重总和 `T` 和对应子权重 `W_a`：
 
 ```text
 Q(s, a) + explore_scaling(T, parent_stats) * P(s, a) / (1 + W_a)
@@ -128,9 +128,9 @@ explore_scaling = (c_puct + c_puct_log * log((T+c_puct_base)/c_puct_base))
                   * sqrt(T+0.01) * parent_utility_stdev_factor
 ```
 
-未访问边用 FPU，关闭 `use_fpu` 时为零。FPU 沿用 KataGo 的 visited-policy 插值：令 `m` 为已分配子节点的先验质量，`a=min(1,m^power)`，则 `FPU = a * parent_Q + (1-a) * NN_Q - reduction * sqrt(m)`，随后按 `fpu_loss_prop` 向 −1 插值。parent_Q 包含节点初始网络样本；根与非根 reduction、loss proportion 独立，零权重 cheap search 根使用非根参数。关闭 `fpu_parent_weight_by_visited_policy` 时，来源的固定分支为 `fpu_parent_weight * NN_Q + (1-fpu_parent_weight) * parent_Q`，之后仍扣 reduction 并应用 loss proportion；默认固定权重为零，即纯 parent_Q。power 允许零。动态 cpuct 的 log 项与父价值标准差项沿用来源公式，可由配置关闭。价值尺度为 W−L 的 [-1,1]，无 score utility。参数见 [selfplay.cfg](../configs/baseline/selfplay.cfg) 与公共 [engine.cfg](../configs/baseline/engine.cfg)；用途覆盖见 [analysis.cfg](../configs/baseline/analysis.cfg) 和 [match.cfg](../configs/baseline/match.cfg)。
+未访问边用 FPU，关闭 `use_fpu` 时为零。FPU 沿用 KataGo 的 visited-policy 插值：令 `m` 为已分配子节点的先验质量，`a=min(1,m^power)`，则 `FPU = a * parent_Q + (1-a) * NN_Q - reduction * sqrt(m)`，随后按 `fpu_loss_prop` 向 −1 插值。parent_Q 包含节点初始网络样本；根与非根 reduction、loss proportion 独立，零权重 cheap search 根使用非根参数。关闭 `fpu_parent_weight_by_visited_policy` 时，来源的固定分支为 `fpu_parent_weight * NN_Q + (1-fpu_parent_weight) * parent_Q`，之后仍扣 reduction 并应用 loss proportion；默认固定权重为零，即纯 parent_Q。power 允许零。动态 cpuct 的 log 项与父价值标准差项沿用来源公式，可由配置关闭。原始价值尺度为 W−L 的 [-1,1]，无 score utility；SubtreeValueBias 修正后的搜索效用不截断到该区间。参数见 [selfplay.cfg](../configs/baseline/selfplay.cfg) 与公共 [engine.cfg](../configs/baseline/engine.cfg)；用途覆盖见 [analysis.cfg](../configs/baseline/analysis.cfg) 和 [match.cfg](../configs/baseline/match.cfg)。
 
-节点更新使用 KataGo 的 `value_weight_exponent`：先执行适用的 noise pruning，按其剩余权重计算简单子价值均值，对每个子树用 `sqrt(1e-8 + 1/(1.5*sqrt(weight)))` 估计标准差，以自由度 3 的 t 分布 CDF（[-50,50] 上 2000 点线性插值表）加 0.0001 后取配置指数，偏重较好的子价值。noise pruning 关闭且根有噪声时，执行 configured chosen-move subtract/prune；noise pruning 开启时覆盖这个分支，即使 cap 为零。重分配后归一化到 noise pruning 后的剩余总权重，再加入本节点带 uncertainty 权重的网络样本。W−L、draw 和二阶矩使用同一重分配，权重平方和按缩放平方更新。指数为零是显式单位权重对照，不是默认搜索。实现见 [search_math.cpp](../cpp/src/search/search_math.cpp)。
+节点更新使用 KataGo 的 `value_weight_exponent`：先执行适用的 noise pruning，按其剩余权重计算简单子价值均值，对每个子树用 `sqrt(1e-8 + 1/(1.5*sqrt(weight)))` 估计标准差，以自由度 3 的 t 分布 CDF（[-50,50] 上 2000 点线性插值表）加 0.0001 后取配置指数，偏重较好的子价值。noise pruning 关闭且根有噪声时，执行 configured chosen-move subtract/prune；noise pruning 开启时覆盖这个分支，即使 cap 为零。重分配后归一化到 noise pruning 后的剩余总权重，再加入本节点带 uncertainty 权重的网络样本。W−L、draw、搜索效用及其二阶矩使用同一重分配，权重平方和按缩放平方更新。指数为零是显式单位权重对照，不是默认搜索。实现见 [search_math.cpp](../cpp/src/search/search_math.cpp)。
 
 根节点网络展开与边模拟次数分开计数。`search.full_search_visits` 为自对弈 full-search 根访问上限，cheap-search 使用独立访问上限；评估直接配置 visits。上限计入根初始网络样本和复用访问，只补足缺口。`initial_visits` 记录搜索前的保留量，`new_playouts` 包含首次根初始化，`simulations` 只计本手经过根边的新增模拟；`root_visits = initial_visits + new_playouts`。根集成多次 NN 请求仍只消耗一个首次根 playout；复用根重新集成不消耗 playout。终局子节点使用精确结果，不调用 NN。已结束五子棋根返回精确终局值和 action=-1，不照搬 Go 的 forceNonTerminal。
 
@@ -156,11 +156,35 @@ Forced playout 作用于已分配、先验为正的根子边：若其完成权�
 
 Policy target pruning 先按 `child_weight*max(0,N-1)/max(1,N)+2*P_search` 选稳定子边，再用同一 `explore_scaling` 的 PUCT 分数反解其他子边所需权重：`ceil(min(child_weight, max(0, explore_scaling*P_search/(best_score-Q)-1)))`。分母非正时反解保留原权重，但所有非稳定边仍执行 `ceil`，包括 uncertainty 或图共享产生的非整数权重。稳定边保留原权重、不取整；非稳定边取整后再判断 LCB 资格。LCB 后统一执行 `chosen_move_prune` 与 `chosen_move_subtract`，两者各自上限为最大选择权重／64。原始 visits 始终独立保存，policy target 不要求等于 visits 归一化。
 
-LCB 使用完成样本的 W−L 加权均值、二阶矩和 `ESS = weight_sum² / weight_sq_sum`。按 KataGo 加入最大方差先验，先验权重为 `weight_sum / ESS³`，更新两种权重和后重新计算 ESS，再计算 `LCB = Q-lcb_stdevs*sqrt(variance/ESS)`。仅剪枝后权重大于零、达到稳定边原始权重比例门槛的边可成为 LCB 最优边；将最优边权重提升到至少 `other_weight * ((radius+excess)/(radius+0.2*excess))²`。此处采用修正后的 LCB 索引行为，首个子边同样有效。
+LCB 使用完成样本的搜索效用加权均值、二阶矩和 `ESS = weight_sum² / weight_sq_sum`。按 KataGo 加入最大方差先验，先验权重为 `weight_sum / ESS³`，更新两种权重和后重新计算 ESS，再计算 `LCB = Q-lcb_stdevs*sqrt(variance/ESS)`。仅剪枝后权重大于零、达到稳定边原始权重比例门槛的边可成为 LCB 最优边；将最优边权重提升到至少 `other_weight * ((radius+excess)/(radius+0.2*excess))²`。此处采用修正后的 LCB 索引行为，首个子边同样有效。
 
 自对弈实际落子使用剪枝后、LCB 前的分布；训练 policy target 再应用 LCB。评估和比赛在落子分布和输出策略中都应用 LCB，分别由各自 profile 控制。落子温度为 `late + (early-late)*0.5^(turn/temperature_halflife*19/sqrt(board_area))`，手数包含开局。自对弈的 early/late 分别为 `temperature.temperature` / `final_temperature`，analysis/match 为 `temperature_early` / `temperature`。温度只改变行为抽样，不改变监督；小于等于 1e-4 且无概率保护时，按来源选择首个最大权重子边；其余情况对权重执行稳定幂变换，`temperature_only_below_prob` 可保护超过概率阈值的部分，仅变换低概率尾部。根 WDL 和 Q 是包含初始网络样本的完成加权搜索均值，与训练用的真实终局 WDL 目标分别保存。评估输出 `network_policy` / `network_wdl` 为根集成结果，`search_policy` 为根温度和噪声后的先验，`policy` 为最终监督／选择策略。
 
-这些步骤直接核对 [KataGo FPU/forced/pruning](/home/sky/RL/SkyZero/KataGo/cpp/search/searchexplorehelpers.cpp)、[noise/LCB](/home/sky/RL/SkyZero/KataGo/cpp/search/searchhelpers.cpp)、[selection](/home/sky/RL/SkyZero/KataGo/cpp/search/searchresults.cpp)、[子树价值加权](/home/sky/RL/SkyZero/KataGo/cpp/search/searchupdatehelpers.cpp) 和 [selfplay 调用边界](/home/sky/RL/SkyZero/KataGo/cpp/program/play.cpp)，并以 SkyZero_V8.1、MuZero_V2 交叉核对。EtaZero 使用 W−L 子树价值加权，未引入 Go score utility、subtree value bias 或专用推理算子；`value_weight_exponent` 只重分配当前子树的价值权重，不实现跨搜索积累的 subtree value bias 修正。uncertainty weighting 与 noise pruning 见下节。随机引擎、并行锁调度和单对称身份评估沿用 EtaZero，不承诺来源逐位复现；t(3) CDF 使用数学等价闭式求值生成同网格插值表。
+这些步骤直接核对 [KataGo FPU/forced/pruning](/home/sky/RL/SkyZero/KataGo/cpp/search/searchexplorehelpers.cpp)、[noise/LCB](/home/sky/RL/SkyZero/KataGo/cpp/search/searchhelpers.cpp)、[selection](/home/sky/RL/SkyZero/KataGo/cpp/search/searchresults.cpp)、[子树价值加权](/home/sky/RL/SkyZero/KataGo/cpp/search/searchupdatehelpers.cpp) 和 [selfplay 调用边界](/home/sky/RL/SkyZero/KataGo/cpp/program/play.cpp)，并以 SkyZero_V8.1、MuZero_V2 交叉核对。EtaZero 使用纯 W−L 作为基础效用，不引入 Go score utility；`value_weight_exponent` 重分配当前子树权重，SubtreeValueBias 则维护局部模式共享的网络误差修正，两者独立。uncertainty weighting 与 noise pruning 见下节。随机引擎、并行锁调度和单对称身份评估沿用 EtaZero，不承诺来源逐位复现；t(3) CDF 使用数学等价闭式求值生成同网格插值表。
+
+### SubtreeValueBias
+
+AlphaZero 的 PUCT、图搜索及两种 Gumbel 搜索共用 [偏差表](../cpp/src/search/subtree_value_bias.cpp) 与 [回传](../cpp/src/search/search_math.cpp)。来源为固定 KataGo 的 `subtreevaluebiastable.cpp`、`localpattern.cpp`、`searchupdatehelpers.cpp` 和 `search.cpp`；来源校验值见 [reference_sources.json](../reference_sources.json)。这是按局部落子模式共享的网络效用误差估计，不是 `value_weight_exponent` 的另一种名称。
+
+非根节点首次创建时，用落子前的 5×5 棋盘局部模式、前一手和当前手的绝对棋盘位置、落子后的行棋方关联表项。开局第一手缺少前一手，不关联表项；已有开局前缀和跨手复用保留最近实际动作。模式不做对称或颜色归一化，画布 padding 不参与位置编号。图转置保留首次创建路径的表项，之后的父边不重复关联或累计同一个节点。真实终局不施加偏差。
+
+令 `u_nn` 为节点的原始 W−L，`u_children` 为经过 noise pruning、chosen subtract/prune 和 value weighting 后、加入节点自身 NN 样本前的子效用均值。令 `T_original` 为 pruning 前的完成子权重，`p` 为配置指数。该节点对共享表贡献：
+
+```text
+w = T_original^p
+delta = (u_children - u_nn) * w
+table.delta += delta - node.last_delta
+table.weight += w - node.last_weight
+u_self = u_nn + factor * table.delta / table.weight
+```
+
+只有 pruning 后的子权重大于 `1e-10` 时替换贡献；表权重大于 `0.001` 时才修正自身效用。叶首次 NN 评估也读取已有表项，但不贡献尚不存在的子统计。修正后的自身效用及其平方按 uncertainty 权重加入父统计；PUCT、FPU 的父值、动态 cpuct、LCB、noise pruning、value weighting 和 Gumbel 的搜索 Q 使用搜索效用。FPU 的 NN 值仍是原始网络预测。W−L、draw、报告 WDL、TD/value surprise 及训练 Q 独立使用相同聚合权重下的原始结果统计，不把效用修正当作概率目标，也不截断搜索效用。
+
+每个节点记录且替换自己的最后贡献。回收节点只扣除 `free_prop` 指定比例，剩余经验在仍有其他节点引用该模式时保留；闲置表项在下一次搜索开始时清理。升根复制子节点而不复制偏差关联或贡献，并在搜索前按后序刷新保留图：有子节点时重算贡献，无子节点时按来源重置为原始效用。整局 reset 和模型替换清除表项；它是固定模型的内存搜索状态，不写入 checkpoint，重启不恢复树或表。
+
+训练配置使用 `selfplay.cfg` 的 `[subtree_value_bias]`，analysis/match 使用 `[engine]` 中同名字段；实际设置以 [基础自对弈配置](../configs/baseline/selfplay.cfg) 和 [基础引擎配置](../configs/baseline/engine.cfg) 为准。factor 为零关闭并不分配表。`subtree_value_bias_table_num_shards` 控制分片锁和 map 的固定开销，不限制表项容量；动态表项由存活节点引用及上述清理决定。每个搜索实例独立拥有表，多对局内存需要乘并行实例数。
+
+棋类适配省略不适用的 Go atari、ko、pass 和 anti-mirror 条件。原始 Zobrist Hash128 改为无碰撞的两字精确模式编码，entry 自旋锁改用 C++ mutex；模式分组和加权公式保持对应语义，哈希位值、锁调度和性能不声称等价。MuZero latent 节点没有真实棋盘模式，所有 MuZero 搜索显式要求 factor 为零，见 [适用边界](muzero.md#katago-工程机制的适用边界)。数值来源对照入口为 [check_katago_subtree_value_bias.py](../tests/reference/check_katago_subtree_value_bias.py)，节点共享、回收、升根、终局和原始 WDL/Q 分离由原生测试覆盖。
 
 ### 误差加权、optimistic policy 与 noise pruning
 
