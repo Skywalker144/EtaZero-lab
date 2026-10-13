@@ -212,11 +212,13 @@ remaining_credit = available_credit - actual_steps * B
 
 ## 模型发布与恢复
 
-[learner](../python/etazero/training.py) 实现实际预算内的单遍消费、batch 级 D4、SGD / AdamW、分组 LR/WD、warmup、范数自适应衰减、Lookahead 与 SWA；配置入口在 `train.cfg`，数学与适配边界见 [学习与数据使用](algorithms.md#学习与数据使用)。非有限 loss 或无法恢复的非有限梯度明确失败；FP16 缩放溢出按下述机制跳步，消费与成功更新分别计数。
+[learner](../python/etazero/training.py) 实现实际预算内的单遍消费、batch 级 D4、SGD / AdamW / Muon、分组 LR/WD、warmup、范数自适应衰减、Lookahead 与 SWA；配置入口在 `train.cfg`，数学与适配边界见 [学习与数据使用](algorithms.md#学习与数据使用)。非有限 loss 或无法恢复的非有限梯度明确失败；FP16 缩放溢出按下述机制跳步，消费与成功更新分别计数。
 
 `training.compile` 将网络与完整损失联合交给 torch.compile / Inductor，使用 fullgraph 和静态 shape 捕获：learner 的 batch 大小与画布固定，各网络结构、尺寸与精度使用各自的图。超过重编译限制时明确失败，避免长运行静默退回 eager；首次 shape / 精度编译有额外耗时。公共包入口在导入 PyTorch 前设置持久缓存，默认 `${XDG_CACHE_HOME:-$HOME/.cache}/etazero/compile-v1/{inductor,triton}`，尊重已有 `TORCHINDUCTOR_CACHE_DIR` 和 `TRITON_CACHE_DIR`；run、autoexp、直接 Python 调用和子进程遵循同一默认值。缓存按需创建并跨运行复用；重建时停止相关进程后整体更换目录，不迁移已损坏缓存。选择 AdamW 时 CUDA 使用 fused 实现，CPU 使用普通实现；SGD 使用 momentum 0.9。编译和融合可能改变浮点归约顺序，属于显式执行条件，不能据此声称与旧 eager 路径逐位一致。SGD momentum 或 AdamW 的一阶／二阶矩与 step 随 checkpoint 保存并恢复。
 
 FP16 缩放溢出由 GradScaler 跳过当前 optimizer 更新并降低 scale，然后消费下一 batch，不保留图、不重试。当前 batch 的前向统计、随机流、reader 游标、样本与 Lookahead/SWA 时钟正常推进，成功更新数单独累计；每次溢出记录 `amp_overflow`，batch 日志记录 `amp_skipped`。训练 autocast 只影响主干，policy/value heads 和 loss 显式关闭 autocast 并使用 FP32。BF16 / FP32 的非有限梯度及非有限 loss 直接失败。
+
+Muon 沿用 [来源内核](../python/etazero/_vendor/muon.py) 的同形状组批、编译 Newton–Schulz 与 foreach 辅助 Adam。正交化固定使用 BF16，独立于网络的 AMP 设置；即使 `training.compile=false`，默认仍编译优化器内核，计时同样扣除其编译耗时。`KATAGO_MUON_BATCHED_NS`、`KATAGO_MUON_NS_BATCH_SIZE`、`KATAGO_MUON_NS_COMPILE_MODE` 和 `KATAGO_AUX_ADAM_FOREACH` 保留来源的环境变量与缺省行为；显式覆盖随 `optimizer_execution` 事件记录，改变这些执行条件可能改变浮点舍入。Muon momentum 与辅助 Adam 的一阶/二阶矩及 step 均随 checkpoint 恢复；参数组或状态张量形状不匹配时明确失败，不采用来源丢弃旧状态的兼容行为。当前只接入单设备标准 Muon，不提供 DDP 或变体选择。
 
 `training.checkpoint_every=0` 关闭轮内周期保存，轮末及正常停止仍保存；正值按本轮消费 batch 数定期保存。间隔单位是消费 batch，而非成功更新、对局或 iteration。异常失败不保存当前状态；进程被强制杀死时，从上次持久化游标重算。
 
@@ -271,6 +273,7 @@ checkpoint 保存训练模型、优化器、范数基准、snapshot 或运行均
 | [采样](../tests/reference/check_katago_sampling.py)、[权重](../tests/reference/check_katago_sampling_weights.py)、[分支预算](../tests/reference/check_katago_forks.py) | PDA、value surprise、权重重分配及 hint / PCR / reduced 预算分支 |
 | [回放](../tests/reference/check_katago_replay.py) | 窗口、分组、文件顺序与整 batch 读取 |
 | [训练时钟](../tests/reference/check_katago_clocks.py)、[保存状态](../tests/reference/check_katago_persistence.py) | LR / Lookahead / SWA 时机及 checkpoint 字段范围 |
+| [Muon](../tests/reference/check_katago_muon.py) | 来源优化器更新、momentum/Adam 状态与 fson/fixup 分组 LR/WD |
 | [禁手](../tests/reference/check_katagomo_rules.py)、[标量公式](../tests/reference/check_reference_formulas.py) | KataGomo Renju 判断及窗口、优化器、梯度阈值和范数统计公式 |
 
 以下来源检查示例在版本目录执行；`--output` 使用新的结果路径，检查失败会以非零状态退出。其他参数见各检查入口的 `--help`；保存状态检查直接运行并将 JSON 打印到 stdout。
