@@ -1067,6 +1067,42 @@ def _assert_compiled_partial_resume(tmp_path,root,c):
     for key in a['model']:
         torch.testing.assert_close(a['model'][key],b['model'][key],rtol=0,atol=0)
     assert a['reader']==b['reader'] and a['scaler']==b['scaler']
+    assert a['optimizer']['param_groups'] == b['optimizer']['param_groups']
+    assert a['optimizer']['state'].keys() == b['optimizer']['state'].keys()
+    for key, values in a['optimizer']['state'].items():
+        assert values.keys() == b['optimizer']['state'][key].keys()
+        for name, value in values.items():
+            torch.testing.assert_close(value, b['optimizer']['state'][key][name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('algorithm,architecture,plain,amp,compiled', [
+    ('alphazero', 'nbt', False, 'bfloat16', True),
+    ('alphazero', 'nbt', True, 'float16', True),
+    ('muzero', 'nbt', False, 'bfloat16', True),
+    ('muzero', 'resnet', True, 'float16', True),
+    ('alphazero', 'nbt', False, 'bfloat16', False),
+])
+def test_muon_compiled_cuda_pipeline_and_exact_resume(tmp_path, algorithm, architecture, plain, amp, compiled):
+    from test_muon import muon_config
+    assert torch.cuda.is_available()
+    torch.set_num_threads(1)
+    config = muon_config(algorithm, architecture, plain)
+    config['training'].update(amp=amp, compile=compiled)
+    root = tmp_path/'run'
+    state = run_training(root, config, BINARY, max_iteration=2)
+    checkpoint = load_checkpoint(root, state['checkpoint'], config)
+    assert checkpoint['optimizer_steps'] > 0
+    assert all(torch.isfinite(p).all() for p in checkpoint['model'].values())
+    groups = checkpoint['optimizer']['param_groups']
+    assert any(g['use_muon'] for g in groups) and any(not g['use_muon'] for g in groups)
+    assert (checkpoint['optimization']['swa'] is None) == plain
+    manifest = load_json(root/Path(state['model']['path']).parent/'manifest.json')
+    verify_export(root, manifest, config['network']['canvas'])
+    events = [json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
+    assert any(row['event'] == 'optimizer_execution' and row['kind'] == 'muon' for row in events)
+    if not compiled:
+        assert sum(row['compile_seconds'] for row in events if row['event'] == 'phase_end') > 0
+    assert_compiled_partial_resume(tmp_path, root, config)
 
 
 @pytest.mark.parametrize('amp',['off','float16'])
