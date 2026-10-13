@@ -28,6 +28,8 @@ bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮�
 
 MuZero 的网络、展开训练与搜索约束见 [MuZero](docs/muzero.md)。
 
+AlphaZero 可按名称选择固定 KataGo 来源的全部手写网络及派生选项，精确采用各预设的布局、宽度、归一化和初始化。名称选择、棋类适配与验证入口见 [KataGo 网络配置](docs/networks.md)。
+
 基础配置在 `configs/` 下按 `<算法短名>_<棋类>` 平铺：`az`、`mz` 分别表示 AlphaZero、MuZero 的 PUCT 搜索；`gazg`、`gmzg` 表示 Gumbel 根与 Gumbel 非根，`gazp`、`gmzp` 表示 Gumbel 根与 PUCT 非根。下划线后的 `g`、`h` 分别表示 Gomoku、Hex。例如 `az_g` 为 AlphaZero 五子棋，`gazg_g` 为根和非根均使用 Gumbel 的 AlphaZero 五子棋，`gmzp_h` 为非根使用 PUCT 的 Gumbel MuZero Hex。实验臂也使用相同命名。参数与使用方式见 [Gumbel](docs/gumbel.md)。
 
 ## 续训与评估
@@ -88,6 +90,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#alphazero) |
+| 选择 KataGo 网络名称、后缀与核对架构 | [KataGo 网络配置](docs/networks.md) |
 | 查看算法组合、公共边界和 Gumbel | [算法组合](docs/algorithms.md#算法与搜索组合)、[算法接口](docs/algorithms.md#算法接口)、[Gumbel](docs/gumbel.md) |
 | 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
 | 查看 V0 历史对齐范围、网络映射和验收证据 | [V0 核查记录](../EtaZero.md#alignment-targets)、[V0 实施记录](../plan.md) |
