@@ -16,7 +16,8 @@ pytestmark=pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS')!='1',reason='H
 
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 @pytest.mark.parametrize('precision',['float32','float16'])
-def test_reloaded_weights_buffers_executable_and_gpu_release(tmp_path,algorithm,precision):
+@pytest.mark.parametrize('clone_runtime',[False,True])
+def test_reloaded_weights_buffers_executable_and_gpu_release(tmp_path,algorithm,precision,clone_runtime):
     torch.set_num_threads(1)
     config=load_config(CONFIGS/'smoke_test')
     config['agent']['algorithm']=algorithm
@@ -41,10 +42,11 @@ def test_reloaded_weights_buffers_executable_and_gpu_release(tmp_path,algorithm,
         path=tmp_path/f'{index}.pt';scripted.save(str(path));paths.append(path)
     order=(0,1,2,1)
     result=subprocess.run([str(ROOT/'build/model_reload_probe'),algorithm,'cuda:0',precision,
+                           *(['--clone-runtime'] if clone_runtime else []),
                            *[str(paths[i]) for i in order]],capture_output=True,text=True,timeout=90)
     assert result.returncode==0,result.stderr
     rounds=json.loads(result.stdout)
-    assert [r['reused'] for r in rounds]==[False,True,False,False]
+    assert [r['reused'] for r in rounds]==[False,True,False,clone_runtime]
     assert all(r['allocated_after_offload']==0 for r in rounds)
     spatial=torch.zeros(5,5,6,6,device='cuda');spatial[:,0]=1
     for i in range(5):spatial[i,1,0,i]=1;spatial[i,2,1,i]=1
@@ -75,6 +77,7 @@ def test_training_rounds_reuse_only_after_model_publication(tmp_path,algorithm):
     config['training']['compile']=False
     config['inference']['server_threads']=2
     if algorithm=='muzero':
+        config['inference']['muzero_queue_capacity']=8
         config['muzero']=dict(latent_channels=16,dynamics_channels=24,dynamics_blocks=1,
                               prediction_channels=24,prediction_blocks=1)
         config['unroll']=dict(steps=3,hidden_gradient_scale=.5)
