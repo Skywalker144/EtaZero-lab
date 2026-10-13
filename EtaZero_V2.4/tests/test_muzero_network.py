@@ -194,8 +194,9 @@ def update(model, optimizer, optimization, device):
     return total.detach()
 
 
-@pytest.mark.parametrize('kind', ['sgd', 'adamw'])
-def test_component_update_state_restore_next_update(tmp_path, dimensions, kind):
+@pytest.mark.parametrize('kind', ['sgd', 'adamw', 'muon'])
+def test_component_update_state_restore_next_update(tmp_path, dimensions, kind, monkeypatch):
+    monkeypatch.setenv('KATAGO_MUON_BATCHED_NS', '0')
     config = load_config(CONFIGS / 'smoke_test')
     config['optimizer']['kind'] = kind
     config['training']['batch_size'] = 2
