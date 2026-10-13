@@ -51,13 +51,16 @@ def warmup_factor(samples, enabled=True):
 
 
 def group_settings(name, options, batch_size, samples, norms, baselines, norm_kind='fixscaleonenorm'):
-    adamw = options['kind'] == 'adamw'
+    muon = options['kind'] == 'muon'
+    adamw = options['kind'] in ('adamw', 'muon')
     batch_scale = math.sqrt(batch_size / 256) if adamw else batch_size / 256
     warmup = warmup_factor(samples, options['lr_warmup'])
     scale = options['lr_scale']
     lr = (1.33 if adamw else 1) * 0.00003 * scale * warmup / options['lookahead_alpha']
     if adamw:
         lr *= batch_scale
+    if muon and name in ('normal', 'normal_attn'):
+        lr *= 2
     if name in ('output', 'output_noreg'):
         lr *= options['head_lr_factor']
     if name in ('noreg', 'output_noreg'):
@@ -87,7 +90,8 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
             factor *= 2 / 3
         if name == 'normal_gamma':
             factor *= 0.25 if adamw else 0.125
-        wd = (0.009 if adamw else 0.00125) * batch_scale * (scale * warmup) ** 0.75 * adaptive * factor
+        regular = 0.020 if muon and name == 'normal' else 0.009 if adamw else 0.00125
+        wd = regular * batch_scale * (scale * warmup) ** (0.70 if muon else 0.75) * adaptive * factor
     elif name == 'output':
         wd = (0.004 if adamw else 1e-6) * batch_scale
     elif name == 'noreg':
@@ -99,10 +103,23 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
     return lr, wd
 
 
+def optimizer_from_groups(groups, kind):
+    if kind == 'muon':
+        from .muon import Muon
+        return Muon(groups)
+    if kind == 'adamw':
+        return torch.optim.AdamW(groups, fused=groups[0]['params'][0].is_cuda)
+    if kind == 'sgd':
+        return torch.optim.SGD(groups, momentum=0.9)
+    raise ValueError(f'Unsupported optimizer kind: {kind}')
+
+
 def optimizer_for(model, config):
     if 'plain_optimizer' in config:
         from .plain_optimization import optimizer_for as plain_optimizer
-        return plain_optimizer(model, config['optimizer']['kind'], config['plain_optimizer'])
+        kind = config['optimizer']['kind']
+        return plain_optimizer(model, kind, config['plain_optimizer'],
+                               parameter_groups(model) if kind == 'muon' else None)
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.optimization import optimizer_for as muzero_optimizer
         return muzero_optimizer(model, config)
@@ -112,9 +129,7 @@ def optimizer_for(model, config):
     for group in groups:
         group['lr'], group['weight_decay'] = group_settings(
             group['group_name'], options, config['training']['batch_size'], 0, {}, baselines, model.norm_kind)
-    if options['kind'] == 'adamw':
-        return torch.optim.AdamW(groups, fused=next(model.parameters()).is_cuda)
-    return torch.optim.SGD(groups, momentum=0.9)
+    return optimizer_from_groups(groups, options['kind'])
 
 
 def optimization_for(model, config, optimizer, state=None):
@@ -209,7 +224,7 @@ class Optimization:
         # EtaZero logs mean losses. Backward uses the batch sum, like KataGo.
         if override:
             return override * self.batch_size
-        cap = 11000 if self.options['kind'] == 'adamw' else 2500
+        cap = 11000 if self.options['kind'] in ('adamw', 'muon') else 2500
         return cap * math.sqrt(self.batch_size / 256) / math.sqrt(max(1e-7, self.options['lr_scale']))
 
     @torch.no_grad()

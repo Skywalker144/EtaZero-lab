@@ -1,13 +1,13 @@
 """Ordinary optimizer and mean-loss update control shared by AlphaZero/MuZero."""
-import torch
+from .optimization import optimizer_from_groups
 
 
-def optimizer_for(model, kind, options):
-    groups = [{'group_name': 'all', 'params': list(model.parameters())}]
-    kwargs = dict(lr=options['learning_rate'], weight_decay=options['weight_decay'])
-    if kind == 'adamw':
-        return torch.optim.AdamW(groups, **kwargs, fused=next(model.parameters()).is_cuda)
-    return torch.optim.SGD(groups, **kwargs, momentum=0.9)
+def optimizer_for(model, kind, options, groups=None):
+    if groups is None:
+        groups = [{'group_name': 'all', 'params': list(model.parameters())}]
+    for group in groups:
+        group.update(lr=options['learning_rate'], weight_decay=options['weight_decay'])
+    return optimizer_from_groups(groups, kind)
 
 
 class PlainOptimization:
