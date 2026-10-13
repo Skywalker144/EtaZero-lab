@@ -68,7 +68,13 @@ def export_model(run_dir, config, checkpoint):
             "bytes":(stage/"model.pt").stat().st_size,
             'inference_precision':config['inference']['inference_precision'],'backend':'libtorch',
             'normalization': {'fixup': 'masked_fixup_bias', 'fixscaleonenorm': 'precomputed_inv_std',
-                              'masked_layernorm': 'masked_layernorm'}[model.norm_kind]}
+                              'masked_layernorm': 'masked_layernorm', 'fixscale': 'masked_fixscale',
+                              'bnorm': 'masked_batchnorm', 'brenorm': 'masked_batchrenorm',
+                              'fixbrenorm': 'masked_fixbrenorm'}[model.norm_kind]}
+    if hasattr(model, 'source_config'):
+        info['katago_architecture'] = model.architecture
+        info['katago_config'] = model.source_config
+        info['normalization'] = 'source_' + model.norm_kind
     if config['agent']['algorithm'] == 'muzero':
         info['algorithm'] = 'muzero'
         info['muzero_config'] = config['muzero']
