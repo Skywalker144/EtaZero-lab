@@ -268,6 +268,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     model = make_network(config).to(device); model.load_state_dict(checkpoint["model"],strict=True); model.train()
     forward=training_forward(model,config)
     if config['training']['compile']:
+        if hasattr(model, 'prepare_compile'):
+            model.prepare_compile()
         from torch._inductor import config as compiler_config
         compiler_config.compile_threads=config['run']['cpu_threads']
         torch._dynamo.config.fail_on_recompile_limit_hit=True
@@ -277,7 +279,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
         # automatic channels-last rewriting corrupts its BF16 attention
         # backward (finite gradients around 1e36, versus ~2.6 in eager).
         # Preserve that storage layout while retaining full-graph compilation.
-        options={'layout_optimization':False} if model.architecture=='transformer' else None
+        from .katago_configs import is_preset
+        options={'layout_optimization':False} if model.architecture=='transformer' or is_preset(model.architecture) else None
         muzero = config['agent']['algorithm'] == 'muzero'
         forward=torch.compile(forward,fullgraph=not muzero,dynamic=muzero,options=options)
     optimizer = optimizer_for(model,config); optimizer.load_state_dict(checkpoint["optimizer"])
@@ -345,6 +348,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             # White Hex canonicalization also applies when augmentation is off.
             tensors = augment_training_batch(tensors, symmetry)
             optimization.before_step()
+            if hasattr(model, 'prepare_brenorm'):
+                model.prepare_brenorm(optimization.consumed_samples, config.get('brenorm'))
             learning_rates = {g["group_name"]: g["lr"] for g in optimizer.param_groups}
             weight_decays = {g["group_name"]: g["weight_decay"] for g in optimizer.param_groups}
             context = torch.autocast("cuda",dtype=torch.float16 if amp=="float16" else torch.bfloat16) if amp!="off" else contextlib.nullcontext()
@@ -354,6 +359,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss * optimization.backward_scale).backward()
             scaler.unscale_(optimizer)
+            if hasattr(model, 'scale_repvgg_gradients'):
+                model.scale_repvgg_gradients()
             grad_norm = torch.nn.utils.get_total_norm([p.grad for p in parameters if p.grad is not None])
             module_norms={}
             detailed = step == 0 or (step+1) % config['optimizer']['norm_interval'] == 0 or step+1 == plan['train_steps']
