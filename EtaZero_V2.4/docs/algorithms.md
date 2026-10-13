@@ -160,7 +160,7 @@ LCB 使用完成样本的 W−L 加权均值、二阶矩和 `ESS = weight_sum² 
 
 自对弈实际落子使用剪枝后、LCB 前的分布；训练 policy target 再应用 LCB。评估和比赛在落子分布和输出策略中都应用 LCB，分别由各自 profile 控制。落子温度为 `late + (early-late)*0.5^(turn/temperature_halflife*19/sqrt(board_area))`，手数包含开局。自对弈的 early/late 分别为 `temperature.temperature` / `final_temperature`，analysis/match 为 `temperature_early` / `temperature`。温度只改变行为抽样，不改变监督；小于等于 1e-4 且无概率保护时，按来源选择首个最大权重子边；其余情况对权重执行稳定幂变换，`temperature_only_below_prob` 可保护超过概率阈值的部分，仅变换低概率尾部。根 WDL 和 Q 是包含初始网络样本的完成加权搜索均值，与训练用的真实终局 WDL 目标分别保存。评估输出 `network_policy` / `network_wdl` 为根集成结果，`search_policy` 为根温度和噪声后的先验，`policy` 为最终监督／选择策略。
 
-这些步骤直接核对 [KataGo FPU/forced/pruning](/home/sky/RL/SkyZero/KataGo/cpp/search/searchexplorehelpers.cpp)、[noise/LCB](/home/sky/RL/SkyZero/KataGo/cpp/search/searchhelpers.cpp)、[selection](/home/sky/RL/SkyZero/KataGo/cpp/search/searchresults.cpp)、[子树价值加权](/home/sky/RL/SkyZero/KataGo/cpp/search/searchupdatehelpers.cpp) 和 [selfplay 调用边界](/home/sky/RL/SkyZero/KataGo/cpp/program/play.cpp)，并以 SkyZero_V8.1、MuZero_V2 交叉核对。EtaZero 使用 W−L 子树价值加权，未引入 Go score utility、subtree value bias或专用推理算子；uncertainty weighting 与 noise pruning 见下节。随机引擎、并行锁调度和单对称身份评估沿用 EtaZero，不承诺来源逐位复现；t(3) CDF 使用数学等价闭式求值生成同网格插值表。
+这些步骤直接核对 [KataGo FPU/forced/pruning](/home/sky/RL/SkyZero/KataGo/cpp/search/searchexplorehelpers.cpp)、[noise/LCB](/home/sky/RL/SkyZero/KataGo/cpp/search/searchhelpers.cpp)、[selection](/home/sky/RL/SkyZero/KataGo/cpp/search/searchresults.cpp)、[子树价值加权](/home/sky/RL/SkyZero/KataGo/cpp/search/searchupdatehelpers.cpp) 和 [selfplay 调用边界](/home/sky/RL/SkyZero/KataGo/cpp/program/play.cpp)，并以 SkyZero_V8.1、MuZero_V2 交叉核对。EtaZero 使用 W−L 子树价值加权，未引入 Go score utility、subtree value bias 或专用推理算子；`value_weight_exponent` 只重分配当前子树的价值权重，不实现跨搜索积累的 subtree value bias 修正。uncertainty weighting 与 noise pruning 见下节。随机引擎、并行锁调度和单对称身份评估沿用 EtaZero，不承诺来源逐位复现；t(3) CDF 使用数学等价闭式求值生成同网格插值表。
 
 ### 误差加权、optimistic policy 与 noise pruning
 
@@ -216,7 +216,7 @@ AlphaZero 的 `train.cfg` 可添加 `[plain_optimizer]`，用 `learning_rate`、
 
 Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；每个分段开始重置同步计数但不复制权重；完整训练轮结束丢弃未同步的 fast 权重，保留优化器状态、消费计数和成功更新计数。`training.sub_epochs`默认1，可将实际batch预算按floor等分为非空分段，实际步数较少时减少段数；分段计数与整轮batch计数分别保存，LR/WD和范数采样仍沿整轮时钟。该单遍与训练额度预算是用户适配，不照抄来源文件概率预算。来源epoch末复制slow后到下个subepoch才重置counter，本地轮末立即将counter归零；下一段的优化执行一致。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
 
-LR/WD 在轮开始刷新，之后按本轮消费 batch 数每 5 批刷新，累计消费超过 2 亿样本后改为每 50 批；刷新使用消费后的计数，作用于下一 batch。范数在更新前测量，默认每 100 batch 取 snapshot，先进入统计再刷新 WD、执行 Lookahead 与 SWA。关闭 `optimizer.norm_only_at_print` 时逐 batch 累积均值，在打印点把历史和及权重同时缩为 0.001；来源的 `norm_*_batch` 没有逐 batch 的 0.995 EMA 衰减。`optimizer.lookahead_print` 只在 Lookahead 周期起点累积该分支的范数，原始 loss 日志仍逐 batch 保存。
+LR/WD 在轮开始刷新，之后按本轮消费 batch 数每 5 批刷新，累计消费超过 2 亿样本后改为每 50 批；刷新使用消费后的计数，作用于下一 batch。范数在更新前测量，默认每 100 batch 取 snapshot，先进入统计再刷新 WD、执行 Lookahead 与 SWA。关闭 `optimizer.norm_only_at_print` 时逐 batch 累积均值，在打印点把历史和及权重同时缩为 0.001；来源的 `norm_*_batch` 没有逐 batch 的 0.995 EMA 衰减。该模式下，启用 `optimizer.lookahead_print` 且 `lookahead_alpha<1` 时只在 Lookahead 周期起点累积范数；这会改变自适应 weight decay，并非纯日志选项。loss 仍逐 batch 累积，日志按 `training.log_every` 或保存边界输出区间均值。
 
 FP16 overflow 时 GradScaler 跳过 optimizer 更新并降低 scale，消费样本、Lookahead 同步计数与 SWA 累积仍推进；因此同步可能发生在跳步 batch，成功更新数另存。learner的训练与validation autocast只用于主干，heads与loss的实际运算保持FP32；`model.eval()`只切换归一化等训练行为，不改变heads精度。独立导出副本的heads跟随推理精度配置。
 
