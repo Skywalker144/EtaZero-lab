@@ -197,5 +197,15 @@
       "mctx/_src/policies.py": "3892bf45b18631167a7c508bcb9c5eea269b97c08c97583cec69e95a8cd5d346",
       "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     }
+  },
+  "KataGoMuon": {
+    "repository": "https://github.com/lightvector/KataGo",
+    "root": "/home/sky/RL/SkyZero/KataGo",
+    "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "sha256": {
+      "python/muon/muon.py": "4879f6c491adaf2ac320529718018eaea2e4cd4ea6473ec5edba94fe6eeb21be",
+      "python/muon/LICENSE": "8c8d17398ecce3dd3fcb1bb77b5d268a427f8250f364ac655c9b38df5b693f6b",
+      "python/train.py": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f"
+    }
   }
 }
