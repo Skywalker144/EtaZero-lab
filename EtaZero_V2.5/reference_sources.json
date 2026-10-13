@@ -61,7 +61,8 @@
       "python/katago/train/fused_swiglu.py": "0ff1ca85fd6dcdc8871b4607a11c6c79ed94b28c5757a768a97d253b01a8b0d9",
       "python/katago/utils/training_data_generator.py": "e1b9535b94e7aba76bc00d8802a03b30370692f735cb92cfb66672dcacf84b6f",
       "python/selfplay/shuffle.sh": "755ebf8f7368d5edc34f1387846407fb2767d571a508c883f3e0b4f93e2580bf",
-      "python/selfplay/synchronous_loop.sh": "f9ea27696a8fefb13773547931d87c46bab29dab8bf6b23c2d96161d284a01e5"
+      "python/selfplay/synchronous_loop.sh": "f9ea27696a8fefb13773547931d87c46bab29dab8bf6b23c2d96161d284a01e5",
+      "python/katago/train/fused_rope.py": "5c3f85381f8554100f90ca0ba09d805bf95769ae2d289b4fc183c0793a9354c9"
     }
   },
   "MuZero_V2": {
