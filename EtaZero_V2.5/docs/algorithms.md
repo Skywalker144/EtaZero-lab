@@ -82,7 +82,7 @@ KataGomo 原生用 WDL 转换为行棋方标量，EtaZero 使用相同视角的 
 
 尺寸与规则每局分别按配置权重采样，零权重不参与采样。平衡开局的候选 Game 继承该局的尺寸与规则，反事实根评估同时交换己敌方平面、禁手平面和 Renju 执色符号；实际棋盘和行棋方保持不变。
 
-`network.architecture` 选择 `nbt`、`plain` 或 `transformer`，两个卷积预设均使用 Mish、fixed scaling 和末端 masked BatchNorm，输出六policy、主WDL、三个TD WDL和短期价值误差。默认 `nbt` 对照 KataGo 的 `b5c192nbt-fson-mish`，`network.blocks` 是外层嵌套瓶颈块数，`network.channels` 是主干宽度；内部宽度由 [network_widths](../python/etazero/config.py) 唯一推导。NBT主干通道须为不小于24的偶数，瓶颈为主干的一半，主干全局分支及Policy/Value卷积宽度按主干的1/6向上取整到8的倍数，Value隐藏层按主干的5/12同样取整；192通道还原源配置的96、32、80宽度。NBT宽度缩放是EtaZero的可配置约定，并非KataGo全部预设的统一比例。
+`network.architecture` 可填写完整 KataGo 来源名称，按原始配置构建所有手写主干和派生选项，包括 RepVGG、双输出头、可学习 RoPE 与实验 attention；选择方式、来源对照及棋类适配见 [KataGo 网络配置](networks.md)。以下段落描述保留的 `nbt`、`plain`、`transformer` 三个 EtaZero 入口。两个卷积预设均使用 Mish、fixed scaling 和末端 masked BatchNorm，输出六policy、主WDL、三个TD WDL和短期价值误差。默认 `nbt` 对照 KataGo 的 `b5c192nbt-fson-mish`，`network.blocks` 是外层嵌套瓶颈块数，`network.channels` 是主干宽度；内部宽度由 [network_widths](../python/etazero/config.py) 唯一推导。NBT主干通道须为不小于24的偶数，瓶颈为主干的一半，主干全局分支及Policy/Value卷积宽度按主干的1/6向上取整到8的倍数，Value隐藏层按主干的5/12同样取整；192通道还原源配置的96、32、80宽度。NBT宽度缩放是EtaZero的可配置约定，并非KataGo全部预设的统一比例。
 
 `plain` 对照 `b10c128-fson-mish`（v15），配置须为128通道、10块。每块直接在主干上执行两层前激活3×3卷积并加残差；第5、8块的首层将128通道分为96局部通道和32 gpool通道，全局上下文广播加入局部结果，第二层从96投影回128。没有NBT的外层瓶颈投影。Policy/Value卷积宽度为32，Value隐藏层80；每块首层缩放为 `1/sqrt(i+1)`，第二层缩放1，末端BN缩放 `1/sqrt(11)`。其他plain宽度/深度明确拒绝。
 
@@ -98,7 +98,7 @@ Attention将96通道分为3个32维头，Q/K/V由无bias线性映射，固定2D 
 
 Transformer使用fixup七参数组，attention投影单列 `normal_attn`，RMSNorm和内部bias归入noreg，head归入output/output_noreg。fixup SGD的基本WD为1e-6乘batch比例，AdamW为0.005乘batch比例的平方根；attention再乘0.5和 `normal_attn_wd_factor`，input/normal沿各自factor，noreg/output_noreg为1e-8乘相同batch尺度。该分支不使用fson的运行范数自适应WD，LR/warmup、Lookahead和SWA仍由 [optimization.py](../python/etazero/optimization.py) 管理。
 
-PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bias、Mish、上述三项池化和线性层，广播加入局部特征，再经过 bias、Mish 和 1×1 输出；全局信息进入最终非线性之前，因此不会成为被 softmax 抵消的统一偏移。ValueHead 使用 1×1、bias、Mish 后的均值，拼接 `mean`、`mean × (sqrt(area)-14)/10`、`mean × ((sqrt(area)-14)²/100-0.1)`，经隐藏层、Mish 和线性输出 WDL；这三个均值保留源尺寸条件化形式，不使用最大值。固定尺寸下它们携带相同空间信息，混合尺寸时为价值层提供尺寸条件。Transformer的上述head激活使用ReLU；两个卷积预设使用Mish。KataGo 的 Go pass、score/ownership 等辅助头、RepVGG 额外卷积及双输出头训练不属于此实现；`network.predict_q_values=true` 仅在Transformer v17添加第七个纯W−L Q输出，Go score Q不适用；缺省false及v15保留六输出。
+PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bias、Mish、上述三项池化和线性层，广播加入局部特征，再经过 bias、Mish 和 1×1 输出；全局信息进入最终非线性之前，因此不会成为被 softmax 抵消的统一偏移。ValueHead 使用 1×1、bias、Mish 后的均值，拼接 `mean`、`mean × (sqrt(area)-14)/10`、`mean × ((sqrt(area)-14)²/100-0.1)`，经隐藏层、Mish 和线性输出 WDL；这三个均值保留源尺寸条件化形式，不使用最大值。固定尺寸下它们携带相同空间信息，混合尺寸时为价值层提供尺寸条件。Transformer的上述head激活使用ReLU；两个卷积预设使用Mish。这三个 EtaZero 入口省略 Go pass、score/ownership 等辅助头，不提供 RepVGG 额外卷积或双输出头训练；完整来源名称的对应机制见 [网络配置](networks.md)。`network.predict_q_values=true` 仅在Transformer v17添加第七个纯W−L Q输出，Go score Q不适用；缺省false及v15保留六输出。
 
 训练 policy logits 为 `[N,6,canvas²]`，顺序为 policy、opponent policy、soft policy、soft opponent policy、长期 optimistic、短期 optimistic，定义见 [schema.py](../python/etazero/schema.py)；价值为当前玩家视角的 W/D/L 三分类 logits `[N,3]`。导出保留六平面的卷积计算形状，并向 native 返回主/短期 optimistic logits `[N,canvas²]`、主 WDL logits `[N,3]` 和误差标准差 `[N]`。训练用终局 WDL one-hot 的交叉熵；native 推理在 FP32 中 softmax 得到概率，`v = W-L`。网络在各前激活处应用有效棋盘 mask，BatchNorm 和池化排除 padding；实现见 [network.py](../python/etazero/network.py)。搜索保留网络原始 WDL、回传的 WDL 均值和 `W-L` 二阶矩；和棋概率在换视角时保持，胜负概率互换。
 
