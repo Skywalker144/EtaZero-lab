@@ -9,9 +9,9 @@ from ._vendor.muon import SingleDeviceMuonWithAuxAdam
 
 
 def muon_suitable(group_name):
-    if group_name in ('normal', 'normal_attn'):
+    if group_name in ('normal', 'normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
         return True
-    if group_name in ('input', 'normal_gamma', 'noreg', 'output', 'output_noreg'):
+    if group_name in ('input', 'input_noreg', 'normal_gamma', 'noreg', 'output', 'output_noreg'):
         return False
     raise ValueError(f'Unknown Muon parameter group: {group_name}')
 
