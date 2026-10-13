@@ -201,6 +201,7 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
     entries=[]; sides=absorbing=zero=0
     for path in sorted(directory.glob('*.npz')):
         a = read_raw(path); m = metadata(a); v = training_view(a)
+        assert v['policy'].dtype==v['opponent_policy'].dtype==np.int16
         entries.append(dict(path=str(path.relative_to(tmp_path)), metadata=m, weight_stats=game_weight_statistics(a)))
         starts=[]
         for g in range(m['games']):
@@ -210,7 +211,9 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
         starts=starts[m['row_begin']:m['row_begin']+m['rows']]
         for row, (g, start) in enumerate(starts):
             if start < 0:
-                sides+=1; assert not v['sequence_mask'][row,1:].any(); continue
+                sides+=1; assert not v['sequence_mask'][row,1:].any()
+                assert (v['policy'][row,1:].sum(-1)>0).all()
+                continue
             lo, hi=a['game_offsets'][g:g+2]; ol=a['observation_offsets'][g]
             for step in range(1, 4):
                 index=start+step
@@ -220,12 +223,19 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
                     zero += a['row_repeats'][index] == 0
                 else:
                     absorbing+=1; assert v['absorbing'][row,step] and v['step_weights'][row,step]==1
+                    size=int(a['sizes'][g]);canvas=m['canvas']
+                    for key in ('policy','opponent_policy'):
+                        counts=v[key][row,step].reshape(canvas,canvas)
+                        expected=np.zeros((canvas,canvas),np.float32)
+                        expected[:size,:size]=1/(size*size)
+                        np.testing.assert_allclose(counts/counts.sum(),expected,rtol=1e-7,atol=0)
                 outcome=int(a['winners'][g])*int(a['players'][ol+start-lo])*(-1)**step
                 assert v['value'][row,step].tolist() == [float(outcome==1),float(outcome==0),float(outcome==-1)]
     assert sides and absorbing and zero
     snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,entries,c)
     reader=BatchReader(snapshot,4,1,17); reader.next(); cursor=reader.state(); expected=reader.next(); reader.close()
     restored=BatchReader(snapshot,4,1,17,cursor); actual=restored.next(); restored.close()
+    assert actual['policy'].dtype==actual['opponent_policy'].dtype==np.float32
     for key in expected: np.testing.assert_array_equal(actual[key], expected[key])
     assert np.all(actual['actions'] >= 0)
     original={p.name:sha256(p) for p in (snapshot/'data').glob('*.npz')}
