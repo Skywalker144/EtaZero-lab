@@ -281,6 +281,10 @@ def make_network(config):
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.network import MuZeroNet, network_config
         return MuZeroNet(network_config(config))
+    from .katago_configs import is_preset
+    if is_preset(config['network']['architecture']):
+        from .katago_network import KataGoNet
+        return KataGoNet(**config['network'])
     return PolicyValueNet(**config["network"])
 
 
@@ -399,10 +403,15 @@ class TrainingForward(nn.Module):
 
     def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight, target, td_target, full_game_weight,
                 q_values=None, q_visits=None):
-        logits, value, td, error = self.model.forward_all(obs, globals)
+        outputs = (self.model.training_outputs(obs, globals) if hasattr(self.model, 'training_outputs')
+                   else (self.model.forward_all(obs, globals),))
         with torch.autocast("cuda", enabled=False):
-            return losses(logits, value, td, error, obs, policy, opponent_policy, opponent_policy_weight,
-                          target, td_target, full_game_weight, self.soft_policy_weight_scale, self.disable_optimistic_policy,q_values,q_visits)
+            components = [losses(*head, obs, policy, opponent_policy, opponent_policy_weight,
+                                 target, td_target, full_game_weight, self.soft_policy_weight_scale,
+                                 self.disable_optimistic_policy, q_values, q_visits) for head in outputs]
+            weights = getattr(self.model, 'head_loss_weights', (1.0,))
+            return tuple(sum(weight * value for weight, value in zip(weights, values))
+                         for values in zip(*components))
 
 
 class InferencePolicyValueNet(nn.Module):
@@ -440,6 +449,9 @@ def inference_network(model):
     from .muzero.network import MuZeroNet, inference_network as muzero_inference
     if isinstance(model, MuZeroNet):
         return muzero_inference(model)
+    from .katago_network import KataGoNet, inference_network as katago_inference
+    if isinstance(model, KataGoNet):
+        return katago_inference(model)
     if model.training:
         raise ValueError('Inference normalization conversion requires evaluation mode')
     result = copy.deepcopy(model)
