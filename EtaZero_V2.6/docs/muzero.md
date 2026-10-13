@@ -80,6 +80,7 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 
 | 机制 | MuZero 行为 |
 |---|---|
+| SubtreeValueBias | latent 节点没有真实局部棋盘；显式要求 `subtree_value_bias_factor=0`，不以动作前缀伪造棋盘模式 |
 | 真实规则、开局、实际落子、fork、reanalysis | 在真实环境共用，搜索本身走 latent 路径 |
 | 真实棋盘图共享、NOVC 身份与 graph catch-up | 不进入 latent 树；开启 graph_search 明确报错 |
 | 跨实际落子的树复用 | 禁止，重新编码真实起点 |
