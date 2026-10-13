@@ -102,7 +102,7 @@ def main():
     result=dict(status='verified',source_commit=reference['commit'],source_sha256=hashes,
                 cases=dict(window_formula=formula,group_threshold=groups,output_plan=plans,basename_md5=md5,file_orders=orders,source_reader_batches=batches),
                 scope='Unmodified pinned source helpers, TrainingDataGenerator and full NPZ reader; identical RNG file orders and RNG state; original Go-shaped fixtures and EtaZero row-ID prefixes; whole-file tails and explicit exhaustion.',
-                adaptations='Go random/tdata identity maps to model_id=random; single learner world_size=1; immutable per-round snapshots instead of live directory reconciliation; private deterministic shuffle/validation streams, no source gameplay RNG sequence equivalence; resource limits are explicit and do not recursively change planned bucket/file counts.')
+                adaptations='Go random/tdata identity maps to model_id=random; single learner world_size=1; immutable per-round snapshots instead of live directory reconciliation; private deterministic shuffle/validation streams, no source gameplay RNG sequence equivalence; configured groups and bucket/file counts are used directly, with resource estimates that do not limit execution.')
     assert not args.output.exists();args.output.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
 
 if __name__=='__main__':main()
