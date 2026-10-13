@@ -20,6 +20,12 @@ def compilation_seconds():
     return calculate_time_spent()['total_wall_time']
 
 
+def compilation_enabled(config):
+    # Muon compiles its batched orthogonalization even with an eager network.
+    return config['training']['compile'] or (
+        config['optimizer']['kind'] == 'muon' and os.environ.get('KATAGO_MUON_BATCHED_NS', '1') == '1')
+
+
 class WorkTimer:
     """Measure a phase/round, excluding compiler work without skipping updates.
 
