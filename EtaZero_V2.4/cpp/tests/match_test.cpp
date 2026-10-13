@@ -9,7 +9,9 @@ namespace {
 void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 struct State {
     std::atomic<int> live{0},peak{0},loads{0},searches{0};
-    bool block_opening=false,fail_search=false;
+    int loading=0,peak_loading=0;
+    std::mutex load_mutex;std::condition_variable load_changed;
+    bool block_opening=false,fail_search=false,block_load=false,fail_load=false;
 };
 struct Service : InferenceService {
     State& state;std::string id;
@@ -57,19 +59,33 @@ int main() {
             "rejection_probability=0.995\nrejection_probability_fallback=0.8\nmax_tries=20\n";}
         Config c(path.string());
         std::vector<MatchModel> models{{"slow","",1},{"fast","",2},{"third","",3}};
-        auto run=[&](State& state,std::vector<MatchTask> tasks,int capacity,std::ostream& out,bool single_pair=false) {
+        auto run=[&](State& state,std::vector<MatchTask> tasks,int capacity,std::ostream& out,bool single_pair=false,int load_workers=1) {
             return run_matches(c,5,Rule::FREESTYLE,"float32",models,tasks,capacity,
-                [&](const MatchModel& m){return std::make_unique<Service>(state,m.id);},
+                [&](const MatchModel& m,const MatchEventSink&){
+                    if(state.block_load) {
+                        std::unique_lock<std::mutex> lock(state.load_mutex);
+                        state.peak_loading=std::max(state.peak_loading,++state.loading);
+                        state.load_changed.notify_all();
+                        check(state.load_changed.wait_for(lock,std::chrono::seconds(2),[&]{return state.peak_loading>=2;}),
+                              "Model preparation must run concurrently");
+                        --state.loading;
+                    }
+                    if(state.fail_load && m.id=="fast")throw std::runtime_error("Injected model load failure");
+                    return std::make_unique<Service>(state,m.id);},
                 [&](InferenceService&,uint64_t){return std::make_unique<FirstLegal>(state);},
-                [](const Game&){return 0.;},[]{return false;},out,single_pair);
+                [](const Game&){return 0.;},[]{return false;},out,single_pair,load_workers);
         };
-        State pipeline;pipeline.block_opening=true;std::ostringstream out;
+        State pipeline;pipeline.block_opening=true;pipeline.block_load=true;std::ostringstream out;
         run(pipeline,{{"slow",0,0,0,0,3,10,false,{}},{"fast",1,1,0,0,3,11,false,{}},
-                      {"shared",1,2,0,0,3,12,false,{}}},3,out);
+                      {"shared",1,2,0,0,3,12,false,{}}},3,out,false,2);
         check(pipeline.loads==3 && pipeline.live==0,"Models shared and released");
         check(occurrences(out.str(),"\"type\":\"opening\"")==3,"Each opening generated once");
         check(occurrences(out.str(),"\"type\":\"game\"")==6,"Both colors finish once");
         check(out.str().find("\"model_windows\":1")!=std::string::npos,"All resident pairs share a window");
+        check(pipeline.peak_loading==2,"Model loading respects its worker limit");
+        check(occurrences(out.str(),"\"stage\":\"model_ready\"")==3,"Preparation progress counts every model");
+        check(out.str().find("\"stage\":\"playing\"")<out.str().find("\"type\":\"opening\""),
+              "Playing starts only after all models are prepared");
         State bounded;std::ostringstream resumed;
         run(bounded,{{"ab",0,1,0,0,2,10,true,{12}},{"bc",1,2,0,0,3,11,true,{12}}},2,resumed);
         check(bounded.peak==2 && bounded.loads==3 && bounded.live==0,"Bounded residency retains the common model");
@@ -96,6 +112,11 @@ int main() {
         catch(const std::runtime_error& e){threw=std::string(e.what())=="Injected search failure";}
         check(threw && failure.live==0,"Worker failure propagates and releases all models");
         check(occurrences(partial.str(),"\"type\":\"game\"")==0,"Failed half-games are not published");
+        State load_failure;load_failure.fail_load=true;std::ostringstream load_partial;threw=false;
+        try{run(load_failure,{{"ab",0,1,0,0,3,10,true,{12}}},2,load_partial,false,2);}
+        catch(const std::runtime_error& e){threw=std::string(e.what())=="Injected model load failure";}
+        check(threw && load_failure.live==0,"Parallel loading failures release all prepared models");
+        check(occurrences(load_partial.str(),"\"type\":\"game\"")==0,"Loading failures never start games");
         std::filesystem::remove(path);std::cout<<"match scheduler passed\n";return 0;
     } catch(const std::exception& e){std::filesystem::remove(path);std::cerr<<e.what()<<'\n';return 1;}
 }
