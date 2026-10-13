@@ -16,13 +16,14 @@ from .config import ROOT, boolean
 from .engine_config import load_engine_config
 from .elo_cache import prepare_pairs, retain_pairs
 from .process import install_signals
-from .runtime import verify_build
+from .build import verify_build
 from .storage import atomic_write, load_json, run_lock, save_json, sha256, sync_directory
 
 
 ELO_FIELDS = {'sample_seconds': float, 'neighbors': int, 'cross_seconds': float,
               'final_cross': boolean, 'games_per_pair': int, 'bootstrap_samples': int,
-              'anchor': str, 'game_threads': int, 'max_loaded_models': int}
+              'anchor': str, 'game_threads': int, 'max_loaded_models': int,
+              'model_load_workers': int}
 
 
 def config_directory(directory):
@@ -51,7 +52,7 @@ def load_elo_config(directory, environ=None, overrides=None):
     if set(values) != set(ELO_FIELDS):
         raise ValueError('Missing or unknown Elo configuration fields')
     settings = {key: convert(str(values[key])) for key, convert in ELO_FIELDS.items()}
-    for key in ('neighbors', 'game_threads'):
+    for key in ('neighbors', 'game_threads', 'model_load_workers'):
         if settings[key] < 1:
             raise ValueError(f'elo.{key} must be positive')
     if settings['max_loaded_models'] < 2:
@@ -116,6 +117,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
                 'anchor': anchor, 'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule],
                 'sampling': {key: settings[key] for key in ('sample_seconds', 'neighbors', 'cross_seconds', 'final_cross')},
                 'execution': {'max_loaded_models': settings['max_loaded_models'],
+                              'model_load_workers': settings['model_load_workers'],
                               'cuda_visible_devices': str(gpu) if gpu is not None else
                               (os.environ if environ is None else environ).get('CUDA_VISIBLE_DEVICES')}}
     manifest['source_sha256'] = {name: sha256(Path(__file__).parent/name)
@@ -190,6 +192,7 @@ def run_autoelo(plan, binary):
                        'new_games_per_second': count/seconds if seconds else 0,
                        'game_threads': plan['settings']['game_threads'],
                        'max_loaded_models': plan['settings']['max_loaded_models'],
+                       'model_load_workers': plan['settings']['model_load_workers'],
                        'native_stats': [load_json(p) for p in sorted(
                            set((output/'performance').glob('*.json')) - previous_stats)]}
         record = output/'invocations'/f'{uuid.uuid4().hex}.json'
