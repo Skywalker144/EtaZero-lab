@@ -11,7 +11,7 @@ import threading
 import numpy as np
 from .storage import load_json
 from .schema import CONTRACT_ID, PLANES, GLOBALS, unpack_observations
-from .data import TRAIN_TARGETS
+from .data import TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 
 
 class BatchReader:
@@ -84,8 +84,8 @@ class BatchReader:
                     "full_game_weight": ((info["rows"],),np.float32),
                     "q_values": ((info['rows'],canvas*canvas),np.float32),
                     "q_visits": ((info['rows'],canvas*canvas),np.float32),
-                    "policy": ((info["rows"],canvas*canvas),np.float32),
-                    "opponent_policy": ((info["rows"],canvas*canvas),np.float32),
+                    "policy": ((info["rows"],canvas*canvas),np.int16),
+                    "opponent_policy": ((info["rows"],canvas*canvas),np.int16),
                     "opponent_policy_weight": ((info["rows"],),np.float32),"value": ((info["rows"],3),np.float32)}
         for key in arrays:
             shape,dtype = expected[key]
@@ -111,6 +111,10 @@ class BatchReader:
             # Source drops each file's suffix. Never fill from another file or
             # wrap a partly filled batch across passes/snapshots.
             batch['obs']=unpack_observations(batch['obs'],self.manifest['canvas'])
+            # Preserve integer weights through disk/cache/shuffle; expand only
+            # the consumed batch before learner normalization and augmentation.
+            for key in TRAIN_POLICY_TARGETS:
+                if key in batch:batch[key]=batch[key].astype(np.float32)
             if self.manifest.get('algorithm') == 'muzero':
                 from .muzero.data import prepare_batch
                 batch = prepare_batch(batch, self.manifest['unroll_weight_mean'], self.random)

@@ -310,6 +310,7 @@ def trajectory_td_targets(search_wdl, players, terminal, area):
 
 TRAIN_TARGETS = ('policy', 'opponent_policy', 'opponent_policy_weight', 'value',
                  'td_value', 'full_game_weight', 'q_values', 'q_visits')
+TRAIN_POLICY_TARGETS = ('policy', 'opponent_policy')
 
 
 def training_targets(config):
@@ -353,10 +354,10 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS):
     full_game_weight = ((a['reanalyzed'][ix] == 0) |
                         (a['reanalysis_used_outcome'][ix] != 0)).astype(np.float32)
     main = {"obs": obs, "globals": globals,
-            "policy": a['policies'][rows].astype(np.float32),
+            "policy": a['policies'][rows],
             "value": np.stack((result==1,result==0,result==-1),axis=1).astype(np.float32)}
     if 'opponent_policy' in targets:
-        main.update(opponent_policy=a['opponent_policies'][rows].astype(np.float32),
+        main.update(opponent_policy=a['opponent_policies'][rows],
                     opponent_policy_weight=a['opponent_policy_weights'][rows])
     if 'td_value' in targets:
         main.update(td_value=td[ix], full_game_weight=full_game_weight)
@@ -369,10 +370,10 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS):
     dropped = a['side_forbidden_input'] == 0
     side_obs[dropped,3:5] = 0;side_globals[dropped,3] = 0
     side_value = a['side_wdl'][side_rows]
-    side = {'obs': side_obs, 'globals': side_globals, 'policy': a['side_policies'][side_rows].astype(np.float32),
+    side = {'obs': side_obs, 'globals': side_globals, 'policy': a['side_policies'][side_rows],
             'value': side_value}
     if 'opponent_policy' in targets:
-        side.update(opponent_policy=np.ones((len(side_rows),main['policy'].shape[1]),np.float32),
+        side.update(opponent_policy=np.ones((len(side_rows),main['policy'].shape[1]),np.int16),
                     opponent_policy_weight=np.zeros(len(side_rows),np.float32))
     if 'td_value' in targets:
         side.update(td_value=np.repeat(side_value[:,None],3,axis=1),

@@ -8,7 +8,7 @@ checkpointed RNG, while absent side continuations are fully masked.
 import math
 import numpy as np
 
-from ..data import metadata, alphazero_training_view, trajectory_td_targets, TRAIN_TARGETS
+from ..data import metadata, alphazero_training_view, trajectory_td_targets, TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 from ..schema import PLANES, GLOBALS
 
 TARGETS = TRAIN_TARGETS
@@ -40,7 +40,8 @@ def training_view(a, targets=TARGETS):
     m = metadata(a); k = m['unroll_steps']; n = len(root['value']); area = m['canvas'] ** 2
     result = {key: root[key] for key in ('obs', 'globals')}
     for key in targets:
-        result[key] = np.zeros((n, k+1, *root[key].shape[1:]), dtype=np.float32)
+        result[key] = np.zeros((n, k+1, *root[key].shape[1:]),
+                               dtype=np.int16 if key in TRAIN_POLICY_TARGETS else np.float32)
         result[key][:, 0] = root[key]
     result['actions'] = np.zeros((n, k), np.int64)
     result['step_weights'] = np.zeros((n, k+1), np.float32)
@@ -65,12 +66,12 @@ def training_view(a, targets=TARGETS):
     for row, (g, start) in enumerate(starts):
         # Normalizable masked targets also keep loss evaluation finite when a
         # side-only batch has no recurrent rows.
-        mask = np.zeros(area, np.float32); size = int(a['sizes'][g]); canvas = m['canvas']
+        mask = np.zeros(area, np.int16); size = int(a['sizes'][g]); canvas = m['canvas']
         mask.reshape(canvas, canvas)[:size, :size] = 1
-        uniform = mask / mask.sum()
-        result['policy'][row, 1:] = uniform
+        # Unit integer weights normalize to the same on-board uniform policy.
+        result['policy'][row, 1:] = mask
         if 'opponent_policy' in targets:
-            result['opponent_policy'][row, 1:] = uniform
+            result['opponent_policy'][row, 1:] = mask
         if start < 0:
             continue
         lo, hi = a['game_offsets'][g:g+2]; ol = a['observation_offsets'][g]
@@ -136,7 +137,8 @@ def validate_view(arrays, rows, canvas, steps, targets=TARGETS):
     if set(arrays) != set(shapes):
         raise ValueError('MuZero training-view fields mismatch')
     for key, shape in shapes.items():
-        dtype = np.uint8 if key in ('obs', 'absorbing') else np.int64 if key == 'actions' else np.float32
+        dtype = (np.uint8 if key in ('obs', 'absorbing') else np.int64 if key == 'actions'
+                 else np.int16 if key in TRAIN_POLICY_TARGETS else np.float32)
         if arrays[key].shape != shape or arrays[key].dtype != dtype:
             raise ValueError(f'Invalid MuZero training {key}')
 
