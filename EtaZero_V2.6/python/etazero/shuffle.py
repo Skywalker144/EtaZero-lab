@@ -1,4 +1,4 @@
-"""Compact, bounded KataGo-style shardify/merge and per-row random waves.
+"""Compact KataGo-style shardify/merge and per-row random waves.
 
 The window formula and wave organization are adapted from KataGo (MIT).
 Raw complete games remain authoritative; temporaries can always be rebuilt.
@@ -132,10 +132,8 @@ def _scatter(task):
 
 
 def _merge_bucket(task):
-    paths, total, scratch, output, limit, shard_rows, seed, label, compressed = task
+    paths, total, scratch, output, shard_rows, seed, label, compressed = task
     rng = np.random.default_rng(np.random.SeedSequence(seed))
-    if total > limit:
-        raise ValueError('Actual random bucket exceeds shuffle array memory budget; increase memory_mb or reduce bucket_rows')
     if not paths:return []
     # Copy each input directly into one fixed-size destination, keeping only one
     # decompressed input live instead of all fragments plus concatenated copies.
@@ -173,25 +171,20 @@ def _merge_bucket(task):
 def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
     """Conservative array estimates, excluding interpreter/allocator and OS overhead."""
     s, canvas = config["shuffle"], config["network"]["canvas"]
-    # Six globals, four spatial float targets (two policies + W-L Q/visits),
+    # Packed observations, int16 policies and float32 W-L Q/visits,
     # opponent/full-game gates, three TD WDLs and main WDL.
-    # Keep the conservative full-target estimate so disabling unused targets
-    # does not change groups, bucket counts or the shuffle's random draws.
-    train_bytes = len(GLOBALS)*4 + len(PLANES)*((canvas*canvas+7)//8) + 16*canvas*canvas + 2*4 + 9*4 + 12
+    # Estimate all targets conservatively, including optional Q outputs.
+    train_bytes = len(GLOBALS)*4 + len(PLANES)*((canvas*canvas+7)//8) + 12*canvas*canvas + 2*4 + 9*4 + 12
     # Raw includes int64 visits and at most twice as many observations as moves.
     raw_bytes = 20*canvas*canvas + 10*((canvas*canvas+7)//8) + 164
     if config.get('agent', {}).get('algorithm') == 'muzero':
         steps = config['unroll']['steps']
-        train_bytes += steps * (16*canvas*canvas + 56) + 8*steps + 9*(steps+1)
+        train_bytes += steps * (12*canvas*canvas + 56) + 8*steps + 9*(steps+1)
         raw_bytes += 6*canvas*canvas
-    budget = s["memory_mb"]*1024**2
-    per_worker = budget//s["workers"]
-    group_rows=min(s['group_rows'],max(1,per_worker//(3*train_bytes)-max_raw_rows))
+    # Configuration determines the plan; estimates never shrink groups/buckets.
+    group_rows=s['group_rows']
     nominal=s['training_shard_rows']
-    bucket_rows=min(s['bucket_rows'],(per_worker//(4*train_bytes+16)//nominal)*nominal)
-    merge_limit=per_worker//(4*train_bytes+16)
-    if 3*max_raw_rows*raw_bytes>per_worker or bucket_rows<nominal:
-        raise ValueError('shuffle.memory_mb is too small for one raw shard or training shard per worker')
+    bucket_rows=s['bucket_rows']
     if keep_prob is None:keep_prob = sampling_probability(rows, config['replay'])
     # Each source group independently rounds its requested sample count.
     output_rows = min(rows, math.ceil(rows*keep_prob+groups/2))
@@ -207,8 +200,8 @@ def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
             "training_view_cache_bytes_estimate":rows*train_bytes*2,
             "group_rows": group_rows, "bucket_rows": bucket_rows, "waves": waves,
             "compress_temp": s['compress_temp'],
-            "buckets_per_wave": buckets,"files_per_bucket":bucket_rows//nominal,"merge_limit_rows":merge_limit, "array_memory_budget_bytes": budget,
-            "scatter_array_bytes_estimate": group_rows*3*raw_bytes*s["workers"],
+            "buckets_per_wave": buckets,"files_per_bucket":bucket_rows//nominal,
+            "scatter_array_bytes_estimate": (3*(group_rows+max_raw_rows)*train_bytes+max_raw_rows*raw_bytes)*s["workers"],
             "merge_array_bytes_estimate": bucket_rows*(4*train_bytes+16)*s["workers"],
             "temporary_bytes_estimate": temp_bytes, "peak_temporary_files_estimate": peak_files}
 
@@ -239,7 +232,7 @@ def _two_phase(pool, groups, raw, rows, scratch, output, plan, shard_rows, seed,
     for group_output in assignments:
         for bucket, path, n in group_output:
             files[bucket].append(path); counts[bucket] += n
-    tasks = [(files[b],counts[b],str(scratch),str(output),plan['merge_limit_rows'],plan['files_per_bucket'],
+    tasks = [(files[b],counts[b],str(scratch),str(output),plan['files_per_bucket'],
               (seed,3,partition,int(label),b),f"{label}_{b}",plan['compress_temp']) for b in range(buckets)]
     return [e for group in pool.map(_merge_bucket,tasks) for e in group]
 
