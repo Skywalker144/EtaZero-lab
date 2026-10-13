@@ -1,4 +1,3 @@
-from etazero.schema import GLOBALS
 """MuZero sequence semantics and native/CUDA end-to-end acceptance."""
 from config_samples import CONFIGS
 import os
@@ -14,6 +13,7 @@ from etazero.config import ROOT, load_config, validate
 from etazero.data import read_raw, metadata, training_view, game_weight_statistics
 from etazero.network import make_network
 from etazero.runtime import run_training
+from etazero.schema import GLOBALS
 from etazero.storage import load_json, sha256
 from etazero.training import load_checkpoint
 
@@ -27,12 +27,13 @@ def assert_diagnostics(root, config):
     for row in updates:
         assert len(row['step_losses']) == config['unroll']['steps']+1
         assert sum(row['step_losses']) == pytest.approx(row['loss'],rel=2e-6)
-        measured = row['step']==1 or row['step']%config['optimizer']['norm_interval']==0 or row['step']==budgets[row['iteration']]
+        # These fixtures log each batch. Overflow losses are retained, but
+        # skipped gradients never contribute to the diagnostic averages.
+        measured = (row['step']==1 or row['step']%config['optimizer']['norm_interval']==0 or row['step']==budgets[row['iteration']]) and not row['amp_skipped']
         assert ('grad_norms' in row)==measured
         if measured:
             assert set(row['grad_norms']) == {'representation','dynamics','prediction'}
-            if not row['amp_skipped']:
-                assert np.linalg.norm(list(row['grad_norms'].values())) == pytest.approx(row['grad_norm'],rel=2e-6)
+            assert np.linalg.norm(list(row['grad_norms'].values())) == pytest.approx(row['grad_norm'],rel=2e-6)
     figure=training_figure(run_history(root))
     assert len(figure.axes)==8 and len(figure.axes[6].lines)==2 and len(figure.axes[7].lines)==3
     figure.clear()
