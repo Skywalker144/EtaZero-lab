@@ -8,7 +8,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 该配置使用 ResNet 主干和普通 AdamW，继承 baseline 的训练预算及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 根及两种非根策略见 [Gumbel](gumbel.md)，沿用同一 latent 推理与展开训练。
 
-展开后的训练行更大，名义训练分片大小由 [MuZero train.cfg](../configs/mz_g/train.cfg) 覆盖；派生配置按配置继承规则读取这些字段。shuffle 保留 baseline 的 worker 数和总数组内存预算，按行大小规划有效桶大小。
+展开后的训练行更大，名义训练分片和配套桶大小由 [MuZero train.cfg](../configs/mz_g/train.cfg) 覆盖；派生配置按配置继承规则读取这些字段。shuffle 保留 baseline 的 worker 数，直接采用配置的分组、分桶和分片计划，行大小仅用于资源估算。展开中的主 policy 与 opponent policy 保持 int16；吸收态及被 mask 的占位 policy 在棋盘内保存单位整数权重，读取后归一化为均匀分布。
 
 ## 训练目标与优化器
 
