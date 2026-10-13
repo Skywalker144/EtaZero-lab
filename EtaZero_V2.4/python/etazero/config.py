@@ -415,8 +415,8 @@ def validate(c):
     if c["training"]["amp"] not in ("off", "float16", "bfloat16"):
         raise ValueError("Invalid optimizer or AMP mode")
     o = c['optimizer']
-    if o['kind'] not in ('sgd', 'adamw'):
-        raise ValueError('Optimizer kind must be sgd or adamw')
+    if o['kind'] not in ('sgd', 'adamw', 'muon'):
+        raise ValueError('Optimizer kind must be sgd, adamw or muon')
     if not 0 < o['lookahead_alpha'] <= 1 or o['swa_scale'] < 1:
         raise ValueError('lookahead_alpha must be in (0,1] and swa_scale must be >= 1')
     if c['inference']['inference_precision'] not in ("float32", "float16"):
