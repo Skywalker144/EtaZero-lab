@@ -14,7 +14,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 `[muzero_training] auxiliary_losses=false` 只计算主 policy CE 和终局 WDL CE，系数均为 1。辅助输出结构保留，损失不读取对手、soft、TD、optimistic、误差或 Q 输出；此模式禁止开启 `predict_q_values`。搜索是否使用辅助预测由各自开关独立控制。
 
-`katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）或 AdamW，学习率与统一 weight decay 由 `[muzero_training]` 指定。它使用 batch 均值反传，不启用 KataGo 分组 LR、自适应衰减、warmup、Lookahead 或 SWA；`gradient_clip=0` 表示不裁剪，发布当前训练权重。checkpoint 仍保存优化器、scaler、计数和 RNG。
+`katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）、AdamW 或 Muon，学习率与统一 weight decay 由 `[muzero_training]` 指定；Muon 的矩阵与辅助 Adam 分工见 [学习与数据使用](algorithms.md#学习与数据使用)。它使用 batch 均值反传，不启用 KataGo 分组 LR、自适应衰减、warmup、Lookahead 或 SWA；`gradient_clip=0` 表示不裁剪，发布当前训练权重。checkpoint 仍保存优化器、scaler、计数、训练指标累积和 RNG。
 
 没有配置 `[muzero_training]` 时使用共用辅助损失及 KataGo 优化器机制。关闭某组训练增强不会自动关闭搜索、采样或评估增强；这些属于独立条件。该能力不意味着逐项复现原论文或 MuZero_V2。
 
@@ -24,12 +24,14 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 ResNet 的 `MaskedNorm` 在通道与有效空间位置上共同计算每样本的均值、方差，采用每通道可学习缩放和偏置；其统计方式接近单组 GroupNorm，并排除棋盘 padding。它不是 BatchNorm，也不是具有逐位置仿射参数的 `nn.LayerNorm([C,H,W])`。representation/dynamics 的入口和残差块采用该归一化与 SiLU；共享的 policy/value heads 仍采用 Mish 与 bias mask。
 
-- representation 接收现有五空间平面和六全局特征，包含棋规、执色、禁手特征与 PDA 条件。
+- representation 接收五空间平面和八全局特征，包含棋规、执色、禁手特征、PDA 条件与 Hex 标识；布局以 [schema.py](../python/etazero/schema.py) 为准。
 - latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。采用 MiniZero 的极小跨度保护：当 `max-min < 1e-5` 时，分母为 `max-min+1e-5`，否则使用原跨度。输出保持在 `[0,1]` 内，极小跨度时最大值可小于 1；该规则同时用于 representation、dynamics、训练和导出推理。FP16 推理仍在 FP32 做归一化。
 - dynamics 只接收 latent 和 int64 `[B]` 画布动作，以 one-hot 动作平面生成下一状态；不接收未来观测、占用、禁手或真实终局。
 - prediction 复用完整 EtaZero heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero 两种主干均支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
 
 WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、无 reward loss，搜索折扣为 1，相邻边翻转价值符号、交换 W/L。训练 heads 和 loss 为 FP32；NBT 导出副本把三段末端 BatchNorm 转为预计算归一化，ResNet 保留逐样本动态归一化。`initial(obs, globals)` / `recurrent(latent, action)` 返回 latent、普通策略 logits、WDL logits、short optimistic logits 和误差标准差。模型元数据独立标识算法与 latent 宽度，导入权重校验架构及完整三段配置。
+
+[逐展开推理测试](../tests/test_muzero_network.py) 使用固定种子，覆盖根预测、三次 recurrent 和旧父 latent 的再次展开，并区分两种数值要求：native 与已序列化、完成 JIT profiling 的 TorchScript 模型比较，FP32 使用 `rtol=2e-4, atol=2e-5`；eager 与优化后的 TorchScript 分别展开，FP32 使用 `rtol=2e-4, atol=2e-4`，容纳融合运算舍入经 latent min/max 归一化传播的误差。FP16 两类比较均使用 `rtol=atol=3e-3`。这些是固定样例的工程验收阈值，不承诺所有输入或多次展开逐位相等；native 对照仍检查 latent、policy、WDL、optimistic 和 stdev 全部输出。
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
@@ -102,7 +104,7 @@ MuZero 概览中的缓存面板使用 **Root NN invalid policy mass**：对主 p
 - **Loss by unroll step**：横轴为 0 至 K，0 是 representation 的根预测。展示最新已完成轮次与所有有测量轮次的算术均值。每步包含该步完整 heads 的带权 loss，以整个起点 batch 为分母，保留真实后续步权重、side mask 和吸收态目标；各步之和等于日志总 loss。这里没有乘只作用于反向传播的 `1/K`，曲线不是单步梯度贡献。
 - **Gradient norms by module**：以累计训练样本量展示 representation h、dynamics g、prediction f，横轴刻度采用紧凑科学计数法，顶部按轮末记录标注累计运行时间（小时）。采用实际反传（已包含 hidden/loss 梯度缩放）经 AMP 反缩放后、裁剪前的参数梯度 L2 范数；总和反传时除以 batch size，均值反传时直接记录，与已有 Network 梯度图保持平均 loss 口径。三段没有共享参数，每次更新的三个范数平方和等于总范数平方；轮次均值不再要求满足该等式。side-only batch 的 dynamics 没有梯度，记录真实零值。
 
-loss 均值包含 AMP 跳步消费，梯度均值只采用成功更新；原始 overflow 仍保存在日志。所有曲线读取已提交逐轮指标；轮内恢复同时恢复指标累积和，以最终消费游标的 `round_metrics` 汇总，不重复计入重算更新。诊断只读取并 detach 已算出的 loss 和梯度，不额外反传或改变优化器更新。旧日志未记录这两类指标时显示缺测，不能事后从总 loss 或总梯度还原。
+loss 均值包含 AMP 跳步消费，梯度均值只采用成功更新；原始 overflow 仍保存在日志。模块梯度只在本轮首批、`optimizer.norm_interval` 的整倍数批及末批测量，跳步不进入聚合；更新日志可以汇总多个 batch，`grad_norms` 的有无取决于该日志区间是否包含成功且有测量的 batch，不能只由末批的 `amp_skipped` 判断。所有曲线读取已提交逐轮指标；轮内恢复同时恢复指标累积和，以最终消费游标的 `round_metrics` 汇总，不重复计入重算更新。诊断只读取并 detach 已算出的 loss 和梯度，不额外反传或改变优化器更新。旧日志未记录这两类指标时显示缺测，不能事后从总 loss 或总梯度还原。
 
 全模型范数和逐展开步 loss 逐 batch 采集，按 `training.log_every` 聚合写出；三个模块范数仅在首 batch、`optimizer.norm_interval` 时点和轮末采集。模块曲线是这些成功更新的采样均值，缺测 batch 不进入分母；与历史逐 batch 采集的模块范数均值口径不同。采集频率不改变裁剪、范数衰减策略或训练时钟。
 
