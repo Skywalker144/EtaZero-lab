@@ -90,6 +90,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#alphazero) |
+| 配置局部模式共享的网络效用偏差及内存分片 | [SubtreeValueBias](docs/algorithms.md#subtreevaluebias) |
 | 选择 KataGo 网络名称、后缀与核对架构 | [KataGo 网络配置](docs/networks.md) |
 | 查看算法组合、公共边界和 Gumbel | [算法组合](docs/algorithms.md#算法与搜索组合)、[算法接口](docs/algorithms.md#算法接口)、[Gumbel](docs/gumbel.md) |
 | 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
