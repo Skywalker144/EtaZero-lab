@@ -23,7 +23,10 @@ OpeningConfig::OpeningConfig(const Config& c, const std::string& policy_section)
       policy_init_mean(c.contains(policy_section+".policy_init_mean") || (policy_section!="policy_init" && policy_init)
           ? c.number(policy_section+".policy_init_mean") : (policy_section=="policy_init"?12.0:0.0)), policy_temperature(c.contains(policy_section+".policy_temperature")?c.number(policy_section+".policy_temperature"):1.0) {
     for (double p : {probability, rejection_probability, rejection_probability_fallback})
-        if (p < 0 || p > 1) throw std::runtime_error("Invalid opening probability");
+        if (!std::isfinite(p) || p < 0 || p > 1) throw std::runtime_error("Invalid opening probability");
+    if (!std::isfinite(avg_dist_factor) || !std::isfinite(balance_exponent) ||
+        !std::isfinite(policy_init_mean) || !std::isfinite(policy_temperature))
+        throw std::runtime_error("Invalid opening configuration: nonfinite parameter");
     if (max_tries < 1 || max_tries > 1000 || avg_dist_factor < 0 || avg_dist_factor > 100 ||
         balance_exponent < 0 || balance_exponent > 100 || policy_init_mean < 0 || policy_init_mean > 100 ||
         policy_temperature < 0.1 || policy_temperature > 5)
