@@ -6,6 +6,8 @@ from .network import FixedScaleMask, BiasMask
 
 
 def parameter_groups(model):
+    if hasattr(model, 'parameter_groups'):
+        return model.parameter_groups()
     groups = {name: [] for name in ('input', 'normal', 'normal_attn', 'normal_gamma', 'noreg', 'output', 'output_noreg')}
     groups['input'] += [model.stem.weight, model.linear_global.weight]
     for block in model.blocks:
@@ -59,27 +61,27 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
     lr = (1.33 if adamw else 1) * 0.00003 * scale * warmup / options['lookahead_alpha']
     if adamw:
         lr *= batch_scale
-    if muon and name in ('normal', 'normal_attn'):
+    if muon and name in ('normal', 'normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
         lr *= 2
     if name in ('output', 'output_noreg'):
         lr *= options['head_lr_factor']
-    if name in ('noreg', 'output_noreg'):
+    if name in ('input_noreg', 'noreg', 'output_noreg'):
         lr *= options['noreg_lr_factor']
-    if norm_kind == 'fixup':
+    if norm_kind in ('fixup', 'fixscale'):
         factor = (options['input_wd_factor'] if name == 'input' else options['normal_wd_factor'] if name == 'normal'
                   else options['normal_attn_wd_factor'] if name == 'normal_attn' else 1.0)
-        if name in ('input','normal','normal_gamma','output','normal_attn'):
+        if name in ('input','normal','normal_gamma','output','normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
             wd = (0.005 if adamw else 1e-6) * batch_scale * factor
-            if name == 'normal_attn':
+            if name in ('normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
                 wd *= 0.5
-        elif name in ('noreg','output_noreg'):
+        elif name in ('input_noreg','noreg','output_noreg'):
             wd = 1e-8 * batch_scale
         else:
             raise ValueError(f'Unknown fixup optimizer group: {name}')
         return lr, wd
-    if norm_kind != 'fixscaleonenorm':
+    if norm_kind not in ('fixscaleonenorm', 'bnorm', 'brenorm', 'fixbrenorm'):
         raise ValueError(f'Unsupported optimizer norm kind: {norm_kind}')
-    if name in ('input', 'normal', 'normal_gamma'):
+    if name in ('input', 'normal', 'normal_gamma', 'normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
         norm_key = 'input' if name == 'input' else 'normal'
         adaptive = 1.0
         if norm_key in norms and baselines[norm_key] > 0:
@@ -90,11 +92,15 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
             factor *= 2 / 3
         if name == 'normal_gamma':
             factor *= 0.25 if adamw else 0.125
-        regular = 0.020 if muon and name == 'normal' else 0.009 if adamw else 0.00125
+        if name in ('normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
+            factor *= {'normal_attn': 0.5, 'normal_gab': 0.3, 'gab_mlp': 0.1, 'tab_module': 0.1}[name]
+            if name == 'normal_attn':
+                factor *= options['normal_attn_wd_factor']
+        regular = 0.020 if muon and name in ('normal', 'normal_attn', 'normal_gab', 'gab_mlp', 'tab_module') else 0.009 if adamw else 0.00125
         wd = regular * batch_scale * (scale * warmup) ** (0.70 if muon else 0.75) * adaptive * factor
     elif name == 'output':
         wd = (0.004 if adamw else 1e-6) * batch_scale
-    elif name == 'noreg':
+    elif name in ('input_noreg', 'noreg'):
         wd = 1e-6 * batch_scale * (scale * warmup) ** 0.75
     elif name == 'output_noreg':
         wd = (1e-6 if adamw else 1e-8) * batch_scale
@@ -224,7 +230,8 @@ class Optimization:
         # EtaZero logs mean losses. Backward uses the batch sum, like KataGo.
         if override:
             return override * self.batch_size
-        cap = 11000 if self.options['kind'] in ('adamw', 'muon') else 2500
+        cap = (11000 if self.options['kind'] in ('adamw', 'muon') else
+               5500 if self.model.norm_kind in ('bnorm', 'brenorm', 'fixbrenorm') else 2500)
         return cap * math.sqrt(self.batch_size / 256) / math.sqrt(max(1e-7, self.options['lr_scale']))
 
     @torch.no_grad()
