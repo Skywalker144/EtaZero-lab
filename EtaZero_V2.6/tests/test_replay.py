@@ -120,7 +120,7 @@ def test_validation_md5_holdout_shared_probability_across_snapshots_and_rebuild(
         def map(self,function,tasks):
             for task in tasks:
                 if function.__name__=='_scatter':self.streams.append(tuple(task[5])+(task[0],))
-                elif function.__name__=='_merge_bucket':self.streams.append(tuple(task[6]))
+                elif function.__name__=='_merge_bucket':self.streams.append(tuple(task[5]))
                 yield function(task)
     for iteration in (1,2):
         pool=RecordingPool()
@@ -190,10 +190,50 @@ def test_scatter_row_ids_pairing_rounding_and_independent_wave_streams(tmp_path)
     for wave in range(3):
         path=tmp_path/f'merge_input_{wave}.npz'
         save_npz(path,dict(value=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
-        files=_merge_bucket(([str(path)],12,str(tmp_path),str(tmp_path/f'out_{wave}'),100,1,(17,3,wave,0),str(wave),True))
+        files=_merge_bucket(([str(path)],12,str(tmp_path),str(tmp_path/f'out_{wave}'),1,(17,3,wave,0),str(wave),True))
         with np.load(tmp_path/f'out_{wave}'/files[0]['path']) as a:
             orders.append(a['marker'][:,0].tolist());np.testing.assert_array_equal(a['marker'][:,0],a['value'][:,0])
         assert sorted(orders[-1])==ids.tolist()
     assert len({tuple(order) for order in orders})==3
-    with pytest.raises(ValueError,match='exceeds shuffle array memory'):
-        _merge_bucket(([],13,str(tmp_path),str(tmp_path),12,1,(17,3,0,0),'overflow',True))
+
+
+@pytest.mark.parametrize('waves',[1,3])
+def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves):
+    from etazero.data import TRAIN_POLICY_TARGETS,training_targets
+    from etazero.shuffle import view_key
+    c=load_config(CONFIGS/'smoke_test')
+    c['shuffle'].update(group_rows=9,bucket_rows=8,training_shard_rows=8,waves=waves)
+    c['replay'].update(min_rows=9,keep_target_rows='all')
+    raw,meta=winning_record()
+    # Int16 boundaries and nontrivial opponent targets catch truncation or
+    # premature normalization; compare paired rows through the full pipeline.
+    raw['policies'][0]=0;raw['policies'][0,0]=30000;raw['policies'][0,1]=17
+    expected=training_view(raw)
+    for key in TRAIN_POLICY_TARGETS:
+        assert expected[key].dtype==np.int16
+    path=tmp_path/'selfplay'/'integer.npz';save_npz(path,raw)
+    entry=dict(path=str(path.relative_to(tmp_path)),metadata=meta,sha256=sha256(path))
+    snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,[entry],c)
+    cache=tmp_path/'.internal/training_views'/(view_key(entry,training_targets(c))+'.npz')
+    with np.load(cache) as stored:
+        for key in TRAIN_POLICY_TARGETS:
+            assert stored[key].dtype==np.int16
+            np.testing.assert_array_equal(stored[key],expected[key])
+    manifest=json.loads((snapshot/'manifest.json').read_text())
+    pairs=[]
+    for info in manifest['files']:
+        with np.load(snapshot/'data'/info['path']) as stored:
+            for key in TRAIN_POLICY_TARGETS:assert stored[key].dtype==np.int16
+            pairs.extend(zip(stored['policy'].tolist(),stored['opponent_policy'].tolist()))
+    expected_pairs=list(zip(expected['policy'].tolist(),expected['opponent_policy'].tolist()))
+    assert sorted(pairs)==sorted(expected_pairs)
+    reader=BatchReader(snapshot,1,1,7)
+    actual=[]
+    try:
+        for _ in range(manifest['rows']):
+            batch=reader.next()
+            for key in TRAIN_POLICY_TARGETS:assert batch[key].dtype==np.float32
+            actual.append((batch['policy'][0].tolist(),batch['opponent_policy'][0].tolist()))
+        with pytest.raises(StopIteration):reader.next()
+    finally:reader.close()
+    assert sorted(actual)==sorted(expected_pairs)
