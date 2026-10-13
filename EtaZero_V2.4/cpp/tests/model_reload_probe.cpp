@@ -22,6 +22,9 @@ int main(int argc,char** argv) {
     try {
         if(argc<6)throw std::runtime_error("Usage: model_reload_probe ALGORITHM DEVICE PRECISION MODELS...");
         at::set_num_threads(1);std::cout<<std::setprecision(10);
+        const bool clones=std::string(argv[4])=="--clone-runtime";
+        const int first=clones?5:4;
+        std::vector<std::shared_ptr<etazero::PreparedModel>> runtimes;
         auto prepared=std::make_shared<etazero::PreparedModel>();
         std::vector<std::vector<float>> obs(5,std::vector<float>(etazero::INPUT_PLANES*36+etazero::GLOBAL_FEATURES));
         etazero::InferenceInputs inputs;
@@ -30,7 +33,11 @@ int main(int argc,char** argv) {
             obs[i][36+i]=1;obs[i][72+6+i]=1;inputs.push_back(&obs[i]);
         }
         std::cout<<'[';
-        for(int round=4;round<argc;++round) {
+        for(int round=first;round<argc;++round) {
+            if(clones) {
+                prepared=std::make_shared<etazero::PreparedModel>(torch::jit::load(argv[round],torch::kCPU),true);
+                for(const auto& runtime:runtimes)if(prepared->reuse_runtime(*runtime,argv[3]))break;
+            }
             std::vector<double> values;
             // Both services use the same prepared weights but independent graphs.
             if(std::string(argv[1])=="alphazero") {
@@ -49,9 +56,10 @@ int main(int argc,char** argv) {
                 for(const auto& e:first.recurrent(actions))append(values,e);
                 for(const auto& e:second.initial({inputs[0]}))append(values,e);
             }
+            if(clones && !prepared->timing.reused_runtime)runtimes.push_back(prepared->clone_runtime());
             prepared->offload();c10::cuda::CUDACachingAllocator::emptyCache();
             auto stats=c10::cuda::CUDACachingAllocator::getDeviceStats(torch::Device(argv[2]).index());
-            if(round>4)std::cout<<',';
+            if(round>first)std::cout<<',';
             std::cout<<"{\"reused\":"<<(prepared->timing.reused_runtime?"true":"false")
                      <<",\"graphs_seconds\":"<<prepared->timing.graph_seconds
                      <<",\"allocated_after_offload\":"<<stats.allocated_bytes[0].current<<",\"values\":[";
