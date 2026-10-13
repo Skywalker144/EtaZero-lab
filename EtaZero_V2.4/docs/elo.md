@@ -53,7 +53,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 
 评分与区间沿用 MuZero_V2 的 [elo.py](../python/etazero/elo.py)：联合 Bradley–Terry 得分模型，和棋记半分，同时拟合共同先手优势；anchor 只规定相对 Elo 零点，不代表外部等级分。弱高斯正则防止全胜／全负导致无穷评分，强度随输出记录。95% 区间按配对分层、以同开局两局为单位 bootstrap；全胜配对会标记先验敏感性。区间条件于已选择的模型、开局与协议，不表示独立训练种子的不确定性。所有开局的两侧和整个赛程完整后才拟合。
 
-输出 `elo.json`、`elo.csv`、`elo.png`、`elo.svg`，并保存模型／配置／二进制身份、赛程、逐开局和逐局原始记录。`--fit-only` 从已有赛果重建评分，不启动 GPU 比赛。
+输出 `elo.json`、`elo.csv`、`elo.png`、`elo.svg`；PNG 和 SVG 使用与 `training.png`、`loss.png` 相同的深色主题。评估目录保存模型／配置／二进制身份、赛程、逐开局和逐局原始记录。`--fit-only` 从已有赛果重建评分，不启动 GPU 比赛。
 
 ## 自动实验 Elo
 
