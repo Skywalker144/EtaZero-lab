@@ -1,6 +1,7 @@
 from config_samples import CONFIGS, derive_config
 from pathlib import Path
 import sys
+import io
 import threading
 import time
 
@@ -67,17 +68,44 @@ def test_fixed_iteration_sampling_and_bridges_survive_extension_and_new_arm(tmp_
 def test_nearest_time_sampling_ties_deduplication_and_final(tmp_path):
     history(tmp_path/'a', [27*60, 32*60, 58*60, 63*60])
     players = discover_players(tmp_path, sample_seconds=1800, include_first=False)
-    assert [(p.iteration, p.seconds) for p in players] == [(2, 32*60), (3, 58*60), (4, 63*60)]
+    assert [(p.iteration, p.seconds) for p in players] == [(2, 32*60), (3, 58*60)]
     history(tmp_path/'a', [28, 32, 70])
     players = discover_players(tmp_path, sample_seconds=30, include_first=False)
     assert [p.iteration for p in players] == [1, 3]  # 30 ties; 60 selects final.
     history(tmp_path/'a', [1, 100, 101])
     players = discover_players(tmp_path, sample_seconds=20, include_first=False)
-    assert [p.iteration for p in players] == [1, 2, 3]  # Five targets, two fixed models.
+    assert [p.iteration for p in players] == [1, 2]  # Five targets, two fixed models; close tail omitted.
     history(tmp_path/'a', [1, 2])
     players = discover_players(tmp_path, sample_seconds=20, include_first=False,
                                required_ids=('a:00000001',))
     assert [p.iteration for p in players] == [1, 2]  # Short history plus pinned anchor.
+
+
+@pytest.mark.parametrize('last, expected', [(34, [1, 2, 3]), (35, [1, 2, 3]),
+                                          (36, [1, 2, 3, 4])])
+def test_time_sampling_adds_tail_only_beyond_half_interval(tmp_path, last, expected):
+    history(tmp_path/'a', [10, 20, 30, last])
+    players = discover_players(tmp_path, sample_seconds=10, include_first=False)
+    assert [p.iteration for p in players] == expected
+
+
+def test_omitted_tail_preserves_covered_grid_and_selected_final_cross(tmp_path):
+    history(tmp_path/'a', [10, 20, 29, 32])
+    history(tmp_path/'b', [10, 20, 30, 32])
+    players = discover_players(tmp_path, sample_seconds=10, include_first=False)
+    assert [p.iteration for p in players if p.arm == 'a'] == [1, 2, 3]
+    edges = build_schedule(players, 1, cross_seconds=30, sample_seconds=10)
+    # Both histories covered 30 seconds, even though a's nearest model is at 29.
+    assert ('a:00000003', 'b:00000003') in edges
+    with_final = build_schedule(players, 1, cross_seconds=100, sample_seconds=10, final_cross=True)
+    assert ('a:00000003', 'b:00000003') in with_final
+    assert all(not p.endswith('00000004') for edge in with_final for p in edge)
+    # An explicitly pinned omitted tail stays in the graph, without displacing
+    # the closer fixed model from the 30-second bridge.
+    pinned = discover_players(tmp_path, sample_seconds=10, include_first=False,
+                              required_ids=('a:00000004',))
+    assert ('a:00000003', 'b:00000003') in build_schedule(
+        pinned, 1, cross_seconds=30, sample_seconds=10)
 
 
 def test_time_samples_and_bridges_survive_extension_and_new_arm(tmp_path):
@@ -264,7 +292,9 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
     assert load_elo_config(tmp_path, environ={})['sample_seconds'] == 5
     assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'})['sample_seconds'] == 6
     assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'}, overrides={'sample_seconds': '7'})['sample_seconds'] == 7
+    assert load_elo_config(tmp_path, environ={'ELO_MODEL_LOAD_WORKERS': '2'})['model_load_workers'] == 2
     for overrides in [{'games_per_pair': '6'}, {'sample_seconds': '0'}, {'game_threads': '0'},
+                      {'model_load_workers': '0'},
                       {'max_loaded_models': '1'}, {'pair_workers': '1'},
                       {'sample_seconds': 'nan'}, {'sample_seconds': 'inf'}, {'sample_seconds': '-1'},
                       {'cross_seconds': 'nan'}, {'cross_seconds': '0'}]:
@@ -325,7 +355,7 @@ def test_shared_arena_never_fits_partial_results(tmp_path, monkeypatch):
     assert len(calls) == 1 and calls[0].is_set()
 
 
-def test_shared_native_routes_pairs_deduplicates_models_and_resumes_one_side(tmp_path):
+def test_shared_native_routes_pairs_deduplicates_models_and_resumes_one_side(tmp_path, monkeypatch):
     from dataclasses import asdict
     for arm in ('a', 'b', 'c'):
         history(tmp_path/arm, [1])
@@ -346,6 +376,9 @@ import json,sys
 from pathlib import Path
 args=dict(zip(sys.argv[2::2],sys.argv[3::2]))
 tasks=Path(args['--tasks']).read_text().splitlines()
+print(json.dumps(dict(type='arena_progress',stage='loading',window=1,models=3,workers=3,loaded=0,seconds=0)),flush=True)
+print(json.dumps(dict(type='arena_progress',stage='model_ready',window=1,models=3,workers=3,loaded=3,seconds=1)),flush=True)
+print(json.dumps(dict(type='arena_progress',stage='playing',window=1,models=3,workers=3,loaded=3,seconds=1)),flush=True)
 partial=not Path(args['--tasks']).with_suffix('.started').exists()
 Path(args['--tasks']).with_suffix('.started').touch()
 for line in tasks:
@@ -354,6 +387,7 @@ for line in tasks:
   print(json.dumps(dict(type='opening',pair=p,id=i,seed=int(seed),generator=int(g),moves=[12],value=0)),flush=True)
  for color in (0,1):
   if int(mask)&(1<<color):
+   print(json.dumps(dict(type='game',pair=p,id=2*i+color,opening_id=i,black_a=color==0,winner=0,moves=[12,13],seconds=1)),flush=True)
    print(json.dumps(dict(type='game',pair=p,id=2*i+color,opening_id=i,black_a=color==0,winner=0,moves=[12,13],seconds=1)),flush=True)
    if partial: sys.exit(1)
 print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
@@ -364,13 +398,45 @@ print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
     assert len((output/'models.txt').read_text().splitlines()) == 3
     first = output/'pairs'/manifest['pairs'][0]['id']/'games/00000000.json'
     original = first.read_bytes()
+    from tqdm import tqdm
+    bars = []
+    def record_progress(*args, **kwargs):
+        bar = tqdm(*args, **(kwargs | {'disable': False, 'file': io.StringIO()}))
+        bars.append(bar)
+        return bar
+    monkeypatch.setattr('etazero.arena.tqdm', record_progress)
     execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
+    progress = next(bar for bar in bars if bar.desc == 'Arena games')
+    assert progress.initial == 1 and progress.n == 8
+    assert progress.postfix == 'window=1 playing'
     fields = (output/'tasks.txt').read_text().splitlines()[0].split()
     assert fields[6:8] == ['2', '1']  # Only the missing white side, saved opening.
     assert first.read_bytes() == original
     assert sum(len(PairStore(output/'pairs'/p['id'], 4).games()) for p in manifest['pairs']) == 8
     binary.unlink()  # A fully complete schedule never starts the executable.
     execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
+
+
+def test_model_inspection_deduplicates_checks_and_rejects_changed_files(tmp_path, monkeypatch):
+    from etazero.arena import inspect_models
+    calls = []
+    def inspect(path):
+        calls.append(path)
+        if path.name == 'changed':
+            raise ValueError('changed model')
+        return path, {'sha256': path.name}
+    monkeypatch.setattr('etazero.arena.model_info', inspect)
+    paths = [tmp_path/'a', tmp_path/'b', tmp_path/'a']
+    assert list(inspect_models(paths)) == paths[:2]
+    assert sorted(calls) == paths[:2]
+    with pytest.raises(ValueError, match='changed model'):
+        inspect_models([tmp_path/'changed'])
+
+
+def test_autoelo_import_does_not_initialize_training_or_torch():
+    import subprocess
+    subprocess.run([sys.executable, '-c',
+                    "import sys, etazero.autoelo; assert 'torch' not in sys.modules"], check=True)
 
 
 def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path, monkeypatch):
