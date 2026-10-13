@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / 'python'))
 from etazero.muzero.network import (normalize_hidden_state, scale_gradient, NetworkConfig,
                                    Representation, Dynamics, Prediction)
 from etazero.muzero.resnet import ResBlock
+from etazero.schema import GLOBALS
 
 
 def check_resnet(namespace):
@@ -36,12 +37,12 @@ def check_resnet(namespace):
     source_rep = namespace['RepresentationNet'](5, 24, 2, 16)
     source_dyn = namespace['DynamicsNet'](6, 32, 2, 16)
     for ours, source in ((representation, source_rep), (dynamics, source_dyn)):
-        # EtaZero's six global features are a separate linear input adaptation.
+        # Global rule/color/PDA/Hex features are a separate linear input adaptation.
         state = {k.replace('stem.weight', 'start_layer.weight').replace('stem_act.norm.', 'norm.'): v
                  for k, v in ours.state_dict().items() if k != 'linear_global.weight'}
         source.load_state_dict(state)
     obs = torch.randn(2, 5, 6, 6); obs[:, :1] = mask
-    actual = representation(obs, torch.zeros(2, 6)); expected = source_rep(obs)
+    actual = representation(obs, torch.zeros(2, len(GLOBALS))); expected = source_rep(obs)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     for step in range(5):
         actions = torch.tensor([step, step+6])
