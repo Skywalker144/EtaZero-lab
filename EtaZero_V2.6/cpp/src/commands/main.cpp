@@ -69,6 +69,10 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     s.use_noise_pruning=c.boolean(key("noise_pruning","use_noise_pruning"));
     s.noise_prune_utility_scale=c.number(key("noise_pruning","noise_prune_utility_scale"));
     s.noise_pruning_cap=c.number(key("noise_pruning","noise_pruning_cap"));
+    s.subtree_value_bias_factor=c.number(key("subtree_value_bias","subtree_value_bias_factor"));
+    s.subtree_value_bias_free_prop=c.number(key("subtree_value_bias","subtree_value_bias_free_prop"));
+    s.subtree_value_bias_weight_exponent=c.number(key("subtree_value_bias","subtree_value_bias_weight_exponent"));
+    s.subtree_value_bias_table_num_shards=c.integer(key("subtree_value_bias","subtree_value_bias_table_num_shards"));
     s.use_fpu=c.boolean(key("fpu","use_fpu"));s.fpu_reduction_max=c.number(key("fpu","fpu_reduction_max"));
     s.root_fpu_reduction_max=c.number(key("fpu","root_fpu_reduction_max"));
     s.fpu_parent_power=c.number(key("fpu","fpu_parent_weight_by_visited_policy_pow"));

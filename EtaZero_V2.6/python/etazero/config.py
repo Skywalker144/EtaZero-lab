@@ -44,6 +44,8 @@ def validate_search_combination(root, nonroot):
 # Each section belongs to exactly one file; baseline supplies every required key.
 # run_dir is optional and belongs only to the selected configuration directory.
 SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncertainty_exponent=float, uncertainty_max_weight=float, policy_optimism=float, root_policy_optimism=float, use_noise_pruning=boolean, noise_prune_utility_scale=float, noise_pruning_cap=float, use_graph_search=boolean, graph_search_catch_up_leak_prob=float, max_playouts=int, max_time=float, nn_randomize=boolean, nn_symmetry=int,
+                         subtree_value_bias_factor=float, subtree_value_bias_free_prop=float,
+                         subtree_value_bias_weight_exponent=float, subtree_value_bias_table_num_shards=int,
                          fpu_parent_weight_by_visited_policy=boolean, fpu_parent_weight=float, value_weight_exponent=float, chosen_move_subtract=float, chosen_move_prune=float,
                          fpu_loss_prop=float, root_fpu_loss_prop=float, c_puct_log=float, c_puct_base=float,
                          c_puct_stdev_prior=float, c_puct_stdev_prior_weight=float, c_puct_stdev_scale=float,
@@ -54,12 +56,15 @@ SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncer
 
 def validate_search_parameters(c):
     bounds={'uncertainty_coeff':(.0001,1),'uncertainty_exponent':(0,2),'uncertainty_max_weight':(1,100),
-            'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50)}
+            'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50),
+            'subtree_value_bias_factor':(0,1),'subtree_value_bias_free_prop':(0,1),'subtree_value_bias_weight_exponent':(0,1)}
     for key,(low,high) in bounds.items():
         if key.startswith('uncertainty_') and not c['use_uncertainty']: continue
         if key.startswith('noise_') and not c['use_noise_pruning']: continue
         if not math.isfinite(c[key]) or not low<=c[key]<=high:
             raise ValueError(f'Invalid search correction: {key}')
+    if type(c['subtree_value_bias_table_num_shards']) is not int or not 1<=c['subtree_value_bias_table_num_shards']<=2**31-1:
+        raise ValueError('subtree_value_bias_table_num_shards must be a positive int32')
     if not 0 <= c['nn_symmetry'] < 8 or not 0 <= c['max_playouts'] <= 2**31-1:
         raise ValueError('Invalid NN symmetry or playout cap')
     if not 1 <= c['root_num_symmetries_to_sample'] <= 8:
@@ -109,6 +114,8 @@ FIELDS = {
     'uncertainty': ("selfplay", dict(use_uncertainty=boolean,uncertainty_coeff=float,uncertainty_exponent=float,uncertainty_max_weight=float)),
     'optimistic_policy': ("selfplay", dict(policy_optimism=float,root_policy_optimism=float)),
     'noise_pruning': ("selfplay", dict(use_noise_pruning=boolean,noise_prune_utility_scale=float,noise_pruning_cap=float)),
+    'subtree_value_bias': ("selfplay", {key: SEARCH_PARAMETERS[key] for key in (
+        'subtree_value_bias_factor','subtree_value_bias_free_prop','subtree_value_bias_weight_exponent','subtree_value_bias_table_num_shards')}),
     'reanalysis': ("selfplay", dict(use_reanalyze=boolean,reanalyze_prop=float,reanalyze_policy_surprise_weight=float,reanalyze_value_surprise_weight=float,reanalyze_surprise_exponent=float,reanalyze_use_outcome_targets=boolean)),
     'hint_positions': ("selfplay", dict(hint_positions_prob=float,positions_file=str)),
     'game_forks': ("selfplay", dict(early_fork_game_prob=float,fork_game_prob=float,early_fork_game_expected_move_prop=float,
@@ -289,6 +296,7 @@ NUMERIC_MINIMUMS = {
     'uncertainty': (('uncertainty_coeff', 'uncertainty_max_weight'), ('uncertainty_exponent',)),
     'optimistic_policy': ((), ('policy_optimism', 'root_policy_optimism')),
     'noise_pruning': (('noise_prune_utility_scale',), ('noise_pruning_cap',)),
+    'subtree_value_bias': (('subtree_value_bias_table_num_shards',), ('subtree_value_bias_factor','subtree_value_bias_free_prop','subtree_value_bias_weight_exponent')),
     'reanalysis': ((), ('reanalyze_prop', 'reanalyze_policy_surprise_weight', 'reanalyze_value_surprise_weight', 'reanalyze_surprise_exponent')),
     'hint_positions': ((), ('hint_positions_prob',)),
     'game_forks': (('fork_game_min_choices', 'early_fork_game_max_choices', 'fork_game_max_choices'), ('early_fork_game_prob', 'fork_game_prob', 'early_fork_game_expected_move_prop')),
@@ -329,6 +337,8 @@ def validate(c):
         if c['graph_search']['use_graph_search'] or c['search']['reuse_tree']:
             raise ValueError('Gumbel requires use_graph_search=false and reuse_tree=false')
     if a['algorithm'] == 'muzero':
+        if c['subtree_value_bias']['subtree_value_bias_factor'] != 0:
+            raise ValueError('MuZero latent search requires subtree_value_bias_factor=0')
         from .muzero.network import network_config
         network_config(c)
         if not 1 <= c['unroll']['steps'] <= 32 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
@@ -409,7 +419,7 @@ def validate(c):
     if c['writer']['first_file_min_random_proportion'] > 1:
         raise ValueError('writer.first_file_min_random_proportion must be in [0,1]')
     search = c['search']
-    validate_search_parameters({key: value for section in ('search', 'graph_search', 'uncertainty', 'optimistic_policy', 'noise_pruning', 'fpu', 'puct', 'symmetry', 'temperature')
+    validate_search_parameters({key: value for section in ('search', 'graph_search', 'uncertainty', 'optimistic_policy', 'noise_pruning', 'subtree_value_bias', 'fpu', 'puct', 'symmetry', 'temperature')
                                 for key, value in c[section].items()})
     if (not 2 <= search['full_search_visits'] <= 2**31 - 1 or search['cheap_search_probs'] > 1
             or (search['cheap_search_probs'] > 0 and not 2 <= search['cheap_search_visits'] <= search['full_search_visits'])
