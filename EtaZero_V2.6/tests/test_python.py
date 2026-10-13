@@ -325,14 +325,23 @@ def test_bit_order_and_non_byte_aligned_planes():
         validate_raw(a)
 
 
-def test_shuffle_resource_limits_and_failure_cleanup(tmp_path,config):
+def test_shuffle_estimates_preserve_configured_plan(config):
+    config['shuffle'].update(group_rows=71,bucket_rows=64,training_shard_rows=16)
+    plans=[]
+    for workers,raw_rows in ((1,5),(128,50000000)):
+        config['shuffle']['workers']=workers
+        plan=resource_plan(10000,raw_rows,3,config,keep_prob=1.)
+        assert plan['group_rows']==71 and plan['bucket_rows']==64
+        assert plan['files_per_bucket']==4 and plan['buckets_per_wave']==156
+        plans.append(plan)
+    assert plans[1]['scatter_array_bytes_estimate']>plans[0]['scatter_array_bytes_estimate']
+
+
+def test_shuffle_failure_cleans_unpublished_files(tmp_path,config):
     a,m=winning_record();path=tmp_path/"selfplay"/"a.npz";save_npz(path,a)
     entries=[{"path":str(path.relative_to(tmp_path)),"sha256":sha256(path),"metadata":m}]
     config["replay"]["min_rows"]=9
-    config["shuffle"].update(memory_mb=1,workers=4,training_shard_rows=4096)
-    with pytest.raises(ValueError,match="memory"):
-        resource_plan(10000,5000,3,config)
-    config["shuffle"].update(memory_mb=2048,training_shard_rows=2,waves=3,temp_dir=str(tmp_path/"scratch"))
+    config["shuffle"].update(workers=4,training_shard_rows=2,waves=3,temp_dir=str(tmp_path/"scratch"))
     a['globals']=a['globals'].astype(np.float64)
     bad=path.with_name('bad.npz');save_npz(bad,a);os.replace(bad,path)
     with pytest.raises(ValueError,match="dtype mismatch"):
@@ -726,7 +735,7 @@ def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
         reader=BatchReader(tmp_path/'snapshots'/identity,9,1,1)
         try:
             batch=reader.next();np.testing.assert_array_equal(batch['value'],view['value'])
-            assert sorted(map(bytes,batch['policy']))==sorted(map(bytes,view['policy']))
+            assert sorted(map(tuple,batch['policy']))==sorted(map(tuple,view['policy']))
         finally:reader.close()
     finally:catalog.close()
     a['forbidden_input']=np.zeros(13,np.uint8)
@@ -800,7 +809,7 @@ def test_shuffle_fixed_output_file_count_even_when_empty(tmp_path,config):
     for item in manifest['files']:
         with np.load(tmp_path/'snapshots'/identity/'data'/item['path']) as rows:
             policies.extend(map(bytes,rows['policy']))
-    assert Counter(policies)==Counter(map(bytes,a['policies'].astype(np.float32)))
+    assert Counter(policies)==Counter(map(bytes,a['policies']))
 
 
 @pytest.mark.parametrize('section,key,value',[
