@@ -200,14 +200,13 @@ def test_validation_history_excludes_abandoned_and_uncommitted_rounds(tmp_path):
     figure.clear()
 
 
-def test_budget_completion_requires_matching_run(tmp_path):
+def test_budget_completion_only_reads_saved_progress(tmp_path):
     directory = umbrella(tmp_path)
     plan = experiment_plan(directory, environ={})
     arm = plan['arms'][0]; root = Path(arm['run_dir'])
     assert arm_progress(arm, plan['settings']) == 'pending'
-    from etazero.config import fingerprint
-    save_json(root/'.internal/run.json', {'config': arm['config'], 'config_id': fingerprint(arm['config']),
-                                          'weights_initialization': None})
+    save_json(root/'.internal/run.json', {'config': {'old': 'configuration'},
+              'weights_initialization': {'path': str(tmp_path/'missing.pt'), 'sha256': 'old'}})
     save_json(root/'.internal/state.json', {'iteration': 2, 'elapsed_seconds': 0})
     journal(root, [{'event': 'session_start', 'utc': '2026-01-01T00:00:00+00:00'}])
     assert arm_progress(arm, plan['settings']) == 'pending'
@@ -215,8 +214,9 @@ def test_budget_completion_requires_matching_run(tmp_path):
     assert arm_progress(arm, plan['settings']) == 'complete'
     assert arm_progress(arm, {**plan['settings'], 'max_iteration': 4, 'max_seconds': 9}) == 'complete'
     arm['config']['run']['seed'] += 1
-    with pytest.raises(ValueError, match='configuration differs'):
-        arm_progress(arm, plan['settings'])
+    assert arm_progress(arm, plan['settings']) == 'complete'
+    (root/'.internal/run.json').unlink()
+    assert arm_progress(arm, plan['settings']) == 'pending'
 
 
 @pytest.mark.parametrize('shared_init', [True, False])
@@ -234,13 +234,14 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
     started = []
 
     def finish_arm(scheduler, arm, slot, gpu):
-        # Exercise the real scheduler and on-disk resume checks without training.
+        # Exercise scheduling and budgets without training; runs own their origin.
         started.append(arm['name'])
         origin = scheduler.initializations.get(arm['name'])
         origin = {k: origin[k] for k in ('path', 'sha256')} if origin else None
         root = Path(arm['run_dir'])
-        save_json(root/'.internal/run.json', {'config': arm['config'],
-                  'config_id': fingerprint(arm['config']), 'weights_initialization': origin})
+        if not (root/'.internal/run.json').exists():
+            save_json(root/'.internal/run.json', {'config': arm['config'],
+                      'config_id': fingerprint(arm['config']), 'weights_initialization': origin})
         save_json(root/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
         scheduler.states[arm['name']] = {'status': 'complete'}
 
@@ -248,7 +249,7 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
     first = experiment_plan(directory, environ=env, work_dir=work)
     assert run_experiment(first, binary) == 0
     assert started == ['a', 'b']
-    old_identity = load_json(work/'.internal/identity.json')
+    old_plan = load_json(work/'.internal/plan.json')
     old_origins = load_json(work/'.internal/plan.json')['initializations']
     old_payloads = {v['path']: Path(v['path']).read_bytes() for v in old_origins.values()}
     complete_state = (tmp_path/'a/.internal/state.json').read_bytes()
@@ -265,13 +266,14 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
     assert started == ['0_new', 'b', 'c']
     assert 'skipped completed a' in capsys.readouterr().out
     assert (tmp_path/'a/.internal/state.json').read_bytes() == complete_state
-    identity = load_json(work/'.internal/identity.json')
-    assert [a['name'] for a in identity['arms']] == ['0_new', 'a', 'b', 'c']
-    assert [a for a in identity['arms'] if a['name'] in {'a', 'b'}] == old_identity['arms']
+    current = load_json(work/'.internal/plan.json')
+    assert [a['name'] for a in current['arms']] == ['0_new', 'a', 'b', 'c']
+    assert [a for a in current['arms'] if a['name'] in {'a', 'b'}] == old_plan['arms']
     origins = load_json(work/'.internal/plan.json')['initializations']
     if shared_init:
-        assert origins['a'] == origins['b'] == origins['0_new'] == old_origins['a']
-        assert origins['c'] != origins['a']
+        assert set(origins) == {'0_new', 'c'}
+        assert origins['0_new'] == old_origins['a']
+        assert origins['c'] != origins['0_new']
     else:
         assert origins == {}
     assert all(Path(path).read_bytes() == payload for path, payload in old_payloads.items())
@@ -281,8 +283,8 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
     assert started == []
 
 
-@pytest.mark.parametrize('change', ['config', 'run_dir', 'removed', 'shared_init', 'umbrella'])
-def test_experiment_rejects_existing_identity_changes(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize('change', ['config', 'architecture', 'run_dir', 'removed', 'shared_init', 'umbrella'])
+def test_experiment_uses_current_plan_and_ignores_old_identity(tmp_path, monkeypatch, change):
     directory = umbrella(tmp_path)
     work = tmp_path/'work'
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
@@ -292,9 +294,14 @@ def test_experiment_rejects_existing_identity_changes(tmp_path, monkeypatch, cha
     plan = experiment_plan(directory, environ={}, work_dir=work)
     assert run_experiment(plan, binary) == 0
     manifest = work/'.internal/identity.json'
+    assert not manifest.exists()
+    save_json(manifest, {'umbrella': plan['umbrella'], 'arms': plan['arms'],
+                         'shared_init': plan['settings']['shared_init']})
     original = manifest.read_bytes()
     if change == 'config':
         plan['arms'][0]['config']['run']['seed'] += 1
+    elif change == 'architecture':
+        plan['arms'][0]['config']['network'].update(architecture='plain', channels=128, blocks=10)
     elif change == 'run_dir':
         plan['arms'][0]['run_dir'] = str(tmp_path/'other')
     elif change == 'removed':
@@ -303,9 +310,12 @@ def test_experiment_rejects_existing_identity_changes(tmp_path, monkeypatch, cha
         plan['settings']['shared_init'] = False
     else:
         plan['umbrella'] = str(tmp_path/'other')
-    with pytest.raises(ValueError, match='changed|removed'):
-        run_experiment(plan, binary)
-    assert calls == [True]
+    assert run_experiment(plan, binary) == 0
+    assert calls == [True, True]
+    current = load_json(work/'.internal/plan.json')
+    assert current['arms'] == plan['arms']
+    assert current['umbrella'] == plan['umbrella']
+    assert current['settings'] == plan['settings']
     assert manifest.read_bytes() == original
 
 
@@ -320,8 +330,73 @@ def test_experiment_accepts_execution_changes(tmp_path, monkeypatch):
     plan['arms'][0]['config']['run']['cpu_threads'] = 3
     plan['arms'][0]['config']['training']['checkpoint_every'] = 1
     assert run_experiment(plan, binary) == 0
-    current = load_json(Path(plan['work_dir'])/'.internal/identity.json')
+    current = load_json(Path(plan['work_dir'])/'.internal/plan.json')
     assert current['arms'][0]['config']['run']['cpu_threads'] == 3
+
+
+def test_experiment_restarts_archived_arm_with_new_architecture(tmp_path, monkeypatch, capsys):
+    directory = umbrella(tmp_path)
+    work = tmp_path/'work'
+    binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
+    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    started = []
+
+    def finish_arm(scheduler, arm, slot, gpu):
+        started.append(arm['name'])
+        root = Path(arm['run_dir'])
+        origin = scheduler.initializations[arm['name']]
+        save_json(root/'.internal/run.json', {'config': arm['config'],
+                  'weights_initialization': {k: origin[k] for k in ('path', 'sha256')}}, immutable=True)
+        save_json(root/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
+        scheduler.states[arm['name']] = {'status': 'complete'}
+
+    monkeypatch.setattr(Scheduler, 'start', finish_arm)
+    first = experiment_plan(directory, environ={}, work_dir=work)
+    assert run_experiment(first, binary) == 0
+    old_origins = load_json(work/'.internal/plan.json')['initializations']
+    root = tmp_path/'a'
+    old_record = (root/'.internal/run.json').read_bytes()
+    archive = tmp_path/'a.old'; root.rename(archive)
+    with (directory/'a/net.cfg').open('a') as config:
+        config.write('[network]\narchitecture = plain\nchannels = 128\nblocks = 10\n')
+    started.clear(); capsys.readouterr()
+    current = experiment_plan(directory, environ={}, work_dir=work)
+    assert run_experiment(current, binary) == 0
+    assert started == ['a']
+    assert 'skipped completed b' in capsys.readouterr().out
+    assert (archive/'.internal/run.json').read_bytes() == old_record
+    assert load_json(root/'.internal/run.json')['config']['network']['architecture'] == 'plain'
+    origins = load_json(work/'.internal/plan.json')['initializations']
+    assert set(origins) == {'a'} and origins['a'] != old_origins['a']
+    assert Path(old_origins['a']['path']).is_file()
+
+
+@pytest.mark.parametrize('shared_init', [True, False])
+def test_existing_runs_resume_without_scheduler_initialization(tmp_path, monkeypatch, shared_init):
+    directory = umbrella(tmp_path)
+    plan = experiment_plan(directory, environ={'SHARED_INIT': str(shared_init).lower()},
+                           work_dir=tmp_path/'new_work')
+    for arm in plan['arms']:
+        root = Path(arm['run_dir'])
+        save_json(root/'.internal/run.json', {'config': arm['config'],
+                  'weights_initialization': {'path': str(tmp_path/'old_work/initial.pt'), 'sha256': 'old'}})
+        save_json(root/'.internal/state.json', {'iteration': 2, 'elapsed_seconds': 5})
+    binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
+    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.experiment.prepare_initializations',
+                        lambda work, arms: {} if not arms else pytest.fail('Existing runs requested initialization'))
+    started = []
+
+    def finish_arm(scheduler, arm, slot, gpu):
+        assert scheduler.initializations == {}
+        started.append(arm['name'])
+        save_json(Path(arm['run_dir'])/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
+        scheduler.states[arm['name']] = {'status': 'complete'}
+
+    monkeypatch.setattr(Scheduler, 'start', finish_arm)
+    assert run_experiment(plan, binary) == 0
+    assert started == ['a', 'b']
+    assert load_json(Path(plan['work_dir'])/'.internal/plan.json')['initializations'] == {}
 
 
 def test_scheduler_failure_interrupts_other_running_arms(tmp_path, monkeypatch):
