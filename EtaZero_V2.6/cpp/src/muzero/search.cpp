@@ -7,6 +7,8 @@
 namespace etazero::muzero {
 Search::Search(Evaluator& evaluator,SearchSettings settings,uint64_t seed)
     :evaluator_(evaluator),settings_(settings),random_(seed) {
+    if(settings.subtree_value_bias_factor!=0)
+        throw std::runtime_error("MuZero latent search does not support real-board subtree value bias; set subtree_value_bias_factor=0");
     if(settings.graph_search||settings.reuse_tree||settings.root_symmetries!=1)
         throw std::runtime_error("MuZero requires graph_search=false, reuse_tree=false, root_symmetries=1");
     if(settings.threads<1)throw std::runtime_error("MuZero requires positive search threads");

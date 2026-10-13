@@ -96,7 +96,7 @@ std::vector<int16_t> quantize_policy(const std::vector<double>& weights) {
 
 void Search::TreeDeleter::operator()(Node* node) const noexcept {
     // Each unmarked table-owned node is transferred into exactly one work list.
-    while(node) {Node* next=node->cleanup_next;delete node;node=next;}
+    while(node) {Node* next=node->cleanup_next;node->subtree_bias.release(free_prop);delete node;node=next;}
 }
 Search::Node* Search::new_node() {
     size_t id=next_node_.fetch_add(1);
@@ -106,8 +106,10 @@ Search::Node* Search::new_node() {
     std::lock_guard<std::mutex> lock(shard.mutex);shard.nodes.emplace(std::move(key),std::move(owner));
     return node;
 }
-Search::Node* Search::find_node(const SearchState& state) {
-    if(!settings_.graph_search)return new_node();
+Search::Node* Search::find_node(const SearchState& state,const SubtreeValueBiasKey* bias_key) {
+    if(!settings_.graph_search) {
+        Node* node=new_node();if(bias_key)node->subtree_bias.entry=subtree_bias_table_->get(*bias_key);return node;
+    }
     std::string key="graph:"+state.graph_key();
     auto& shard=node_table_[std::hash<std::string>{}(key)%node_table_.size()];
     std::lock_guard<std::mutex> lock(shard.mutex);
@@ -115,7 +117,30 @@ Search::Node* Search::find_node(const SearchState& state) {
     if(found!=shard.nodes.end()){++graph_hits_;return found->second.get();}
     auto owner=std::make_unique<Node>(next_node_.fetch_add(1));Node* node=owner.get();
     node->graph_identity=state.graph_key();
+    // A transposition keeps the bias association from the first creating path.
+    if(bias_key)node->subtree_bias.entry=subtree_bias_table_->get(*bias_key);
     shard.nodes.emplace(std::move(key),std::move(owner));return node;
+}
+void Search::prepare_subtree_bias(const SearchState& state) {
+    if(settings_.subtree_value_bias_factor==0)return;
+    if(!state.supports_subtree_value_bias())throw std::runtime_error("Subtree value bias requires a real-board state adapter");
+    if(!subtree_bias_table_)subtree_bias_table_=std::make_unique<SubtreeValueBiasTable>(settings_.subtree_value_bias_table_num_shards);
+    // Refresh the retained graph in postorder after promotion/deletion. KataGo
+    // resets childless utilities to raw W-L here; backups reapply table bias.
+    std::unordered_set<Node*> seen;std::vector<std::pair<Node*,bool>> stack{{root_,false}};
+    while(!stack.empty()) {
+        auto [node,after]=stack.back();stack.pop_back();
+        if(!after) {
+            if(!seen.insert(node).second)continue;
+            stack.push_back({node,true});
+            for(int i=0;i<node->child_count.load();++i)if(auto child=node->edge(i).child.load())stack.push_back({child,false});
+        } else if(node->child_count.load()>0 && node->status.load()==Node::READY)recompute(*node);
+        else {
+            std::lock_guard<std::mutex> lock(node->stats_mutex);
+            node->stats.value=node->stats.win_loss;node->stats.value_sq=node->stats.value*node->stats.value;
+        }
+    }
+    subtree_bias_table_->clear_unused();
 }
 size_t Search::node_count() const {
     size_t count=0;for(const auto& shard:node_table_)count+=shard.nodes.size();return count;
@@ -147,7 +172,11 @@ Search::Search(SearchSettings s,uint64_t seed,bool start_workers) : settings_(s)
        !std::isfinite(s.policy_optimism) || s.policy_optimism<0 || s.policy_optimism>1 ||
        !std::isfinite(s.root_policy_optimism) || s.root_policy_optimism<0 || s.root_policy_optimism>1 ||
        (s.use_noise_pruning && (!std::isfinite(s.noise_prune_utility_scale) || s.noise_prune_utility_scale<0.001 || s.noise_prune_utility_scale>10 ||
-       !std::isfinite(s.noise_pruning_cap) || s.noise_pruning_cap<0 || s.noise_pruning_cap>1e50)))
+       !std::isfinite(s.noise_pruning_cap) || s.noise_pruning_cap<0 || s.noise_pruning_cap>1e50)) ||
+       !std::isfinite(s.subtree_value_bias_factor) || s.subtree_value_bias_factor<0 || s.subtree_value_bias_factor>1 ||
+       !std::isfinite(s.subtree_value_bias_free_prop) || s.subtree_value_bias_free_prop<0 || s.subtree_value_bias_free_prop>1 ||
+       !std::isfinite(s.subtree_value_bias_weight_exponent) || s.subtree_value_bias_weight_exponent<0 || s.subtree_value_bias_weight_exponent>1 ||
+       s.subtree_value_bias_table_num_shards<1)
         throw std::runtime_error("Invalid search settings");
     root_=new_node();thread_states_.resize(s.threads);cleanup_roots_.resize(s.threads,nullptr);
     for(int i=0;i<s.threads;++i) {
@@ -186,10 +215,10 @@ void Search::collect_nodes(Node* keep) {
         }
     }
     if(count<4096 || workers_.empty()) {
-        for(auto node:cleanup_roots_)TreeDeleter{}(node);
+        for(auto node:cleanup_roots_)TreeDeleter{settings_.subtree_value_bias_free_prop}(node);
     } else {
         {std::lock_guard<std::mutex> lock(work_mutex_);cleaning_=true;workers_done_=0;++generation_;}
-        work_changed_.notify_all();TreeDeleter{}(cleanup_roots_[0]);
+        work_changed_.notify_all();TreeDeleter{settings_.subtree_value_bias_free_prop}(cleanup_roots_[0]);
         std::unique_lock<std::mutex> lock(work_mutex_);
         work_changed_.wait(lock,[&]{return workers_done_==static_cast<int>(workers_.size());});cleaning_=false;
     }
@@ -197,6 +226,7 @@ void Search::collect_nodes(Node* keep) {
 }
 void Search::reset(uint64_t seed) {
     root_=nullptr;collect_nodes(nullptr);root_=new_node();
+    if(subtree_bias_table_)subtree_bias_table_->clear_unused();
     for(int i=0;i<settings_.threads;++i) {
         random_[i].seed(seed+0x9e3779b97f4a7c15ULL*i);
         inference_random_[i].seed((seed^0xd1b54a32d192ed03ULL)+0x9e3779b97f4a7c15ULL*i);
@@ -204,6 +234,7 @@ void Search::reset(uint64_t seed) {
 }
 void Search::set_evaluator(Evaluator& evaluator) {
     root_=nullptr;collect_nodes(nullptr);root_=new_node();evaluator_=&evaluator;
+    if(subtree_bias_table_)subtree_bias_table_->clear_unused();
     for(auto& thread:thread_states_)thread.state.reset();
 }
 void Search::evaluate_node(Node& node,const SearchState& state,int worker,int symmetries) {
@@ -263,7 +294,10 @@ void Search::evaluate_node(Node& node,const SearchState& state,int worker,int sy
     std::lock_guard<std::mutex> lock(node.stats_mutex);
     node.initial_wdl=averaged;node.initial_value=averaged[0]-averaged[2];node.initial_stdev=stdev;node.has_auxiliary=auxiliary;
     node.initial_weight=uncertainty_weight(stdev,auxiliary,settings_);
-    if(node.stats.visits==0)node.stats={1,node.initial_value,node.initial_value*node.initial_value,averaged[1],node.initial_weight,node.initial_weight*node.initial_weight};
+    if(node.stats.visits==0) {
+        double utility=node.subtree_bias.apply(node.initial_value,settings_.subtree_value_bias_factor);
+        node.stats={1,utility,utility*utility,averaged[1],node.initial_weight,node.initial_weight*node.initial_weight,node.initial_value};
+    }
 }
 ValueStats Search::snapshot(Node& node) {std::lock_guard<std::mutex> lock(node.stats_mutex);return node.stats;}
 std::vector<RootChildStats> Search::child_stats(Node& node,bool aggregation) {
@@ -276,7 +310,7 @@ std::vector<RootChildStats> Search::child_stats(Node& node,bool aggregation) {
         double scale=double(n)/stats.visits,weight=stats.weight*scale;
         double perspective=edge.perspective.load();
         children.push_back({node.moves[edge.move_index].search_prior,weight*perspective*stats.value,
-                            weight*stats.value_sq,n,weight,stats.weight_sq*scale*(aggregation?scale:1),weight*stats.draw});
+                            weight*stats.value_sq,n,weight,stats.weight_sq*scale*(aggregation?scale:1),weight*stats.draw,weight*perspective*stats.win_loss});
     }
     return children;
 }
@@ -284,7 +318,7 @@ void Search::recompute(Node& node,int visits_to_add) {
     std::lock_guard<std::mutex> update(node.update_mutex);
     // LCB uses linear edge sampling weightSq; parent aggregation scales a weighted mean quadratically.
     auto children=child_stats(node,true);
-    auto result=aggregate_values(node.initial_wdl,children,settings_,&node==root_ && !remove_root_noise_ && settings_.noise_fraction>0,node.initial_weight);
+    auto result=aggregate_values(node.initial_wdl,children,settings_,&node==root_ && !remove_root_noise_ && settings_.noise_fraction>0,node.initial_weight,&node.subtree_bias);
     std::lock_guard<std::mutex> lock(node.stats_mutex);
     result.visits=node.stats.visits+visits_to_add;node.stats=result;
 }
@@ -340,7 +374,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
                 value=state.terminal_value();draw=value==0?1:0;
                 if(!std::isfinite(value) || std::abs(value)>1)throw std::runtime_error("Invalid terminal value");
                 std::lock_guard<std::mutex> lock(node->stats_mutex);
-                auto& stats=node->stats;++stats.visits;stats.value=value;stats.value_sq=value*value;stats.draw=draw;
+                auto& stats=node->stats;++stats.visits;stats.value=stats.win_loss=value;stats.value_sq=value*value;stats.draw=draw;
                 double terminal_weight=settings_.use_uncertainty && root_->has_auxiliary?settings_.uncertainty_max_weight:1;
                 stats.weight=stats.visits*terminal_weight;stats.weight_sq=stats.visits*terminal_weight*terminal_weight;break;
             }
@@ -411,11 +445,13 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             choice=candidates[std::uniform_int_distribution<size_t>(0,candidates.size()-1)(rng)];
             }
             Edge* edge=&child_edge(*node,choice);
+            Node* child=edge->child.load(std::memory_order_acquire);
+            SubtreeValueBiasKey bias_key;
+            bool has_bias_key=!child && settings_.subtree_value_bias_factor!=0 && state.subtree_bias_key(node->moves[choice].action,bias_key);
             int perspective=state.move(node->moves[choice].action);
             if(perspective!=1 && perspective!=-1)throw std::runtime_error("WDL search perspective must be +1 or -1");
-            Node* child=edge->child.load(std::memory_order_acquire);
             if(!child) {
-                Node* candidate=find_node(state);Node* expected=nullptr;
+                Node* candidate=find_node(state,has_bias_key?&bias_key:nullptr);Node* expected=nullptr;
                 if(edge->child.compare_exchange_strong(expected,candidate,std::memory_order_release,std::memory_order_acquire))child=candidate;
                 else child=expected; // Unused racing candidates are collected with the table.
             }
@@ -474,7 +510,7 @@ void Search::worker_loop(int worker) {
         std::unique_lock<std::mutex> lock(work_mutex_);
         work_changed_.wait(lock,[&]{return closing_ || generation_!=seen;});if(closing_)return;
         seen=generation_;bool cleaning=cleaning_;lock.unlock();
-        if(cleaning)TreeDeleter{}(cleanup_roots_[worker]);else simulate_many(worker);
+        if(cleaning)TreeDeleter{settings_.subtree_value_bias_free_prop}(cleanup_roots_[worker]);else simulate_many(worker);
         lock.lock();++workers_done_;lock.unlock();work_changed_.notify_all();
     }
 }
@@ -497,6 +533,8 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
         root_=nullptr;collect_nodes(nullptr);root_=new_node();
     }
     if(settings_.graph_search)root_->graph_identity=identity;
+    remove_root_noise_=options.remove_root_noise;
+    prepare_subtree_bias(state);
     SearchResult result;result.policy.assign(state.actions(),0);result.move_policy=result.policy;
     result.visits.assign(state.actions(),0);result.network_policy=result.policy;result.search_policy=result.policy;
     result.initial_visits=root_->status.load()==Node::READY?root_->visits.load()+1:0;
@@ -572,7 +610,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
             auto q=snapshot(*child);
             if(q.visits>0 && q.weight>0) {
                 result.q_visits[action]=q.visits;
-                result.q_values[action]=static_cast<float>(e.perspective.load()*q.value);
+                result.q_values[action]=static_cast<float>(e.perspective.load()*q.win_loss);
             }
         }
         auto n=e.n.load();if(n<=0)continue;
@@ -581,8 +619,8 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     if(actions.size()!=stats.size())throw std::runtime_error("Root child stats are incomplete");
     if(total!=root_->visits.load())throw std::runtime_error("Search has inconsistent completed root visits");
     result.network_wdl=root_->initial_wdl;result.network_sample_weight=root_->initial_weight;result.network_value_stdev=root_->initial_stdev;
-    auto parent=snapshot(*root_);result.value=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
-    result.search_wdl=wdl_from_value(parent.value,parent.draw);
+    auto parent=snapshot(*root_);result.value=parent.win_loss;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
+    result.search_wdl=wdl_from_value(parent.win_loss,parent.draw);
     if(total==0) {
         result.policy=result.move_policy=result.search_policy;
         result.policy_target=quantize_policy(result.policy);

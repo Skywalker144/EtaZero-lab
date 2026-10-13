@@ -106,7 +106,7 @@ std::vector<double> noise_pruned_weights(const std::vector<RootChildStats>& chil
     }
     return weights;
 }
-ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& s,bool noisy_root,double initial_weight) {
+ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& s,bool noisy_root,double initial_weight,SubtreeValueBias* bias) {
     auto adjusted=noise_pruned_weights(children,s);double total=std::accumulate(adjusted.begin(),adjusted.end(),0.0),maximum=0,simple_value=0;
     int64_t visits=1;
     for(size_t i=0;i<children.size();++i) {
@@ -132,16 +132,26 @@ ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>
         }
         if(adjusted_total<=0)throw std::runtime_error("Value weighting removed every child");
     }
-    double own=initial[0]-initial[2],value=initial_weight*own,value_sq=initial_weight*own*own;
-    double draw=initial_weight*initial[1],weight_sq=initial_weight*initial_weight;
+    double value=0,value_sq=0,win_loss=0,draw=0,weight_sq=0;
     for(size_t i=0;i<children.size();++i) {
-        const auto& c=children[i];if(c.weight<=0)continue;
+        const auto& c=children[i];if(c.weight<=0 || total<=0)continue;
         double desired=adjusted[i]*total/adjusted_total,scale=desired/c.weight;
         value+=scale*c.value_sum;value_sq+=scale*c.value_sq_sum;draw+=scale*c.draw_sum;
+        win_loss+=scale*c.win_loss_sum;
         weight_sq+=scale*scale*c.weight_sq;
     }
+    // KataGo learns from the weighted CHILD utility before adding this node's
+    // raw NN sample. Confidence uses child weight BEFORE noise pruning.
+    double own=initial[0]-initial[2],utility=own;
+    if(bias) {
+        double original=0;for(const auto& c:children)original+=c.weight;
+        utility=bias->update(own,total>0?value/total:0,original,total,
+                             s.subtree_value_bias_factor,s.subtree_value_bias_weight_exponent);
+    }
+    value+=initial_weight*utility;value_sq+=initial_weight*utility*utility;
+    win_loss+=initial_weight*own;draw+=initial_weight*initial[1];weight_sq+=initial_weight*initial_weight;
     double weight=initial_weight+total;
-    return {visits,value/weight,value_sq/weight,draw/weight,weight,weight_sq};
+    return {visits,value/weight,value_sq/weight,draw/weight,weight,weight_sq,win_loss/weight};
 }
 double explore_scaling(double total,const ValueStats& parent,const SearchSettings& s) {
     double stdev=s.c_puct_stdev_prior;

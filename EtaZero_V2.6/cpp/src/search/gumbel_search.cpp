@@ -62,7 +62,7 @@ template<bool Full> void GumbelSearch<Full>::gumbel_worker_loop(int worker) {
         std::unique_lock<std::mutex> lock(work_mutex_);
         work_changed_.wait(lock,[&]{return closing_||generation_!=seen;});if(closing_)return;
         seen=generation_;bool cleaning=cleaning_;lock.unlock();
-        if(cleaning)TreeDeleter{}(cleanup_roots_[worker]);else simulate_gumbel(worker);
+        if(cleaning)TreeDeleter{settings_.subtree_value_bias_free_prop}(cleanup_roots_[worker]);else simulate_gumbel(worker);
         lock.lock();++workers_done_;lock.unlock();work_changed_.notify_all();
     }
 }
@@ -75,6 +75,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
         throw std::runtime_error("Invalid Gumbel search caps/temperature");
     if(options.hint_action<-1||(options.hint_action>=0&&!state.legal(options.hint_action)))throw std::runtime_error("Illegal Gumbel root hint");
     start_=std::chrono::steady_clock::now();advance(0);SearchResult result;
+    prepare_subtree_bias(state);
     result.policy.assign(state.actions(),0);result.move_policy=result.policy;result.network_policy=result.policy;result.search_policy=result.policy;
     result.visits.assign(state.actions(),0);result.q_values.assign(state.actions(),0);result.q_visits.assign(state.actions(),0);
     if(state.terminal()) {double v=state.terminal_value();result.value=v;result.network_wdl=result.search_wdl={(v+std::abs(v))/2,1-std::abs(v),(std::abs(v)-v)/2};return result;}
@@ -102,13 +103,13 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     auto children=root_children();auto parent=snapshot(*root_);
     result.simulations=completed_;result.new_playouts=completed_+1;result.root_visits=root_->visits.load()+1;result.stopped_early=stopped_;
     result.network_wdl=root_->initial_wdl;result.network_sample_weight=root_->initial_weight;result.network_value_stdev=root_->initial_stdev;
-    result.value=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
-    result.search_wdl=wdl_from_value(parent.value,parent.draw);
+    result.value=parent.win_loss;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
+    result.search_wdl=wdl_from_value(parent.win_loss,parent.draw);
     for(size_t i=0;i<actions.size();++i) {
         result.visits[actions[i]]=children[i].visits;
         int index=root_->moves[i].child_index.load();
         if(index>=0){auto& edge=root_->edge(index);if(Node* child=edge.child.load()){auto q=snapshot(*child);
-            if(q.visits>0){result.q_visits[actions[i]]=q.visits;result.q_values[actions[i]]=float(edge.perspective.load()*q.value);}}}
+            if(q.visits>0){result.q_visits[actions[i]]=q.visits;result.q_values[actions[i]]=float(edge.perspective.load()*q.win_loss);}}}
     }
     finish_gumbel_result(result,actions,children,root_->initial_value,*schedule_,gumbel_,temperature,random_[0]);
     result.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start_).count();return result;

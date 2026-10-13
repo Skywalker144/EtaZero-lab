@@ -1,6 +1,7 @@
 #pragma once
 #include "game.h"
 #include "inference.h"
+#include "subtree_value_bias.h"
 namespace etazero {
 // WDL search over terminal-outcome games: no intermediate reward or discount.
 struct SearchEvaluation {
@@ -26,6 +27,11 @@ public:
     // Exact situation identity includes all rule/history/input conditions that affect continuations.
     // Unsupported state adapters must refuse graph search explicitly.
     virtual std::string graph_key() const { throw std::runtime_error("State does not support graph search"); }
+    virtual bool supports_subtree_value_bias() const { return false; }
+    // Called BEFORE the selected move. False denotes insufficient real history.
+    virtual bool subtree_bias_key(int,SubtreeValueBiasKey&) const {
+        throw std::runtime_error("State does not support real-board subtree value bias");
+    }
     // Return +1 for the same value perspective, -1 when the player changes.
     virtual int move(int action) = 0;
 };
@@ -45,6 +51,11 @@ public:
     bool terminal() const override { return game_.finished(); }
     double terminal_value() const override { return game_.terminal_value(); }
     int symmetry_count() const override { return game_.rule()==Rule::HEX?2:8; }
+    bool supports_subtree_value_bias() const override { return true; }
+    bool subtree_bias_key(int action,SubtreeValueBiasKey& key) const override {
+        if(game_.last_action()<0)return false;
+        key=subtree_value_bias_key(game_,action);return true;
+    }
     Evaluation evaluate(SearchEvaluation options = {}) const override {
         return evaluator_.evaluate_symmetry(game_.observation(),options.symmetry,options.skip_cache,
                                            options.policy_temperature,options.randomize,options.optimism);

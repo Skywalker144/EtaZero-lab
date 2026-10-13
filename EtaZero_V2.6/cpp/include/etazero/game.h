@@ -4,7 +4,7 @@
 namespace etazero {
 class Game {
     Board board_;
-    int canvas_, player_ = 1, turn_ = 0, winner_ = 0, reason_ = 0;
+    int canvas_, player_ = 1, turn_ = 0, winner_ = 0, reason_ = 0, last_action_ = -1;
     Rule rule_;
     bool finished_ = false;
     double pda_doublings_ = 0; int pda_player_ = 0;
@@ -25,6 +25,7 @@ public:
     int actions() const { return canvas_ * canvas_; }
     int player() const { return player_; }
     int turn() const { return turn_; }
+    int last_action() const { return last_action_; }
     int winner() const { return winner_; }
     int reason() const { return reason_; }
     Rule rule() const { return rule_; }
@@ -73,6 +74,7 @@ public:
             if (analyzer.forbidden(board_, local)) { winner_ = -1; reason_ = 2; }
         }
         board_.cells[local] = player_;
+        last_action_ = a;
         ++turn_;
         if (rule_ == Rule::HEX && board_.hex_connected(player_)) { winner_ = player_; reason_ = 3; }
         if (rule_ != Rule::HEX && !winner_) for (int n : board_.lengths(local, player_))

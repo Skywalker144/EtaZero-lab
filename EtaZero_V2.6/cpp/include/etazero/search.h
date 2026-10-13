@@ -31,6 +31,8 @@ struct SearchSettings {
     double uncertainty_coeff=0.25, uncertainty_exponent=1, uncertainty_max_weight=8;
     double policy_optimism=0, root_policy_optimism=0;
     double noise_prune_utility_scale=0.15, noise_pruning_cap=1e50;
+    double subtree_value_bias_factor=0, subtree_value_bias_free_prop=0.8, subtree_value_bias_weight_exponent=0.85;
+    int subtree_value_bias_table_num_shards=65536;
 };
 struct SearchRun {
     int max_visits = 0;
@@ -42,21 +44,23 @@ struct SearchRun {
     int hint_action = -1; // Root-only guidance; changes always clear statistics.
     bool collect_root_policy_invalid_mass = false;
 };
-// Completed weighted samples, all quantities from the parent player's perspective.
+// Completed weighted samples: utility and pure W-L use the parent player's perspective.
 struct RootChildStats {
     double prior, value_sum, value_sq_sum;
     int64_t visits;
     double weight, weight_sq, draw_sum=0;
+    double win_loss_sum=value_sum; // Pure W-L; value_sum/value_sq_sum are search utility.
 };
 struct ValueStats {
     int64_t visits=0;
     double value=0, value_sq=0, draw=1, weight=0, weight_sq=0;
+    double win_loss=value; // Utility may be biased; training/report WDL never uses it.
 };
 double temperature_at_turn(double early,double late,double halflife,int turn,int board_area);
 std::vector<double> policy_temperature_distribution(const std::vector<double>& weights,double temperature);
 std::vector<double> temperature_distribution(const std::vector<double>& weights,double temperature,double only_below_prob=1);
 double value_weight_cdf(double z);
-ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& settings,bool noisy_root,double initial_weight=1);
+ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& settings,bool noisy_root,double initial_weight=1,SubtreeValueBias* bias=nullptr);
 double mixed_policy_logit(double ordinary,double optimistic,double optimism);
 double uncertainty_weight(double stdev,bool supported,const SearchSettings& settings);
 std::vector<double> noise_pruned_weights(const std::vector<RootChildStats>& children,const SearchSettings& settings);
@@ -134,6 +138,7 @@ protected:
         bool has_auxiliary=false;
         WDL initial_wdl{0,1,0};
         ValueStats stats;
+        SubtreeValueBias subtree_bias;
         std::mutex stats_mutex, update_mutex;
         std::exception_ptr error;
         std::unique_ptr<Move[]> moves;
@@ -151,7 +156,7 @@ protected:
             return published[2].load(std::memory_order_acquire)[index-64];
         }
     };
-    struct TreeDeleter { void operator()(Node* node) const noexcept; };
+    struct TreeDeleter { double free_prop;void operator()(Node* node) const noexcept; };
     struct Sync { std::mutex mutex; std::condition_variable changed; };
     std::array<Sync,64> locks_;
     std::atomic<size_t> next_node_{0};
@@ -166,6 +171,7 @@ protected:
     std::vector<ThreadState> thread_states_;
     Evaluator* evaluator_ = nullptr;
     SearchSettings settings_;
+    std::unique_ptr<SubtreeValueBiasTable> subtree_bias_table_;
     // Table owns all nodes. Edges and root borrow pointers until quiescent mark-and-sweep.
     struct NodeShard { std::mutex mutex;std::unordered_map<std::string,std::unique_ptr<Node>> nodes; };
     std::array<NodeShard,64> node_table_;
@@ -200,7 +206,8 @@ protected:
     std::vector<RootChildStats> child_stats(Node& node,bool aggregation=false);
     void recompute(Node& node,int visits_to_add=0); // Serializes updates without holding parent stats during child reads.
     Node* new_node();
-    Node* find_node(const SearchState& state);
+    Node* find_node(const SearchState& state,const SubtreeValueBiasKey* bias_key);
+    void prepare_subtree_bias(const SearchState& state);
     bool catch_up(Edge& edge,Node& child,int worker);
     size_t node_count() const;
     Edge& child_edge(Node& node,int move_index);
