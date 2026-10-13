@@ -1355,6 +1355,65 @@ def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
     assert all(sha256(path) == digest for path, digest in hashes.items())
 
 
+def test_autoexp_archived_muzero_architecture_and_scheduler_changes(tmp_path):
+    from etazero.experiment import experiment_plan, run_experiment, write_arm_config
+    from test_muzero_pipeline import small_config
+    torch.set_num_threads(1)
+    directory = tmp_path/'umbrella'; arm = directory/'a'
+    root = tmp_path/'run'; work = tmp_path/'scheduler'
+    directory.mkdir()
+    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=1\nmax_seconds=0\narm_gpus=0\nshared_init=true\nautoelo=false\n')
+    config = small_config()
+    config['run']['run_dir'] = str(root)
+    config['muzero_training'] = dict(auxiliary_losses=True, katago_optimizer=False,
+                                     learning_rate=.001, weight_decay=.0003)
+    config['optimizer']['kind'] = 'adamw'
+    write_arm_config(config, arm)
+    plan = experiment_plan(directory, environ={}, work_dir=work)
+    assert run_experiment(plan, BINARY) == 0
+    old_record = load_json(root/'.internal/run.json')
+    assert old_record['config']['network']['architecture'] == 'nbt'
+    assert old_record['weights_initialization'] is not None
+    # A different scheduler directory and shared_init setting must not affect resume.
+    resumed = experiment_plan(directory, environ={'SHARED_INIT': 'false', 'MAX_ITERS': '2'},
+                              work_dir=tmp_path/'other_scheduler')
+    assert run_experiment(resumed, BINARY) == 0
+    assert load_json(root/'.internal/run.json') == old_record
+    state = load_json(root/'.internal/state.json')
+    assert state['iteration'] == 3 and state['checkpoint']['optimizer_steps'] > 0
+    checkpoint_hash = sha256(root/state['checkpoint']['path'])
+    record_hash = sha256(root/'.internal/run.json')
+    archive = tmp_path/'run.nbt'; root.rename(archive)
+    # Retained legacy metadata must not lock the next architecture.
+    save_json(work/'.internal/identity.json', {'umbrella': plan['umbrella'], 'arms': plan['arms'],
+                                              'shared_init': True})
+    legacy_hash = sha256(work/'.internal/identity.json')
+    config['network']['architecture'] = 'resnet'
+    write_arm_config(config, arm)
+    replacement = experiment_plan(directory, environ={}, work_dir=work)
+    assert run_experiment(replacement, BINARY) == 0
+    current = load_json(root/'.internal/run.json')
+    assert current['id'] != old_record['id']
+    assert current['config']['network']['architecture'] == 'resnet'
+    assert current['weights_initialization'] != old_record['weights_initialization']
+    state = load_json(root/'.internal/state.json')
+    assert state['iteration'] == 2 and state['checkpoint']['optimizer_steps'] > 0
+    saved = load_checkpoint(root, state['checkpoint'], config)
+    assert saved['network_config']['architecture'] == 'resnet'
+    assert sha256(archive/'.internal/run.json') == record_hash
+    archived_state = load_json(archive/'.internal/state.json')
+    assert sha256(archive/archived_state['checkpoint']['path']) == checkpoint_hash
+    assert sha256(work/'.internal/identity.json') == legacy_hash
+    # Incompatible reuse of a training directory remains the learner's responsibility.
+    config['network']['architecture'] = 'nbt'
+    write_arm_config(config, arm)
+    incompatible = experiment_plan(directory, environ={'MAX_ITERS': '2'}, work_dir=work)
+    with pytest.raises(RuntimeError, match='Experiment a exited'):
+        run_experiment(incompatible, BINARY)
+    assert 'Resume model/optimizer/data configuration differs' in (work/'logs/a.runner.log').read_text()
+    assert load_json(root/'.internal/run.json') == current
+
+
 def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     umbrella = tmp_path/'umbrella'; arm = umbrella/'a'; arm.mkdir(parents=True)
     root = tmp_path/'run'; work = tmp_path/'scheduler'
