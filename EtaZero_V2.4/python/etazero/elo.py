@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize
 from scipy.special import expit
+from tqdm.auto import trange
 
 from .storage import atomic_path, write_json
 
@@ -94,7 +95,7 @@ def fit_ratings(games: list[dict], anchor: str, samples: int = 300, seed: int = 
         raise ValueError('Complete both colors of each opening before fitting')
     rng = np.random.default_rng(seed)
     bootstrap = []
-    for _ in range(samples):
+    for _ in trange(samples, desc='Elo bootstrap', unit='sample', dynamic_ncols=True, disable=None):
         n, w = np.zeros_like(counts), np.zeros_like(wins)
         for block_n, block_w in blocks:
             multiplicity = rng.multinomial(len(block_n), np.full(len(block_n), 1 / len(block_n)))
@@ -119,6 +120,7 @@ def fit_ratings(games: list[dict], anchor: str, samples: int = 300, seed: int = 
 
 
 def write_ratings(output: Path, samples: int = 300) -> dict:
+    print('Elo: validating completed games and fitting ratings', flush=True)
     from .arena import load_results
     manifest, games = load_results(output)
     expected = len(manifest['pairs']) * manifest['games_per_pair']
