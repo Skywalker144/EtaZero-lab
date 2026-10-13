@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 import time
-from .config import ROOT, FILES, FIELDS, boolean, fingerprint, load_config, resume_config, validate
+from .config import ROOT, FILES, FIELDS, boolean, load_config, validate
 from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sha256
 
@@ -121,24 +121,10 @@ def prepare_initializations(work, arms):
     return references
 
 
-def arm_progress(arm, settings, initialization=None):
+def arm_progress(arm, settings):
     root = Path(arm['run_dir'])
-    info_path = root/'.internal/run.json'
-    if not info_path.exists():
-        if root.exists() and any(root.iterdir()):
-            # The run lock can precede run.json if startup was interrupted.
-            leftovers = list(root.rglob('*'))
-            if any(p.is_file() and p != root/'.internal/run.lock' for p in leftovers):
-                raise ValueError(f'Nonempty arm directory has no run record: {root}')
+    if not (root/'.internal/run.json').exists():
         return 'pending'
-    info = load_json(info_path)
-    if resume_config(info['config']) != resume_config(arm['config']):
-        raise ValueError(f'Arm configuration differs from saved run: {arm["name"]}')
-    origin = info['weights_initialization']
-    if initialization != origin:
-        raise ValueError(f'Arm initialization differs from saved run: {arm["name"]}')
-    if origin and sha256(origin['path']) != origin['sha256']:
-        raise ValueError(f'Arm initialization payload changed: {arm["name"]}')
     state_path = root/'.internal/state.json'
     state = load_json(state_path) if state_path.exists() else {'iteration': 0, 'elapsed_seconds': 0.0}
     if settings['max_iteration'] and state['iteration'] > settings['max_iteration']:
@@ -223,10 +209,7 @@ class Scheduler:
     def run(self):
         settings = self.plan['settings']; queue = []
         for arm in self.plan['arms']:
-            origin = self.initializations.get(arm['name'])
-            # run.json stores just path/checksum, while the umbrella also stores the group key.
-            origin = {k: origin[k] for k in ('path', 'sha256')} if origin else None
-            status = arm_progress(arm, settings, origin)
+            status = arm_progress(arm, settings)
             self.states[arm['name']] = {'status': status}
             if status == 'pending':
                 queue.append(arm)
@@ -242,9 +225,8 @@ class Scheduler:
                     if code is None:
                         continue
                     item['output'].close(); self.running.remove(item)
-                    arm = item['arm']; origin = self.initializations.get(arm['name'])
-                    origin = {k: origin[k] for k in ('path', 'sha256')} if origin else None
-                    complete = code == 0 and arm_progress(arm, settings, origin) == 'complete'
+                    arm = item['arm']
+                    complete = code == 0 and arm_progress(arm, settings) == 'complete'
                     self.states[arm['name']].update(status='complete' if complete else 'failed', returncode=code)
                     self.save()
                     if not complete:
@@ -273,25 +255,11 @@ def run_experiment(plan, binary):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError('Another scheduler owns this experiment') from error
-        identity = {'umbrella': plan['umbrella'], 'arms': plan['arms'], 'shared_init': plan['settings']['shared_init']}
-        manifest = work/'.internal/identity.json'
-        if manifest.exists():
-            previous = load_json(manifest)
-            if any(previous[key] != identity[key] for key in ('umbrella', 'shared_init')):
-                raise ValueError('Experiment umbrella or shared initialization changed; use a new experiment directory')
-            current_arms = {arm['name']: arm for arm in identity['arms']}
-            for arm in previous['arms']:
-                current = current_arms.get(arm['name'])
-                if (current is None or any(current[key] != arm[key] for key in ('config_dir','run_dir'))
-                        or resume_config(current['config']) != resume_config(arm['config'])):
-                    raise ValueError(f'Existing experiment arm changed or was removed: {arm["name"]}; '
-                                     'use a new experiment directory')
-            if previous != identity:
-                # Record new arms and execution changes under the scheduler lock.
-                save_json(manifest, identity)
-        else:
-            save_json(manifest, identity, immutable=True)
-        initializations = prepare_initializations(work, plan['arms']) if identity['shared_init'] else {}
+        # Existing runs own their resume state and weight origin. Only new runs
+        # need a shared initialization; the scheduler uses the current plan.
+        new_arms = [arm for arm in plan['arms']
+                    if not (Path(arm['run_dir'])/'.internal/run.json').exists()]
+        initializations = prepare_initializations(work, new_arms) if plan['settings']['shared_init'] else {}
         save_json(work/'.internal/plan.json', {**plan, 'initializations': initializations,
                                              'binary_sha256': binary_hash})
         code = Scheduler(work, plan, binary, initializations).run()
