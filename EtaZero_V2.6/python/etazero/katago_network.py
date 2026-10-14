@@ -139,6 +139,36 @@ class SerializedSearch(nn.Module):
         return self.graph(obs, globals)
 
 
+class ExportComplexDepthwiseConv2d(nn.Module):
+    """Preassemble the source's two real kernels on the export copy.
+
+    Runtime kernel concatenation followed by AMP casts can trigger the
+    TorchScript TensorExpr OptimizeCat output-stride assertion. Conv2d weights
+    avoid that rewrite and use the backend's ordinary FP16 weight preparation.
+    The two convolutions and real/imaginary output arithmetic stay unchanged.
+    """
+    def __init__(self, module):
+        super().__init__()
+        self.c = module.c
+        for name, weight in (
+                ('conv_ri', torch.cat((module.real_kernel, module.imag_kernel), 0)),
+                ('conv_neg_ir', torch.cat((-module.imag_kernel, module.real_kernel), 0))):
+            # Allocate no random weights: exporting must not advance the learner RNG.
+            conv = nn.Conv2d(2 * self.c, 2 * self.c, module.kernel_size,
+                             padding=module.dilation * (module.kernel_size // 2),
+                             dilation=module.dilation, groups=2 * self.c,
+                             bias=False, device='meta')
+            conv.weight = nn.Parameter(weight.detach(), requires_grad=False)
+            setattr(self, name, conv)
+
+    def forward(self, x):
+        x_ri = torch.cat((x[..., :self.c, :, :], x[..., self.c:, :, :]), -3)
+        conv1, conv2 = self.conv_ri(x_ri), self.conv_neg_ir(x_ri)
+        real = conv1[..., :self.c, :, :] - conv1[..., self.c:, :, :]
+        imag = conv2[..., self.c:, :, :] - conv2[..., :self.c, :, :]
+        return torch.cat((real, imag), -3)
+
+
 def inference_network(model):
     if model.training:
         raise ValueError('KataGo inference export requires evaluation mode')
@@ -147,6 +177,9 @@ def inference_network(model):
     result.network.has_intermediate_head = False
     result.network.use_flex_attention = False
     for module in result.modules():
+        for name, child in list(module.named_children()):
+            if isinstance(child, source.ComplexDepthwiseConv2d):
+                setattr(module, name, ExportComplexDepthwiseConv2d(child))
         if isinstance(module, source.TransformerFFNBlock):
             module.fused_swiglu_kernel = False
         if isinstance(module, source.NormActConv) and module.conv1x1 is not None:
