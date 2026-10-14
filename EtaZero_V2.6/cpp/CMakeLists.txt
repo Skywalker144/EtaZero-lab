@@ -26,6 +26,8 @@ if(ETAZERO_WITH_TORCH)
     target_link_libraries(etazero_torch PUBLIC etazero_core "${TORCH_LIBRARIES}")
     add_executable(etazero src/commands/main.cpp src/commands/match.cpp)
     target_link_libraries(etazero PRIVATE etazero_torch)
+    add_executable(inference_benchmark tools/inference_benchmark.cpp)
+    target_link_libraries(inference_benchmark PRIVATE etazero_torch)
     # MuZero retains its own request and node layouts.
     add_library(etazero_muzero_torch src/muzero/torch_backend.cpp)
     target_link_libraries(etazero_muzero_torch PUBLIC etazero_muzero etazero_torch "${TORCH_LIBRARIES}")
