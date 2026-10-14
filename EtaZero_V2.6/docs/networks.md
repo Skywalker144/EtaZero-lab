@@ -54,11 +54,31 @@ PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b
 
 `rvgl` 的训练模型保留并行 1×1 分支；导出副本按来源 exporter 将其权重并入空间卷积的中心，移除该分支。原训练参数和 checkpoint 不受影响，合并可能改变浮点舍入。
 
+Frequency-mixing TAB 的复数 depthwise 卷积在导出副本中预先拼装为来源所用的两个实数 depthwise `Conv2d`，保留原有卷积拆分及实部/虚部输出运算。固定权重不再在推理时拼接，避免 TorchScript TensorExpr 对 AMP 与拼接的输出 stride 重写问题；训练参数和计算保持来源实现。
+
 Batch renorm 默认保持来源初始界限 `rmax=1,dmax=0`，EMA momentum 为 0.001。需要随样本数调整界限时，在 `train.cfg` 显式设置 `[brenorm]` 的 `avg_momentum`、`target_rmax`、`target_dmax`、`adjustment_scale`。界限按来源的指数更新公式由累计消费样本数推导；模型保存 running/renorm statistics，续训恢复样本时钟，不重新开始调整。
 
 执行采用来源公开的 NCHW/SDPA 路径并保留显式 mask。单图编译按来源要求关闭 fused RoPE/QKV attention 路径；支持形状的 CUDA AMP SwiGLU 保留来源融合内核。导出关闭训练融合内核，以固定 canvas 的 tensor trace 封装成 TorchScript，并保留动态 batch 和输入设备；C++ 使用已有 LibTorch/CUDA Graph 后端。此执行选择不代表与来源默认 NHWC/flex attention 的性能或浮点运算顺序完全等价。
 
 ## 检查入口
+
+### 原生推理测速
+
+[推理测速脚本](../scripts/benchmark_inference.py) 为所选 KataGo 名称生成同一随机种子初始化的模型，通过生产 `TorchBackend` 在同一进程中交替测量。先按 README 构建；将 `ARCH_A`、`ARCH_B` 设为需要比较的完整架构名称，在本版本目录运行：
+
+```bash
+conda run --no-capture-output -n pytorch python scripts/benchmark_inference.py \
+  --architectures "$ARCH_A" "$ARCH_B" --canvas 15 --precision float16 \
+  --batches 1 4 16 64 --output data/my_inference_benchmark
+```
+
+也可以用 `--config-dir` 加入现有 AlphaZero 配置目录的网络，与 `--architectures` 的命名预设一起比较。它通过训练使用的 `make_network` 构造实际网络，可测原有 `nbt` 入口；`--canvas` 须与配置中的 canvas 相同。测速不修改配置或读取训练 checkpoint。
+
+每组先预热，再按 `--repeats` 重复计时，交替模型顺序与 batch 遍历方向。耗时包含 CPU 输入打包、H2D、CUDA Graph 重放、同步 D2H 和结果构造；加载、图捕获与预热单列，不计入吞吐。结果不包含组批排队、缓存和搜索，也不直接等于自对弈速度。非图桶大小的 batch 会补到下一个桶，原始记录和汇总均记录 `graph_batch`。
+
+测速须在可访问宿主 CUDA 的环境执行。输出目录必须不存在，保留源码快照、架构配置、种子、模型与二进制哈希、构建配置、软硬件信息、逐轮 `raw.jsonl` 及 `summary.json/csv`。汇总采用各轮平均 batch 延迟与吞吐的中位数，并列吞吐范围；这不是单次请求的尾延迟统计。
+
+### 架构正确性
 
 [架构测试](../tests/test_katago_architectures.py) 检查全部手写预设的真实模块构建与参数角色、名称/字段校验、输出头和归一化组合；[CUDA 测试](../tests/test_katago_gpu.py) 检查原生可变 batch 推理、跨设备导出、混合精度训练和续训。
 
