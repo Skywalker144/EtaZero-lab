@@ -20,7 +20,8 @@ _HALF_NAMES = ('b1c6nbt', 'b20c384bt', 'b15c384lbt', 'b10c480nb3t', 'b18c384dnbt
                'b7c96h6kv3qk32v16tflrs', 'b5c48h3tfr', 'b4c256h4nbttflrs',
                'b10c512h8nbt3tflrs', 'b6c384h6nbttflrs-qkn-ireg16',
                'b2b10c96h3tfrs', 'b5c384h6nbttfgabs', 'b5c384h6nbttftabs',
-               'b5c384h6nbttflrtab2cheaps', 'b6c384h6nbttflrs-dwc')
+               'b5c384h6nbttflrtab2cheaps', 'b5c384h6nbttflrtab2cheaps-fson-silu',
+               'b6c384h6nbttflrs-dwc')
 
 
 @pytest.mark.parametrize('name,precision', [(name, 'float32') for name in BASE_NAMES] +
@@ -72,6 +73,7 @@ def test_every_handwritten_architecture_native_cuda_graph(tmp_path, name, precis
 
 @pytest.mark.parametrize('name', ['b7c96h6kv3qk32v16tflrs-fson-silu',
                                  'b6c384h6nbttflrs-qkn-ireg16-fson-silu',
+                                 'b5c384h6nbttflrtab2cheaps',
                                  'b5c384h6nbttflrtab2cheaps-fson-silu'])
 def test_export_moves_from_cuda_to_cpu_and_preserves_dynamic_batches(tmp_path, name):
     model = KataGoNet(name, 6).cuda().eval()
@@ -87,6 +89,39 @@ def test_export_moves_from_cuda_to_cpu_and_preserves_dynamic_batches(tmp_path, n
             expected = p[:, 0], v, p[:, 5], .5 * torch.nn.functional.softplus(raw * .5)
             for actual, reference in zip(restored(spatial, globals), expected):
                 torch.testing.assert_close(actual, reference, rtol=3e-5, atol=3e-6)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+def test_tab2_export_preserves_eager_amp_and_training_state(dtype):
+    torch.set_num_threads(2)
+    torch.manual_seed(853)
+    model = KataGoNet('b5c384h6nbttflrtab2cheaps', 6).cuda().eval()
+    with torch.no_grad():
+        for name, parameter in model.network.named_parameters():
+            if 'normactconvq.conv.weight' in name:
+                parameter.add_(torch.randn_like(parameter) * .002)
+    original = {name: value.clone() for name, value in model.state_dict().items()}
+    cpu_rng, cuda_rng = torch.get_rng_state().clone(), torch.cuda.get_rng_state().clone()
+    exported = torch.jit.script(inference_network(model))
+    assert torch.equal(torch.get_rng_state(), cpu_rng)
+    assert torch.equal(torch.cuda.get_rng_state(), cuda_rng)
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, original[name], rtol=0, atol=0)
+    assert not any('real_kernel' in name or 'imag_kernel' in name for name, _ in exported.named_parameters())
+    # Eager source heads stay FP32; the inference graph uses AMP heads. Match
+    # the source oracle's existing BF16 tolerance for that precision difference.
+    rtol = 3e-3 if dtype == torch.float16 else 3e-2
+    with torch.inference_mode(), torch.autocast('cuda', dtype=dtype):
+        for batch in (1, 3):
+            obs = torch.randn(batch, 5, 6, 6, device='cuda'); obs[:, 0] = 1
+            obs[0, 0, 5] = 0
+            globals = torch.randn(batch, 8, device='cuda')
+            policy, value, _, raw = model.forward_all(obs, globals)
+            expected = policy[:, 0], value, policy[:, 5], .5 * torch.nn.functional.softplus(raw.float() * .5)
+            for _ in range(3):
+                exported(obs, globals)
+            for actual, reference in zip(exported(obs, globals), expected):
+                torch.testing.assert_close(actual.float(), reference.float(), rtol=rtol, atol=3e-3)
 
 
 @pytest.mark.parametrize('name,amp,compiled,q,kind', [
