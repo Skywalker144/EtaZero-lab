@@ -3,7 +3,7 @@ import pytest
 import torch
 from etazero.config import load_config, validate
 from etazero.katago_configs import BASE_NAMES, resolve
-from etazero.katago_network import KataGoNet, inference_network
+from etazero.katago_network import KataGoNet, inference_network, ExportComplexDepthwiseConv2d
 from etazero.network import TrainingForward, make_network, losses
 from etazero.optimization import optimizer_for
 from config_samples import CONFIGS
@@ -161,3 +161,27 @@ def test_repvgg_export_folds_branches_without_changing_training_weights():
 def test_source_grouped_rmsnorm_dimension_constraint_is_not_changed():
     with pytest.raises(ValueError, match='divisible'):
         KataGoNet('b1c6nbt-rgnh', 6)
+
+
+@pytest.mark.parametrize('dilation', [1, 3])
+def test_complex_depthwise_export_preserves_source_convolution_and_rng(dilation):
+    from etazero._vendor.katago.model_pytorch import ComplexDepthwiseConv2d
+    torch.set_num_threads(2)
+    source = ComplexDepthwiseConv2d(3, dilation=dilation).double()
+    source.initialize('relu')
+    original = {name: value.clone() for name, value in source.state_dict().items()}
+    rng = torch.get_rng_state().clone()
+    exported = ExportComplexDepthwiseConv2d(source)
+    assert torch.equal(torch.get_rng_state(), rng)
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(value, original[name], rtol=0, atol=0)
+    x = torch.randn(2, 6, 7, 9, dtype=torch.float64)
+    # Independent complex convolution verifies the real/imaginary mapping.
+    expected = torch.nn.functional.conv2d(
+        torch.complex(x[:, :3], x[:, 3:]),
+        torch.complex(source.real_kernel, source.imag_kernel),
+        padding=dilation, dilation=dilation, groups=3)
+    actual = exported(x)
+    torch.testing.assert_close(actual[:, :3], expected.real, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(actual[:, 3:], expected.imag, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(actual, source(x), rtol=0, atol=0)
