@@ -92,6 +92,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#alphazero) |
 | 配置局部模式共享的网络效用偏差及内存分片 | [SubtreeValueBias](docs/algorithms.md#subtreevaluebias) |
 | 选择 KataGo 网络名称、后缀与核对架构 | [KataGo 网络配置](docs/networks.md) |
+| 比较现有配置或命名预设的原生 CUDA Graph 推理速度 | [推理测速](docs/networks.md#原生推理测速) |
 | 查看算法组合、公共边界和 Gumbel | [算法组合](docs/algorithms.md#算法与搜索组合)、[算法接口](docs/algorithms.md#算法接口)、[Gumbel](docs/gumbel.md) |
 | 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
 | 查看 V0 历史对齐范围、网络映射和验收证据 | [V0 核查记录](../EtaZero.md#alignment-targets)、[V0 实施记录](../plan.md) |
