@@ -47,13 +47,14 @@ def test_resnet_is_independent_of_other_batch_rows_and_train_eval_mode():
         torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
-def test_resnet_guards_optimizer_and_initialization_identity():
+@pytest.mark.parametrize('katago_optimizer', [False, True])
+def test_resnet_optimizer_and_initialization_identity(katago_optimizer):
     c = load_config(CONFIGS / 'resnet')
     nbt = copy.deepcopy(c); nbt['network']['architecture'] = 'nbt'
     assert initialization_key(c) != initialization_key(nbt)
-    invalid = copy.deepcopy(c); invalid['muzero_training']['katago_optimizer'] = True
-    with pytest.raises(ValueError, match='katago_optimizer=false'):
-        validate(invalid)
+    c['muzero_training']['katago_optimizer'] = katago_optimizer
+    c['optimizer']['kind'] = 'sgd' if katago_optimizer else 'adamw'
+    validate(c)
     invalid = load_config(CONFIGS / 'baseline'); invalid['network']['architecture'] = 'resnet'
     with pytest.raises(ValueError, match='Unsupported network architecture'):
         validate(invalid)
@@ -62,6 +63,13 @@ def test_resnet_guards_optimizer_and_initialization_identity():
     model = MuZeroNet(NetworkConfig(6, 16, 24, 1, 24, 1, 24, 0, architecture='resnet'))
     opt = optimizer_for(model, c)
     control = optimization_for(model, c, opt)
-    assert isinstance(opt, torch.optim.AdamW)
-    assert control.backward_scale == 1 and control.swa_count == 0
+    assert isinstance(opt, torch.optim.SGD if katago_optimizer else torch.optim.AdamW)
+    assert control.backward_scale == (c['training']['batch_size'] if katago_optimizer else 1)
+    assert control.swa_count == 0
+    if katago_optimizer:
+        assert all(g['momentum'] == .9 for g in opt.param_groups)
+        roles = {id(p): g['group_name'] for g in opt.param_groups for p in g['params']}
+        assert roles[id(model.representation.stem_act.norm.weight)] == 'normal_gamma'
+        assert roles[id(model.dynamics.trunk.blocks[0].norm1.bias)] == 'noreg'
+        assert roles[id(model.prediction.policy_head.out.weight)] == 'output'
     assert {id(p) for g in opt.param_groups for p in g['params']} == {id(p) for p in model.parameters()}
