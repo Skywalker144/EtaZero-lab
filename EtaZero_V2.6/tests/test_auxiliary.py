@@ -133,7 +133,7 @@ def test_native_side_writer_catalog_shuffle_reader_roundtrip(tmp_path):
     from etazero.reader import BatchReader
     from etazero.shuffle import build_snapshot
     from etazero.storage import save_json,sha256
-    binary=ROOT/'build/record_contract_test'
+    binary=Path(__file__).resolve().parents[1]/'build/record_contract_test'
     if not binary.exists(): pytest.skip('Build C++ record_contract_test first')
     directory=tmp_path/'selfplay/worker'
     subprocess.run([str(binary),str(directory)],check=True,capture_output=True,text=True)
@@ -163,7 +163,7 @@ def test_native_empty_side_arrays_keep_valid_zip_crc(tmp_path):
     import subprocess
     from etazero.config import ROOT
     from etazero.data import read_raw
-    binary=ROOT/'build/record_contract_test'
+    binary=Path(__file__).resolve().parents[1]/'build/record_contract_test'
     if not binary.exists(): pytest.skip('Build C++ record_contract_test first')
     directory=tmp_path/'worker'
     subprocess.run([str(binary),str(directory),'no-side'],check=True,capture_output=True,text=True)
