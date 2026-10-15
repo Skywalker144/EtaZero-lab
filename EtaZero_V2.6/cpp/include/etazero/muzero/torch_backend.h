@@ -41,6 +41,7 @@ private:
     std::vector<std::unique_ptr<Graph>> initial_graphs_, recurrent_graphs_;
     std::string precision_;
     int canvas_, max_batch_, latent_channels_;
+    bool has_auxiliary_;
     std::shared_ptr<const int> owner_ = std::make_shared<const int>(0);
     void check_batch(size_t n) const;
     void capture_graphs();
