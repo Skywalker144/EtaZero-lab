@@ -280,7 +280,7 @@ class PolicyValueNet(nn.Module):
 def make_network(config):
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.network import MuZeroNet, network_config
-        return MuZeroNet(network_config(config))
+        return MuZeroNet(network_config(config), config.get('muzero_training', {}).get('auxiliary_losses', True))
     from .katago_configs import is_preset
     if is_preset(config['network']['architecture']):
         from .katago_network import KataGoNet
