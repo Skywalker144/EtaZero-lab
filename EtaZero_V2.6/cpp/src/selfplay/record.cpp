@@ -434,8 +434,8 @@ void RecordWriter::publish() {
     auto& b=*buffers_;
     const int canvas=b.canvas,actions_count=b.actions_count;
     const size_t n=b.ids.size(),t=b.actions.size(),o=b.players.size(),s=b.sample_indices.size();
-    // Globally distributed basenames make the source's MD5 file holdout stable
-    // across snapshots and independent of worker/attempt-local shard numbers.
+    // Independent file naming does not consume the game RNG. Validation uses
+    // game identity, so splitting a trajectory across files cannot change it.
     std::random_device file_random;
     const uint64_t filename_bits=(uint64_t(file_random())<<32)^file_random();
     std::ostringstream filename;
