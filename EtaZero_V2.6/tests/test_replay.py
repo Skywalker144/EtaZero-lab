@@ -12,11 +12,65 @@ from etazero.config import ROOT,load_config,validate
 from etazero.data import Catalog,training_view
 from etazero.reader import BatchReader,BatchPrefetcher
 from etazero.schema import CONTRACT_ID
-from etazero.shuffle import build_snapshot,desired_window,window_sources,_groups,resource_plan,validation_file,prune_derived,restore_snapshot
+from etazero.shuffle import build_snapshot,desired_window,window_sources,_groups,resource_plan,prune_derived,restore_snapshot
 from etazero.storage import save_npz,save_json,sha256
 from etazero.network import make_network,TrainingForward
 from etazero.training import validate_epoch
 from test_python import winning_record
+
+
+@pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
+def test_game_holdout_keeps_split_trajectories_and_side_rows_together(tmp_path, monkeypatch, algorithm):
+    from collections import Counter
+    import subprocess
+    from etazero.config import write_native
+    from etazero.data import read_raw, metadata, game_row_ranges, game_identity, game_weight_statistics, training_targets
+    from test_muzero_pipeline import small_config
+    c=small_config() if algorithm=='muzero' else load_config(CONFIGS/'smoke_test')
+    c['training']['skip_validation']=False
+    c['writer'].update(shard_rows=10,first_file_min_random_proportion=1)
+    c['parallelism'].update(game_threads=1,search_threads=1)
+    c['side_positions']['side_position_prob']=1
+    c['opening']['probability']=0;c['policy_init']['policy_init']=False
+    c['replay'].update(min_rows=1,taper_exponent=1,expand_per_row=1,keep_target_rows='all')
+    c['shuffle'].update(group_rows=20,bucket_rows=16,training_shard_rows=8,waves=2)
+    write_native(c,tmp_path/'effective.cfg')
+    subprocess.run([str(ROOT/'build/etazero'),'selfplay','--config',str(tmp_path/'effective.cfg'),
+                    '--evaluator','random','--model','random','--model-id','model','--device','cpu',
+                    '--games','4','--output',str(tmp_path/'selfplay'),'--run-id','test','--attempt-id','test',
+                    '--config-id','test','--source-id','test','--iteration','1','--worker','0','--seed','734'],
+                   check=True,capture_output=True,text=True,timeout=60)
+    entries=[];games={};targets=training_targets(c);side_rows=0
+    def fingerprints(view):
+        return Counter(tuple(view[key][i].tobytes() for key in sorted(view)) for i in range(len(view['value'])))
+    for path in sorted((tmp_path/'selfplay').glob('*.npz')):
+        raw=read_raw(path);m=metadata(raw);view=training_view(raw,targets)
+        entries.append(dict(path=str(path.relative_to(tmp_path)),metadata=m,weight_stats=game_weight_statistics(raw)))
+        _,starts,ends=game_row_ranges(raw);offsets=np.r_[0,np.cumsum(ends-starts)]
+        side_rows+=len(raw['side_players'])
+        for i,game in enumerate(raw['game_ids']):
+            identity=game_identity(m,game)
+            games.setdefault(identity,[]).append({k:v[offsets[i]:offsets[i+1]] for k,v in view.items()})
+    assert side_rows and len(games)==4 and all(len(parts)>1 for parts in games.values())
+    held_out=sorted(games)[0]
+    monkeypatch.setattr('etazero.shuffle.validation_game',lambda identity:identity==held_out)
+    expected=[Counter(),Counter()]
+    for identity,parts in games.items():
+        for view in parts:expected[identity==held_out].update(fingerprints(view))
+    snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,entries,c)
+    manifest=json.loads((snapshot/'manifest.json').read_text())
+    for partition, key in enumerate(('files','validation_files')):
+        actual=Counter()
+        for info in manifest[key]:
+            path=snapshot/'data'/('validation' if partition else '')/info['path']
+            with np.load(path) as arrays:actual.update(fingerprints(dict(arrays)))
+        assert actual==expected[partition]
+    if algorithm=='muzero':
+        stats=[g for e in manifest['sources'] for g in e['weight_stats']]
+        assert held_out not in {g['id'] for g in stats}
+    hashes={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
+    prune_derived(tmp_path,[snapshot.name],set());restore_snapshot(snapshot)
+    assert hashes=={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
 
 
 def id_snapshot(root,counts,validation=False):
@@ -98,19 +152,21 @@ def test_capped_random_and_actual_mtime_window_range():
 
 
 def holdout_entries(root,copies=12):
-    entries=[];train_names=[];val_names=[]
+    entries=[];train_ids=[];val_ids=[]
     for i in range(5000):
-        name=f'raw_{i:05}.npz';value=int(hashlib.md5(name.encode()).hexdigest()[:13],16)/2**52
-        (val_names if value>=.99 else train_names).append(name)
-    for index,name in enumerate(train_names[:copies]+val_names[:copies]):
-        raw,meta=winning_record(index%3);meta.update(shard_id=name,attempt_id=name)
+        value=int(hashlib.md5(f'test:holdout:0:{i}'.encode()).hexdigest()[:13],16)/2**52
+        (val_ids if value>=.99 else train_ids).append(i)
+    for index,game in enumerate(train_ids[:copies]+val_ids[:copies]):
+        name=f'raw_{index:05}.npz'
+        raw,meta=winning_record(index%3);meta.update(shard_id=name,attempt_id='holdout')
+        raw['game_ids'][0]=game
         raw['metadata']=np.frombuffer(json.dumps(meta).encode(),np.uint8)
         path=Path(root)/'selfplay'/name;save_npz(path,raw)
         entries.append({'path':str(path.relative_to(root)),'sha256':sha256(path),'metadata':meta})
     return entries
 
 
-def test_validation_md5_holdout_shared_probability_across_snapshots_and_rebuild(tmp_path):
+def test_validation_game_holdout_shared_probability_across_snapshots_and_rebuild(tmp_path):
     c=load_config(CONFIGS / 'smoke_test');c['training']['skip_validation']=False
     c['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=108)
     c['shuffle'].update(group_rows=18,bucket_rows=16,training_shard_rows=8,waves=3)
@@ -128,7 +184,7 @@ def test_validation_md5_holdout_shared_probability_across_snapshots_and_rebuild(
         assert len(pool.streams)==len(set(pool.streams)) # Both partitions, every wave/stage/group/bucket.
         m=json.loads((snapshot/'manifest.json').read_text());train={e['path'] for e in m['sources']};val={e['path'] for e in m['validation_sources']}
         assert len(train)==len(val)==12 and not train&val and train|val=={e['path'] for e in entries}
-        assert all(not validation_file(p) for p in train) and all(validation_file(p) for p in val)
+        assert train=={e['path'] for e in entries[:12]} and val=={e['path'] for e in entries[12:]}
         assert m['keep_prob']==m['validation_resource_plan']['keep_prob']==.5
         assert m['rows']==m['validation_rows']==54
         assert not train&all_val and not val&all_train;all_train|=train;all_val|=val
