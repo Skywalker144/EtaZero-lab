@@ -12,7 +12,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 ## 训练目标与优化器
 
-`[muzero_training] auxiliary_losses=false` 只计算主 policy CE 和终局 WDL CE，系数均为 1。辅助输出结构保留，损失不读取对手、soft、TD、optimistic、误差或 Q 输出；此模式禁止开启 `predict_q_values`。搜索是否使用辅助预测由各自开关独立控制。
+`[muzero_training] auxiliary_losses=false` 只计算主 policy CE 和终局 WDL CE，系数均为 1。辅助输出结构保留，损失不读取对手、soft、TD、optimistic、误差或 Q 输出；此模式禁止开启 `predict_q_values`。导出模型携带 `has_auxiliary=false`，搜索使用主 policy 和单位叶节点权重，即使评估配置开启 optimism 或 uncertainty 也不会使用未受监督的辅助预测。启用辅助损失的模型仍由搜索开关决定是否使用这些预测。
 
 `katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）、AdamW 或 Muon，学习率与统一 weight decay 由 `[muzero_training]` 指定；Muon 的矩阵与辅助 Adam 分工见 [学习与数据使用](algorithms.md#学习与数据使用)。它使用 batch 均值反传，不启用 KataGo 分组 LR、自适应衰减、warmup、Lookahead 或 SWA；`gradient_clip=0` 表示不裁剪，发布当前训练权重。checkpoint 仍保存优化器、scaler、计数、训练指标累积和 RNG。
 
