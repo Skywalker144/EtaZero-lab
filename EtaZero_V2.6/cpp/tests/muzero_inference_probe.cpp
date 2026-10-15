@@ -21,7 +21,7 @@ void output(const std::vector<TorchBackend::Output>& values) {
         std::cout<<",\"policy\":";array(e.logits);
         std::cout<<",\"wdl\":";array(std::vector<double>(e.wdl.begin(),e.wdl.end()));
         std::cout<<",\"optimistic\":";array(e.optimistic_logits);
-        std::cout<<",\"stdev\":"<<e.shortterm_value_stdev<<'}';
+        std::cout<<",\"stdev\":"<<e.shortterm_value_stdev<<",\"has_auxiliary\":"<<(e.has_auxiliary?"true":"false")<<'}';
     }
     std::cout<<']';
 }
