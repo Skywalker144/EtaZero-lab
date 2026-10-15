@@ -1406,12 +1406,27 @@ def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
     from etazero.plotting import run_history
     from etazero.schema import CONTRACT_ID
     umbrella = tmp_path/'umbrella'; umbrella.mkdir()
-    (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_seconds = 0\narm_gpus = 0\nshared_init = true\n')
+    (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_hours = 0\narm_gpus = 0\nshared_init = true\n')
+    (umbrella/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'
+                                      '[match]\nboard_size=5\nvisits=4\nmax_batch=8\n'
+                                      'inference_precision=float16\n')
+    (umbrella/'elo.cfg').write_text('[elo]\nsample_seconds=100000\ngames_per_pair=4\n'
+                                   'game_threads=2\nmax_loaded_models=2\nbootstrap_samples=2\n')
     for name in ('a', 'b'):
         arm = umbrella/name; arm.mkdir()
         derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {tmp_path/name}\n')
     plan = experiment_plan(umbrella, environ={}, work_dir=tmp_path/'scheduler')
+    # The actual post-training arena must use the profile resolved at startup.
+    (umbrella/'match.cfg').write_text('Changed after planning.\n')
+    (umbrella/'elo.cfg').write_text('Changed after planning.\n')
     assert run_experiment(plan, BINARY) == 0
+    evaluation = tmp_path/'elo/latest'
+    manifest = load_json(evaluation/'manifest.json')
+    assert manifest['config'] == plan['elo']['config']
+    assert manifest['games_per_pair'] == 4
+    assert manifest['execution']['cuda_visible_devices'] == '0'
+    assert load_json(evaluation/'elo.json')['games'] == 4
+    assert load_json(tmp_path/'scheduler/.internal/plan.json')['elo'] == plan['elo']
     records = [load_json(tmp_path/name/'.internal/run.json') for name in ('a', 'b')]
     assert records[0]['id'] != records[1]['id']
     assert records[0]['weights_initialization'] == records[1]['weights_initialization']
@@ -1420,26 +1435,32 @@ def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
     for name in ('a', 'b'):
         root = tmp_path/name
         state = load_json(root/'.internal/state.json')
-        assert state['iteration'] == 3 and state['checkpoint']['total_steps'] == 8
+        assert state['iteration'] == 3
+        assert_training_budget(root, state, next(arm['config'] for arm in plan['arms'] if arm['name'] == name))
         initial = next(p for p in (root/'checkpoints').glob('iteration_000000*.pt'))
         checkpoints.append(torch.load(initial, map_location='cpu', weights_only=False))
         assert (root/'training.png').stat().st_size > 10000
         assert (root/'logs/performance.png').stat().st_size > 10000
         history = run_history(root)
         assert [r['iteration'] for r in history] == [0, 1, 2]
-        assert history[0]['steps'] == 0 and history[2]['steps'] == 4
+        assert history[0]['steps'] == 0
+        assert sum(row['steps'] for row in history) == state['checkpoint']['total_steps']
         assert history[2]['avg_game_length'] >= history[2]['avg_rows_per_game']
         hashes.update({p: sha256(p) for p in (root/'selfplay').rglob('*.npz')})
     assert all(torch.equal(value, checkpoints[1]['model'][key]) for key, value in checkpoints[0]['model'].items())
     assert all(c['contract'] == CONTRACT_ID and c['total_steps'] == 0 for c in checkpoints)
     assert run_experiment(plan, BINARY) == 0
     assert all(sha256(path) == digest for path, digest in hashes.items())
+    invocation = load_json(load_json(evaluation/'status.json')['performance'])
+    assert invocation['reused_games'] == 4 and invocation['new_games'] == 0
     # Increase only the cumulative invocation budget, keeping effective arm config unchanged.
     plan['settings']['max_iteration'] = 3
     assert run_experiment(plan, BINARY) == 0
     for name in ('a', 'b'):
         state = load_json(tmp_path/name/'.internal/state.json')
-        assert state['iteration'] == 4 and state['checkpoint']['total_steps'] == 12
+        assert state['iteration'] == 4
+        assert_training_budget(tmp_path/name, state,
+                               next(arm['config'] for arm in plan['arms'] if arm['name'] == name))
     assert all(sha256(path) == digest for path, digest in hashes.items())
 
 
@@ -1450,7 +1471,7 @@ def test_autoexp_archived_muzero_architecture_and_scheduler_changes(tmp_path):
     directory = tmp_path/'umbrella'; arm = directory/'a'
     root = tmp_path/'run'; work = tmp_path/'scheduler'
     directory.mkdir()
-    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=1\nmax_seconds=0\narm_gpus=0\nshared_init=true\nautoelo=false\n')
+    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=1\nmax_hours=0\narm_gpus=0\nshared_init=true\nautoelo=false\n')
     config = small_config()
     config['run']['run_dir'] = str(root)
     config['muzero_training'] = dict(auxiliary_losses=True, katago_optimizer=False,
@@ -1505,7 +1526,7 @@ def test_autoexp_archived_muzero_architecture_and_scheduler_changes(tmp_path):
 def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     umbrella = tmp_path/'umbrella'; arm = umbrella/'a'; arm.mkdir(parents=True)
     root = tmp_path/'run'; work = tmp_path/'scheduler'
-    (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 1\nmax_seconds = 0\narm_gpus = 0\nshared_init = false\n')
+    (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 1\nmax_hours = 0\narm_gpus = 0\nshared_init = false\nautoelo = false\n')
     derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {root}\n')
     (arm/'train.cfg.local').write_text('[training]\ntrain_steps = 200\ncheckpoint_every = 20\n')
     command = [sys.executable, '-m', 'etazero.experiment', '--config-dir', str(umbrella),
@@ -1548,7 +1569,7 @@ def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
     from etazero.experiment import experiment_plan, run_experiment
     umbrella = tmp_path/'umbrella'; arm = umbrella/'a'; arm.mkdir(parents=True)
     root = tmp_path/'run'
-    (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 0\nmax_seconds = 1\narm_gpus = 0\nshared_init = false\n')
+    (umbrella/'exp.cfg').write_text(f'[experiment]\nmax_iteration = 0\nmax_hours = {1/3600}\narm_gpus = 0\nshared_init = false\nautoelo = false\n')
     derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {root}\n')
     plan = experiment_plan(umbrella, environ={}, work_dir=tmp_path/'scheduler')
     assert run_experiment(plan, BINARY) == 0
@@ -1558,7 +1579,7 @@ def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
     checksum = sha256(root/'.internal/state.json')
     assert run_experiment(plan, BINARY) == 0
     assert sha256(root/'.internal/state.json') == checksum
-    plan['settings'].update(max_seconds=0, max_iteration=1)
+    plan['settings'].update(max_hours=0, max_iteration=1)
     assert run_experiment(plan, BINARY) == 0
     state = load_json(root/'.internal/state.json')
     assert state['iteration'] == 2 and state['checkpoint']['total_steps'] == 4
@@ -1621,7 +1642,7 @@ def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch
     train=[e for e in events if e['event']=='phase_end' and e['phase']=='train']
     assert all(e['seconds']>0 and e['wall_seconds']>=e['seconds'] for e in train)
     assert arm_progress({'name':'test','run_dir':str(root),'config':c},
-                      dict(max_iteration=0,max_seconds=resumed['elapsed_seconds']),None)=='complete'
+                      dict(max_iteration=0,max_hours=base['elapsed_seconds']/3600))=='complete'
 
 
 def test_compiler_timer_covers_lazy_backward_and_recompile(gpu_config):

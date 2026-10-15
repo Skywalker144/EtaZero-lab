@@ -8,7 +8,7 @@ import time
 import pytest
 
 from etazero.arena import Player, PairStore, build_schedule, discover_players, execute_pair, execute_arena, identity, run_arena
-from etazero.autoelo import autoelo_plan, load_elo_config, publish_latest
+from etazero.autoelo import autoelo_plan, load_elo_config, load_elo_profile, publish_latest
 from etazero.autoelo import run_autoelo
 from etazero.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pairs
 from etazero.config import ROOT, load_config
@@ -16,6 +16,10 @@ from etazero.engine_config import load_engine_config
 from etazero.experiment import experiment_plan, run_experiment, Scheduler
 from etazero.schema import CONTRACT_ID
 from etazero.storage import load_json, save_json, sha256
+
+
+def match_profile(directory, contents=''):
+    (directory/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'+contents)
 
 
 def history(root, times, algorithm=None):
@@ -143,15 +147,17 @@ def complete_fake_pair(manifest, pair, directory, limit=None):
 
 
 def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path, monkeypatch):
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-not-in-resolved-environment')
     config = tmp_path/'config'; config.mkdir()
     (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ncross_seconds=1000\ngames_per_pair=4\nbootstrap_samples=2\n')
-    (config/'match.cfg').write_text('[match]\ndevice=cpu\n')
+    match_profile(config, '[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('b', 'c'):
         history(data/arm, list(range(1, 17)))
     monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
     calls = []
     def native(output, manifest, binary, samples, workers, env):
+        assert 'CUDA_VISIBLE_DEVICES' not in env
         for pair in manifest['pairs']:
             directory = output/'pairs'/pair['id']
             calls.extend((pair['id'], task['id']) for task in
@@ -251,7 +257,7 @@ def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_pat
 def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
     (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ngames_per_pair=4\nbootstrap_samples=2\n')
-    (config/'match.cfg').write_text('[match]\ndevice=cpu\n')
+    match_profile(config, '[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('a','b'):
         history(data/arm, list(range(1,9)))
@@ -301,19 +307,79 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
         with pytest.raises(ValueError):
             load_elo_config(tmp_path, environ={}, overrides=overrides)
     training = load_config(CONFIGS / 'muzero')
-    (tmp_path/'match.cfg').write_text('[match]\ngame_threads=20\nreuse_tree=false\nuse_graph_search=false\n')
-    match = load_engine_config(tmp_path, match=True, umbrella=True, environ={})
+    match_profile(tmp_path, '[match]\ngame_threads=20\nreuse_tree=false\nuse_graph_search=false\n')
+    match = load_engine_config(tmp_path, match=True, environ={})
     assert match['match']['game_threads'] == 20 and not match['match']['reuse_tree']
     assert load_config(CONFIGS / 'muzero') == training
     (tmp_path/'match.cfg').write_text('[match]\nunknown=1\n')
     with pytest.raises(ValueError, match='Unknown key'):
-        load_engine_config(tmp_path, match=True, umbrella=True, environ={})
+        load_engine_config(tmp_path, match=True, environ={})
+
+
+def test_optional_elo_overrides_and_explicit_shared_match(tmp_path):
+    baseline = load_elo_config(tmp_path, environ={})
+    with pytest.raises(FileNotFoundError, match='match.cfg'):
+        load_elo_profile(tmp_path, environ={})
+    # Neither the scheduler nor an arm's profile supplies the shared protocol.
+    (tmp_path/'exp.cfg').write_text('Ignored by independent Elo.\n')
+    arm = tmp_path/'arm'; arm.mkdir()
+    match_profile(arm, '[match]\nvisits=999\n')
+    match_profile(tmp_path, '[match]\nvisits=17\n')
+    (tmp_path/'engine.cfg.local').write_text('[engine]\nvisits=19\n')
+    (tmp_path/'match.cfg.local').write_text('[match]\nvisits=23\n')
+    profile = load_elo_profile(tmp_path, environ={'MATCH_VISITS': '29', 'MATCH_GAMES': 'invalid'})
+    assert profile['settings'] == baseline
+    assert profile['config']['match']['visits'] == 29
+    assert profile['config']['match']['games'] == baseline['games_per_pair']
+    assert profile['config']['match']['game_threads'] == baseline['game_threads']
+    assert load_engine_config(tmp_path, True, environ={})['match']['visits'] == 23
+
+
+@pytest.mark.parametrize('contents', ['[elo]\nunknown=1\n', '[match]\nvisits=17\n',
+                                     '[experiment]\nautoelo=false\n'])
+def test_elo_file_ownership_is_strict(tmp_path, contents):
+    (tmp_path/'elo.cfg').write_text(contents)
+    with pytest.raises(ValueError, match='Unknown key|Wrong section'):
+        load_elo_config(tmp_path, environ={})
+
+
+def test_resolved_elo_profile_survives_config_and_environment_changes(tmp_path, monkeypatch):
+    config = tmp_path/'configs'; config.mkdir()
+    match_profile(config, '[match]\nvisits=17\n')
+    (config/'elo.cfg').write_text('[elo]\nsample_seconds=10\ngames_per_pair=12\n')
+    profile = load_elo_profile(config, environ={'CUDA_VISIBLE_DEVICES': 'GPU-original'})
+    (config/'match.cfg').unlink()
+    (config/'elo.cfg').write_text('Changed after planning.\n')
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-changed')
+    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    data = tmp_path/'data'
+    history(data/'a', [10, 20])
+    history(data/'b', [10, 20])
+    plan = autoelo_plan(config, tmp_path/'binary', data=data, profile=profile)
+    assert plan['manifest']['config']['match']['visits'] == 17
+    assert plan['manifest']['games_per_pair'] == 12
+    assert plan['manifest']['execution']['cuda_visible_devices'] == 'GPU-original'
+    plan['manifest']['config']['match']['visits'] = 99
+    assert profile['config']['match']['visits'] == 17
+
+
+def test_independent_elo_discovers_config_arms_without_scheduler_settings(tmp_path, monkeypatch):
+    directory = tmp_path/'configs'; directory.mkdir()
+    (directory/'exp.cfg').write_text('Unused by independent evaluation.\n')
+    match_profile(directory, '[match]\nboard_size=5\n')
+    (directory/'elo.cfg').write_text('[elo]\nsample_seconds=10\n')
+    for name in ('a', 'b'):
+        derive_config(directory/name, CONFIGS/'smoke_test', f'run_dir={tmp_path/name}\n')
+        history(tmp_path/name, [10, 20])
+    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    plan = autoelo_plan(directory, tmp_path/'binary', environ={})
+    assert plan['summary']['players_per_arm'] == {'a': 2, 'b': 2}
 
 
 def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
     (config/'elo.cfg').write_text('[elo]\nsample_seconds=10\n')
-    (config/'match.cfg').write_text('[match]\nreuse_tree=false\nuse_graph_search=false\ncache_entries=0\n')
+    match_profile(config, '[match]\nreuse_tree=false\nuse_graph_search=false\ncache_entries=0\n')
     (config/'untrained').mkdir()
     derive_config(config/'untrained', CONFIGS/'smoke_test', '')
     data = tmp_path/'data'
@@ -334,7 +400,7 @@ def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(
     assert custom['summary']['players_per_arm'] == {'alias-a':3, 'alias-b':3}
     assert custom['manifest']['execution']['cuda_visible_devices'] == 'GPU-test'
     assert custom['manifest']['config']['match']['device'] == 'cuda:0'
-    (config/'match.cfg').write_text('[match]\nreuse_tree=true\n')
+    match_profile(config, '[match]\nreuse_tree=true\n')
     with pytest.raises(ValueError, match='MuZero matches require'):
         autoelo_plan(config, binary, data=data, environ={})
 
@@ -506,25 +572,34 @@ def test_latest_pointer_and_native_performance_preserve_prior_results(tmp_path):
 @pytest.mark.parametrize('code', [0, 130])
 def test_autoexp_invokes_elo_only_after_success_and_keeps_actual_arm_paths(tmp_path, monkeypatch, code):
     directory = tmp_path/'configs'; directory.mkdir()
-    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=2\nmax_seconds=0\narm_gpus=2\nshared_init=false\nautoelo=true\n')
+    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration=2\nmax_hours=0\narm_gpus=2\nshared_init=false\nautoelo=true\n')
     (directory/'a').mkdir()
     derive_config(directory/'a', CONFIGS/'smoke_test', f'run_dir={tmp_path/"custom-output"}\n')
     (directory/'b').mkdir()
     derive_config(directory/'b', CONFIGS/'smoke_test', f'run_dir={tmp_path/"another-output"}\n')
+    match_profile(directory, '[match]\nboard_size=5\nvisits=17\n')
     plan = experiment_plan(directory, environ={}, work_dir=tmp_path/'controller')
     binary = tmp_path/'binary'; binary.write_bytes(b'binary')
     monkeypatch.setattr('etazero.runtime.verify_build', lambda _: 'hash')
-    monkeypatch.setattr(Scheduler, 'run', lambda _: code)
+    def train(scheduler):
+        (directory/'match.cfg').write_text('Changed during training.\n')
+        (directory/'elo.cfg').write_text('Changed during training.\n')
+        monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-changed')
+        return code
+    monkeypatch.setattr(Scheduler, 'run', train)
     calls = []
-    def elo_plan(directory, binary, *, arms, gpu):
+    def elo_plan(directory, binary, *, arms, profile):
         assert [arm['name'] for arm in arms] == ['a', 'b']
-        calls.append(([arm['run_dir'] for arm in arms], gpu))
+        assert profile == plan['elo']
+        assert profile['config']['match']['visits'] == 17
+        calls.append(([arm['run_dir'] for arm in arms], profile['cuda_visible_devices']))
         return {'summary': {}, 'output': str(tmp_path/'elo')}
     monkeypatch.setattr('etazero.autoelo.autoelo_plan', elo_plan)
     monkeypatch.setattr('etazero.autoelo.run_autoelo', lambda *_: None)
     assert run_experiment(plan, binary) == code
     assert calls == ([([str(tmp_path/'custom-output'), str(tmp_path/'another-output')], '2')]
                      if code == 0 else [])
+    assert load_json(tmp_path/'controller/.internal/plan.json')['elo'] == plan['elo']
     if code == 0:
         assert load_json(tmp_path/'controller/.internal/elo_status.json')['status'] == 'complete'
         monkeypatch.setattr('etazero.autoelo.run_autoelo', lambda *_: (_ for _ in ()).throw(RuntimeError('elo failed')))

@@ -19,7 +19,7 @@ from etazero.storage import save_json, load_json, sha256
 
 def umbrella(tmp_path):
     directory = tmp_path/'umbrella'; directory.mkdir()
-    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_seconds = 0\narm_gpus = 0\nshared_init = true\nautoelo = false\n')
+    (directory/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_hours = 0\narm_gpus = 0\nshared_init = true\nautoelo = false\n')
     for name in ('a', 'b'):
         arm = directory/name; arm.mkdir()
         derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {tmp_path/name}\n')
@@ -38,14 +38,107 @@ def test_plan_is_read_only_and_resolves_inheritance(tmp_path):
     write_arm_config(plan['arms'][0]['config'], resolved)
     assert load_config(resolved) == plan['arms'][0]['config']
     with pytest.raises(ValueError, match='finite iteration or time'):
-        experiment_plan(directory, environ={'MAX_ITERS': '0', 'MAX_TIME_SECONDS': '0'})
+        experiment_plan(directory, environ={'MAX_ITERS': '0', 'MAX_TIME_HOURS': '0'})
     with pytest.raises(ValueError, match='repeat'):
         experiment_plan(directory, environ={'ARM_GPUS': '0,0'})
     with pytest.raises(ValueError, match='nonnegative'):
-        experiment_plan(directory, environ={'MAX_TIME_SECONDS': 'nan'})
+        experiment_plan(directory, environ={'MAX_TIME_HOURS': 'nan'})
     with pytest.raises(ValueError, match='non-overlapping'):
         derive_config(directory/'b', CONFIGS/'smoke_test', f'run_dir = {tmp_path/"a/subdir"}\n')
         experiment_plan(directory, environ={})
+
+
+def test_scheduler_local_budget_and_disabled_evaluation_scope(tmp_path):
+    directory = umbrella(tmp_path)
+    for name in ('elo.cfg', 'match.cfg'):
+        (directory/name).write_text('Unused when automatic evaluation is disabled.\n')
+    (directory/'exp.cfg.local').write_text('[experiment]\nmax_iteration=3\nmax_hours=4.5\n')
+    plan = experiment_plan(directory, environ={})
+    assert plan['settings']['max_iteration'] == 3
+    assert plan['settings']['max_hours'] == 4.5
+    assert 'elo' not in plan
+    overridden = experiment_plan(directory, environ={'MAX_ITERS': '4', 'MAX_TIME_HOURS': '6'})
+    assert overridden['settings']['max_iteration'] == 4
+    assert overridden['settings']['max_hours'] == 6
+
+
+@pytest.mark.parametrize('hours', [6, 10, 4.5])
+def test_experiment_parses_hour_budget_from_config(tmp_path, hours):
+    directory = umbrella(tmp_path)
+    path = directory/'exp.cfg'
+    path.write_text(path.read_text().replace('max_iteration = 2', 'max_iteration = 0')
+                   .replace('max_hours = 0', f'max_hours = {hours}'))
+    plan = experiment_plan(directory, environ={})
+    assert plan['settings']['max_hours'] == hours
+
+
+@pytest.mark.parametrize('hours', ['-0.5', 'nan', 'inf', '-inf', '1e308'])
+def test_experiment_rejects_invalid_hour_budget(tmp_path, hours):
+    directory = umbrella(tmp_path)
+    with pytest.raises(ValueError, match='nonnegative and finite'):
+        experiment_plan(directory, environ={'MAX_TIME_HOURS': hours})
+
+
+@pytest.mark.parametrize('elapsed, expected', [(16199.5, 'pending'), (16200, 'complete'),
+                                              (16200.5, 'complete')])
+def test_hour_budget_completion_uses_elapsed_seconds(tmp_path, elapsed, expected):
+    save_json(tmp_path/'.internal/run.json', {})
+    save_json(tmp_path/'.internal/state.json', {'iteration': 1, 'elapsed_seconds': elapsed})
+    assert arm_progress({'run_dir': str(tmp_path)}, {'max_iteration': 0, 'max_hours': 4.5}) == expected
+
+
+@pytest.mark.parametrize('section', ['elo', 'match', 'opening', 'hex_opening'])
+def test_scheduler_rejects_evaluation_sections(tmp_path, section):
+    directory = umbrella(tmp_path)
+    with (directory/'exp.cfg').open('a') as stream:
+        stream.write(f'\n[{section}]\n')
+    with pytest.raises(ValueError, match='Wrong section/file ownership'):
+        experiment_plan(directory, environ={})
+
+
+def test_evaluation_is_resolved_before_training_and_dry_run_reuses_plan(tmp_path, monkeypatch, capsys):
+    from etazero import experiment
+    directory = umbrella(tmp_path)
+    (directory/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'
+                                      '[match]\nboard_size=5\nvisits=17\n')
+    (directory/'elo.cfg').write_text('[elo]\ngames_per_pair=12\n')
+    plan = experiment_plan(directory, environ={'AUTOELO': 'true'}, work_dir=tmp_path/'work')
+    assert plan['elo']['config']['match']['games'] == 12
+    assert plan['elo']['config']['match']['visits'] == 17
+    assert plan['elo']['cuda_visible_devices'] == '0'
+    assert not (tmp_path/'work').exists()
+    (directory/'match.cfg').unlink()
+    monkeypatch.setattr(experiment, 'experiment_plan', lambda *args, **kwargs: plan)
+    monkeypatch.setattr(sys, 'argv', ['autoexp', '--config-dir', str(directory), '--dry-run'])
+    assert experiment.main() == 0
+    assert json.loads(capsys.readouterr().out) == plan
+
+
+@pytest.mark.parametrize('failure', ['missing_match', 'invalid_elo', 'board', 'canvas',
+                                    'reuse_tree', 'use_graph_search', 'root_num_symmetries_to_sample'])
+def test_evaluation_errors_are_rejected_before_creating_work(tmp_path, failure):
+    directory = umbrella(tmp_path)
+    protocol = ('[match]\nboard_size=5\nreuse_tree=false\nuse_graph_search=false\n'
+                'root_num_symmetries_to_sample=1\n')
+    if failure == 'invalid_elo':
+        (directory/'elo.cfg').write_text('[elo]\nsample_seconds=0\n')
+    elif failure == 'board':
+        protocol = protocol.replace('board_size=5', 'board_size=7')
+    elif failure == 'canvas':
+        (directory/'b/net.cfg.local').write_text('[network]\ncanvas=7\n')
+    elif failure in ('reuse_tree', 'use_graph_search', 'root_num_symmetries_to_sample'):
+        derive_config(directory/'b', CONFIGS/'muzero', f'run_dir={tmp_path/"b"}\n')
+        if failure == 'root_num_symmetries_to_sample':
+            protocol = protocol.replace(f'{failure}=1', f'{failure}=2')
+        else:
+            protocol = protocol.replace(f'{failure}=false', f'{failure}=true')
+    if failure != 'missing_match':
+        (directory/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'+protocol)
+    with pytest.raises((FileNotFoundError, ValueError), match={
+            'missing_match': 'match.cfg', 'invalid_elo': 'sample_seconds', 'board': 'exceeds model canvas',
+            'canvas': 'same canvas'}.get(failure, 'MuZero matches require')):
+        experiment_plan(directory, environ={'AUTOELO': 'true'}, work_dir=tmp_path/'work')
+    assert not (tmp_path/'work').exists()
 
 
 def test_shared_weights_group_by_network_seed_and_verify_payload(tmp_path):
@@ -212,7 +305,7 @@ def test_budget_completion_only_reads_saved_progress(tmp_path):
     assert arm_progress(arm, plan['settings']) == 'pending'
     save_json(root/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
     assert arm_progress(arm, plan['settings']) == 'complete'
-    assert arm_progress(arm, {**plan['settings'], 'max_iteration': 4, 'max_seconds': 9}) == 'complete'
+    assert arm_progress(arm, {**plan['settings'], 'max_iteration': 4, 'max_hours': 9/3600}) == 'complete'
     arm['config']['run']['seed'] += 1
     assert arm_progress(arm, plan['settings']) == 'complete'
     (root/'.internal/run.json').unlink()
@@ -220,14 +313,14 @@ def test_budget_completion_only_reads_saved_progress(tmp_path):
 
 
 @pytest.mark.parametrize('shared_init', [True, False])
-@pytest.mark.parametrize('budget', ['iterations', 'seconds'])
+@pytest.mark.parametrize('budget', ['iterations', 'hours'])
 def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monkeypatch, capsys,
                                                                shared_init, budget):
     from etazero.config import fingerprint
     directory = umbrella(tmp_path)
     env = {'SHARED_INIT': str(shared_init).lower()}
-    if budget == 'seconds':
-        env.update(MAX_ITERS='0', MAX_TIME_SECONDS='10')
+    if budget == 'hours':
+        env.update(MAX_ITERS='0', MAX_TIME_HOURS=str(10/3600))
     work = tmp_path/'work'
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
     monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
@@ -401,11 +494,13 @@ def test_existing_runs_resume_without_scheduler_initialization(tmp_path, monkeyp
 
 def test_scheduler_failure_interrupts_other_running_arms(tmp_path, monkeypatch):
     directory = umbrella(tmp_path)
-    plan = experiment_plan(directory, environ={'ARM_GPUS': '0,1'}, work_dir=tmp_path/'work')
+    plan = experiment_plan(directory, environ={'ARM_GPUS': '0,1', 'MAX_TIME_HOURS': '4.5'},
+                           work_dir=tmp_path/'work')
     scheduler = Scheduler(Path(plan['work_dir']), plan, ROOT/'build/etazero', {})
     processes = []
     actual_popen = subprocess.Popen
     def popen(command, **kwargs):
+        assert float(command[command.index('--max-seconds')+1]) == 16200
         # Fail one arm while another is genuinely running; no GPU work is needed
         # to verify process ownership, fail-fast and signal handling.
         config_dir = Path(command[command.index('--config-dir')+1])

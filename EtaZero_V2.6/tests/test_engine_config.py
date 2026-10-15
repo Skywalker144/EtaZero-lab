@@ -94,6 +94,33 @@ def test_cli_loads_standalone_profile_and_requires_model_source(profiles):
     assert help_result.returncode==0 and '--stream' in help_result.stdout and '--config ' in help_result.stdout
 
 
-def test_explicit_missing_umbrella_source_does_not_use_defaults(tmp_path):
+def test_explicit_missing_source_does_not_use_defaults(tmp_path):
     with pytest.raises(FileNotFoundError,match='source does not exist'):
-        load_engine_config(tmp_path/'typo.cfg',True,environ={},umbrella=True)
+        load_engine_config(tmp_path/'typo.cfg',True,environ={})
+
+
+def test_sibling_experiment_files_do_not_change_match_routing(profiles):
+    before = load_engine_config(profiles, True, environ={})
+    for name in ('exp.cfg', 'exp.cfg.local', 'elo.cfg'):
+        (profiles/name).write_text('Not a valid configuration.\n')
+    assert load_engine_config(profiles, True, environ={}) == before
+    assert load_engine_config(profiles/'match.cfg', True, environ={}) == before
+
+
+@pytest.mark.parametrize('section', ['experiment', 'elo'])
+def test_match_rejects_orchestration_sections(profiles, section):
+    with (profiles/'match.cfg').open('a') as stream:
+        stream.write(f'\n[{section}]\n')
+    with pytest.raises(ValueError, match='Wrong section/file ownership'):
+        load_engine_config(profiles, True, environ={})
+
+
+def test_final_overrides_precede_environment_and_are_validated(profiles):
+    result = load_engine_config(profiles, True, environ={'MATCH_GAMES': 'invalid'},
+                                overrides={'match': {'games': 12, 'game_threads': 3, 'reuse_tree': False}})
+    assert result['match']['games'] == 12 and result['match']['game_threads'] == 3
+    assert result['match']['reuse_tree'] is False
+    with pytest.raises(ValueError, match='Match games'):
+        load_engine_config(profiles, True, environ={}, overrides={'match': {'games': 6}})
+    with pytest.raises(ValueError, match='Unknown engine override'):
+        load_engine_config(profiles, True, environ={}, overrides={'match': {'unknown': 1}})

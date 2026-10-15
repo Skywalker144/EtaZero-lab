@@ -22,26 +22,26 @@ ENGINE_FIELDS.update(root_search_algo=str, nonroot_search_algo=str,
                      **{'gumbel_'+key: value for key, value in GUMBEL_FIELDS.items()})
 
 
-def load_engine_config(source, match=False, environ=None, *, umbrella=False):
-    result = _load_profile(source, match, environ, umbrella=umbrella)
+def load_engine_config(source, match=False, environ=None, *, overrides=None):
+    result = _load_profile(source, match, environ, overrides=overrides)
     validate_engine_config(result, match)
     return result
 
 
-def load_match_opening_config(source, environ=None, *, umbrella=False):
+def load_match_opening_config(source, environ=None):
     """Read match's opening alone, without imposing match search or game budgets."""
-    profiles = _load_profile(source, True, environ, umbrella=umbrella, groups=('opening',))
+    profiles = _load_profile(source, True, environ, groups=('opening',))
     validate_match_opening(profiles['opening'])
     return profiles['opening']
 
 
-def load_match_hex_opening_config(source, environ=None, *, umbrella=False):
-    opening = _load_profile(source, True, environ, umbrella=umbrella, groups=('hex_opening',))['hex_opening']
+def load_match_hex_opening_config(source, environ=None):
+    opening = _load_profile(source, True, environ, groups=('hex_opening',))['hex_opening']
     validate_hex_opening(opening,match=True)
     return opening
 
 
-def _load_profile(source, match, environ, *, umbrella=False, groups=None):
+def _load_profile(source, match, environ, *, groups=None, overrides=None):
     source = Path(source)
     if not source.is_absolute() and not source.exists():
         source = ROOT/source
@@ -54,6 +54,10 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
     if match:
         fields['opening'] = {**FIELDS['opening'][1], **FIELDS['policy_init'][1]}
         fields['hex_opening'] = FIELDS['hex_opening'][1]
+    overrides = overrides or {}
+    for group, keys in overrides.items():
+        if group not in fields or set(keys) - set(fields[group]):
+            raise ValueError(f'Unknown engine override: {group}')
     values, common = {}, {}
 
     def read(path, *, local=False):
@@ -63,15 +67,11 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
         for (group, key), value in entries.items():
             if group == 'engine':
                 common[key] = value
-            else:
+            elif group in fields:
                 values[group, key] = value
-    if umbrella:
-        # An experiment may omit a match profile and use the default protocol.
-        read(ROOT/'configs/baseline'/f'{section}.cfg')
-    if path.is_file():
-        read(path)
-    elif not umbrella:
+    if not path.is_file():
         raise FileNotFoundError(f'Engine profile does not exist: {path}')
+    read(path)
     for local in (path.parent/'engine.cfg.local', Path(str(path)+'.local')):
         if local.is_file():
             read(local, local=True)
@@ -88,6 +88,7 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
             if group == section and key in ENGINE_FIELDS:
                 raw = env.get('ENGINE_'+key.upper(), raw)
             raw = env.get(override, raw)
+            raw = overrides.get(group, {}).get(key, raw)
             if raw is None and group == "opening":
                 defaults = {"policy_init": "false", "policy_temperature": "1", "policy_after": "true", "policy_on_failure": "true"}
                 if key == "policy_init_mean" and not result[group]["policy_init"]:
@@ -103,7 +104,7 @@ def _load_profile(source, match, environ, *, umbrella=False, groups=None):
             if raw is None:
                 raise ValueError(f'Missing engine field: {group}.{key}')
             try:
-                result[group][key] = convert(raw)
+                result[group][key] = convert(str(raw))
             except (ValueError, TypeError) as error:
                 raise ValueError(f'Invalid {group}.{key}: {raw}') from error
     return result

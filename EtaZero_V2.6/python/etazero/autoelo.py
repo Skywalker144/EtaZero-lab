@@ -1,6 +1,6 @@
 """Incremental experiment Elo with fixed checkpoints and reusable paired matches."""
 import argparse
-import configparser
+from copy import deepcopy
 from dataclasses import asdict
 import json
 import math
@@ -13,6 +13,7 @@ import uuid
 from .arena import (PairStore, build_schedule, discover_players, identity,
                     native_config, run_arena)
 from .config import ROOT, boolean
+from .config_files import read_config_file
 from .engine_config import load_engine_config
 from .elo_cache import prepare_pairs, retain_pairs
 from .process import install_signals
@@ -35,15 +36,11 @@ def config_directory(directory):
 
 def load_elo_config(directory, environ=None, overrides=None):
     directory = config_directory(directory)
-    values = {}
-    for path in (ROOT/'configs/baseline/elo.cfg', directory/'elo.cfg', directory/'elo.cfg.local'):
-        if not path.is_file():
-            continue
-        parser = configparser.ConfigParser(interpolation=None, strict=True)
-        parser.read_string(path.read_text())
-        if parser.defaults() or parser.sections() != ['elo'] or set(parser['elo']) - set(ELO_FIELDS):
-            raise ValueError(f'Unknown Elo sections or fields: {path}')
-        values.update(parser['elo'])
+    entries = read_config_file(ROOT/'configs/baseline/elo.cfg', {'elo': ELO_FIELDS})
+    for path in (directory/'elo.cfg', directory/'elo.cfg.local'):
+        if path.is_file():
+            entries.update(read_config_file(path, {'elo': ELO_FIELDS}))
+    values = {key: value for (section, key), value in entries.items() if section == 'elo'}
     env = os.environ if environ is None else environ
     for key in ELO_FIELDS:
         if 'ELO_'+key.upper() in env:
@@ -66,6 +63,19 @@ def load_elo_config(directory, environ=None, overrides=None):
     return settings
 
 
+def load_elo_profile(directory, environ=None, overrides=None, *, gpu=None):
+    """Resolve one shared match protocol and its Elo-owned execution limits."""
+    settings = load_elo_config(directory, environ, overrides)
+    config = load_engine_config(config_directory(directory)/'match.cfg', match=True, environ=environ,
+                                overrides={'match': {'games': settings['games_per_pair'],
+                                                     'game_threads': settings['game_threads']}})
+    if gpu is not None and config['match']['device'] != 'cpu':
+        config['match']['device'] = 'cuda:0'
+    env = os.environ if environ is None else environ
+    return {'settings': settings, 'config': config,
+            'cuda_visible_devices': str(gpu) if gpu is not None else env.get('CUDA_VISIBLE_DEVICES')}
+
+
 def default_output(directory, arms=None, data=None):
     if data is not None:
         return Path(data).resolve()/'elo'
@@ -79,18 +89,17 @@ def default_output(directory, arms=None, data=None):
 
 
 def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
-                 overrides=None, environ=None, gpu=None):
+                 overrides=None, environ=None, gpu=None, profile=None):
     directory = config_directory(directory)
-    settings = load_elo_config(directory, environ, overrides)
-    config = load_engine_config(directory, match=True, environ=environ, umbrella=True)
-    # Elo owns the number of games; match.cfg supplies only the match protocol.
-    config['match']['games'] = settings['games_per_pair']
-    config['match']['game_threads'] = settings['game_threads']
-    if gpu is not None and config['match']['device'] != 'cpu':
-        config['match']['device'] = 'cuda:0'
+    if profile is None:
+        profile = load_elo_profile(directory, environ, overrides, gpu=gpu)
+    elif overrides is not None or environ is not None or gpu is not None:
+        raise ValueError('A resolved Elo profile cannot be combined with new overrides')
+    profile = deepcopy(profile)
+    settings, config = profile['settings'], profile['config']
     if arms is None and data is None:
-        from .experiment import experiment_plan
-        arms = experiment_plan(directory, environ=environ)['arms']
+        from .experiment import load_experiment_arms
+        arms = load_experiment_arms(directory)
     roots = [(a['name'], Path(a['run_dir'])) for a in arms] if arms is not None else None
     base = Path(output).resolve() if output is not None else default_output(directory, arms, data)
     anchor_path = base/'anchor.json'
@@ -118,10 +127,10 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
                 'sampling': {key: settings[key] for key in ('sample_seconds', 'neighbors', 'cross_seconds', 'final_cross')},
                 'execution': {'max_loaded_models': settings['max_loaded_models'],
                               'model_load_workers': settings['model_load_workers'],
-                              'cuda_visible_devices': str(gpu) if gpu is not None else
-                              (os.environ if environ is None else environ).get('CUDA_VISIBLE_DEVICES')}}
+                              'cuda_visible_devices': profile['cuda_visible_devices']}}
     manifest['source_sha256'] = {name: sha256(Path(__file__).parent/name)
-                               for name in ('autoelo.py', 'arena.py', 'elo.py', 'elo_cache.py', 'engine_config.py')}
+                               for name in ('autoelo.py', 'arena.py', 'elo.py', 'elo_cache.py',
+                                            'engine_config.py')}
     # Store JSON-native values so in-memory and reloaded manifests compare equal.
     manifest = json.loads(json.dumps(manifest))
     session = base/identity(manifest)[:16]
@@ -174,7 +183,9 @@ def run_autoelo(plan, binary):
             print(f"autoelo: reused_games={before}/{plan['summary']['games']}", flush=True)
             env = dict(os.environ)
             visibility = plan['manifest']['execution']['cuda_visible_devices']
-            if visibility is not None:
+            if visibility is None:
+                env.pop('CUDA_VISIBLE_DEVICES', None)
+            else:
                 env['CUDA_VISIBLE_DEVICES'] = visibility
             result = run_arena(output, plan['manifest'], Path(binary),
                                plan['settings']['bootstrap_samples'], plan['settings']['max_loaded_models'], env)

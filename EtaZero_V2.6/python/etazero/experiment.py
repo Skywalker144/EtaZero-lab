@@ -13,12 +13,13 @@ import subprocess
 import sys
 import time
 from .config import ROOT, FILES, FIELDS, boolean, load_config, validate
+from .config_files import read_config_file
 from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sha256
 
-EXP_FIELDS = {'max_iteration': int, 'max_seconds': float, 'arm_gpus': str, 'shared_init': boolean,
-              'autoelo': boolean}
-ENV_FIELDS = {'MAX_ITERS': 'max_iteration', 'MAX_TIME_SECONDS': 'max_seconds',
+EXP_FIELDS = {'max_iteration': int, 'max_hours': float, 'arm_gpus': str,
+              'shared_init': boolean, 'autoelo': boolean}
+ENV_FIELDS = {'MAX_ITERS': 'max_iteration', 'MAX_TIME_HOURS': 'max_hours',
               'ARM_GPUS': 'arm_gpus', 'SHARED_INIT': 'shared_init', 'AUTOELO': 'autoelo'}
 
 
@@ -28,20 +29,23 @@ def experiment_plan(directory, environ=None, work_dir=None):
     if not directory.is_absolute() and not directory.exists():
         directory = ROOT/directory
     directory = directory.resolve()
-    parser = configparser.ConfigParser(interpolation=None, strict=True)
-    parser.read_string((directory/'exp.cfg').read_text())
+    if not (directory/'exp.cfg').is_file():
+        raise FileNotFoundError(directory/'exp.cfg')
+    entries = read_config_file(directory/'exp.cfg', {'experiment': EXP_FIELDS})
+    if (directory/'exp.cfg.local').is_file():
+        entries.update(read_config_file(directory/'exp.cfg.local', {'experiment': EXP_FIELDS}))
+    raw = {key: value for (section, key), value in entries.items() if section == 'experiment'}
     required = set(EXP_FIELDS) - {'autoelo'}
-    if (parser.defaults() or parser.sections() != ['experiment'] or
-            not required <= set(parser['experiment']) or set(parser['experiment']) - set(EXP_FIELDS)):
-        raise ValueError('exp.cfg requires exactly [experiment] and '+', '.join(EXP_FIELDS))
-    raw = {'autoelo': 'true', **dict(parser['experiment'])}
+    if not required <= set(raw):
+        raise ValueError('exp.cfg requires [experiment] fields: '+', '.join(sorted(required)))
+    raw = {'autoelo': 'true', **raw}
     for source, target in ENV_FIELDS.items():
         if source in env:
             raw[target] = env[source]
     settings = {key: convert(raw[key]) for key, convert in EXP_FIELDS.items()}
-    if settings['max_iteration'] < 0 or not math.isfinite(settings['max_seconds']) or settings['max_seconds'] < 0:
+    if settings['max_iteration'] < 0 or not math.isfinite(settings['max_hours'] * 3600) or settings['max_hours'] < 0:
         raise ValueError('Experiment budgets must be nonnegative and finite')
-    if not settings['max_iteration'] and not settings['max_seconds']:
+    if not settings['max_iteration'] and not settings['max_hours']:
         raise ValueError('Each experiment requires a finite iteration or time budget')
     if settings['arm_gpus'].strip():
         slots = [value.strip() for value in settings['arm_gpus'].split(',')]
@@ -53,11 +57,9 @@ def experiment_plan(directory, environ=None, work_dir=None):
         slots = [None]
     tag = hashlib.sha256(str(directory).encode()).hexdigest()[:12]
     work = Path(work_dir).resolve() if work_dir else ROOT/'data/experiments'/f'{directory.name}_{tag}'
-    arms = []
-    for selected in sorted(directory.iterdir()):
-        if not selected.is_dir() or not (selected/'run.cfg').is_file():
-            continue
-        config = load_config(selected)
+    arms = load_experiment_arms(directory)
+    for arm in arms:
+        config = arm['config']
         if slots != [None]:
             devices = config['devices']
             if len(devices['selfplay'].split(',')) != 1:
@@ -65,18 +67,37 @@ def experiment_plan(directory, environ=None, work_dir=None):
             devices['train'] = 'cpu' if devices['train'] == 'cpu' else 'cuda:0'
             devices['selfplay'] = 'cpu' if devices['selfplay'] == 'cpu' else 'cuda:0'
             validate(config)
-        destination = Path(config['run']['run_dir'])
-        arms.append({'name': selected.name, 'config_dir': str(selected), 'run_dir': str(destination), 'config': config})
-    if not arms:
-        raise ValueError(f'No experiment arm directories with run.cfg in {directory}')
-    destinations = [Path(a['run_dir']) for a in arms]
-    for i, destination in enumerate(destinations):
+        destination = Path(arm['run_dir'])
         if destination == work or destination in work.parents:
             raise ValueError('An arm run directory must not contain the experiment controller directory')
+    plan = {'umbrella': str(directory), 'work_dir': str(work), 'settings': settings, 'slots': slots, 'arms': arms}
+    if settings['autoelo']:
+        from .autoelo import load_elo_profile
+        from .arena import validate_match_models
+        plan['elo'] = load_elo_profile(directory, environ=env, gpu=slots[0])
+        validate_match_models(plan['elo']['config'],
+                              [{'canvas': arm['config']['network']['canvas'],
+                                'algorithm': arm['config']['agent']['algorithm']} for arm in arms])
+    return plan
+
+
+def load_experiment_arms(directory):
+    """Resolve training arms and outputs without loading scheduler or Elo settings."""
+    arms = []
+    for selected in sorted(Path(directory).iterdir()):
+        if not selected.is_dir() or not (selected/'run.cfg').is_file():
+            continue
+        config = load_config(selected)
+        arms.append({'name': selected.name, 'config_dir': str(selected),
+                     'run_dir': config['run']['run_dir'], 'config': config})
+    if not arms:
+        raise ValueError(f'No experiment arm directories with run.cfg in {directory}')
+    destinations = [Path(arm['run_dir']) for arm in arms]
+    for i, destination in enumerate(destinations):
         for other in destinations[:i]:
             if destination == other or destination in other.parents or other in destination.parents:
                 raise ValueError('Experiment arms require independent, non-overlapping run directories')
-    return {'umbrella': str(directory), 'work_dir': str(work), 'settings': settings, 'slots': slots, 'arms': arms}
+    return arms
 
 
 def initialization_key(config):
@@ -129,7 +150,7 @@ def arm_progress(arm, settings):
     state = load_json(state_path) if state_path.exists() else {'iteration': 0, 'elapsed_seconds': 0.0}
     if settings['max_iteration'] and state['iteration'] > settings['max_iteration']:
         return 'complete'
-    if settings['max_seconds'] and state['elapsed_seconds'] >= settings['max_seconds']:
+    if settings['max_hours'] and state['elapsed_seconds'] >= settings['max_hours'] * 3600:
         return 'complete'
     return 'pending'
 
@@ -168,7 +189,7 @@ class Scheduler:
         command = [sys.executable, '-m', 'etazero', 'run', '--config-dir', str(directory),
                    '--run-dir', arm['run_dir'], '--binary', str(self.binary),
                    '--iterations', str(self.plan['settings']['max_iteration']),
-                   '--max-seconds', str(self.plan['settings']['max_seconds'])]
+                   '--max-seconds', str(self.plan['settings']['max_hours'] * 3600)]
         # A resumed run already records its weight origin and rejects --weights.
         origin = self.initializations.get(arm['name'])
         if origin and not (Path(arm['run_dir'])/'.internal/run.json').exists():
@@ -271,7 +292,7 @@ def run_experiment(plan, binary):
             status = work/'.internal/elo_status.json'
             save_json(status, {'status': 'planning'})
             try:
-                evaluation = autoelo_plan(plan['umbrella'], binary, arms=plan['arms'], gpu=plan['slots'][0])
+                evaluation = autoelo_plan(plan['umbrella'], binary, arms=plan['arms'], profile=plan['elo'])
                 print('autoelo: '+json.dumps(evaluation['summary']), flush=True)
                 save_json(status, {'status': 'running', 'output': evaluation['output']})
                 handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -303,12 +324,6 @@ def main():
         parser.error('Set CONFIG_DIR or --config-dir to an experiment umbrella')
     plan = experiment_plan(args.config_dir, work_dir=args.work_dir)
     if args.dry_run:
-        if plan['settings']['autoelo']:
-            from .autoelo import load_elo_config
-            from .engine_config import load_engine_config
-            plan['elo'] = {'settings': load_elo_config(plan['umbrella']),
-                           'config': load_engine_config(plan['umbrella'], match=True, umbrella=True),
-                           'schedule': 'Discovered after every scheduled arm has completed'}
         print(json.dumps(plan, indent=2)); return 0
     return run_experiment(plan, args.binary.resolve())
 

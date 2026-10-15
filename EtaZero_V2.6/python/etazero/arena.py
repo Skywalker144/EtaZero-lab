@@ -355,12 +355,19 @@ def load_results(output: Path) -> tuple[dict, list[dict]]:
 
 
 def native_config(config, players):
-    canvases = set()
     infos = inspect_models([player.model for player in players])
     for player in players:
         _, info = infos[player.model]
         if info['sha256'] != player.sha256:
             raise ValueError(f'Model changed: {player.model}')
+    canvas = validate_match_models(config, [infos[player.model][1] for player in players])
+    return {**config, 'network': {'canvas': canvas}}
+
+
+def validate_match_models(config, models):
+    """Check shared match conditions against model metadata or planned networks."""
+    canvases = set()
+    for info in models:
         canvases.add(info['canvas'])
         if info.get('algorithm') == 'muzero' and (config['match']['reuse_tree'] or
                 config['match']['use_graph_search'] or config['match']['root_num_symmetries_to_sample'] != 1):
@@ -371,7 +378,7 @@ def native_config(config, players):
     canvas = canvases.pop()
     if config['match']['board_size'] > canvas:
         raise ValueError('Match board exceeds model canvas')
-    return {**config, 'network': {'canvas': canvas}}
+    return canvas
 
 
 def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
