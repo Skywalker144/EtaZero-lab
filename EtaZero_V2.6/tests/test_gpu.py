@@ -157,7 +157,7 @@ def test_unlimited_iterations_stop_and_auto_resume(tmp_path):
     assert result.returncode==0,result.stdout+'\n'+result.stderr
     resumed=load_json(root/".internal/state.json")
     assert resumed["run_id"]==first["run_id"] and resumed["iteration"]==target+1
-    assert resumed["checkpoint"]["total_steps"]==target*4
+    assert_training_budget(root,resumed,load_json(root/'config/effective.json'))
     assert_preserved(root,shards)
 
 
@@ -182,7 +182,7 @@ def test_default_nested_run_directory_and_explicit_resume(tmp_path,monkeypatch,g
     main()
     second=load_json(root/'.internal/state.json')
     assert second['run_id']==first['run_id'] and second['iteration']==3
-    assert second['checkpoint']['total_steps']==8
+    assert_training_budget(root,second,effective)
     assert load_json(root/'config/effective.json')==effective
     assert all(sha256(p)==digest for p,digest in shards.items())
 
@@ -239,8 +239,7 @@ def test_resume_norm_sampling_identity_and_disabled_sampling_pipeline(tmp_path,g
 
 def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
     root,state=pipeline
-    assert state["checkpoint"]["total_steps"]==8
-    assert state["checkpoint"]["total_samples"]==64
+    assert_training_budget(root,state,gpu_config)
     shards={p:sha256(p) for p in (root/"selfplay").rglob("*.npz")}
     assert shards
     for path in shards:
