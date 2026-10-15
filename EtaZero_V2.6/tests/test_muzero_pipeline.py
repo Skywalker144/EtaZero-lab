@@ -77,12 +77,12 @@ def test_config_inherits_baseline_and_disables_invalid_tree_features(tmp_path):
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
 @pytest.mark.parametrize('compiled', [False, True])
-@pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
-def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture):
+@pytest.mark.parametrize('architecture,katago_optimizer', [('nbt', True), ('resnet', True), ('resnet', False)])
+def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture, katago_optimizer):
     torch.set_num_threads(1); torch._dynamo.reset()
     c = small_config(); c['training']['compile'] = compiled
     c['network']['architecture'] = architecture
-    if architecture == 'resnet':
+    if not katago_optimizer:
         c['muzero_training'] = dict(auxiliary_losses=True, katago_optimizer=False,
                                     learning_rate=.001, weight_decay=.0003)
         c['optimizer']['kind'] = 'adamw'
