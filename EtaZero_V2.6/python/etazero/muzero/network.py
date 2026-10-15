@@ -164,11 +164,12 @@ class Prediction(nn.Module):
 
 
 class MuZeroNet(nn.Module):
-    def __init__(self, config: NetworkConfig):
+    def __init__(self, config: NetworkConfig, auxiliary_losses=True):
         super().__init__()
         self.canvas = config.canvas
         self.latent_channels = config.latent_channels
         self.predict_q_values = config.predict_q_values
+        self.auxiliary_losses = auxiliary_losses
         self.norm_kind = 'fixscaleonenorm' if config.architecture == 'nbt' else 'masked_layernorm'
         self.architecture = config.architecture
         self.representation = Representation(config)
@@ -200,6 +201,7 @@ class InferenceMuZeroNet(nn.Module):
         super().__init__()
         self.model = model
         self.contract = CONTRACT_ID
+        self.has_auxiliary = model.auxiliary_losses
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str, str, int]:
