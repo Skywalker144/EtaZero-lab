@@ -71,7 +71,7 @@ CONFIG_DIR="configs/<实验伞目录>" bash scripts/autoelo.sh
 bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估标识>"
 ```
 
-设置在伞目录 `elo.cfg` 的 `[elo]`；默认值以 [baseline/elo.cfg](../configs/baseline/elo.cfg) 为准。优先级为对应命令行参数 > `ELO_<字段大写>` 环境覆盖 > 伞目录 `elo.cfg.local` > 伞目录 `elo.cfg` > baseline 默认值。未知字段、非法百分比或局数、断开的比较图明确拒绝。
+设置在伞目录可选 `elo.cfg` 的 `[elo]`，只需填写实验专用差异；无差异时可省略整个文件。默认值以 [baseline/elo.cfg](../configs/baseline/elo.cfg) 为准。优先级为对应命令行参数 > `ELO_<字段大写>` 环境覆盖 > 伞目录 `elo.cfg.local` > 伞目录 `elo.cfg` > baseline 默认值。未知字段、非法采样间隔或局数、断开的比较图明确拒绝。
 
 | 字段 | 含义 |
 |---|---|
@@ -90,7 +90,9 @@ bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估�
 
 组内按已选模型连接 `neighbors` 级近邻。跨臂按 `cross_seconds` 的整数倍选点，仅使用固定时间采样模型，并要求每对臂都已覆盖目标所在的采样网格；最近距离相同时选择更早模型。覆盖范围以已完成的采样目标时间计算，即使该目标选中的模型实际时间略早或最后模型未追加，仍视为覆盖。每对臂独立确定覆盖范围，新增臂不改变其他臂的时间配对。临时末点不参与固定时间配对，`final_cross` 单独安排各臂最后一个已选模型两两比赛。配对重复时只安排一次；比较图必须连通。全部赛果联合重新拟合，不先分别估计再平移，不约束曲线单调；增加数据后旧模型的 Elo 与区间可能变化。
 
-所有模型共用伞目录 `match.cfg`，显式引用公共 engine 和比赛 profile，再应用伞目录 `match.cfg.local` 和 `MATCH_` 环境覆盖，不继承各臂的训练或比赛条件。局数由 `elo.games_per_pair` 控制。MuZero 要求关闭图搜索与子树复用、根对称数量为一，不兼容条件在启动前拒绝。混合 AZ/MZ 时须在共享比赛配置中满足这些约束。固定 visits 不等于相同思考时间，评估耗时不进入训练横轴。
+所有模型共用伞目录必需的 `match.cfg`，显式引用公共 engine 和比赛 profile，按独立比赛相同的规则应用该目录的 `engine.cfg.local`、`match.cfg.local`、`ENGINE_` 和 `MATCH_` 环境覆盖，不继承各臂的训练或比赛条件。局数和全局工作线程数最终分别由 `elo.games_per_pair`、`elo.game_threads` 覆盖，然后校验最终比赛配置。独立比赛加载器只读取所选比赛文件及其引用，不根据同目录是否存在 `exp.cfg` 切换配置来源。
+
+autoexp 在启动训练前解析、校验并保存本次评估配置和设备映射，训练结束后复用该配置；修改文件或环境变量在下次启动时生效。各臂模型画布须一致，比赛棋盘不能超过模型画布。MuZero 要求关闭图搜索与子树复用、根对称数量为一；包含 MuZero 臂时在训练前检查，比赛前仍按实际模型元数据复核。独立 autoelo 每次启动读取当前配置。混合 AZ/MZ 时须在共享比赛配置中满足这些约束。固定 visits 不等于相同思考时间，评估耗时不进入训练横轴。
 
 独立 `--data` 发现有已提交 state 的实际数据臂；autoexp 使用本次完整调度臂列表和真实输出路径，支持自定义 run_dir。autoexp 的 CUDA 比赛使用第一个训练 GPU 槽位，子进程通过 `CUDA_VISIBLE_DEVICES` 映射为 `cuda:0`；独立 autoelo 遵循比赛 device 与当前可见设备。
 
