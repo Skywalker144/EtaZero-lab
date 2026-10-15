@@ -84,7 +84,7 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
 
 每套配置位于 `configs/<name>/`。训练使用 `run.cfg`、`env.cfg`、`net.cfg`、`selfplay.cfg`、`train.cfg`；`env.cfg` 的 `[environment]` 管理棋盘、规则和训练行的禁手特征 dropout；`hex` 使用普通六邻接实际连接规则。`selfplay.cfg` 的 `[hex_opening]` 配置 Hex 首手平衡采样，与五子棋 `[opening]` 独立，详见 [Hex](hex.md)。`selfplay.cfg` 首部 `[search]` 集中完整／cheap 根访问预算、cheap 概率与权重；搜索技巧按独立 section 配置，底部 `[parallelism]`、`[inference]`、`[writer]` 管理执行资源。训练字段以 [config.py](../python/etazero/config.py) 为事实源。独立分析和比赛通过 `analysis.cfg`、`match.cfg` 显式引用公共 `engine.cfg`，字段以 [engine_config.py](../python/etazero/engine_config.py) 为事实源，不读取训练继承链，不参与训练配置身份；引用、覆盖优先级与直接文件入口见 [分析与比赛配置](elo.md#独立配置与搜索预算)。
 
-基础配置在 `configs/` 下按短名平铺，命名规则见 [README](../README.md#配置与训练)。`baseline/` 集中维护完整的公共起始设置；工程检查配置放在 `checks/`，消融配置放在 `ablations/`。独立实验目录包含 `exp.cfg` 和平铺的实验臂，每臂通过 `@include` 引用基础配置文件，仅覆盖本次实验的差异；调度方式见 [自动实验](#自动实验)。
+基础配置在 `configs/` 下按短名平铺，命名规则见 [README](../README.md#配置与训练)。`baseline/` 集中维护完整的公共起始设置；工程检查配置放在 `checks/`，消融配置放在 `ablations/`。独立实验目录按职责维护配置：`exp.cfg` 管调度，开启自动评估时必须提供根目录的公共 `match.cfg`，可选 `elo.cfg` 只写区别于 baseline 的采样、赛程、统计和执行设置。平铺的实验臂通过 `@include` 引用基础训练配置文件，仅覆盖本次实验的差异；调度方式见 [自动实验](#自动实验)。
 
 训练、分析和比赛共用文件级 `@include` 解析器。每个配置文件在 INI 节之前显式引用同类文件，例如 `@include ../baseline/run.cfg`；路径相对于声明引用的文件，支持引号，不依赖启动目录。多个引用从左到右合并，当前文件覆盖引用值，最后应用当前目录的 `*.cfg.local`；被引用目录的本机覆盖不会自动传播。训练 `run_dir` 只取当前配置或命令行，不从引用文件继承。分析和比赛在合并后以对应模式节覆盖公共 `[engine]`。引用循环、文件缺失、未知/重复字段、错误文件归属，以及解析器所检查的非法枚举、范围、组合和未实现能力，在配置加载时拒绝；native 构造器还会核对所需约束。opening、policy init 和 game fork 的数值参数无论功能是否开启都须符合范围，Python 与 native 均拒绝非法值和非有限数值。各入口只读取自身配置文件，不自动引入其他入口配置。
 
@@ -332,16 +332,20 @@ MuZero 概览以根 NN 非法落点概率质量替换缓存面板，每轮按实
 | 字段 | 语义 |
 |---|---|
 | `max_iteration` | 每臂累计完成训练轮数上限，0 不限 |
-| `max_seconds` | 每臂累计已提交完整轮次净墙钟上限，0 不限；不含编译、绘图、排队、暂停和启动恢复 |
+| `max_hours` | 每臂累计已提交完整轮次净墙钟上限，单位小时，支持小数（如 `4.5`），0 不限；不含编译、绘图、排队、暂停和启动恢复 |
 | `arm_gpus` | GPU 编号或 GPU/MIG UUID 的逗号列表，每槽同时一个臂；空值串行使用各臂原有 devices |
 | `shared_init` | true/false；按网络结构和 seed 分组共享初始模型权重 |
 | `autoelo` | true/false；可省略，默认 true，所有训练臂成功完成后运行共享 Elo |
 
 每次处理伞目录下所有含 `run.cfg` 的直接子目录：已达到预算的臂跳过，其余臂启动或恢复训练；自动 Elo 包含全部臂。独立 `autoelo.sh` 默认使用完整臂列表，显式 `--data` 则按给定数据目录发现历史臂。
 
-两个预算至少一个为正，先达到任一预算即完成。预算通过普通训练入口的 `--iterations`、`--max-seconds` 覆盖此次调用，不改变生效配置，并记录在 `session_start` 的实际停止上限中；默认不自动构建，缺失或过期的 native binary 提示先执行 `scripts/build.sh`。时间上限在完整轮次边界检查，可能超过一轮的预算余量。
+启动时依次读取 `exp.cfg`、可选 `exp.cfg.local`，再应用调度环境覆盖。`exp.cfg` 仅接受 `[experiment]`。开启自动评估时，实验入口同时解析 Elo 设置和公共比赛协议，应用 Elo 的局数、线程覆盖以及首个 GPU 槽位映射，再检查各臂模型画布和 MuZero 比赛约束；配置错误在初始化或训练前拒绝。关闭自动评估时不读取比赛或 Elo 配置。
 
-`MAX_ITERS`、`MAX_TIME_SECONDS`、`ARM_GPUS`、`SHARED_INIT`、`AUTOELO` 可覆盖伞配置，后两项使用 true/false。`CONFIG_DIR` 或 `--config-dir` 选择伞目录，`DRY_RUN=1` 或 `--dry-run` 仅打印训练和评估配置计划，不创建目录、初始化权重或启动任何任务；历史模型采样在训练完成后确定。`--binary` 指定本版本已验证构建；`--work-dir` 指定调度产物目录，默认 `data/experiments/<伞目录名>_<路径摘要>/`。自动 Elo 的采样、赛程、C++ 并行配置、独立入口和结果恢复见 [自动实验 Elo](elo.md#自动实验-elo)；评估阶段状态单独保存于调度目录 `.internal/elo_status.json`，失败保留训练完成状态并明确报错。
+dry-run 与执行共用同一份生效计划；实际执行将其保存到调度目录 `.internal/plan.json`，包括评估配置和 CUDA 可见设备。本次训练完成后的评估使用该计划，不重新读取配置文件或环境覆盖；历史模型和赛程在训练完成后发现。重新启动命令会按当前配置创建本次计划。
+
+两个预算至少一个为正，先达到任一预算即完成。小时预算换算为秒后，通过普通训练入口的 `--iterations`、`--max-seconds` 覆盖此次调用，不改变生效配置，并记录在 `session_start` 的实际停止上限中；默认不自动构建，缺失或过期的 native binary 提示先执行 `scripts/build.sh`。时间上限在完整轮次边界检查，可能超过一轮的预算余量。
+
+`MAX_ITERS`、`MAX_TIME_HOURS`、`ARM_GPUS`、`SHARED_INIT`、`AUTOELO` 可覆盖伞配置，后两项使用 true/false。`CONFIG_DIR` 或 `--config-dir` 选择伞目录，`DRY_RUN=1` 或 `--dry-run` 仅打印训练和评估配置计划，不创建目录、初始化权重或启动任何任务。`--binary` 指定本版本已验证构建；`--work-dir` 指定调度产物目录，默认 `data/experiments/<伞目录名>_<路径摘要>/`。自动 Elo 的采样、赛程、C++ 并行配置、独立入口和结果恢复见 [自动实验 Elo](elo.md#自动实验-elo)；评估阶段状态单独保存于调度目录 `.internal/elo_status.json`，失败保留训练完成状态并明确报错。
 
 指定 GPU 槽位时，子进程的 `CUDA_VISIBLE_DEVICES` 设为该槽，CUDA devices 映射为 `cuda:0`，CPU devices 保留。每臂至多一个 selfplay device，多设备配置会明确拒绝；GPU 槽位不得重复。每臂使用普通训练相同的输出目录解析；例如 `configs/<伞目录>` 的各臂默认位于 `data/<伞目录>/<臂名>/`。重复、嵌套或包含调度目录的路径会在启动前拒绝。生成给子进程的配置写入最终绝对输出路径，不按调度临时配置的位置重新映射。GPU 槽位仅控制本次 scheduler，不管理外部任务或保留宿主 GPU。
 
