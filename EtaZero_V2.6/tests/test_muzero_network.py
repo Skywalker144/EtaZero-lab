@@ -195,13 +195,14 @@ def update(model, optimizer, optimization, device):
 
 
 @pytest.mark.parametrize('kind', ['sgd', 'adamw', 'muon'])
-def test_component_update_state_restore_next_update(tmp_path, dimensions, kind, monkeypatch):
+@pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
+def test_component_update_state_restore_next_update(tmp_path, dimensions, kind, architecture, monkeypatch):
     monkeypatch.setenv('KATAGO_MUON_BATCHED_NS', '0')
     config = load_config(CONFIGS / 'smoke_test')
     config['optimizer']['kind'] = kind
     config['training']['batch_size'] = 2
     torch.manual_seed(19)
-    model = MuZeroNet(replace(dimensions, predict_q_values=True)).train()
+    model = MuZeroNet(replace(dimensions, predict_q_values=True, architecture=architecture)).train()
     optimizer = optimizer_for(model, config)
     optimization = Optimization(model, config, optimizer)
     update(model, optimizer, optimization, 'cpu')
