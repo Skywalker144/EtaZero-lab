@@ -15,7 +15,7 @@ import uuid
 import fcntl
 import warnings
 import numpy as np
-from .data import read_raw, training_view, training_targets, TRAIN_TARGETS
+from .data import read_raw, training_view, training_targets, TRAIN_TARGETS, game_row_ranges, game_identity
 from .schema import CONTRACT_ID, GLOBALS, PLANES
 from .storage import atomic_write, load_json, save_json, save_npz, sync_directory, write_npz
 
@@ -57,8 +57,34 @@ def window_sources(entries, replay, counts=None):
                               counts['raw_rows']+int(replay['add_to_data_rows'])])
 
 
-def validation_file(path):
-    return int(hashlib.md5(Path(path).name.encode()).hexdigest()[:13],16)/2**52>=.99
+def validation_game(identity):
+    return int(hashlib.md5(identity.encode()).hexdigest()[:13],16)/2**52>=.99
+
+
+def source_rows(entry):
+    ranges = entry.get('row_ranges')
+    return entry['metadata']['rows'] if ranges is None else sum(end-start for start,end in ranges)
+
+
+def split_sources(root, chosen):
+    """Keep every shard span and side/unroll target of a game in one partition."""
+    partitions = [], []
+    for entry in chosen:
+        with np.load(root/entry['path'], allow_pickle=False) as raw:
+            _, starts, ends = game_row_ranges(raw)
+            identities = [game_identity(entry['metadata'], game) for game in raw['game_ids']]
+        offsets = np.r_[0, np.cumsum(ends-starts)]
+        held_out = [validation_game(identity) for identity in identities]
+        for partition, sources in enumerate(partitions):
+            selected = [i for i, holdout in enumerate(held_out) if holdout == bool(partition) and offsets[i+1]>offsets[i]]
+            if not selected:
+                continue
+            source = dict(entry, row_ranges=[[int(offsets[i]), int(offsets[i+1])] for i in selected])
+            if 'weight_stats' in entry:
+                games = {identities[i] for i in selected}
+                source['weight_stats'] = [g for g in entry['weight_stats'] if g['id'] in games]
+            sources.append(source)
+    return partitions
 
 
 def sampling_probability(rows, replay):
@@ -111,7 +137,10 @@ def _scatter(task):
     views = []
     for path, source_id in sources:
         if raw:
-            view = _source_view(path, source_id, cache, targets)
+            key, ranges = source_id
+            view = _source_view(path, key, cache, targets)
+            if ranges is not None:
+                view = {k: np.concatenate([v[start:end] for start,end in ranges]) for k,v in view.items()}
         else:
             view = _load_view(path)
         views.append(view)
@@ -218,7 +247,7 @@ def _groups(items, limit):
 
 
 def _source_groups(root, chosen, limit, seed, partition=0, targets=TRAIN_TARGETS):
-    items = [(str(root/e['path']),view_key(e,targets),e['metadata']['rows']) for e in chosen]
+    items = [(str(root/e['path']),(view_key(e,targets),e.get('row_ranges')),source_rows(e)) for e in chosen]
     rng = np.random.default_rng(np.random.SeedSequence([seed,2**32-1,partition]))
     return _groups([items[i] for i in rng.permutation(len(items))],limit)
 
@@ -241,8 +270,7 @@ def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None, out
     if not chosen:return []
     s = config['shuffle']
     targets = config.get('targets') or training_targets(config)
-    rows = sum(e['metadata']['rows'] for e in chosen)
-    items = [(str(root/e['path']),view_key(e,targets),e['metadata']['rows']) for e in chosen]
+    items = [(str(root/e['path']),(view_key(e,targets),e.get('row_ranges')),source_rows(e)) for e in chosen]
     groups = _source_groups(root,chosen,plan['group_rows'],seed,partition,targets)
     sizes = {path:n for path,_,n in items}
     keep_prob = plan['keep_prob']
@@ -308,12 +336,11 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None, counts=None):
     targets=training_targets(config)
     rows=selection['window_rows'];desired=selection['desired_rows']
     seed = config["run"]["seed"]+iteration
-    keep_prob=sampling_probability(rows,r) # Before MD5 filtering, like the source.
+    keep_prob=sampling_probability(rows,r) # Shared probability, before the game holdout.
     skip=config['training']['skip_validation']
-    train_sources=[e for e in chosen if skip or not validation_file(e['path'])]
-    val_sources=[] if skip else [e for e in chosen if validation_file(e['path'])]
+    train_sources,val_sources=(chosen,[]) if skip else split_sources(root,chosen)
     def partition_plan(sources,partition):
-        subset_rows=sum(e['metadata']['rows'] for e in sources)
+        subset_rows=sum(source_rows(e) for e in sources)
         max_raw=max((max(e['metadata']['plies'],e['metadata']['rows']) for e in sources),default=0)
         rough=resource_plan(subset_rows,max_raw,math.ceil(subset_rows/s['group_rows']),config,keep_prob)
         groups=_source_groups(root,sources,rough['group_rows'],seed,partition,targets)
@@ -332,7 +359,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None, counts=None):
         stage.mkdir();scratch.mkdir()
         outputs = _write_data(root,stage,scratch/'train',train_sources,config,plan,seed,pool)
         if not outputs or not sum(e['rows'] for e in outputs):
-            raise ValueError('keep_target_rows produced an empty sample after per-group rounding or MD5 holdout')
+            raise ValueError('keep_target_rows produced an empty sample after per-group rounding or game holdout')
         validation_outputs=_write_data(root,stage,scratch/'val',val_sources,config,val_plan,seed,pool,'data/validation',partition=1)
         for files,partition in ((outputs,plan),(validation_outputs,val_plan)):
             usable=sum(e['rows']//config['training']['batch_size']*config['training']['batch_size'] for e in files)
