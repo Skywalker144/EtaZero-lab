@@ -1,4 +1,4 @@
-"""MuZero parameter roles for the shared fson optimizer schedule.
+"""MuZero NBT/ResNet parameter roles for the shared normalized optimizer policy.
 
 Representation/dynamics normalization is internal to the latent model, so its
 gamma/bias use normal_gamma/noreg. Only prediction normalization and the heads
@@ -41,8 +41,6 @@ def optimizer_for(model, config):
         from ..plain_optimization import optimizer_for as plain_optimizer
         kind = config['optimizer']['kind']
         return plain_optimizer(model, kind, plain, parameter_groups(model) if kind == 'muon' else None)
-    if model.architecture != 'nbt':
-        raise ValueError('KataGo optimizer policy requires the MuZero NBT architecture')
     groups = parameter_groups(model)
     options = config['optimizer']
     baselines = model_norms(groups)

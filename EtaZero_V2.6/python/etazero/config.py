@@ -343,8 +343,6 @@ def validate(c):
         network_config(c)
         if not 1 <= c['unroll']['steps'] <= 32 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
             raise ValueError('MuZero unroll.steps must be in [1,32], hidden_gradient_scale in [0,1]')
-        if c['network']['architecture'] == 'resnet' and c.get('muzero_training', {}).get('katago_optimizer', True):
-            raise ValueError('MuZero resnet requires muzero_training.katago_optimizer=false')
         if not c.get('muzero_training', {}).get('auxiliary_losses', True) and c['network']['predict_q_values']:
             raise ValueError('MuZero without auxiliary losses requires predict_q_values=false')
         if c['graph_search']['use_graph_search'] or c['search']['reuse_tree'] or c['symmetry']['root_num_symmetries_to_sample'] != 1:

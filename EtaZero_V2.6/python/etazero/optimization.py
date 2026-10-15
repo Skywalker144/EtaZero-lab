@@ -1,4 +1,4 @@
-"""KataGo fson/fixup optimizer policies and convolution/attention parameter roles."""
+"""KataGo optimizer policies, including the MuZero masked-normalization adaptation."""
 import math
 import torch
 from torch.optim.swa_utils import AveragedModel
@@ -79,7 +79,9 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
         else:
             raise ValueError(f'Unknown fixup optimizer group: {name}')
         return lr, wd
-    if norm_kind not in ('fixscaleonenorm', 'bnorm', 'brenorm', 'fixbrenorm'):
+    # MuZero's per-sample masked norm uses the same affine-parameter roles and
+    # normalized-trunk LR/WD policy; its forward normalization stays unchanged.
+    if norm_kind not in ('fixscaleonenorm', 'bnorm', 'brenorm', 'fixbrenorm', 'masked_layernorm'):
         raise ValueError(f'Unsupported optimizer norm kind: {norm_kind}')
     if name in ('input', 'normal', 'normal_gamma', 'normal_attn', 'normal_gab', 'gab_mlp', 'tab_module'):
         norm_key = 'input' if name == 'input' else 'normal'
