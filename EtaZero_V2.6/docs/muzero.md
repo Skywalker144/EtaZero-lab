@@ -6,7 +6,7 @@ MuZero 使用独立的 latent 搜索、initial/recurrent 推理组批及轨迹�
 CONFIG_DIR=configs/mz_g bash scripts/run.sh
 ```
 
-该配置使用 ResNet 主干和普通 AdamW，继承 baseline 的训练预算及可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 根及两种非根策略见 [Gumbel](gumbel.md)，沿用同一 latent 推理与展开训练。
+该配置使用 NBT 主干，继承 baseline 的 KataGo SGD + Momentum、分组学习率与自适应权重衰减、warmup、Lookahead 和 SWA，以及训练预算和可共用的搜索启发式；三段主干规模、展开长度和并行局数在其覆盖文件中定义。Hex、Gumbel 及其他派生配置沿配置继承链采用同一网络与优化设置，显式覆盖的对照实验除外。这些是可运行的起始设置，尚不是经过棋力或等时间实验选择的最优默认值。Gumbel 根及两种非根策略见 [Gumbel](gumbel.md)，沿用同一 latent 推理与展开训练。
 
 展开后的训练行更大，名义训练分片和配套桶大小由 [MuZero train.cfg](../configs/mz_g/train.cfg) 覆盖；派生配置按配置继承规则读取这些字段。shuffle 保留 baseline 的 worker 数，直接采用配置的分组、分桶和分片计划，行大小仅用于资源估算。展开中的主 policy 与 opponent policy 保持 int16；吸收态及被 mask 的占位 policy 在棋盘内保存单位整数权重，读取后归一化为均匀分布。
 
@@ -20,7 +20,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 ## 网络与推理
 
-[网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用 MuZero_V2 的两层全宽 3×3 残差块、逐样本 masked normalization 与 SiLU。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。ResNet 的归一化对每个样本的所有通道和有效格点进行 FP32 归约，不维护 BatchNorm 统计，卷积保留来源的默认初始化；prediction 不额外加入末端归一化。ResNet 要求 `katago_optimizer=false`，不套用 NBT/fson 参数分组。相同通道数与块数不保证相同参数量或计算量。
+[网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用 MuZero_V2 的两层全宽 3×3 残差块、逐样本 masked normalization 与 SiLU。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。ResNet 的归一化对每个样本的所有通道和有效格点进行 FP32 归约，不维护 BatchNorm 统计，卷积保留来源的默认初始化；prediction 不额外加入末端归一化。ResNet 也支持 KataGo 优化模式，采用相同的归一化主干分组 LR/WD 策略；逐样本归一化的缩放与偏置分别进入 `normal_gamma` 和 `noreg`，heads 使用输出组，前向归一化与初始化保持 ResNet 定义。这是 EtaZero 对 KataGo 优化策略的适配，KataGo 来源本身不提供该 ResNet 主干。相同通道数与块数不保证相同参数量或计算量。
 
 ResNet 的 `MaskedNorm` 在通道与有效空间位置上共同计算每样本的均值、方差，采用每通道可学习缩放和偏置；其统计方式接近单组 GroupNorm，并排除棋盘 padding。它不是 BatchNorm，也不是具有逐位置仿射参数的 `nn.LayerNorm([C,H,W])`。representation/dynamics 的入口和残差块采用该归一化与 SiLU；共享的 policy/value heads 仍采用 Mish 与 bias mask。
 
@@ -74,7 +74,7 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 
 [learner](../python/etazero/muzero/training.py) 采用来源中的梯度边界：根 loss 梯度系数 1，未来各步为 `1/K`；第二次及以后 dynamics 前按 `unroll.hidden_gradient_scale` 缩放 hidden 梯度，首次 representation→dynamics 不缩放。前向 loss 日志记录未缩放的各步损失和，反向系数不改变日志值。KataGo 优化器模式保留 batch 总和反传，普通优化器模式使用 batch 均值；consumed samples 计真实起点，不能当作展开状态数与 AlphaZero 比较。
 
-编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。NBT 的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW/Muon、Lookahead 和 SWA；representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
+编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。两种主干的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW/Muon、Lookahead 和 SWA；NBT representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组；ResNet 主干中的归一化属于内部组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
 
 ## KataGo 工程机制的适用边界
 
