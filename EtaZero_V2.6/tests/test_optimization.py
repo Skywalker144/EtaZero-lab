@@ -75,22 +75,23 @@ def test_parameter_group_coverage_and_roles(config):
         parameter_groups(model)
 
 
-def test_native_lr_and_decay_formulas(config):
+@pytest.mark.parametrize('norm_kind', ['fixscaleonenorm', 'masked_layernorm'])
+def test_native_lr_and_decay_formulas(config, norm_kind):
     options = config['optimizer']
-    lr, wd = group_settings('normal', options, 256, 0, {}, {'normal': 2})
+    lr, wd = group_settings('normal', options, 256, 0, {}, {'normal': 2}, norm_kind)
     assert lr == pytest.approx(3e-6)
     assert wd == pytest.approx(0.00125 * 0.05 ** 0.75)
-    head_lr, head_wd = group_settings('output', options, 256, 0, {}, {'normal': 2})
+    head_lr, head_wd = group_settings('output', options, 256, 0, {}, {'normal': 2}, norm_kind)
     assert head_lr == pytest.approx(1.5e-6) and head_wd == pytest.approx(1e-6)
-    gamma_wd = group_settings('normal_gamma', options, 256, 0, {}, {'normal': 2})[1]
+    gamma_wd = group_settings('normal_gamma', options, 256, 0, {}, {'normal': 2}, norm_kind)[1]
     assert gamma_wd == pytest.approx(wd / 8)
-    adaptive = group_settings('normal', options, 256, 2000000, {'normal': 4}, {'normal': 2})[1]
+    adaptive = group_settings('normal', options, 256, 2000000, {'normal': 4}, {'normal': 2}, norm_kind)[1]
     assert adaptive == pytest.approx(0.00125 * 2 ** (2 * math.tanh(math.log(2) * 3)))
     adamw = {**options, 'kind': 'adamw'}
-    lr, wd = group_settings('input', adamw, 64, 2000000, {}, {'input': 2})
+    lr, wd = group_settings('input', adamw, 64, 2000000, {}, {'input': 2}, norm_kind)
     assert lr == pytest.approx(1.33 * 3e-5 * 0.5 / 0.5)
     assert wd == pytest.approx(0.009 * 0.5 * 2 / 3)
-    assert group_settings('normal_gamma', adamw, 256, 2000000, {}, {'normal': 2})[1] == pytest.approx(0.009 / 4)
+    assert group_settings('normal_gamma', adamw, 256, 2000000, {}, {'normal': 2}, norm_kind)[1] == pytest.approx(0.009 / 4)
 
 
 @pytest.mark.parametrize('kind',['sgd','adamw'])
