@@ -147,7 +147,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 令 `s = taper_scale`（0时取m）、`d = add_to_data_rows`、`x = N−m+s+d`，窗口为 `max(m, int(m + a·(x**p−s**p)/(p·s**(p−1))))`，设置 `max_rows` 时再截到上限。参数和非法范围由 [train.cfg](../configs/baseline/train.cfg) 与 [config.py](../python/etazero/config.py) 唯一维护。快照另存来源范围 `[raw_total+int(d)−actual_window_rows, raw_total+int(d)]`；其end是未封顶的真实累计，不能替代N或本地产样quota。
 
-`keep_target_rows` 接受正整数或 `all`。在MD5切分之前计算 `q = min(1,K/actual_window_rows)`；窗口文件先乱序，再累计训练行到 `group_rows` 阈值才封组，末文件可以跨阈值。每组保留 `round(group_rows_actual·q)` 行的均匀子集，取整采用Python round，包括半整数的偶数取整；因此总输出可能偏离K。`q=1`保留全部，`q=0`的空结果明确拒绝，不能用旧快照顶替。
+`keep_target_rows` 接受正整数或 `all`。在棋局切分之前计算 `q = min(1,K/actual_window_rows)`；窗口文件先乱序，再累计训练行到 `group_rows` 阈值才封组，末文件可以跨阈值。每组保留 `round(group_rows_actual·q)` 行的均匀子集，取整采用Python round，包括半整数的偶数取整；因此总输出可能偏离K。`q=1`保留全部，`q=0`的空结果明确拒绝，不能用旧快照顶替。
 
 两阶段shuffle对保留行独立均匀分桶，再按固定计划的桶数和每桶文件数输出：`B=max(1,round(approx_rows_per_wave/bucket_rows))`，`F=bucket_rows/training_shard_rows`，要求整除；真实桶内按 `floor(j·N/F)` 等分。training_shard_rows是名义大小，真实文件可更大、更小或空，不根据实际桶大小重新决定F。所有字段共同排列。source的均匀排列＋multinomial桶计数与该随机分配分布相同；这里使用可重建的独立SeedSequence流，不宣称来源os.urandom序列相同。初次采样、wave内scatter和merge分别使用含partition/stage/wave/group/bucket的命名空间，跨桶任务不复用流。
 
@@ -172,7 +172,7 @@ learner 固定单遍消费：随机排列文件，每个文件在本轮快照中
 
 训练与验证 reader 在文件加载时保留字段、shape 和 dtype 校验，不对 value / TD 做整文件 WDL 扫描或自动修复。搜索端 `wdl_from_value` 负责截断舍入越界并输出合法概率；TD 目标由概率的凸组合产生。MuZero 无后续轨迹的 masked slot 保留全零占位目标。learner 每 batch 检查 loss 与梯度；此检查不替代离线数据质量检查，也不提供历史损坏数据的兼容修复。
 
-`training.skip_validation` 控制验证；true 对应同步来源 SKIP_VALIDATE 分支。启用时MD5原始文件basename的前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation；目录和模型代次不影响所属分区。writer以独立OS随机流生成64位十六进制basename，不消耗game RNG。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest持久记录源文件分区与输出文件行数。验证payload位于同一个原子data目录的validation子目录，回收及重建同时覆盖两个分区。
+`training.skip_validation` 控制验证；true 对应同步来源 SKIP_VALIDATE 分支。启用时，对 `run_id:attempt_id:worker_id:game_id` 的 MD5 前13个十六进制字符除2**52，`[0,.99)`作为train，`[.99,1)`作为validation。同一棋局的所有分片、重复行、side 样本和 MuZero unroll 属于同一分区；文件名、目录和快照轮次不影响分区。与 KataGo 的文件级留出不同，此处按棋局隔离，避免相同监督进入两侧；不同棋局之间仍可能有相同局面。两分区共用原窗口与切分前q，分别按来源分桶规划，manifest记录每个原始文件选中的棋局行区间，重建使用相同区间。原始对局和训练视图缓存保持完整，验证payload位于同一原子data目录的validation子目录。
 
 每轮训练结束、最终checkpoint之前，validation用当前raw模型eval/no_grad读取每文件完整batch，默认按文件名排序；`randomize_validation_files`可随机文件顺序。验证始终随机D4，即使训练D4关闭；采用独立随机流，保持训练RNG不受验证影响。AMP精度及FP32 heads沿训练设置，启用compile时单独生成eval图。`max_validation_samples=0`不设上限，正值在完整batch使总数超过上限后停止，沿来源允许一batch超额。验证不推进optimizer、Lookahead、SWA、训练样本或成功更新计数，不修改BN统计；无完整validation batch时明确记录samples=0，不捏造loss。事件记录样本均值loss、batch数量和D4计数。此验证不是棋力评估。
 ## 训练额度与自对弈产量
