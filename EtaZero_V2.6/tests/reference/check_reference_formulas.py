@@ -143,7 +143,8 @@ def check_gradient_caps(eta, reference):
     example = None
     for kind, batch, scale in itertools.product(
             ('sgd', 'adamw'), (64, 128, 256, 1024), (0.25, 1.0, 4.0)):
-        fixture = SimpleNamespace(options={'kind': kind, 'lr_scale': scale}, batch_size=batch)
+        fixture = SimpleNamespace(options={'kind': kind, 'lr_scale': scale}, batch_size=batch,
+                                  model=SimpleNamespace(norm_kind='fixscaleonenorm'))
         actual = eta['gradient_cap'](fixture, 0)
         reference.update(use_adamw=kind == 'adamw', use_muon=False, batch_size=batch,
                          world_size=1, model_config={'norm_kind': 'fixscaleonenorm'},
