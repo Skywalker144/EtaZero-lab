@@ -394,6 +394,10 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS):
     return {key: np.concatenate((main[key],side[key]))[order] for key in main}
 
 
+def game_identity(m, game):
+    return f'{m["run_id"]}:{m["attempt_id"]}:{m["worker_id"]}:{int(game)}'
+
+
 def game_weight_statistics(a):
     """Distinct trainable main-position sums, independent of shard row spans."""
     m = metadata(a)
@@ -402,7 +406,7 @@ def game_weight_statistics(a):
     for g,game in enumerate(a['game_ids']):
         lo,hi=a['game_offsets'][g:g+2]
         valid=a['train_mask'][lo:hi].astype(bool)
-        result.append({'id':f'{m["run_id"]}:{m["attempt_id"]}:{m["worker_id"]}:{int(game)}',
+        result.append({'id':game_identity(m, game),
                        'sum':float(a['target_weights'][lo:hi][valid].sum(dtype=np.float64)),
                        'count':int(valid.sum())})
     return result
