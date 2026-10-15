@@ -125,13 +125,15 @@ def test_independent_trunks_complete_heads_and_mask(dimensions, q, architecture)
 
 @pytest.mark.parametrize('q', [False, True])
 @pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
-def test_scripted_initial_and_recurrent_roundtrip(tmp_path, dimensions, q, architecture):
-    model = MuZeroNet(replace(dimensions, predict_q_values=q, architecture=architecture)).eval()
+@pytest.mark.parametrize('auxiliary', [False, True])
+def test_scripted_initial_and_recurrent_roundtrip(tmp_path, dimensions, q, architecture, auxiliary):
+    model = MuZeroNet(replace(dimensions, predict_q_values=q, architecture=architecture), auxiliary).eval()
     inference = inference_network(model)
     scripted = torch.jit.script(inference)
     path = tmp_path / 'model.pt'; scripted.save(str(path))
     restored = torch.jit.load(str(path))
     assert restored.metadata()[2:] == ('muzero', 16)
+    assert restored.has_auxiliary == auxiliary
     obs, globals = inputs()
     with torch.no_grad():
         original = model(obs, globals)
@@ -222,7 +224,8 @@ def test_component_update_state_restore_next_update(tmp_path, dimensions, kind, 
 
 @pytest.mark.parametrize('device,precision', [('cpu', 'float32'), ('cuda:0', 'float32'), ('cuda:0', 'float16')])
 @pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
-def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precision, architecture):
+@pytest.mark.parametrize('auxiliary', [False, True])
+def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precision, architecture, auxiliary):
     if device.startswith('cuda') and os.environ.get('ETAZERO_GPU_TESTS') != '1':
         pytest.skip('Enable ETAZERO_GPU_TESTS=1 with host CUDA access')
     binary = ROOT / 'build/muzero_inference_probe'
@@ -230,7 +233,7 @@ def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precis
         pytest.skip('Build the native MuZero inference probe first')
     # Seed 0 exercises accumulated eager/JIT rounding at recurrent depth three.
     torch.manual_seed(0)
-    model = MuZeroNet(replace(dimensions, architecture=architecture)).to(device).eval()
+    model = MuZeroNet(replace(dimensions, architecture=architecture), auxiliary).to(device).eval()
     # Nontrivial BN buffers ensure all three export conversions are exercised.
     with torch.no_grad():
         if architecture == 'nbt':
@@ -247,6 +250,7 @@ def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precis
     expected = multistep_predictions(scripted, device, precision, profiled=True)
     for step, prediction in enumerate(expected):
         for row in range(2):
+            assert actual[step][row]['has_auxiliary'] == auxiliary
             for key, tensor in prediction.items():
                 np.testing.assert_allclose(actual[step][row][key], tensor[row].cpu().numpy(),
                                            rtol=3e-3 if precision == 'float16' else 2e-4,
