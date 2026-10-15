@@ -127,6 +127,31 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture, kat
     assert result['result']['root_visits'] == 12 and result['result']['initial_visits'] == 0
 
 
+@pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
+def test_cuda_main_losses_export_ignores_auxiliary_search_settings(tmp_path):
+    from etazero.analysis import analyze
+    from etazero.engine_config import load_engine_config
+    c=small_config();c['training']['compile']=False
+    c['muzero_training']={'auxiliary_losses':False,'katago_optimizer':True,
+                         'learning_rate':.001,'weight_decay':.0003}
+    validate(c)
+    state=run_training(tmp_path,c,ROOT/'build/etazero',max_iteration=2)
+    exported=torch.jit.load(str(tmp_path/state['model']['path']))
+    assert not exported.has_auxiliary
+    evaluation=load_engine_config(CONFIGS/'muzero')
+    evaluation['analysis'].update(visits=24,search_threads=1,server_threads=1,
+                                  nn_randomize=False,nn_symmetry=0,cache_entries=0)
+    results=[]
+    for enabled in (False,True):
+        evaluation['analysis'].update(use_uncertainty=enabled,policy_optimism=float(enabled),
+                                      root_policy_optimism=float(enabled))
+        _,result=analyze(evaluation,ROOT/'build/etazero',tmp_path,size=5,rule='renju',moves='0,5')
+        results.append(result['result'])
+    for key in ('action','network_policy','search_policy','policy','visits','wdl'):
+        assert results[0][key]==results[1][key],key
+    assert run_training(tmp_path,c,ROOT/'build/etazero',resume=True,max_iteration=2)==state
+
+
 def test_unroll_gradient_boundaries_and_side_mask():
     from etazero.muzero.training import TrainingForward
     class Model(torch.nn.Module):
