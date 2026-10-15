@@ -47,6 +47,7 @@ TorchBackend::TorchBackend(const std::string& path,const std::string& device,int
        fields[2].toStringRef()!="muzero" || fields[3].toInt()<1)
         throw std::runtime_error("MuZero model algorithm/contract/canvas mismatch");
     latent_channels_=fields[3].toInt();
+    has_auxiliary_=model_.attr("has_auxiliary").toBool();
     if(device_.is_cuda()) {
         // Model loading completes on the constructor's stream before services
         // may use the immutable weights on their independent streams.
@@ -217,7 +218,7 @@ std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result
     for(int64_t i=0;i<n;++i) {
         auto row=cpu.data_ptr<float>()+i*stride;auto& e=outputs[i].evaluation;
         e.logits.assign(row,row+area);e.wdl={row[area],row[area+1],row[area+2]};
-        e.optimistic_logits.assign(row+area+3,row+2*area+3);e.shortterm_value_stdev=row[2*area+3];e.has_auxiliary=true;
+        e.optimistic_logits.assign(row+area+3,row+2*area+3);e.shortterm_value_stdev=row[2*area+3];e.has_auxiliary=has_auxiliary_;
     }
     return outputs;
 }
