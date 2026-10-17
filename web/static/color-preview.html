@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f3f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141414" media="(prefers-color-scheme: dark)">
+  <title>EtaZero · A / B 配色预览</title>
+  <link rel="icon" href="data:,">
+  <script>
+    const previewParams = new URLSearchParams(location.search);
+    document.documentElement.dataset.palette = previewParams.get('scheme') === 'b' ? 'b' : 'a';
+    document.documentElement.dataset.theme = previewParams.get('theme') === 'dark' ? 'dark' : 'light';
+  </script>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="color-preview.css">
+  <script src="color-preview.js" defer></script>
+</head>
+<body>
+  <nav class="preview-bar" aria-label="配色方案预览">
+    <div class="preview-title"><span class="preview-label">PALETTE STUDY</span><b>先选配色，再打磨细节</b><small>相同布局与示例数据 · 仅外观预览</small></div>
+    <div class="preview-options">
+      <button data-scheme="a" aria-pressed="true">A · 中性精密</button><button data-scheme="b" aria-pressed="false">B · 温润陶土</button>
+      <span class="preview-separator"></span>
+      <button data-preview-theme="light" aria-pressed="true">浅色</button><button data-preview-theme="dark" aria-pressed="false">深色</button>
+      <span class="preview-separator"></span>
+      <select id="preview-state" aria-label="预览状态"><option value="ready">分析完成</option><option value="thinking">思考中</option><option value="empty">空状态</option></select>
+    </div>
+  </nav>
+  <div class="palette-strip" aria-label="当前方案色板">
+    <span><i style="--swatch:var(--background)"></i>画布 <code data-color-token="--background"></code></span>
+    <span><i style="--swatch:var(--surface)"></i>面板 <code data-color-token="--surface"></code></span>
+    <span><i style="--swatch:var(--action)"></i>主操作 <code data-color-token="--action"></code></span>
+    <span><i style="--swatch:var(--accent)"></i>分析强调 <code data-color-token="--accent"></code></span>
+    <span class="palette-description" id="palette-description"></span>
+  </div>
+  <header class="header">
+    <div class="brand">EtaZero <span id="version"></span><h1>开发工作台</h1></div>
+    <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">连接中</span><select id="theme" aria-label="配色主题" title="配色主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
+  </header>
+  <div id="error" class="error" role="alert" hidden></div>
+  <main class="workspace">
+    <aside class="setup panel" aria-label="模型与会话配置">
+      <details id="setup-details" class="setup-details" open>
+      <summary class="setup-toggle">会话配置<span>展开 / 收起</span></summary>
+      <div class="setup-content">
+      <div class="panel-heading"><h2>会话配置</h2><button id="refresh-models" title="重新扫描已发布模型，不重启服务">刷新模型</button></div>
+      <form id="settings">
+        <label class="field">配置目录<select id="run" required></select></label>
+        <label class="field">权重代数 <small id="model-count"></small><select id="model" required></select></label>
+        <div id="model-summary" class="model-summary"></div>
+        <div class="field-row"><label class="field">棋盘<select id="size"></select></label><label class="field">棋规<select id="rule"></select></label></div>
+        <label class="field">开局<select id="opening"><option value="empty">空盘</option><option value="balanced">平衡开局</option></select></label>
+        <label class="field">操作模式<select id="mode"><option value="play">人机对弈</option><option value="manual">局面研究 · 手动双方</option></select></label>
+        <fieldset><legend>人类执子 <small>人机模式生效</small></legend><div class="side-switch"><label><input type="radio" name="human" value="1" checked><span><i class="tiny-stone black"></i> 黑棋</span></label><label><input type="radio" name="human" value="-1"><span><i class="tiny-stone white"></i> 白棋</span></label></div></fieldset>
+        <label class="field">根访问上限<input id="visits" type="number" min="2" max="100000" step="1" required></label>
+        <div class="budget-presets"><button type="button" data-visits="32">32</button><button type="button" data-visits="100">100</button><button type="button" data-visits="500">500</button><button type="button" data-visits="1600">1600</button></div>
+        <button id="new-game" class="primary" type="submit">创建棋局</button>
+        <button id="apply-settings" type="button" class="wide" disabled>应用模式 / 执子 / 预算</button>
+        <p id="settings-note" class="muted">模型、棋盘、棋规和开局在创建棋局时生效。</p>
+      </form>
+      <details class="inspector"><summary>模型元信息 <span>MANIFEST</span></summary><pre id="model-info"></pre></details>
+      <details class="inspector"><summary>搜索配置 <span>EVAL</span></summary><p class="muted">下列为生效配置；根访问上限取当前会话值，每次搜索清树。推理精度 auto 按设备解析。预算不改变训练配置。</p><pre id="engine-config"></pre></details>
+      <details class="inspector"><summary>平衡开局 <span>MATCH</span></summary><p class="muted">参数沿用所选目录的比赛配置。按当前模型的网络估值生成，不使用搜索访问预算。</p><pre id="opening-config"></pre></details>
+      <p id="engine-info" class="engine-info"></p>
+      </div>
+      </details>
+    </aside>
+
+    <section class="position panel" aria-label="棋盘与历史">
+      <div class="panel-heading"><h2>局面 <span id="rule-badge" class="badge"></span></h2><span id="session-mode" class="muted">未创建</span></div>
+      <div class="status-line"><span id="status-dot" class="dot"></span><span id="status" role="status" aria-live="polite">选择模型，创建棋局</span><span id="move-count">第 0 手</span></div>
+      <div id="session-info" class="session-info">—</div>
+      <div id="opening-info" class="muted" hidden></div>
+      <div class="board-surround"><div id="board" class="board" role="group" aria-label="五子棋棋盘"></div></div>
+      <div class="board-footer"><label class="check"><input id="numbers" type="checkbox" checked> 手数</label><label class="overlay-label">叠加<select id="overlay"><option value="none">无</option><option value="network_prior">网络先验</option><option value="visit_policy">访问分布</option><option value="selection_weight">选择权重</option></select></label><span id="board-coordinate" class="mono">—</span></div>
+      <div class="actions"><button id="analyze" class="primary" disabled title="分析当前局面，不落子 (A)">分析 <kbd>A</kbd></button><button id="step" disabled title="当前方由 AI 落一手 (S)">AI 单步 <kbd>S</kbd></button><button id="undo" disabled title="撤回落子 (U)">撤回 <kbd>U</kbd></button><button id="retry" hidden>重试 AI</button></div>
+      <p id="view-note" class="view-note" hidden></p>
+      <div class="history-heading"><h2>落子记录</h2><small id="history-count">0 手</small></div>
+      <div class="replay-toolbar"><button id="first" title="初始局面 (Home)" aria-label="初始局面">|‹</button><button id="prev" title="上一手 (←)" aria-label="上一手">‹</button><input id="timeline" aria-label="回看手数" type="range" min="0" max="0" value="0"><button id="next" title="下一手 (→)" aria-label="下一手">›</button><button id="live" title="返回当前局面 (End)">当前</button></div>
+      <div id="history" class="history"></div>
+      <button id="branch" class="wide" hidden>从此处继续 · 撤回后续落子</button>
+      <p id="rule-note" class="muted"></p>
+    </section>
+
+    <aside class="analysis panel" aria-label="搜索分析">
+      <div class="panel-heading"><h2>搜索分析</h2><span id="analysis-move" class="muted">—</span></div>
+      <div id="analysis-empty" class="empty-state">创建棋局后按 A 分析当前方，或等待 AI 落子。</div>
+      <div id="analysis-data" hidden>
+        <div class="analysis-context"><span id="analysis-context" role="status" aria-live="polite"></span><button id="show-analysis" title="在主棋盘查看本次搜索的落子前局面">定位局面</button></div>
+        <div class="metrics"><div><small>根访问</small><strong id="completed"></strong></div><div><small>搜索耗时</small><strong id="seconds"></strong></div><div><small>根访问 / s</small><strong id="throughput"></strong></div></div>
+        <div class="value-heading"><span id="value-label">当前方 W−L</span><strong id="value"></strong></div>
+        <div class="wdl-bar" aria-hidden="true"><i id="wdl-win"></i><i id="wdl-draw"></i><i id="wdl-loss"></i></div>
+        <p id="wdl" class="mono metric-note"></p><p id="network-wdl" class="mono metric-note muted"></p>
+        <div id="inference-metrics" class="inference-metrics mono"></div>
+        <div class="tabs" role="tablist" aria-label="分析视图"><button id="tab-candidates" role="tab" aria-controls="candidates-view" aria-selected="true" data-tab="candidates-view">候选点</button><button id="tab-network" role="tab" aria-controls="network-view" aria-selected="false" data-tab="network-view" tabindex="-1">网络输出</button><button id="tab-heatmaps" role="tab" aria-controls="heatmaps-view" aria-selected="false" data-tab="heatmaps-view" tabindex="-1">策略对照</button><button id="tab-raw" role="tab" aria-controls="raw-view" aria-selected="false" data-tab="raw-view" tabindex="-1">原始数据</button></div>
+        <section id="network-view" role="tabpanel" aria-labelledby="tab-network" hidden>
+          <p id="network-empty" class="muted">等待网络输出</p>
+          <div id="network-data" hidden>
+            <div id="network-position" class="muted"></div>
+            <div class="table-toolbar"><label class="overlay-label">显示<select id="network-kind"><option value="probabilities">概率 %</option><option value="logits">原始 logits</option></select></label><label class="check"><input id="network-common-scale" type="checkbox" checked> 统一色阶</label></div>
+            <div id="network-maps" class="network-grid"></div>
+            <p id="network-detail" class="heatmap-detail" aria-live="polite"></p>
+            <p class="muted">同一次固定朝向推理，温度 1。概率包含棋盘上已落子位置，与搜索先验的归一化范围不同。对手策略从当前局面预测对手下一手，未交换执子；optimistic 策略不表示点位胜率。</p>
+          </div>
+        </section>
+        <section id="candidates-view" role="tabpanel" aria-labelledby="tab-candidates">
+          <div class="table-toolbar"><span id="candidate-count" class="muted"></span><label class="check"><input id="visited-only" type="checkbox"> 仅已访问</label></div>
+          <div class="table-scroll"><table><thead><tr><th><button data-sort="action">点位</button></th><th><button data-sort="network_prior">先验 %</button></th><th><button data-sort="visits">访问</button></th><th><button data-sort="visit_policy">访问 %</button></th><th aria-sort="descending"><button data-sort="selection_weight">选择 % ↓</button></th></tr></thead><tbody id="candidates"></tbody></table></div>
+          <p class="muted">★ 本次搜索建议点。点击候选点定位；历史局面试走需先“从此处继续”。选择权重含目标剪枝 / LCB。</p>
+        </section>
+        <section id="heatmaps-view" role="tabpanel" aria-labelledby="tab-heatmaps" hidden>
+          <div id="heatmaps"><div id="heatmap-position" class="muted"></div><p id="heatmap-empty" hidden>等待搜索</p><div id="heatmap-data">
+            <div class="heatmap-pair"><section><div class="heatmap-heading"><h3>网络先验</h3><span>概率 %</span></div><div id="prior-map" class="heat-grid" role="group" aria-label="神经网络先验热力图"></div><div class="heat-legend"><span>0</span><i></i><span id="prior-max"></span></div></section>
+            <section><div class="heatmap-heading"><label for="search-map-kind">搜索</label><select id="search-map-kind"><option value="visit_policy">访问分布</option><option value="selection_weight">选择权重</option></select></div><div id="search-map" class="heat-grid" role="group" aria-label="搜索结果热力图"></div><div class="heat-legend"><span>0</span><i></i><span id="search-max"></span></div></section></div>
+            <p id="heatmap-detail" class="heatmap-detail" aria-live="polite"></p><p class="muted">均为搜索前局面；颜色按各自最大值线性缩放，格内为实际百分比。先验含 NN 温度，不含根温度 / 噪声。</p>
+          </div></div>
+        </section>
+        <section id="raw-view" role="tabpanel" aria-labelledby="tab-raw" hidden><pre id="raw-analysis"></pre></section>
+      </div>
+    </aside>
+  </main>
+  <footer><span id="state-version">单会话 · 服务端保存</span><span><kbd>A</kbd> 分析　<kbd>S</kbd> 单步　<kbd>U</kbd> 撤回　<kbd>←</kbd> <kbd>→</kbd> 回看　<kbd>End</kbd> 当前</span></footer>
+</body>
+</html>
