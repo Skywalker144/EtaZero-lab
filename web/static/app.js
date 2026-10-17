@@ -178,7 +178,7 @@ function renderBoard(game, disabled) {
       const cell = $('board').querySelector(`[data-action="${candidate.action}"]`);
       const value = document.createElement('span');
       value.className = 'overlay-value';
-      value.style.background = `hsl(${160 - 125 * candidate[field] / maximum} 55% 70% / .8)`;
+      value.style.background = `color-mix(in srgb,#778bb8 ${candidate[field] / maximum * 80}%,#f0f1f5)`;
       value.textContent = size > 15 ? '' : (candidate[field] * 100).toFixed(1);
       cell?.append(value);
     }
@@ -202,11 +202,10 @@ function renderHeatmap(id, field, maximumId, analysis) {
       const candidate = candidates.get(action);
       const value = candidate ? candidate[field] : 0;
       const ratio = maximum > 0 ? value / maximum : 0;
-      const color = value > 0 ? `hsl(${160 - 125 * ratio} 55% ${94 - 38 * ratio}%)` : '#edf0e8';
       const detail = `${coordinate(action, size)} · ` + (stone ? `${stone === 1 ? '黑' : '白'}棋` : !candidate ? '不可选点' :
         `网络先验 ${(candidate.network_prior * 100).toFixed(3)}% · 访问 ${candidate.visits} 次（${(candidate.visit_policy * 100).toFixed(3)}%） · 选择权重 ${(candidate.selection_weight * 100).toFixed(3)}%`);
       const percent = value === 0 ? '·' : value < .001 ? '&lt;0.1' : (value * 100).toFixed(1);
-      html += `<div class="heat-cell ${action === analysis.action ? 'chosen-point' : ''}" data-action="${action}" data-value="${value}" data-detail="${detail}" role="img" aria-label="${detail}" title="${detail}" tabindex="0" style="background:${color}">${stone ? `<i class="heat-stone ${stone === 1 ? 'black' : 'white'}"></i>` : `<span>${percent}</span>`}</div>`;
+      html += `<div class="heat-cell ${action === analysis.action ? 'chosen-point' : ''}" data-action="${action}" data-value="${value}" data-detail="${detail}" role="img" aria-label="${detail}" title="${detail}" tabindex="0" style="--intensity:${ratio * 100}%">${stone ? `<i class="heat-stone ${stone === 1 ? 'black' : 'white'}"></i>` : `<span>${percent}</span>`}</div>`;
     }
   }
   const map = $(id);
@@ -262,11 +261,10 @@ function renderNetworkMaps() {
       for (let x = 0; x < size; x++) {
         const action = y * size + x, value = values[action], stone = analysis.board[action];
         const ratio = high > low ? (value - low) / (high - low) : 0;
-        const color = `hsl(${160 - 125 * ratio} 55% ${94 - 38 * ratio}%)`;
         const detail = `${label} · ${coordinate(action, size)} · 概率 ${(head.probabilities[action] * 100).toFixed(4)}% · logit ${head.logits[action].toFixed(5)}` +
           (stone ? ` · 已有${stone === 1 ? '黑' : '白'}棋（仍参与网络归一化）` : '');
         const number = probabilities ? (value * 100).toFixed(1) : value.toFixed(1);
-        html += `<div class="heat-cell network-cell" data-action="${action}" data-value="${value}" data-detail="${detail}" role="img" aria-label="${detail}" title="${detail}" tabindex="0" style="background:${color}">${stone ? `<i class="heat-stone ${stone === 1 ? 'black' : 'white'}"></i>` : `<span>${number}</span>`}</div>`;
+        html += `<div class="heat-cell network-cell" data-action="${action}" data-value="${value}" data-detail="${detail}" role="img" aria-label="${detail}" title="${detail}" tabindex="0" style="--intensity:${ratio * 100}%">${stone ? `<i class="heat-stone ${stone === 1 ? 'black' : 'white'}"></i>` : `<span>${number}</span>`}</div>`;
       }
     }
     let best = 0, entropy = 0, occupied = 0;
@@ -297,14 +295,21 @@ function renderCandidates() {
     button.parentElement.setAttribute('aria-sort', sortField === button.dataset.sort ? (sortDirection === -1 ? 'descending' : 'ascending') : 'none');
   });
   const fragment = document.createDocumentFragment();
+  const probabilityCell = value => `<td class="probability" style="--bar:${value * 100}%">${percent(value, 2)}</td>`;
   for (const c of candidates) {
     const row = document.createElement('tr');
     row.dataset.action = c.action;
     row.classList.toggle('selected', highlight === c.action);
-    row.innerHTML = `<td><button data-candidate="${c.action}" class="${c.action === analysis.action ? 'chosen' : ''}" title="在棋盘定位 ${coordinate(c.action, analysis.board_size)}">${coordinate(c.action, analysis.board_size)}${c.action === analysis.action ? ' ★' : ''}</button></td><td>${percent(c.network_prior, 2)}</td><td>${c.visits}</td><td>${percent(c.visit_policy, 2)}</td><td>${percent(c.selection_weight, 2)}</td>`;
+    row.innerHTML = `<td><button data-candidate="${c.action}" class="${c.action === analysis.action ? 'chosen' : ''}" title="在棋盘定位 ${coordinate(c.action, analysis.board_size)}">${coordinate(c.action, analysis.board_size)}${c.action === analysis.action ? ' ★' : ''}</button></td>${probabilityCell(c.network_prior)}<td>${c.visits}</td>${probabilityCell(c.visit_policy)}${probabilityCell(c.selection_weight)}`;
     fragment.append(row);
   }
   $('candidates').append(fragment);
+}
+function renderWdl(id, label, values) {
+  const names = ['W', 'D', 'L'], classes = ['win', 'draw', 'loss'];
+  $(id).classList.add('wdl-row');
+  $(id).innerHTML = `<span>${label}</span>` + values.map((value, i) =>
+    `<span><i class="wdl-key ${classes[i]}" aria-hidden="true"></i>${names[i]} ${percent(value)}%</span>`).join('');
 }
 function renderAnalysis() {
   const a = state.analysis;
@@ -324,8 +329,8 @@ function renderAnalysis() {
     $('throughput').textContent = a.seconds > 0 ? Math.round(a.completed_visits / a.seconds).toLocaleString() : '—';
     $('value-label').textContent = `${a.player === 1 ? '黑' : '白'}方视角 · 搜索 W−L`;
     $('value').textContent = `${a.root_value >= 0 ? '+' : ''}${a.root_value.toFixed(4)}`;
-    $('wdl').textContent = `搜索 W / D / L   ${a.wdl.map(v => percent(v) + '%').join(' / ')}`;
-    $('network-wdl').textContent = `网络 W / D / L   ${a.network_wdl.map(v => percent(v) + '%').join(' / ')}`;
+    renderWdl('wdl', '搜索', a.wdl);
+    renderWdl('network-wdl', '网络', a.network_wdl);
     ['wdl-win', 'wdl-draw', 'wdl-loss'].forEach((id, i) => { $(id).style.width = `${a.wdl[i] * 100}%`; });
     $('inference-metrics').textContent = `NN 请求 ${a.requests} · 批次 ${a.batches} · 平均批量 ${a.batches ? (a.requests / a.batches).toFixed(2) : '—'}`;
     $('raw-analysis').textContent = JSON.stringify(a, null, 2);
@@ -475,7 +480,21 @@ function updateSizes() {
   for (const option of $('size').options) option.disabled = !model || Number(option.value) > model.canvas;
   if (model && Number($('size').value) > model.canvas) $('size').value = model.canvas;
   $('new-game').disabled = !model || !online || pending || Boolean(state?.busy);
-  $('model-summary').textContent = model ? `${model.manifest.algorithm === 'muzero' ? 'MuZero' : 'AlphaZero'} · 第 ${model.iteration} 代 · ${model.manifest.weights || '—'} · 画布 ${model.canvas}² · 累计 ${(model.manifest.checkpoint.total_steps ?? 0).toLocaleString()} 步` : '此配置目录暂无已发布权重';
+  const summary = $('model-summary');
+  summary.replaceChildren();
+  if (model) {
+    const tags = [model.manifest.algorithm === 'muzero' ? 'MuZero' : 'AlphaZero', `第 ${model.iteration} 代`, model.manifest.weights || '—', `画布 ${model.canvas}²`];
+    for (const text of tags) {
+      const tag = document.createElement('span');
+      tag.className = 'model-tag';
+      tag.textContent = text;
+      summary.append(tag, ' ');
+    }
+    const steps = document.createElement('span');
+    steps.className = 'model-steps mono';
+    steps.textContent = `累计 ${(model.manifest.checkpoint.total_steps ?? 0).toLocaleString()} 步`;
+    summary.append(steps);
+  } else summary.textContent = '此配置目录暂无已发布权重';
   $('model-info').textContent = model ? JSON.stringify({file: model.path, ...model.manifest}, null, 2) : '';
 }
 async function loadCatalog() {
@@ -555,6 +574,25 @@ function selectCandidate(action) {
   render();
 }
 $('candidates').addEventListener('click', event => { const button = event.target.closest('[data-candidate]'); if (button) selectCandidate(Number(button.dataset.candidate)); });
+function clearPointPreview() {
+  $('board').querySelector('.preview-point')?.classList.remove('preview-point');
+  $('board-coordinate').textContent = '—';
+}
+for (const id of ['candidates', 'heatmap-data', 'network-data']) {
+  const container = $(id);
+  for (const eventName of ['mouseover', 'focusin']) container.addEventListener(eventName, event => {
+    const point = event.target.closest('[data-action]');
+    clearPointPreview();
+    // A previous search can refer to a different board; preview only matching positions.
+    if (!point || !samePosition(displayedGame(), state?.analysis)) return;
+    const action = Number(point.dataset.action);
+    $('board').querySelector(`[data-action="${action}"]`)?.classList.add('preview-point');
+    $('board-coordinate').textContent = coordinate(action, state.analysis.board_size);
+  });
+  for (const eventName of ['mouseout', 'focusout']) container.addEventListener(eventName, event => {
+    if (!container.contains(event.relatedTarget)) clearPointPreview();
+  });
+}
 for (const eventName of ['mouseover', 'focusin']) {
   $('board').addEventListener(eventName, event => {
     const point = event.target.closest('[data-action]');
