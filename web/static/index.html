@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f3f3f1" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#141414" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f5f5f6" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#131315" media="(prefers-color-scheme: dark)">
   <title>EtaZero · 开发工作台</title>
   <link rel="icon" href="data:,">
   <script src="/theme.js"></script>
@@ -13,8 +13,8 @@
 </head>
 <body>
   <header class="header">
-    <div class="brand">EtaZero <span id="version"></span><h1>开发工作台</h1></div>
-    <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">连接中</span><select id="theme" aria-label="配色主题" title="配色主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
+    <div class="brand"><svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true"><rect x="1" y="1" width="26" height="26" rx="8" fill="currentColor"/><circle cx="11" cy="11" r="4" class="brand-stone"/><circle cx="18" cy="18" r="4" fill="none" class="brand-stone-outline"/></svg>EtaZero <span id="version"></span><h1>开发工作台</h1></div>
+    <div class="connection"><span class="connection-status" role="status"><span id="connection-dot" class="dot"></span><span id="connection">连接中</span></span><select id="theme" aria-label="配色主题" title="配色主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
   </header>
   <div id="error" class="error" role="alert" hidden></div>
   <main class="workspace">
@@ -24,17 +24,21 @@
       <div class="setup-content">
       <div class="panel-heading"><h2>会话配置</h2><button id="refresh-models" title="重新扫描已发布模型，不重启服务">刷新模型</button></div>
       <form id="settings">
+        <fieldset class="settings-group"><legend>模型与棋局 <small>创建棋局时生效</small></legend>
         <label class="field">配置目录<select id="run" required></select></label>
         <label class="field">权重代数 <small id="model-count"></small><select id="model" required></select></label>
         <div id="model-summary" class="model-summary"></div>
         <div class="field-row"><label class="field">棋盘<select id="size"></select></label><label class="field">棋规<select id="rule"></select></label></div>
         <label class="field">开局<select id="opening"><option value="empty">空盘</option><option value="balanced">平衡开局</option></select></label>
+        <button id="new-game" class="primary" type="submit">创建棋局</button>
+        </fieldset>
+        <fieldset class="settings-group session-controls"><legend>会话控制 <small>可应用到当前棋局</small></legend>
         <label class="field">操作模式<select id="mode"><option value="play">人机对弈</option><option value="manual">局面研究 · 手动双方</option></select></label>
         <fieldset><legend>人类执子 <small>人机模式生效</small></legend><div class="side-switch"><label><input type="radio" name="human" value="1" checked><span><i class="tiny-stone black"></i> 黑棋</span></label><label><input type="radio" name="human" value="-1"><span><i class="tiny-stone white"></i> 白棋</span></label></div></fieldset>
         <label class="field">根访问上限<input id="visits" type="number" min="2" max="100000" step="1" required></label>
         <div class="budget-presets"><button type="button" data-visits="32">32</button><button type="button" data-visits="100">100</button><button type="button" data-visits="500">500</button><button type="button" data-visits="1600">1600</button></div>
-        <button id="new-game" class="primary" type="submit">创建棋局</button>
         <button id="apply-settings" type="button" class="wide" disabled>应用模式 / 执子 / 预算</button>
+        </fieldset>
         <p id="settings-note" class="muted">模型、棋盘、棋规和开局在创建棋局时生效。</p>
       </form>
       <details class="inspector"><summary>模型元信息 <span>MANIFEST</span></summary><pre id="model-info"></pre></details>
@@ -54,16 +58,19 @@
       <div class="board-footer"><label class="check"><input id="numbers" type="checkbox" checked> 手数</label><label class="overlay-label">叠加<select id="overlay"><option value="none">无</option><option value="network_prior">网络先验</option><option value="visit_policy">访问分布</option><option value="selection_weight">选择权重</option></select></label><span id="board-coordinate" class="mono">—</span></div>
       <div class="actions"><button id="analyze" class="primary" disabled title="分析当前局面，不落子 (A)">分析 <kbd>A</kbd></button><button id="step" disabled title="当前方由 AI 落一手 (S)">AI 单步 <kbd>S</kbd></button><button id="undo" disabled title="撤回落子 (U)">撤回 <kbd>U</kbd></button><button id="retry" hidden>重试 AI</button></div>
       <p id="view-note" class="view-note" hidden></p>
+      <button id="branch" class="wide" hidden>从此处继续 · 撤回后续落子</button>
       <div class="history-heading"><h2>落子记录</h2><small id="history-count">0 手</small></div>
       <div class="replay-toolbar"><button id="first" title="初始局面 (Home)" aria-label="初始局面">|‹</button><button id="prev" title="上一手 (←)" aria-label="上一手">‹</button><input id="timeline" aria-label="回看手数" type="range" min="0" max="0" value="0"><button id="next" title="下一手 (→)" aria-label="下一手">›</button><button id="live" title="返回当前局面 (End)">当前</button></div>
       <div id="history" class="history"></div>
-      <button id="branch" class="wide" hidden>从此处继续 · 撤回后续落子</button>
       <p id="rule-note" class="muted"></p>
     </section>
 
     <aside class="analysis panel" aria-label="搜索分析">
       <div class="panel-heading"><h2>搜索分析</h2><span id="analysis-move" class="muted">—</span></div>
-      <div id="analysis-empty" class="empty-state">创建棋局后按 A 分析当前方，或等待 AI 落子。</div>
+      <div id="analysis-empty" class="empty-state">
+        <svg class="empty-board" viewBox="0 0 80 80" fill="none" aria-hidden="true"><rect x="1" y="1" width="78" height="78" rx="18"/><path d="M24 16v48M40 16v48M56 16v48M16 24h48M16 40h48M16 56h48"/><circle cx="40" cy="40" r="7"/><circle cx="56" cy="24" r="7"/></svg>
+        <strong>从一个局面开始</strong><p>创建棋局后按 <kbd>A</kbd> 分析当前方，<br>或等待 AI 落子查看搜索结果。</p>
+      </div>
       <div id="analysis-data" hidden>
         <div class="analysis-context"><span id="analysis-context" role="status" aria-live="polite"></span><button id="show-analysis" title="在主棋盘查看本次搜索的落子前局面">定位局面</button></div>
         <div class="metrics"><div><small>根访问</small><strong id="completed"></strong></div><div><small>搜索耗时</small><strong id="seconds"></strong></div><div><small>根访问 / s</small><strong id="throughput"></strong></div></div>
