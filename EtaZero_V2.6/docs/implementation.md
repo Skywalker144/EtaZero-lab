@@ -84,7 +84,7 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_selfplay.py \
 
 每套配置位于 `configs/<name>/`。训练使用 `run.cfg`、`env.cfg`、`net.cfg`、`selfplay.cfg`、`train.cfg`；`env.cfg` 的 `[environment]` 管理棋盘、规则和训练行的禁手特征 dropout；`hex` 使用普通六邻接实际连接规则。`selfplay.cfg` 的 `[hex_opening]` 配置 Hex 首手平衡采样，与五子棋 `[opening]` 独立，详见 [Hex](hex.md)。`selfplay.cfg` 首部 `[search]` 集中完整／cheap 根访问预算、cheap 概率与权重；搜索技巧按独立 section 配置，底部 `[parallelism]`、`[inference]`、`[writer]` 管理执行资源。训练字段以 [config.py](../python/etazero/config.py) 为事实源。独立分析和比赛通过 `analysis.cfg`、`match.cfg` 显式引用公共 `engine.cfg`，字段以 [engine_config.py](../python/etazero/engine_config.py) 为事实源，不读取训练继承链，不参与训练配置身份；引用、覆盖优先级与直接文件入口见 [分析与比赛配置](elo.md#独立配置与搜索预算)。
 
-基础配置在 `configs/` 下按短名平铺，命名规则见 [README](../README.md#配置与训练)。`baseline/` 集中维护完整的公共起始设置；工程检查配置放在 `checks/`，消融配置放在 `ablations/`。独立实验目录按职责维护配置：`exp.cfg` 管调度，开启自动评估时必须提供根目录的公共 `match.cfg`，可选 `elo.cfg` 只写区别于 baseline 的采样、赛程、统计和执行设置。平铺的实验臂通过 `@include` 引用基础训练配置文件，仅覆盖本次实验的差异；调度方式见 [自动实验](#自动实验)。
+基础配置在 `configs/` 下按短名平铺，命名规则见 [README](../README.md#配置与训练)。`baseline/` 集中维护完整的公共起始设置；工程检查配置放在 `checks/`。独立实验目录按职责维护配置：`exp.cfg` 管调度，开启自动评估时必须提供根目录的公共 `match.cfg`，可选 `elo.cfg` 只写区别于 baseline 的采样、赛程、统计和执行设置。平铺的实验臂通过 `@include` 引用基础训练配置文件，仅覆盖本次实验的差异；调度方式见 [自动实验](#自动实验)。
 
 训练、分析和比赛共用文件级 `@include` 解析器。每个配置文件在 INI 节之前显式引用同类文件，例如 `@include ../baseline/run.cfg`；路径相对于声明引用的文件，支持引号，不依赖启动目录。多个引用从左到右合并，当前文件覆盖引用值，最后应用当前目录的 `*.cfg.local`；被引用目录的本机覆盖不会自动传播。训练 `run_dir` 只取当前配置或命令行，不从引用文件继承。分析和比赛在合并后以对应模式节覆盖公共 `[engine]`。引用循环、文件缺失、未知/重复字段、错误文件归属，以及解析器所检查的非法枚举、范围、组合和未实现能力，在配置加载时拒绝；native 构造器还会核对所需约束。opening、policy init 和 game fork 的数值参数无论功能是否开启都须符合范围，Python 与 native 均拒绝非法值和非有限数值。各入口只读取自身配置文件，不自动引入其他入口配置。
 
