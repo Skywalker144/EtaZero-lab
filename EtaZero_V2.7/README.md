@@ -22,7 +22,7 @@ CONFIG_DIR=configs/checks/smoke_test bash scripts/run.sh --run-dir data/my_check
 CONFIG_DIR=configs/az_g bash scripts/run.sh
 ```
 
-`CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`analysis`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
+`CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`analysis`、`gtp`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
 
 bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照单遍限制；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
 
@@ -87,6 +87,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 调整配置、继承与本机覆盖 | [配置组织](docs/implementation.md#配置组织) |
 | 固定评估预算、成对比赛、续测与 Elo 图 | [评估与 Elo](docs/elo.md) |
 | 查看 AlphaZero / KataGo 的局长变化、规模规律与架构对照经验 | [训练经验](../docs/training-experience.md) |
+| GTP 对弈、持续分析、停止和 JSON 批量局面 | [原生交互引擎](docs/engine.md) |
 | 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#alphazero) |
