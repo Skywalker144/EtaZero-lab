@@ -16,7 +16,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double
     if(!std::isfinite(temperature)||temperature<0||options.max_visits<0||options.max_playouts<-1||options.max_time<-1||!std::isfinite(options.max_time))
         throw std::runtime_error("Invalid Gumbel MuZero search caps/temperature");
     if(options.hint_action<-1||(options.hint_action>=0&&!game.legal(options.hint_action)))throw std::runtime_error("Illegal Gumbel MuZero root hint");
-    advance(0);auto start=std::chrono::steady_clock::now();SearchResult result;int area=game.actions();
+    advance(0);auto start=std::chrono::steady_clock::now();SearchResult result;result.gumbel=true;int area=game.actions();
     result.policy.resize(area);result.move_policy.resize(area);result.network_policy.resize(area);result.search_policy.resize(area);
     result.visits.resize(area);result.q_values.resize(area);result.q_visits.resize(area);
     if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl={(v+std::abs(v))/2,1-std::abs(v),(std::abs(v)-v)/2};return result;}
@@ -49,6 +49,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double
     auto effective=gumbel_;if(options.remove_root_noise)effective.noise_scale=0;
     GumbelRoot schedule(priors,budget,effective,random_);
     std::mutex mutex;std::condition_variable changed;int completed=0;int64_t pending=0;bool stopped=false;std::exception_ptr error;
+    auto next_report=start;
     auto worker=[&] {
         int reserved=-1;bool path_reserved=false;std::vector<std::pair<Node*,size_t>> path;
         try {
@@ -91,6 +92,13 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double
                     path.clear();path_reserved=false;schedule.commit(reserved);reserved=-1;++completed;
                 }
                 changed.notify_all();
+                if(options.on_report) {
+                    std::lock_guard<std::mutex> lock(mutex);auto now=std::chrono::steady_clock::now();
+                    if(!error && now>=next_report) {
+                        next_report=now+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options.report_interval));
+                        auto report=analysis_snapshot(area,&gumbel_);report.seconds=std::chrono::duration<double>(now-start).count();options.on_report(report);
+                    }
+                }
             }
         } catch(...) {
             std::lock_guard<std::mutex> lock(mutex);if(!error)error=std::current_exception();
@@ -104,6 +112,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double
     for(auto& thread:threads)thread.join();
     if(pending||schedule.pending())throw std::runtime_error("Gumbel MuZero leaked pending visits");
     if(error)std::rethrow_exception(error);
+    if(options.collect_analysis){result.analysis=analysis_snapshot(area,&gumbel_).analysis;result.gumbel=true;}
     if(!stopped&&completed!=budget)throw std::runtime_error("Gumbel MuZero budget mismatch");
     result.simulations=completed;result.new_playouts=completed+1;result.root_visits=root_->stats.visits;result.stopped_early=stopped;
     result.network_wdl=root_->initial;result.network_sample_weight=root_->initial_weight;result.network_value_stdev=root_->stdev;

@@ -1,5 +1,6 @@
 #include "etazero/muzero/search.h"
 #include "etazero/symmetry.h"
+#include "etazero/gumbel.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -56,6 +57,27 @@ size_t Search::select(Node& node,bool root) {
     }
     return choices.empty()?node.edges.size():choices[std::uniform_int_distribution<size_t>(0,choices.size()-1)(random_)];
 }
+SearchResult Search::analysis_snapshot(int actions,const GumbelSettings* gumbel) const {
+    SearchResult out;out.policy.assign(actions,0);out.move_policy=out.network_policy=out.search_policy=out.policy;out.visits.assign(actions,0);
+    auto p=root_->stats;out.value=p.value;out.search_wdl=wdl_from_value(p.value,p.draw);out.network_wdl=root_->initial;out.root_visits=p.visits;
+    std::vector<int> visited;auto stats=children(*root_);
+    for(size_t i:root_->expansion_order){const auto& e=root_->edges[i];if(e.child&&e.child->ready)visited.push_back(e.action);}
+    for(const auto& e:root_->edges) {
+        AnalysisCandidate c;c.action=e.action;c.pv.push_back(e.action);out.network_policy[e.action]=e.prior;out.search_policy[e.action]=e.search_prior;
+        if(e.child&&e.child->ready) {
+            auto q=e.child->stats;c.has_value=q.visits>0&&q.weight>0;c.weight=q.weight;c.utility=c.win_loss=-q.value;c.wdl=wdl_from_value(-q.value,q.draw);out.visits[e.action]=q.visits;
+            const Node* current=e.child;
+            while(c.pv.size()<32) {
+                const Edge* best=nullptr;int64_t count=0;
+                for(const auto& next:current->edges)if(next.child&&next.child->ready&&next.child->stats.visits>count){count=next.child->stats.visits;best=&next;}
+                if(!best)break;
+                c.pv.push_back(best->action);current=best->child;
+            }
+        }
+        out.analysis.push_back(std::move(c));
+    }
+    analysis_policy(out,visited,stats,settings_,p,gumbel);return out;
+}
 SearchResult Search::run(const Game& game,double temperature,SearchRun options) {
     if(!std::isfinite(temperature)||temperature<0||options.max_visits<0||options.max_playouts<-1||options.max_time<-1||!std::isfinite(options.max_time))throw std::runtime_error("Invalid MuZero search caps/temperature");
     if(options.hint_action<-1||(options.hint_action>=0&&!game.legal(options.hint_action)))throw std::runtime_error("Illegal MuZero root hint");
@@ -97,6 +119,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     int budget=std::min(cap?std::max(0,cap-1):settings_.simulations,std::max(0,max_playouts-1));
     double max_time=options.max_time<0?settings_.max_time:options.max_time;
     std::mutex mutex;std::condition_variable changed;int issued=0,completed=0;int64_t pending=0;bool stopped=false;std::exception_ptr error;
+    auto next_report=start;
     auto worker=[&]{
       try {
         for(;;) {
@@ -127,6 +150,13 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
                 for(auto [p,i]:path){--p->edges[i].pending;--pending;}
             }
             changed.notify_all();
+            if(options.on_report) {
+                std::lock_guard<std::mutex> lock(mutex);auto now=std::chrono::steady_clock::now();
+                if(!error && now>=next_report) {
+                    next_report=now+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options.report_interval));
+                    auto report=analysis_snapshot(area);report.seconds=std::chrono::duration<double>(now-start).count();options.on_report(report);
+                }
+            }
         }
       } catch(...) {std::lock_guard<std::mutex> lock(mutex);if(!error)error=std::current_exception();changed.notify_all();}
     };
@@ -136,6 +166,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     for(auto& thread:threads)thread.join();
     if(pending)throw std::runtime_error("MuZero leaked pending visits");
     if(error)std::rethrow_exception(error);
+    if(options.collect_analysis)result.analysis=analysis_snapshot(area).analysis;
     if(!stopped&&completed!=budget)throw std::runtime_error("MuZero search budget mismatch");
     result.simulations=completed;result.new_playouts=completed+1;result.root_visits=root_->stats.visits;result.stopped_early=stopped;
     result.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();

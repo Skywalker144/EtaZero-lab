@@ -34,6 +34,8 @@ struct SearchSettings {
     double subtree_value_bias_factor=0, subtree_value_bias_free_prop=0.8, subtree_value_bias_weight_exponent=0.85;
     int subtree_value_bias_table_num_shards=65536;
 };
+struct SearchResult;
+struct GumbelSettings;
 struct SearchRun {
     int max_visits = 0;
     bool training = false, clear_before_search = false, remove_root_noise = false;
@@ -43,6 +45,10 @@ struct SearchRun {
     std::function<bool()> should_stop;
     int hint_action = -1; // Root-only guidance; changes always clear statistics.
     bool collect_root_policy_invalid_mass = false;
+    // Interactive diagnostics only. Empty callbacks keep training on its existing path.
+    bool collect_analysis = false;
+    double report_interval = 0.25;
+    std::function<void(const SearchResult&)> on_report;
 };
 // Completed weighted samples: utility and pure W-L use the parent player's perspective.
 struct RootChildStats {
@@ -70,8 +76,20 @@ double child_selection_score(double prior,double value,double weight,int pending
 std::vector<double> noise_alpha_distribution(const std::vector<double>& policy);
 double fpu_value(double nn_value, double parent_value, double visited_mass, double power, double reduction,
                  bool by_visited_policy=true, double nn_weight=0);
+struct RootSelectionDiagnostic { double weight=0, lcb=0, radius=0; bool has_lcb=false; };
 std::vector<double> root_selection_weights(const std::vector<RootChildStats>& children,
-                                         const SearchSettings& settings, bool use_lcb, ValueStats parent = {}, bool normalize_output = true);
+                                         const SearchSettings& settings, bool use_lcb, ValueStats parent = {}, bool normalize_output = true,
+                                         std::vector<RootSelectionDiagnostic>* diagnostics = nullptr);
+struct AnalysisCandidate {
+    int action=-1;
+    double weight=0, utility=0, win_loss=0;
+    WDL wdl{0,1,0};
+    bool has_value=false;
+    RootSelectionDiagnostic selection;
+    std::vector<int> pv;
+};
+void analysis_policy(SearchResult&,const std::vector<int>&,const std::vector<RootChildStats>&,
+                     const SearchSettings&,ValueStats,const GumbelSettings*);
 struct SearchResult {
     int action = -1, simulations = 0;
     int64_t root_visits = 0;
@@ -94,6 +112,8 @@ struct SearchResult {
     // and pure W-L in this root player's perspective.
     std::vector<int64_t> q_visits;
     std::vector<float> q_values;
+    std::vector<AnalysisCandidate> analysis;
+    bool gumbel=false;
 };
 // Reported WDL probabilities, with KataGo's floating-point boundary handling.
 WDL wdl_from_value(double value, double draw);
@@ -113,7 +133,6 @@ public:
     virtual void advance(int action) = 0;
     virtual void reset(uint64_t seed) = 0;
 };
-struct GumbelSettings;
 class Search : public GameSearch {
 protected:
     struct Node;
@@ -199,6 +218,7 @@ protected:
     double max_time_ = 1e20;
     std::chrono::steady_clock::time_point start_;
     std::function<bool()> should_stop_;
+    std::function<void()> report_; // Invoked only by coordinator worker 0.
     std::exception_ptr error_;
     bool expand(Node& node, const SearchState& state, int worker);
     void evaluate_node(Node& node,const SearchState& state,int worker,int symmetries);
@@ -217,6 +237,7 @@ protected:
     int gumbel_selection(Node&,const GumbelSettings&);
     void simulate_many(int worker);
     void worker_loop(int worker);
+    SearchResult analysis_snapshot(int actions,const GumbelSettings* gumbel=nullptr);
 public:
     Search(SearchSettings settings, uint64_t seed,bool start_workers=true);
     Search(Evaluator& evaluator, SearchSettings settings, uint64_t seed,bool start_workers=true);

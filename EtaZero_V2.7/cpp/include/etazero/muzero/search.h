@@ -23,6 +23,7 @@ protected:
     std::vector<RootChildStats> children(const Node&) const;
     void recompute(Node&);
     size_t select(Node&,bool root);
+    SearchResult analysis_snapshot(int actions,const GumbelSettings* gumbel=nullptr) const;
 public:
     Search(Evaluator&,SearchSettings,uint64_t seed);
     SearchResult run(const Game&,double temperature,SearchRun options={}) override;

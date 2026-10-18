@@ -212,5 +212,14 @@
       "python/muon/LICENSE": "8c8d17398ecce3dd3fcb1bb77b5d268a427f8250f364ac655c9b38df5b693f6b",
       "python/train.py": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f"
     }
+  },
+  "SkyZero_V8.1_interactive": {
+    "root": "/home/sky/RL/SkyZero-lab/SkyZero_V8.1",
+    "sha256": {
+      "katago/cpp/search/asyncbot.h": "ddfc083018e93ffbcb70a1b8b7934ca5f41d5dbeb27a302cbbf5908a2068183c",
+      "katago/cpp/command/gtp.cpp": "8728d2aca4c312a7a8b6eb3141f943c23764bdb6837d87dc47e49ae5fb19e59e",
+      "scripts/python/katago_web_backend.py": "76bccd1c63851d3cad06884415a0cb34d9f753927ca1e389d9cbb49681de4db7",
+      "katago/cpp/external/nlohmann_json/json.hpp": "be7bbfbc7c62c35aa6f27dfbdd950384f247dd9f2281b5930bdaa3a6ab95eef7"
+    }
   }
 }

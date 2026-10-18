@@ -8,6 +8,7 @@
 #include "etazero/gumbel_search.h"
 #include "etazero/muzero/torch_backend.h"
 #include "etazero/match.h"
+#include "etazero/session.h"
 #include <csignal>
 #include <charconv>
 #include <chrono>
@@ -31,7 +32,7 @@ struct Args {
     std::map<std::string, std::string> args;
     Args(int argc, char** argv) {
         const std::set<std::string> allowed{"config","model","model-id","device","games","output","run-id","attempt-id",
-                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream","models","max-models","model-load-workers"};
+                                          "config-id","source-id","iteration","worker","seed","size","rule","moves","model-b","model-b-id","evaluator","tasks","stream","models","max-models","model-load-workers","protocol"};
         for (int i = 2; i < argc; i += 2) {
             std::string name = argv[i];
             if (name.rfind("--",0) != 0 || !allowed.count(name.substr(2)) || i+1 >= argc || !args.emplace(name.substr(2), argv[i+1]).second)
@@ -414,48 +415,8 @@ int analyze(const Args& a, const Config& c, bool raw) {
     if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
     std::cout << ",\"inference_precision\":" << quote(precision) << ",\"nn_requests\":" << eval->requests << ",\"cache_hits\":" << eval->cache_hits << "}\n"; return stop_requested?130:0;
 }
-// Interactive actions use the actual board width, unlike search's canvas indices.
-int web_integer(const std::string& text) {
-    int value;
-    auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
-    if(parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size())
-        throw std::runtime_error("Expected integer argument");
-    return value;
-}
-uint64_t web_seed(const std::string& text) {
-    uint64_t value;
-    auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
-    if(parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size())
-        throw std::runtime_error("Expected uint64 seed");
-    return value;
-}
-struct WebOpening {
-    OpeningResult result;
-    uint64_t seed;
-    double seconds;
-};
-void web_state(const Game& game,const std::vector<int>& moves,const std::optional<WebOpening>& opening) {
-    std::cout<<"{\"board_size\":"<<game.size()<<",\"canvas_size\":"<<game.canvas()
-             <<",\"player\":"<<game.player()<<",\"turn\":"<<game.turn()
-             <<",\"finished\":"<<(game.finished()?"true":"false")<<",\"winner\":"<<game.winner()
-             <<",\"reason\":"<<game.reason()<<",\"board\":";
-    array(std::cout,game.board().cells);std::cout<<",\"moves\":";array(std::cout,moves);
-    std::cout<<",\"opening\":";
-    if(opening) {
-        const auto& result=opening->result;
-        // Seeds are strings in JSON so browsers retain all 64 bits.
-        std::cout<<"{\"seed\":"<<quote(std::to_string(opening->seed))<<",\"attempts\":"<<result.attempts
-                 <<",\"balanced_moves\":"<<result.balanced_moves<<",\"policy_moves\":"<<result.policy_moves
-                 <<",\"value\":"<<result.start_value<<",\"value_player\":"<<(result.balanced_moves%2==0?1:-1)
-                 <<",\"seconds\":"<<opening->seconds<<",\"moves\":";
-        std::vector<int> local;
-        for(int action:result.actions)local.push_back(action/game.canvas()*game.size()+action%game.canvas());
-        array(std::cout,local);std::cout<<'}';
-    } else std::cout<<"null";
-    std::cout<<'}';
-}
 struct WebPolicyPlanes {
-    torch::Tensor logits, probabilities;
+    torch::Tensor logits, probabilities, value_logits, wdl;
     std::string precision;
 };
 WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,const std::string& device_name,std::string precision) {
@@ -497,132 +458,35 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
         .to(torch::kFloat32).contiguous().reshape({6,size*size});
     if(!torch::isfinite(logits).all().item<bool>())throw std::runtime_error("Nonfinite Web policy logits");
     auto probabilities=torch::softmax(logits,1).to(torch::kCPU).contiguous();
-    return {logits.to(torch::kCPU).contiguous(),probabilities,precision};
+    auto value=output.toTuple()->elements()[1].toTensor().to(torch::kFloat32);
+    if(value.dim()!=2 || value.size(0)!=1 || value.size(1)!=3 || !torch::isfinite(value).all().item<bool>())
+        throw std::runtime_error("Invalid raw NN value output");
+    auto wdl=torch::softmax(value,1).to(torch::kCPU).contiguous();
+    return {logits.to(torch::kCPU).contiguous(),probabilities,value.to(torch::kCPU).contiguous(),wdl,precision};
 }
-void web_analysis(const SearchResult& result,const Game& game,double seconds,uint64_t requests,uint64_t batches,
-                  const WebPolicyPlanes& planes) {
-    std::vector<int> candidates;
-    int64_t total=0;
-    for(int a=0;a<game.actions();++a)if(game.legal(a)){candidates.push_back(a);total+=result.visits[a];}
-    std::stable_sort(candidates.begin(),candidates.end(),[&](int a,int b){return result.move_policy[a]>result.move_policy[b];});
-    std::cout<<"{\"action\":"<<result.action/game.canvas()*game.size()+result.action%game.canvas()
-             <<",\"board_size\":"<<game.size()<<",\"canvas_size\":"<<game.canvas()
-             <<",\"turn\":"<<game.turn()<<",\"player\":"<<game.player()<<",\"root_value\":"<<result.value
-             <<",\"completed_visits\":"<<result.root_visits<<",\"seconds\":"<<seconds
-             <<",\"requests\":"<<requests<<",\"batches\":"<<batches<<",\"wdl\":";
-    array(std::cout,std::vector<double>(result.search_wdl.begin(),result.search_wdl.end()));
-    std::cout<<",\"network_wdl\":";
-    array(std::cout,std::vector<double>(result.network_wdl.begin(),result.network_wdl.end()));
-    std::cout<<",\"board\":";array(std::cout,game.board().cells);std::cout<<",\"candidates\":[";
-    for(size_t i=0;i<candidates.size();++i) {
-        int a=candidates[i];if(i)std::cout<<',';
-        std::cout<<"{\"action\":"<<a/game.canvas()*game.size()+a%game.canvas()<<",\"visits\":"<<result.visits[a]
-                 <<",\"network_prior\":"<<result.network_policy[a]<<",\"visit_policy\":"<<double(result.visits[a])/total
-                 <<",\"selection_weight\":"<<result.move_policy[a]<<'}';
-    }
-    std::cout<<"],\"network_planes\":{\"precision\":"<<quote(planes.precision)<<",\"heads\":[";
-    const int count=game.size()*game.size();
-    const std::array<int,4> displayed_heads{0,1,4,5};
-    const std::array<std::string,4> names{"policy","opponent_policy","long_optimistic_policy","short_optimistic_policy"};
-    for(size_t i=0;i<displayed_heads.size();++i) {
-        int head=displayed_heads[i];if(i)std::cout<<',';
-        auto logits=planes.logits.data_ptr<float>()+head*count;
-        auto probabilities=planes.probabilities.data_ptr<float>()+head*count;
-        std::cout<<"{\"name\":"<<quote(names[i])<<",\"logits\":";array(std::cout,std::vector<float>(logits,logits+count));
-        std::cout<<",\"probabilities\":";array(std::cout,std::vector<float>(probabilities,probabilities+count));std::cout<<'}';
-    }
-    std::cout<<"]}}";
-}
-int analysis_session(const Args& a,const Config& c) {
-    torch::jit::Module web_model;
-    auto eval=evaluator(a,c,"analysis",&web_model);
-    auto search_owner=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");auto& search=*search_owner;
-    std::optional<Game> game;
-    std::optional<WebOpening> opening;
-    std::vector<int> played;
-    const int canvas=c.integer("network.canvas");
-    std::cout<<std::setprecision(17)<<"{\"ok\":true,\"canvas_size\":"<<canvas<<"}\n"<<std::flush;
-    std::string line;
-    while(!stop_requested && std::getline(std::cin,line)) {
-        try {
-            std::istringstream input(line);std::vector<std::string> words;
-            for(std::string word;input>>word;)words.push_back(word);
-            if(words.empty())throw std::runtime_error("Empty command");
-            if(words[0]=="quit" && words.size()==1)break;
-            if(words[0]=="new" && (words.size()==3 || words.size()==6)) {
-                Game replacement(web_integer(words[1]),canvas,parse_rule(words[2]));
-                std::optional<WebOpening> generated;
-                std::vector<int> moves;
-                if(words.size()==6) {
-                    if(words[3]!="balanced")throw std::runtime_error("Unknown opening kind");
-                    uint64_t seed=web_seed(words[4]);
-                    int timeout_ms=web_integer(words[5]);
-                    if(timeout_ms<1 || timeout_ms>120000)throw std::runtime_error("Opening timeout must be in [1, 120000] ms");
-                    OpeningConfig config(c);
-                    if(replacement.rule()==Rule::HEX ? (config.hex_probability!=1 || config.hex_make_fair_probability!=1 || config.hex_min_accept_rate<=0) : (config.probability!=1 || config.rejection_probability_fallback>=1))
-                        throw std::runtime_error("Balanced openings require probability one and a rejection fallback below one");
-                    std::mt19937_64 random(seed);
-                    auto started=std::chrono::steady_clock::now();
-                    auto deadline=started+std::chrono::milliseconds(timeout_ms);
-                    for(int retry=0;retry<100;++retry) {
-                        replacement=Game(replacement.size(),canvas,replacement.rule());
-                        auto result=initialize_opening(replacement,config,*eval,random,[&]{
-                            return stop_requested.load() || std::chrono::steady_clock::now()>=deadline;
-                        });
-                        if(result.status==OpeningStatus::Interrupted || stop_requested.load() || std::chrono::steady_clock::now()>=deadline)
-                            throw std::runtime_error("平衡开局生成已取消或超时，请重新创建棋局");
-                        if(result.status!=OpeningStatus::Success)
-                            throw std::runtime_error("Balanced opening failed: "+result.failure);
-                        if(replacement.finished())continue;
-                        for(int action:result.actions)moves.push_back(action/canvas*replacement.size()+action%canvas);
-                        generated=WebOpening{std::move(result),seed,
-                            std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()};
-                        break;
-                    }
-                    if(!generated)throw std::runtime_error("100 consecutive terminal openings");
-                }
-                game=std::move(replacement);played=std::move(moves);opening=std::move(generated);
-                search.reset(std::stoull(a.get("seed","0")));
-            } else if(!game)throw std::runtime_error("Start a new game first");
-            else if(words[0]=="play" && words.size()==2) {
-                int local=web_integer(words[1]);
-                if(local<0 || local>=game->size()*game->size())throw std::runtime_error("Move outside board");
-                game->play(local/game->size()*canvas+local%game->size());played.push_back(local);
-            } else if(words[0]=="undo" && words.size()==2) {
-                int count=web_integer(words[1]);
-                if(count<1 || count>static_cast<int>(played.size()))throw std::runtime_error("Invalid undo count");
-                Game replacement(game->size(),canvas,game->rule());
-                auto retained=played;retained.resize(retained.size()-count);
-                for(int local:retained)replacement.play(local/replacement.size()*canvas+local%replacement.size());
-                game=std::move(replacement);played=std::move(retained);
-                // Manual research may alter the generated prefix; its old value then no longer applies.
-                if(opening && played.size()<opening->result.actions.size())opening.reset();
-            } else if((words[0]=="genmove" || words[0]=="analyze") && words.size()==2) {
-                int visits=web_integer(words[1]);
-                if(visits<2 || visits>100000)throw std::runtime_error("Visits must be in [2, 100000]");
-                Game before=*game;
-                SearchRun options;options.max_visits=visits;options.clear_before_search=true;
-                options.should_stop=[]{return stop_requested.load();};
-                auto requests=eval->requests.load(),batches=eval->batches.load();
-                auto start=std::chrono::steady_clock::now();
-                auto result=analyze_position(search,c,before,options);
-                if(stop_requested)break;
-                if(result.action<0)throw std::runtime_error("Search has no move: zero playout budget");
-                double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-                auto planes=web_policy_planes(web_model,before,a.get("device"),c.text("analysis.inference_precision"));
-                if(words[0]=="genmove") {
-                    game->play(result.action);played.push_back(result.action/canvas*game->size()+result.action%canvas);
-                }
-                std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played,opening);std::cout<<",\"analysis\":";
-                web_analysis(result,before,seconds,eval->requests.load()-requests,eval->batches.load()-batches,planes);
-                std::cout<<"}\n"<<std::flush;continue;
-            } else if(!(words[0]=="state" && words.size()==1))throw std::runtime_error("Unknown command or arguments");
-            std::cout<<"{\"ok\":true,\"state\":";web_state(*game,played,opening);std::cout<<"}\n"<<std::flush;
-        } catch(const std::exception& error) {
-            std::cout<<"{\"ok\":false,\"error\":"<<quote(error.what())<<"}\n"<<std::flush;
+int analysis_session(const Args& a,const Config& c,const std::string& protocol) {
+    torch::jit::Module model;
+    auto eval=evaluator(a,c,"analysis",&model);
+    auto search=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");
+    auto raw=[&](const Game& game) {
+        auto planes=web_policy_planes(model,game,a.get("device"),c.text("analysis.inference_precision"));
+        Json result={{"precision",planes.precision},{"heads",Json::array()}};
+        result["value_logits"]=std::vector<float>(planes.value_logits.data_ptr<float>(),planes.value_logits.data_ptr<float>()+3);
+        result["wdl"]=std::vector<float>(planes.wdl.data_ptr<float>(),planes.wdl.data_ptr<float>()+3);
+        const int count=game.size()*game.size();
+        const std::array<int,4> heads{0,1,4,5};
+        const std::array<std::string,4> names{"policy","opponent_policy","long_optimistic_policy","short_optimistic_policy"};
+        for(size_t i=0;i<heads.size();++i) {
+            auto logits=planes.logits.data_ptr<float>()+heads[i]*count;
+            auto probabilities=planes.probabilities.data_ptr<float>()+heads[i]*count;
+            result["heads"].push_back({{"name",names[i]},{"logits",std::vector<float>(logits,logits+count)},
+                                      {"probabilities",std::vector<float>(probabilities,probabilities+count)}});
         }
-    }
-    eval->finish();return stop_requested?130:0;
+        return result;
+    };
+    int code=engine_session(*search,*eval,c,std::stoull(a.get("seed","0")),protocol,raw,
+                           [&](const Game& game){return move_temperature(c,"analysis",game);},[]{return stop_requested.load();});
+    eval->finish();return code;
 }
 int arena(const Args& a,const Config& c) {
     std::vector<MatchModel> models;std::set<std::string> ids;
@@ -714,7 +578,7 @@ int match(const Args& a,const Config& c) {
 }
 int main(int argc,char** argv) {
     try {
-        if(argc<2)throw std::runtime_error("Expected selfplay, worker, analysis, infer, match or arena");
+        if(argc<2)throw std::runtime_error("Expected selfplay, worker, analysis, gtp, infer, match or arena");
         std::string mode=argv[1]; Args args(argc,argv); Config config(args.get("config"));
         if(mode=="selfplay" || mode=="worker" || mode=="infer")
             if((config.text("agent.algorithm")!="alphazero" && config.text("agent.algorithm")!="muzero") ||
@@ -722,15 +586,16 @@ int main(int argc,char** argv) {
                (config.text("agent.nonroot_search_algo")!="puct" && config.text("agent.nonroot_search_algo")!="gumbel") ||
                (config.text("agent.root_search_algo")=="puct" && config.text("agent.nonroot_search_algo")!="puct"))
                 throw std::runtime_error("Invalid native algorithm/search combination");
-        torch::set_num_threads(config.integer(mode=="analysis"?"analysis.cpu_threads":(mode=="match"||mode=="arena")?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
+        torch::set_num_threads(config.integer((mode=="analysis"||mode=="gtp")?"analysis.cpu_threads":(mode=="match"||mode=="arena")?"match.cpu_threads":"run.cpu_threads")); torch::set_num_interop_threads(1);
         std::signal(SIGINT,stop_handler); std::signal(SIGTERM,stop_handler);
         if(mode=="selfplay") {ForkPool forks;auto service=evaluator(args,config,"selfplay");int code=selfplay(args,config,*service,forks);service->finish();return code;}
         if(mode=="worker")return worker(args,config);
         if(mode=="analysis") {
             const auto stream=args.get("stream","false");
             if(stream!="true" && stream!="false")throw std::runtime_error("--stream must be true or false");
-            return stream=="true"?analysis_session(args,config):analyze(args,config,false);
+            return stream=="true"?analysis_session(args,config,args.get("protocol","text")):analyze(args,config,false);
         }
+        if(mode=="gtp")return analysis_session(args,config,"gtp");
         if(mode=="infer")return analyze(args,config,true);
         if(mode=="match")return match(args,config);
         if(mode=="arena")return arena(args,config);

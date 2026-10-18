@@ -30,7 +30,9 @@ double fpu_value(double nn_value,double parent_value,double visited_mass,double 
     return mix*parent_value+(1-mix)*nn_value-reduction*std::sqrt(mass);
 }
 std::vector<double> root_selection_weights(const std::vector<RootChildStats>& children,
-                                         const SearchSettings& s,bool use_lcb,ValueStats parent,bool normalize_output) {
+                                         const SearchSettings& s,bool use_lcb,ValueStats parent,bool normalize_output,
+                                         std::vector<RootSelectionDiagnostic>* diagnostics) {
+    if(diagnostics)diagnostics->assign(children.size(),{});
     std::vector<double> weights;double total=0,best_goodness=-1e30;size_t stable=0;
     for(size_t i=0;i<children.size();++i) {
         const auto& c=children[i];weights.push_back(c.weight);total+=c.weight;
@@ -60,6 +62,7 @@ std::vector<double> root_selection_weights(const std::vector<RootChildStats>& ch
                 double variance=std::max(1e-8,c.value_sq_sum/n-mean*mean)+prior/(n+prior);
                 ess=(n+prior)*(n+prior)/(c.weight_sq+prior*prior);
                 radius[i]=s.lcb_stdevs*std::sqrt(variance/ess);lcb[i]=mean-radius[i];
+                if(diagnostics)(*diagnostics)[i]={0,lcb[i],radius[i],true};
             }
             if(weights[i]>0 && weights[i]>=s.min_lcb_visit_prop*best.weight &&
                (candidate<0 || lcb[i]>lcb[candidate]))candidate=i;
@@ -77,6 +80,7 @@ std::vector<double> root_selection_weights(const std::vector<RootChildStats>& ch
     double maximum=*std::max_element(weights.begin(),weights.end());
     double cutoff=std::min(s.chosen_move_prune,maximum/64),subtract=std::min(s.chosen_move_subtract,maximum/64);
     for(auto& w:weights)w=w<cutoff?0:std::max(0.0,w-subtract);
+    if(diagnostics)for(size_t i=0;i<weights.size();++i)(*diagnostics)[i].weight=weights[i];
     if(normalize_output)normalize(weights);
     return weights;
 }
@@ -501,6 +505,7 @@ void Search::simulate_many(int worker) {
         }
         if(issued_.fetch_add(1)>=budget_)break;
         simulation(worker);
+        if(worker==0 && report_)report_();
     }}
     catch(...){{std::lock_guard<std::mutex> lock(error_mutex_);if(!error_)error_=std::current_exception();}failed_=true;}
 }
@@ -587,10 +592,19 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     std::sort(root_->prior_order.begin(),root_->prior_order.end(),[&](int a,int b){return root_->moves[a].search_prior>root_->moves[b].search_prior;});
     if(!fresh)recompute(*root_);
     {std::lock_guard<std::mutex> lock(work_mutex_);position_=&state;issued_=0;completed_=0;failed_=false;error_=nullptr;workers_done_=0;cleaning_=false;++generation_;}
+    auto next_report=start_;
+    report_=options.on_report?std::function<void()>([&]{
+        auto now=std::chrono::steady_clock::now();
+        if(now<next_report)return;
+        next_report=now+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options.report_interval));
+        options.on_report(analysis_snapshot(state.actions()));
+    }):std::function<void()>{};
     work_changed_.notify_all();simulate_many(0);
     {std::unique_lock<std::mutex> lock(work_mutex_);work_changed_.wait(lock,[&]{return workers_done_==static_cast<int>(workers_.size());});}
     if(pending()!=0)throw std::runtime_error("Search leaked pending visits");
     if(error_)std::rethrow_exception(error_);
+    report_={};
+    if(options.collect_analysis)result.analysis=analysis_snapshot(state.actions()).analysis;
     if(!stopped_ && completed_!=budget_)throw std::runtime_error("Search budget mismatch");
     result.simulations=completed_;result.new_playouts=completed_+fresh_playouts_;result.root_visits=root_->visits.load()+1;
     result.graph_hits=graph_hits_.load();result.graph_catch_ups=graph_catch_ups_.load();

@@ -49,6 +49,7 @@ template<bool Full> void GumbelSearch<Full>::simulate_gumbel(int worker) {
             simulation<true,Full>(worker,reserved,&gumbel_);
             {std::lock_guard<std::mutex> lock(root_mutex_);schedule_->commit(reserved);reserved=-1;}
             root_changed_.notify_all();
+            if(worker==0 && report_)report_();
         }
     } catch(...) {
         {std::lock_guard<std::mutex> lock(root_mutex_);if(reserved>=0)schedule_->cancel(reserved);}
@@ -74,7 +75,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     if(!std::isfinite(temperature)||temperature<0||options.max_visits<0||options.max_playouts<-1||options.max_time<-1||!std::isfinite(options.max_time))
         throw std::runtime_error("Invalid Gumbel search caps/temperature");
     if(options.hint_action<-1||(options.hint_action>=0&&!state.legal(options.hint_action)))throw std::runtime_error("Illegal Gumbel root hint");
-    start_=std::chrono::steady_clock::now();advance(0);SearchResult result;
+    start_=std::chrono::steady_clock::now();advance(0);SearchResult result;result.gumbel=true;
     prepare_subtree_bias(state);
     result.policy.assign(state.actions(),0);result.move_policy=result.policy;result.network_policy=result.policy;result.search_policy=result.policy;
     result.visits.assign(state.actions(),0);result.q_values.assign(state.actions(),0);result.q_visits.assign(state.actions(),0);
@@ -95,10 +96,18 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     auto effective=gumbel_;if(options.remove_root_noise)effective.noise_scale=0;
     schedule_=std::make_unique<GumbelRoot>(priors,budget_,effective,random_[0]);
     {std::lock_guard<std::mutex> lock(work_mutex_);position_=&state;issued_=0;completed_=0;failed_=false;stopped_=false;error_=nullptr;workers_done_=0;cleaning_=false;++generation_;}
+    auto next_report=start_;
+    report_=options.on_report?std::function<void()>([&]{
+        auto now=std::chrono::steady_clock::now();if(now<next_report)return;
+        next_report=now+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options.report_interval));
+        options.on_report(analysis_snapshot(state.actions(),&gumbel_));
+    }):std::function<void()>{};
     work_changed_.notify_all();simulate_gumbel(0);
     {std::unique_lock<std::mutex> lock(work_mutex_);work_changed_.wait(lock,[&]{return workers_done_==int(workers_.size());});}
     if(pending()!=0||schedule_->pending()!=0)throw std::runtime_error("Gumbel leaked pending visits");
     if(error_)std::rethrow_exception(error_);
+    report_={};
+    if(options.collect_analysis){result.analysis=analysis_snapshot(state.actions(),&gumbel_).analysis;result.gumbel=true;}
     if(!stopped_&&completed_!=budget_)throw std::runtime_error("Gumbel budget mismatch");
     auto children=root_children();auto parent=snapshot(*root_);
     result.simulations=completed_;result.new_playouts=completed_+1;result.root_visits=root_->visits.load()+1;result.stopped_early=stopped_;
