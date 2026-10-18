@@ -3,10 +3,11 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile
+import time
 from threading import Event, Thread
 import unittest
 
-from web.app import App
+from web.app import App, Conflict
 from web.server import make_server
 
 
@@ -14,7 +15,7 @@ def position(moves):
     board = [0] * 225
     for index, action in enumerate(moves):
         board[action] = 1 if index % 2 == 0 else -1
-    return dict(board_size=15, board=board, moves=moves, turn=len(moves),
+    return dict(board_size=15, rule='freestyle', board=board, moves=moves, turn=len(moves),
                 player=1 if len(moves) % 2 == 0 else -1, finished=False, winner=0)
 
 
@@ -22,16 +23,18 @@ def analysis(game):
     actions = [i for i, value in enumerate(game['board']) if not value]
     weights = [1 / (1 + abs(i - 112)) for i in actions]
     total = sum(weights)
-    candidates = [dict(action=i, network_prior=w / total, visits=1,
-                       visit_policy=1 / len(actions), selection_weight=w / total)
-                  for i, w in zip(actions, weights)]
+    candidates = [dict(action=i, rank=rank, network_prior=w / total, visits=max(1, round(w * 100)),
+                       visit_policy=w / total, selection_weight=w / total, winrate=.56,
+                       draw_rate=.12, wdl=[.5, .12, .38], utility=.12, lcb=.1, radius=.02,
+                       raw_selection_weight=w, improved_policy=None, pv=[i])
+                  for rank, (i, w) in enumerate(zip(actions, weights), 1)]
     probabilities = [0.0] * 225
     for candidate in candidates:
         probabilities[candidate['action']] = candidate['network_prior']
-    return dict(board_size=15, board=game['board'], turn=game['turn'], player=game['player'],
+    return dict(board_size=15, rule=game['rule'], board=game['board'], turn=game['turn'], player=game['player'],
                 action=actions[0], candidates=candidates, seconds=.125,
                 completed_visits=100, root_value=.12, wdl=[.5, .12, .38],
-                network_wdl=[.45, .2, .35], requests=100, batches=25,
+                network_wdl=[.45, .2, .35], requests=100, batches=25, root_search_algo='puct', final=True,
                 network_planes=dict(precision='float32', heads=[
                     dict(name=name, probabilities=probabilities, logits=[0.0] * 225)
                     for name in ('policy', 'opponent_policy', 'long_optimistic_policy', 'short_optimistic_policy')]))
@@ -42,9 +45,16 @@ class ControlledEngine:
         self.game = position([112, 113])
         self.searching, self.release = Event(), Event()
         self.fail = False
+        self.analyses = []
 
-    def command(self, command):
-        operation, value = command.split()
+    def command(self, command, on_report=None, should_stop=None):
+        if isinstance(command, dict):
+            operation, value = command['command'], command.get('visits')
+        else:
+            operation, *values = command.split()
+            value = values[0] if values else None
+        if operation == 'raw_nn':
+            return dict(state=deepcopy(self.game), network_planes=analysis(self.game)['network_planes'])
         if operation == 'play':
             self.game = position(self.game['moves'] + [int(value)])
         elif operation == 'undo':
@@ -58,7 +68,24 @@ class ControlledEngine:
             result = analysis(self.game)
             self.game = position(self.game['moves'] + [result['action']])
             return dict(state=deepcopy(self.game), analysis=result)
+        elif operation == 'analyze':
+            self.analyses.append(deepcopy(self.game))
+            count = 0
+            while not should_stop():
+                result = analysis(self.game)
+                count += 100
+                result.update(completed_visits=count, final=False)
+                result.pop('network_planes')
+                on_report(result)
+                time.sleep(.02)
+            result = analysis(self.game)
+            result.update(completed_visits=count, final=True)
+            result.pop('network_planes')
+            return dict(state=deepcopy(self.game), analysis=result, cancelled=True)
         return dict(state=deepcopy(self.game))
+
+    def stop(self):
+        pass  # The task's cancellation callback is also checked before search starts.
 
     def close(self):
         self.release.set()
@@ -77,7 +104,7 @@ class AnalysisUpdateTests(unittest.TestCase):
         config = dict(analysis=dict(visits=100, device='cpu', search_threads=1,
                                      virtual_loss=1, board_size=15, rule='freestyle',
                                      inference_precision='float32'))
-        self.app = App(Path('EtaZero_V1.2/build/etazero'), {'fixture': model}, config, 15)
+        self.app = App(Path('EtaZero_V2.7/build/etazero'), {'fixture': model}, config, 15)
         self.engine = ControlledEngine()
         self.app.engine = self.engine
         self.app.publish(game=self.engine.game, game_id='fixture', model='fixture',
@@ -90,6 +117,158 @@ class AnalysisUpdateTests(unittest.TestCase):
         with self.app.condition:
             self.assertTrue(self.app.condition.wait_for(lambda: not self.app.state['busy'], timeout=5))
         return self.app.snapshot()
+
+    def wait_analysis(self, moves):
+        with self.app.condition:
+            self.assertTrue(self.app.condition.wait_for(
+                lambda: self.app.state['analysis_progress'] is not None and
+                self.app.state['analysis_progress']['board'] == position(moves)['board'], timeout=5))
+        return self.app.snapshot()
+
+    def submit(self, operation, **values):
+        state = self.app.snapshot()
+        return self.app.submit(operation, dict(version=state['version'], game_id=state['game_id'], **values))
+
+    def test_continuous_analysis_follows_moves_and_undo_and_stays_paused(self):
+        self.app.publish(mode='manual', visits=2, analysis=None)
+        self.submit('analyze')
+        state = self.wait_analysis([112, 113])
+        self.assertTrue(state['analysis_enabled'])
+        self.assertFalse(state['busy'])
+        self.assertGreater(state['analysis_progress']['completed_visits'], state['visits'])
+        self.assertEqual(len(state['analysis_progress']['network_planes']['heads']), 4)
+        self.submit('play', action=114)
+        state = self.wait_analysis([112, 113, 114])
+        self.assertEqual(state['analysis_progress']['player'], -1)
+        self.submit('undo')
+        self.wait_analysis([112, 113])
+        self.submit('stop')
+        stopped = self.wait_idle()
+        self.assertFalse(stopped['analysis_enabled'])
+        self.assertTrue(stopped['analysis']['final'])
+        self.assertIn('network_planes', stopped['analysis'])
+        starts = len(self.engine.analyses)
+        for operation, values in [('play', dict(action=115)), ('undo', {}),
+                                  ('configure', dict(human=1, visits=32, mode='manual'))]:
+            self.submit(operation, **values)
+            self.assertFalse(self.wait_idle()['analysis_enabled'])
+        self.assertEqual(len(self.engine.analyses), starts)
+        self.submit('analyze')
+        self.wait_analysis([112, 113])
+        self.assertEqual(len(self.engine.analyses), starts + 1)
+
+    def test_reports_do_not_invalidate_moves_but_board_changes_do(self):
+        self.app.publish(mode='manual')
+        self.submit('analyze')
+        state = self.wait_analysis([112, 113])
+        with self.app.condition:
+            self.assertTrue(self.app.condition.wait_for(lambda: self.app.state['version'] > state['version'], timeout=5))
+        self.app.submit('play', dict(version=state['version'], action=115))
+        self.wait_analysis([112, 113, 115])
+        with self.assertRaises(Conflict):
+            self.app.submit('undo', dict(version=state['version']))
+
+    def test_pause_before_continuous_search_starts(self):
+        self.app.publish(mode='manual')
+        release = Event()
+        self.addCleanup(release.set)
+        self.app.executor.submit(lambda: release.wait(5))
+        self.submit('analyze')
+        self.submit('stop')
+        release.set()
+        state = self.wait_idle()
+        self.assertFalse(state['analysis_enabled'])
+        self.assertEqual(self.engine.analyses, [])
+        self.assertEqual(state['game']['moves'], [112, 113])
+
+    def test_pause_at_terminal_position_stays_paused_after_undo(self):
+        self.engine.game.update(finished=True, winner=1)
+        self.app.publish(mode='manual', analysis_enabled=True, game=deepcopy(self.engine.game))
+        self.submit('stop')
+        self.assertFalse(self.app.snapshot()['analysis_enabled'])
+        self.submit('undo')
+        self.assertFalse(self.wait_idle()['analysis_enabled'])
+        self.assertEqual(self.engine.analyses, [])
+
+    def test_browser_continuous_analysis_and_pause_controls(self):
+        from playwright.sync_api import sync_playwright
+
+        self.app.publish(mode='manual', visits=2, analysis=None)
+        server = make_server(self.app, '127.0.0.1', 0)
+        Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport=dict(width=1440, height=900))
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(f'http://127.0.0.1:{server.server_port}')
+            page.wait_for_function("!document.querySelector('#analyze').disabled")
+            controls = page.locator('.actions').bounding_box()
+            board = page.locator('#board').bounding_box()
+            self.assertLess(controls['y'] + controls['height'], board['y'])
+            page.locator('#analyze').click()
+            page.wait_for_function("document.querySelector('#analysis-context').textContent.includes('实时分析')")
+            self.assertEqual(page.locator('#analyze').get_attribute('aria-pressed'), 'true')
+            page.keyboard.press('a')
+            page.wait_for_function("document.querySelector('#analyze').getAttribute('aria-pressed') === 'false' && !document.querySelector('#analyze').disabled")
+            page.keyboard.press('a')
+            page.wait_for_function("document.querySelector('#analysis-context').textContent.includes('实时分析')")
+            self.assertFalse(page.locator('#board [data-action="114"]').is_disabled())
+            page.locator('#tab-network').click()
+            self.assertEqual(page.locator('#network-maps > section').count(), 4)
+            page.evaluate("window.savedNetworkNode = document.querySelector('#network-maps > section')")
+            page.wait_for_function("Number(document.querySelector('#completed').textContent.replaceAll(',', '')) >= 500")
+            self.assertTrue(page.evaluate('window.savedNetworkNode.isConnected'))
+            page.locator('#board [data-action="114"]').click()
+            page.wait_for_function("document.querySelector('#move-count').textContent === '第 3 手' && document.querySelector('#status').textContent.includes('持续分析')")
+            self.wait_analysis([112, 113, 114])
+            page.locator('#undo').click()
+            page.wait_for_function("document.querySelector('#move-count').textContent === '第 2 手' && document.querySelector('#status').textContent.includes('持续分析')")
+            page.locator('#analyze').click()
+            page.wait_for_function("document.querySelector('#analyze').getAttribute('aria-pressed') === 'false' && !document.querySelector('#undo').disabled")
+            starts = len(self.engine.analyses)
+            page.locator('#board [data-action="115"]').click()
+            page.wait_for_function("document.querySelector('#move-count').textContent === '第 3 手' && !document.querySelector('#undo').disabled")
+            page.locator('#undo').click()
+            page.wait_for_function("document.querySelector('#move-count').textContent === '第 2 手' && !document.querySelector('#undo').disabled")
+            self.assertEqual(len(self.engine.analyses), starts)
+            page.locator('body').click(position=dict(x=5, y=5))
+            page.keyboard.press('a')
+            page.wait_for_function("document.querySelector('#status').textContent.includes('持续分析')")
+            page.keyboard.press('Escape')
+            page.wait_for_function("document.querySelector('#status').textContent.includes('分析已暂停')")
+            for theme in ('light', 'dark'):
+                page.locator('#theme').select_option(theme)
+                for width in (1440, 390):
+                    page.set_viewport_size(dict(width=width, height=900))
+                    readable = page.evaluate('''() => {
+                      const rgb = color => {
+                        const ctx = document.createElement('canvas').getContext('2d');
+                        ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+                        return [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3);
+                      };
+                      const luminance = color => rgb(color).map(x => x / 255)
+                        .map(x => x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4)
+                        .reduce((sum, x, i) => sum + x * [.2126, .7152, .0722][i], 0);
+                      const contrast = (a, b) => (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+                      return [...document.querySelectorAll('.candidate-marker')].every(marker => {
+                        const bg = luminance(getComputedStyle(marker).backgroundColor);
+                        return [...marker.children].every(child => {
+                          const css = getComputedStyle(child);
+                          if (css.display === 'none') return true;
+                          const childBg = child.tagName === 'SUP' ? luminance(css.backgroundColor) : bg;
+                          const minimum = child.tagName === 'STRONG' ? 12 : child.tagName === 'SUP' ? 9 : 10;
+                          return parseFloat(css.fontSize) >= minimum && contrast(luminance(css.color), childBg) >= 4.5;
+                        });
+                      });
+                    }''')
+                    self.assertTrue(readable, (theme, width))
+                    self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+                    page.screenshot(path=f'/tmp/etazero-continuous-{theme}-{width}.png', full_page=True)
+            self.assertEqual(errors, [])
+            browser.close()
 
     def test_keep_previous_until_search_finishes_and_clear_on_undo(self):
         self.app.submit('play', dict(version=self.app.snapshot()['version'], action=114))
