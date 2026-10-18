@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from secrets import randbits
-from threading import Condition
+from threading import Condition, Event
 import time
 from typing import Any
 from uuid import uuid4
@@ -46,10 +46,13 @@ class App:
         self.condition = Condition()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='etazero-game')
         self.closed = False
+        self.cancelled = Event()
+        self.operation_version = 0
         self.state = dict(instance=uuid4().hex, version=0, catalog_revision=0, game_id=None, busy=False, phase='idle', game=None, analysis=None,
                           error=None, model=None, human=1, rule='freestyle',
                           visits=config['analysis']['visits'], mode='play', started_at=None, analysis_config=None,
-                          opening_kind='empty', opening_config=None)
+                          opening_kind='empty', opening_config=None, analysis_progress=None, stop_requested=False,
+                          analysis_enabled=False)
 
     def catalog(self) -> dict:
         c = self.config['analysis']
@@ -90,13 +93,30 @@ class App:
         with self.condition:
             self.state.update(values)
             self.state['version'] += 1
+            # Search reports do not invalidate actions against the same position.
+            if set(values) != {'analysis_progress'}:
+                self.operation_version = self.state['version']
             self.condition.notify_all()
 
     def submit(self, operation: str, payload: dict) -> dict:
         with self.condition:
             if type(payload.get('version')) is not int:
                 raise ValueError('缺少有效的棋局版本号')
-            if self.closed or self.state['busy'] or payload['version'] != self.state['version']:
+            if operation == 'stop':
+                if (self.closed or (self.state['phase'] not in ('thinking', 'analyzing', 'stopping') and
+                                    not self.state['analysis_enabled']) or
+                        payload.get('game_id') != self.state['game_id']):
+                    raise Conflict('当前没有可停止的搜索')
+                if not self.state['busy'] and self.state['phase'] == 'idle':
+                    self.publish(analysis_enabled=False)
+                    return deepcopy(self.state)
+                self.cancelled.set()
+                self.publish(analysis_enabled=False, busy=True, stop_requested=True, phase='stopping')
+                if self.engine:
+                    self.engine.stop()
+                return deepcopy(self.state)
+            if (self.closed or self.state['busy'] or
+                    not self.operation_version <= payload['version'] <= self.state['version']):
                 raise Conflict('棋局状态已更新，请等待同步后再操作')
             game = self.state['game']
             if operation in ('new', 'configure'):
@@ -136,12 +156,19 @@ class App:
                     raise Conflict('当前不需要 AI 落子')
             elif operation not in ('new', 'configure', 'refresh'):
                 raise ValueError('未知操作')
+            if operation == 'analyze' and self.state['analysis_enabled']:
+                raise Conflict('持续分析已经开启')
+            self.cancelled.set()
+            if self.state['phase'] == 'analyzing' and self.engine:
+                self.engine.stop()
+            self.cancelled = Event()
             self.publish(busy=True, phase='loading' if operation in ('new', 'refresh') else 'thinking',
-                         error=None, started_at=time.time())
-            self.executor.submit(self.perform, operation, dict(payload))
+                         error=None, started_at=time.time(), analysis_progress=None, stop_requested=False,
+                         analysis_enabled=operation == 'analyze' or self.state['analysis_enabled'])
+            self.executor.submit(self.perform, operation, dict(payload), self.cancelled)
             return deepcopy(self.state)
 
-    def perform(self, operation: str, payload: dict):
+    def perform(self, operation: str, payload: dict, cancelled: Event):
         try:
             if operation == 'new':
                 selected = payload['model']
@@ -197,9 +224,8 @@ class App:
                 self.publish(game=reply['state'], analysis=None, mode='manual')
             elif operation == 'configure':
                 self.publish(visits=payload['visits'], human=payload['human'], mode=payload.get('mode', 'play'))
-            elif operation in ('analyze', 'step'):
-                reply = self.engine.command(f"{'analyze' if operation == 'analyze' else 'genmove'} {self.state['visits']}")
-                self.publish(game=reply['state'], analysis=reply['analysis'])
+            elif operation == 'step':
+                self.search('genmove', cancelled)
             elif operation == 'refresh' and self.discover_catalog:
                 models, runs = self.discover_catalog()
                 metadata = {key: load_json(path.parent / 'manifest.json') for key, path in models.items()}
@@ -215,16 +241,56 @@ class App:
             game = self.state['game']
             if operation in ('new', 'play', 'retry') and self.state['mode'] == 'play' and game and not game['finished'] and game['player'] != self.state['human']:
                 self.publish(phase='thinking', started_at=time.time())
-                reply = self.engine.command(f"genmove {self.state['visits']}")
-                self.publish(game=reply['state'], analysis=reply['analysis'])
-            self.publish(busy=False, phase='idle', started_at=None)
+                self.search('genmove', cancelled)
+            if cancelled is not self.cancelled:
+                return
+            game = self.state['game']
+            if self.state['analysis_enabled'] and not cancelled.is_set() and game and not game['finished']:
+                self.search('analyze', cancelled)
+            if cancelled is not self.cancelled:
+                return
+            self.publish(busy=False, phase='idle', started_at=None, stop_requested=False)
         except Exception as error:
-            self.publish(busy=False, phase='error', error=str(error), started_at=None)
+            if cancelled is self.cancelled:
+                self.publish(busy=False, phase='error', error=str(error), started_at=None,
+                             analysis_progress=None, stop_requested=False, analysis_enabled=False)
+
+    def search(self, command: str, cancelled: Event):
+        continuous = command == 'analyze'
+        planes = None
+        if continuous:
+            planes = self.engine.command('raw_nn')['network_planes']
+            with self.condition:
+                if cancelled.is_set():
+                    return
+                self.publish(busy=False, phase='analyzing', started_at=time.time())
+
+        def report(analysis):
+            with self.condition:
+                if cancelled is self.cancelled and not cancelled.is_set():
+                    self.publish(analysis_progress={**analysis, **({'network_planes': planes} if planes else {})})
+
+        request = dict(command=command, visits=self.state['visits'], continuous=continuous)
+        reply = self.engine.command(request, on_report=report, should_stop=cancelled.is_set)
+        with self.condition:
+            if cancelled is not self.cancelled:
+                return
+            if reply.get('cancelled') and 'analysis' not in reply:
+                self.publish(analysis_progress=None)
+                return
+            analysis = reply['analysis']
+            if planes:
+                analysis = {**analysis, 'network_planes': planes}
+            self.publish(game=reply['state'], analysis=analysis if analysis['completed_visits'] else self.state['analysis'],
+                         analysis_progress=None)
 
     def close(self):
         with self.condition:
             self.closed = True
+            self.cancelled.set()
             self.condition.notify_all()
+        if self.engine:
+            self.engine.stop()
         self.executor.shutdown(wait=True)
         if self.engine:
             self.engine.close()
