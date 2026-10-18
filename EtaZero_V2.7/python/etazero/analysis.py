@@ -60,7 +60,7 @@ def analyze(config,binary,run_dir,model=None,size=None,rule=None,moves="",output
     return path,payload
 
 
-def stream_analysis(config, binary, run_dir, model=None):
+def stream_analysis(config, binary, run_dir, model=None, protocol='text'):
     """Run the same native session used by Web, retaining weights across queries."""
     import tempfile
     from .runtime import verify_build
@@ -72,7 +72,8 @@ def stream_analysis(config, binary, run_dir, model=None):
     with tempfile.TemporaryDirectory(prefix='etazero-analysis-') as temporary:
         path=Path(temporary)/'effective.cfg'
         write_native({**config,'network':{'canvas':info['canvas']}},path)
-        command=[str(binary),'analysis','--stream','true','--config',str(path),'--model',str(model),
+        command=[str(binary),'gtp' if protocol=='gtp' else 'analysis',
+                 *([] if protocol=='gtp' else ['--stream','true','--protocol',protocol]),'--config',str(path),'--model',str(model),
                  '--model-id',info['id'],'--device',c['device'],'--seed',str(c['seed'])]
         code=subprocess.call(command)
         if code:
