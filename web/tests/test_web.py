@@ -6,10 +6,11 @@ import tempfile
 from pathlib import Path
 import time
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-from threading import Thread
+from threading import Thread, Event
 
 from etazero.engine_config import load_engine_config, load_match_opening_config
 from etazero.config import ROOT, write_native
@@ -94,7 +95,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(app.catalog()['models'], [])
         self.assertEqual(app.catalog()['runs'], [])
         self.publish('new-run', 1)
-        app.perform('refresh', {})
+        app.perform('refresh', {}, app.cancelled)
         self.assertIsNone(app.snapshot()['error'])
         self.assertEqual(len(app.catalog()['runs']), 1)
         self.assertEqual(app.snapshot()['catalog_revision'], 1)
@@ -277,6 +278,175 @@ class WebTests(unittest.TestCase):
             self.assertEqual(errors, [])
             browser.close()
 
+    def test_stop_before_search_starts_preserves_game(self):
+        app = App(BINARY, {'test': Path(MODEL)}, self.config, 5)
+        self.addCleanup(app.close)
+
+        def idle():
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                state = app.snapshot()
+                if not state['busy']:
+                    self.assertIsNone(state['error'])
+                    return state
+                time.sleep(.01)
+            self.fail('Search did not stop')
+
+        app.submit('new', dict(version=app.snapshot()['version'], model='test', size=5,
+                               rule='renju', human=1, visits=100000, mode='manual'))
+        state = idle()
+        release = Event()
+        self.addCleanup(release.set)
+        app.executor.submit(lambda: release.wait(10))
+        app.submit('step', dict(version=state['version']))
+        with self.assertRaises(Conflict):
+            app.submit('stop', dict(version=state['version'], game_id='another-game'))
+        app.submit('stop', dict(version=state['version'], game_id=state['game_id']))
+        release.set()
+        stopped = idle()
+        self.assertEqual(stopped['game'], state['game'])
+        self.assertFalse(stopped['stop_requested'])
+        app.submit('configure', dict(version=stopped['version'], human=1, visits=16, mode='manual'))
+        state = idle()
+        app.submit('analyze', dict(version=state['version']))
+        with app.condition:
+            self.assertTrue(app.condition.wait_for(lambda: app.state['analysis_progress'] is not None and
+                                                  app.state['analysis_progress']['completed_visits'] > 16, timeout=30))
+        state = app.snapshot()
+        app.submit('stop', dict(version=state['version'], game_id=state['game_id']))
+        self.assertGreater(idle()['analysis']['completed_visits'], 16)
+
+    def test_browser_live_candidates_filter_and_stop(self):
+        from playwright.sync_api import sync_playwright
+
+        app = App(BINARY, {'test': Path(MODEL)}, self.config, 7)
+        self.addCleanup(app.close)
+        server = make_server(app, '127.0.0.1', 0)
+        Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        algorithm = model_info(MODEL)[1].get('algorithm', 'alphazero')
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(f'http://127.0.0.1:{server.server_port}')
+            page.wait_for_function("!document.querySelector('#new-game').disabled")
+            page.locator('#size').select_option('7')
+            page.locator('#mode').select_option('manual')
+            page.locator('#visits').fill('100000')
+            page.locator('#new-game').click()
+            page.wait_for_function("!document.querySelector('#analyze').disabled")
+            page.locator('#analyze').click()
+            page.wait_for_function("document.querySelector('#analysis-context').textContent.includes('实时分析') && document.querySelectorAll('.candidate-marker').length > 0")
+            self.assertFalse(app.snapshot()['analysis_progress']['final'])
+            self.assertIn('network_planes', app.snapshot()['analysis_progress'])
+            page.locator('#board [data-action="24"]').click()
+            page.wait_for_function("document.querySelector('#move-count').textContent === '第 1 手' && document.querySelector('#status').textContent.includes('持续分析')")
+            with app.condition:
+                self.assertTrue(app.condition.wait_for(lambda: app.state['analysis_progress'] is not None and
+                                                      app.state['analysis_progress']['turn'] == 1, timeout=30))
+            page.locator('#undo').click()
+            page.wait_for_function("document.querySelector('#move-count').textContent === '第 0 手' && document.querySelector('#status').textContent.includes('持续分析')")
+            page.wait_for_function("document.querySelector('#analysis-context').textContent.includes('实时分析') && document.querySelectorAll('.candidate-marker').length > 0")
+            page.locator('#analyze').click()
+            page.wait_for_function("!document.querySelector('#analyze').disabled && document.querySelector('#analyze').getAttribute('aria-pressed') === 'false'")
+            state = app.snapshot()
+            self.assertEqual(state['game']['moves'], [])
+            self.assertTrue(state['analysis']['final'])
+            self.assertLess(state['analysis']['completed_visits'], 100000)
+            page.locator('#candidate-top').fill('3')
+            page.locator('#candidate-min').fill('0')
+            page.locator('#board-candidates-only').check()
+            self.assertGreater(page.locator('.candidate-marker').count(), 0)
+            self.assertLessEqual(page.locator('.candidate-marker').count(), 3)
+            self.assertEqual(page.locator('#candidates tr').count(), page.locator('.candidate-marker').count())
+            page.locator('#candidates [data-candidate]').first.hover()
+            self.assertIn('PV', page.locator('#candidate-detail').inner_text())
+            self.assertIn('LCB', page.locator('#candidate-detail').inner_text())
+            page.screenshot(path=f'/tmp/etazero-analysis-{algorithm}.png', full_page=True)
+            page.locator('#theme').select_option('dark')
+            page.set_viewport_size({'width': 390, 'height': 844})
+            self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+            page.screenshot(path=f'/tmp/etazero-analysis-{algorithm}-mobile.png', full_page=True)
+            page.locator('.setup-toggle').click()
+            page.locator('#visits').fill('32')
+            page.locator('#rule').select_option('hex')
+            page.locator('#new-game').click()
+            page.wait_for_function("!document.querySelector('#analyze').disabled")
+            self.assertTrue(page.locator('#candidate-detail').inner_text().startswith('悬停候选点'))
+            page.locator('#analyze').click()
+            page.wait_for_function("document.querySelector('#analysis-context').textContent.includes('实时分析') && document.querySelectorAll('#board.hex-board .candidate-marker').length > 0")
+            page.locator('#analyze').click()
+            page.wait_for_function("document.querySelector('#analyze').getAttribute('aria-pressed') === 'false' && !document.querySelector('#analyze').disabled")
+            self.assertGreater(page.locator('#board.hex-board .candidate-marker').count(), 0)
+            self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+            self.assertEqual(errors, [])
+            page.screenshot(path=f'/tmp/etazero-analysis-{algorithm}-hex.png', full_page=True)
+            browser.close()
+
+    def test_continuous_analysis_native_algorithms_and_ai_handoff(self):
+        for root_algo in ('puct', 'gumbel'):
+            with self.subTest(root_algo=root_algo):
+                config = deepcopy(self.config)
+                config['analysis'].update(root_search_algo=root_algo, nonroot_search_algo='puct',
+                                          reuse_tree=False, use_graph_search=False,
+                                          root_num_symmetries_to_sample=1, search_threads=1)
+                app = App(BINARY, {'test': Path(MODEL)}, config, 7)
+
+                def submit(operation, **values):
+                    state = app.snapshot()
+                    app.submit(operation, dict(version=state['version'], game_id=state['game_id'], **values))
+
+                def wait(predicate):
+                    with app.condition:
+                        self.assertTrue(app.condition.wait_for(lambda: app.state['error'] or predicate(app.state), timeout=30))
+                    state = app.snapshot()
+                    self.assertIsNone(state['error'])
+                    return state
+
+                def analyzed(turn):
+                    return wait(lambda s: s['analysis_progress'] is not None and
+                                s['analysis_progress']['turn'] == turn and
+                                s['analysis_progress']['completed_visits'] > s['visits'])
+
+                try:
+                    submit('new', model='test', size=7, rule='freestyle', human=1, visits=2, mode='manual')
+                    wait(lambda s: not s['busy'])
+                    submit('analyze')
+                    state = analyzed(0)
+                    self.assertEqual(state['analysis_progress']['root_search_algo'], root_algo)
+                    self.assertEqual(len(state['analysis_progress']['network_planes']['heads']), 4)
+                    pid = app.engine.process.pid
+                    submit('play', action=24)
+                    state = analyzed(1)
+                    self.assertEqual(state['analysis_progress']['board'], state['game']['board'])
+                    submit('undo')
+                    analyzed(0)
+                    submit('step')
+                    analyzed(1)
+                    submit('stop')
+                    state = wait(lambda s: not s['busy'])
+                    self.assertFalse(state['analysis_enabled'])
+                    self.assertTrue(state['analysis']['final'])
+                    submit('undo')
+                    state = wait(lambda s: not s['busy'])
+                    self.assertEqual(state['phase'], 'idle')
+                    self.assertIsNone(state['analysis_progress'])
+                    self.assertFalse(state['analysis_enabled'])
+                    submit('configure', human=1, visits=2, mode='play')
+                    wait(lambda s: not s['busy'])
+                    submit('analyze')
+                    analyzed(0)
+                    submit('play', action=24)
+                    state = analyzed(2)
+                    self.assertEqual(state['game']['player'], 1)
+                    self.assertEqual(state['analysis_progress']['board'], state['game']['board'])
+                    self.assertEqual(app.engine.process.pid, pid)
+                finally:
+                    app.close()
+
     def test_network_planes_match_published_model(self):
         import torch
         from etazero.export import example_inputs
@@ -297,13 +467,16 @@ class WebTests(unittest.TestCase):
         with torch.inference_mode(), torch.autocast('cuda', dtype=torch.float16, enabled=half):
             if info.get('algorithm') == 'muzero':
                 hidden = module.model.representation(obs, globals)
-                logits = module.model.prediction(hidden)[0]
+                output = module.model.prediction(hidden)
             else:
-                logits = module.model.forward_all(obs, globals)[0]
+                output = module.model.forward_all(obs, globals)
+            logits, value = output[:2]
         logits = logits[0].reshape(-1, info['canvas'], info['canvas'])[:, :5, :5].float().reshape(-1, 25)
         heads = analysis['network_planes']['heads']
         self.assertEqual([head['name'] for head in heads], [POLICY_HEADS[i] for i in (0, 1, 4, 5)])
         self.assertEqual(analysis['network_planes']['precision'], 'float16' if half else 'float32')
+        torch.testing.assert_close(torch.tensor(analysis['network_planes']['value_logits']), value[0].float().cpu(), rtol=1e-4, atol=1e-5)
+        torch.testing.assert_close(torch.tensor(analysis['network_planes']['wdl']), value[0].float().softmax(0).cpu(), rtol=1e-4, atol=1e-6)
         for head, index in zip(heads, (0, 1, 4, 5)):
             self.assertEqual(len(head['logits']), 25)
             torch.testing.assert_close(torch.tensor(head['logits']), logits[index].cpu(), rtol=1e-4, atol=1e-5)
@@ -470,6 +643,10 @@ class WebTests(unittest.TestCase):
             self.assertEqual(state['game']['moves'], [24])
             before = state['game']
             state = perform('analyze')
+            with app.condition:
+                self.assertTrue(app.condition.wait_for(lambda: app.state['analysis_progress'] is not None, timeout=30))
+            state = app.snapshot()
+            state = perform('stop', game_id=state['game_id'])
             self.assertEqual(state['game'], before)  # Analysis must not advance the position.
             self.assertEqual(state['analysis']['turn'], 1)
             self.assertEqual(state['analysis']['player'], -1)
