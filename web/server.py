@@ -66,7 +66,7 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
                 if not isinstance(payload, dict):
                     raise ValueError('请求必须是对象')
                 operations = {f'/api/{name}': name for name in
-                              ('new', 'play', 'undo', 'retry', 'analyze', 'step', 'branch', 'configure', 'refresh')}
+                              ('new', 'play', 'undo', 'retry', 'analyze', 'step', 'branch', 'configure', 'refresh', 'stop')}
                 if self.path not in operations:
                     return self.json(404, dict(error='未知接口'))
                 self.json(202, app.submit(operations[self.path], payload))
