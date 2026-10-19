@@ -35,11 +35,12 @@ class BatchEvaluator final : public Evaluator {
         std::exception_ptr error;
         bool done=false;
         std::mutex mutex;std::condition_variable changed;
-        std::chrono::steady_clock::time_point time=std::chrono::steady_clock::now();
+        uint64_t order=0;
     };
     struct CacheEntry { std::string key;InferenceOutput output; };
     std::vector<std::unique_ptr<Backend>> backends_;
     std::shared_ptr<const int> owner_=std::make_shared<const int>(0);
+    std::atomic<uint64_t> next_request_{0};
     std::vector<std::thread> threads_;
     std::deque<Request*> initial_;
     std::vector<std::deque<Request*>> recurrent_;

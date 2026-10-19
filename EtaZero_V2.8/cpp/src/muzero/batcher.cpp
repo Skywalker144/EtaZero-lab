@@ -26,8 +26,14 @@ std::vector<float> transform_observation(const std::vector<float>& obs,int n,con
 }
 void restore_evaluation(Evaluation& e,const std::vector<int>& map) {
     if(e.logits.size()!=map.size())throw std::runtime_error("MuZero policy shape mismatch");
-    auto logits=e.logits,optimistic=e.optimistic_logits;
-    for(size_t a=0;a<map.size();++a){e.logits[a]=logits[map[a]];if(e.has_auxiliary)e.optimistic_logits[a]=optimistic.at(map[a]);}
+    thread_local std::vector<double> scratch;
+    scratch=e.logits;
+    for(size_t a=0;a<map.size();++a)e.logits[a]=scratch[map[a]];
+    if(e.has_auxiliary) {
+        if(e.optimistic_logits.size()!=map.size())throw std::runtime_error("MuZero optimistic policy shape mismatch");
+        scratch=e.optimistic_logits;
+        for(size_t a=0;a<map.size();++a)e.optimistic_logits[a]=scratch[map[a]];
+    }
 }
 BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends,int canvas,size_t batch,int wait,
                                size_t cache,bool randomize,int symmetry,uint64_t seed,size_t capacity)
@@ -40,7 +46,9 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends,in
 }
 BatchEvaluator::~BatchEvaluator(){try{finish();}catch(...){}}
 InferenceOutput BatchEvaluator::submit(Request& request,size_t server) {
-    request.done=false;request.error=nullptr;request.time=std::chrono::steady_clock::now();
+    request.done=false;request.error=nullptr;
+    // Preserve oldest-request scheduling without reading the wall clock.
+    request.order=next_request_.fetch_add(1,std::memory_order_relaxed);
     {std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock,[&]{return error_||closing_||queued_<capacity_;});
         if(error_)std::rethrow_exception(error_);
@@ -55,21 +63,21 @@ InferenceOutput BatchEvaluator::submit(Request& request,size_t server) {
     return output;
 }
 InferenceOutput BatchEvaluator::initial(const std::vector<float>& obs) {
-    ++submitted;std::string key;size_t slot=0;
+    submitted.fetch_add(1,std::memory_order_relaxed);std::string key;size_t slot=0;
     if(!cache_.empty()) {
         // Input is already in the fixed tree orientation; exact globals retain PDA/rules.
         key.assign(reinterpret_cast<const char*>(obs.data()),obs.size()*sizeof(float));
         slot=std::hash<std::string>{}(key)%cache_.size();
         {std::lock_guard<std::mutex> lock(mutex_);if(error_)std::rethrow_exception(error_);if(closing_)throw std::runtime_error("MuZero service is closing");}
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        if(cache_[slot].key==key && cache_[slot].output.latent){++cache_hits;return cache_[slot].output;}
+        if(cache_[slot].key==key && cache_[slot].output.latent){cache_hits.fetch_add(1,std::memory_order_relaxed);return cache_[slot].output;}
     }
     thread_local Request request;request.observation=&obs;auto output=submit(request,0);
     if(!cache_.empty()){std::lock_guard<std::mutex> lock(cache_mutex_);cache_[slot]={std::move(key),output};}
     return output;
 }
 InferenceOutput BatchEvaluator::recurrent(std::shared_ptr<const Latent> latent,int action) {
-    ++submitted;auto routed=std::dynamic_pointer_cast<const RoutedLatent>(latent);
+    submitted.fetch_add(1,std::memory_order_relaxed);auto routed=std::dynamic_pointer_cast<const RoutedLatent>(latent);
     if(!routed || routed->owner!=owner_)throw std::runtime_error("MuZero latent belongs to another inference service");
     thread_local Request request;request.action={routed->value,action};return submit(request,routed->server);
 }
@@ -83,7 +91,7 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     if(randomize){std::lock_guard<std::mutex> lock(random_mutex_);symmetry=std::uniform_int_distribution<int>(0,hex_input(obs)?1:7)(random_);}
     auto map=symmetry_mapping(canvas_,input_symmetry(obs,symmetry));
     auto input=transform_observation(obs,canvas_,map);InferenceOutput result;
-    if(skip){++submitted;thread_local Request request;request.observation=&input;result=submit(request,0);}else result=initial(input);
+    if(skip){submitted.fetch_add(1,std::memory_order_relaxed);thread_local Request request;request.observation=&input;result=submit(request,0);}else result=initial(input);
     restore_evaluation(result.evaluation,map);return result.evaluation;
 }
 void BatchEvaluator::serve(size_t server) {
@@ -103,13 +111,10 @@ void BatchEvaluator::serve(size_t server) {
                 if(initial_.empty()&&recurrent_[server].empty()){if(closing_)return;continue;}
                 if(wait_us_>0)changed_.wait_for(lock,std::chrono::microseconds(wait_us_),[&]{return closing_||initial_.size()>=batch_||recurrent_[server].size()>=batch_;});
                 if(initial_.empty()&&recurrent_[server].empty())continue;
-                initial=recurrent_[server].empty()||(!initial_.empty()&&initial_.front()->time<recurrent_[server].front()->time);
+                initial=recurrent_[server].empty()||(!initial_.empty()&&initial_.front()->order<recurrent_[server].front()->order);
                 auto& queue=initial?initial_:recurrent_[server];
                 batch.clear();while(!queue.empty()&&batch.size()<batch_){batch.push_back(queue.front());queue.pop_front();}queued_-=batch.size();++active_;changed_.notify_all();
             }
-            uint64_t waiting=0;
-            for(auto r:batch)waiting+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-r->time).count();
-            wait_microseconds+=waiting;
             std::vector<InferenceOutput> outputs;
             if(initial){initial_inputs.clear();for(auto r:batch)initial_inputs.push_back(r->observation);outputs=backends_[server]->initial(initial_inputs);}
             else{recurrent_inputs.clear();for(auto r:batch)recurrent_inputs.push_back(r->action);outputs=backends_[server]->recurrent(recurrent_inputs);recurrent_inputs.clear();}
@@ -118,8 +123,8 @@ void BatchEvaluator::serve(size_t server) {
                 if(!output.latent)throw std::runtime_error("Missing MuZero latent");
                 auto routed=std::make_shared<RoutedLatent>();routed->value=output.latent;routed->owner=owner_;routed->server=server;output.latent=std::move(routed);
             }
-            requests+=batch.size();++batches;rows_by_server[server]+=batch.size();
-            auto maximum=max_observed_batch.load();while(maximum<batch.size()&&!max_observed_batch.compare_exchange_weak(maximum,batch.size())){}
+            requests.fetch_add(batch.size(),std::memory_order_relaxed);batches.fetch_add(1,std::memory_order_relaxed);rows_by_server[server]+=batch.size();
+            auto maximum=max_observed_batch.load(std::memory_order_relaxed);while(maximum<batch.size()&&!max_observed_batch.compare_exchange_weak(maximum,batch.size(),std::memory_order_relaxed)){}
             for(size_t i=0;i<batch.size();++i){complete(batch[i],std::move(outputs[i]),nullptr);}
             {std::lock_guard<std::mutex> lock(mutex_);--active_;}batch.clear();changed_.notify_all();
         }
@@ -134,7 +139,7 @@ void BatchEvaluator::serve(size_t server) {
 }
 void BatchEvaluator::drain(){std::unique_lock<std::mutex> lock(mutex_);changed_.wait(lock,[&]{return error_||(active_==0&&initial_.empty()&&std::all_of(recurrent_.begin(),recurrent_.end(),[](const auto& q){return q.empty();}));});if(error_)std::rethrow_exception(error_);}
 void BatchEvaluator::finish(){{std::lock_guard<std::mutex> lock(mutex_);closing_=true;}changed_.notify_all();for(auto& t:threads_)if(t.joinable())t.join();if(error_)std::rethrow_exception(error_);}
-void BatchEvaluator::reset_stats(){drain();requests=0;batches=0;max_observed_batch=0;wait_microseconds=0;submitted=0;cache_hits=0;std::fill(rows_by_server.begin(),rows_by_server.end(),0);}
+void BatchEvaluator::reset_stats(){drain();requests=0;batches=0;max_observed_batch=0;submitted=0;cache_hits=0;std::fill(rows_by_server.begin(),rows_by_server.end(),0);}
 
 namespace {uint64_t mix(uint64_t x){x+=0x9e3779b97f4a7c15ULL;x=(x^(x>>30))*0xbf58476d1ce4e5b9ULL;x=(x^(x>>27))*0x94d049bb133111ebULL;return x^(x>>31);}}
 InferenceOutput RandomBackend::output(std::shared_ptr<State> state) {
