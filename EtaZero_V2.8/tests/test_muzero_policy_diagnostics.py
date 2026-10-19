@@ -16,7 +16,7 @@ from test_python import compact_search, winning_record
 def test_iteration_invalid_mass_and_marker_free_missing_measurements():
     history = [dict(dict.fromkeys(METRICS, 1.), iteration=i, steps=1,
                     total_rows=10*i, total_samples=8*i, phases={},
-                    step_losses=[1., 2.], grad_norms=dict(representation=1., dynamics=2., prediction=3.),
+                    step_losses=[1., 2.],
                     **measurement)
                for i, measurement in enumerate([{}, {'root_policy_invalid_mass': .25}, {},
                                                 {'root_policy_invalid_mass': .1}], 1)]
