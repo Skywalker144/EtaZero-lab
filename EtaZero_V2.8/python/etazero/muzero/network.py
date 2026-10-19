@@ -207,6 +207,11 @@ class InferenceMuZeroNet(nn.Module):
     def metadata(self) -> tuple[int, str, str, int]:
         return self.model.canvas, self.contract, 'muzero', self.model.latent_channels
 
+    @torch.jit.export
+    def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        policy, value, _, _ = self.model.prediction(self.model.representation(obs, globals))
+        return policy, value
+
     def predict(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         policy, value, _, error = self.model.prediction(hidden)
         stdev = 0.5 * F.softplus(error.float() * 0.5)
