@@ -32,7 +32,7 @@ def assert_diagnostics(root, config):
         else:
             assert np.isnan(row['grad_norm'])
     figure=training_figure(run_history(root))
-    assert len(figure.axes)==8 and len(figure.axes[6].lines)==2 and not figure.axes[7].lines
+    assert len(figure.axes)==7 and len(figure.axes[6].lines)==2
     figure.clear()
 
 
