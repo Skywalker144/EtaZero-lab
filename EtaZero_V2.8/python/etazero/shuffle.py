@@ -14,10 +14,28 @@ import shutil
 import uuid
 import fcntl
 import warnings
+import ctypes
+import signal
 import numpy as np
-from .data import read_raw, training_view, training_targets, TRAIN_TARGETS, game_row_ranges, game_identity
+from .data import open_raw, training_view, training_targets, TRAIN_TARGETS, game_row_ranges, game_identity
 from .schema import CONTRACT_ID, GLOBALS, PLANES
 from .storage import atomic_write, load_json, save_json, save_npz, sync_directory, write_npz
+
+
+def _follow_parent(parent_pid):
+    # Linux parent-death signal also covers an idle persistent worker. Check
+    # after arming it, closing the race where the controller died during spawn.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def shuffle_pool(workers):
+    return ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'),
+                               initializer=_follow_parent, initargs=(os.getpid(),))
 
 
 def desired_window(rows, replay):
@@ -70,10 +88,14 @@ def split_sources(root, chosen):
     """Keep every shard span and side/unroll target of a game in one partition."""
     partitions = [], []
     for entry in chosen:
-        with np.load(root/entry['path'], allow_pickle=False) as raw:
-            _, starts, ends = game_row_ranges(raw)
-            identities = [game_identity(entry['metadata'], game) for game in raw['game_ids']]
-        offsets = np.r_[0, np.cumsum(ends-starts)]
+        games = entry.get('game_rows')
+        if games is None:  # Standalone callers may supply uncatalogued raw sources.
+            with open_raw(root/entry['path']) as raw:
+                _, starts, ends = game_row_ranges(raw)
+                games = [(game_identity(entry['metadata'], game), int(end-start))
+                         for game, start, end in zip(raw['game_ids'], starts, ends)]
+        identities, counts = zip(*games)
+        offsets = np.r_[0, np.cumsum(counts)]
         held_out = [validation_game(identity) for identity in identities]
         for partition, sources in enumerate(partitions):
             selected = [i for i, holdout in enumerate(held_out) if holdout == bool(partition) and offsets[i+1]>offsets[i]]
@@ -126,7 +148,8 @@ def _source_view(path, source_id, cache, targets):
     view_path = Path(cache)/(source_id+'.npz')
     if view_path.exists():
         return _load_view(view_path)
-    arrays = training_view(read_raw(path, deep=False), targets)
+    with open_raw(path) as raw:
+        arrays = training_view(raw, targets)
     atomic_write(view_path, lambda p: _temporary(p, arrays), durable=False)
     return arrays
 
@@ -278,8 +301,7 @@ def _write_data(root, stage, scratch, chosen, config, plan, seed, pool=None, out
     if not kept_rows:return []
     output = stage/output_name;output.mkdir(parents=True,exist_ok=True)
     cache = root/'.internal/training_views'
-    owner = nullcontext(pool) if pool is not None else ProcessPoolExecutor(
-        max_workers=s['workers'],mp_context=multiprocessing.get_context('spawn'))
+    owner = nullcontext(pool) if pool is not None else shuffle_pool(s['workers'])
     with owner as workers:
         if plan['waves'] == 1:
             outputs = _two_phase(workers,groups,True,kept_rows,scratch,output,plan,s['training_shard_rows'],
