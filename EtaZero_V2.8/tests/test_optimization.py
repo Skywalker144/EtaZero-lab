@@ -207,6 +207,30 @@ def small_optimization(config):
     return model, optimizer, Optimization(model, config, optimizer)
 
 
+@pytest.mark.parametrize('steps,segments,k,effective', [(1,1,6,1),(5,1,6,5),(5,3,6,2),(7,3,3,3),(20,1,6,6)])
+def test_short_round_learns_and_resumes_lookahead(config, steps, segments, k, effective):
+    from etazero.training import subepoch_ends
+    config['training']['sub_epochs'] = segments
+    config['optimizer'].update(lookahead_k=k, lookahead_alpha=.5)
+    model, optimizer, _ = small_optimization(config)
+    control = Optimization(model, config, optimizer, round_steps=steps)
+    assert control.lookahead_k == effective
+    control.begin_round()
+    ends = subepoch_ends(steps, segments)
+    for step in range(steps):
+        if step in ends[:-1]:control.begin_subepoch()
+        control.before_step()
+        # Actual SGD updates with a known direction; no mutation of slow weights.
+        optimizer.zero_grad();model.weight.sum().backward();optimizer.step()
+        control.after_step()
+        if step == steps//2:
+            control = Optimization(model, config, optimizer, copy.deepcopy(control.state_dict()), round_steps=steps)
+    control.finish_round()
+    assert model.weight.item() < 1
+    assert control.optimizer_steps == steps and control.consumed_samples == steps*config['training']['batch_size']
+    torch.testing.assert_close(model.weight, control.slow['weight'])
+
+
 @pytest.mark.parametrize('kind,base', [('sgd', 2500), ('adamw', 11000)])
 def test_gradient_cap_and_explicit_mean_override(config, kind, base):
     config['optimizer'].update(kind=kind, lr_scale=4)
