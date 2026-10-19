@@ -238,7 +238,7 @@ AlphaZero 的 `train.cfg` 可添加 `[plain_optimizer]`，用 `learning_rate`、
 
 总 loss 为上式加三个 TD、长期/短期 optimistic 和短期价值误差分量的平均值，启用Q时再加上述Q分量；实际反向使用 `batch_size * L`，与来源的 batch 求和尺度一致。默认梯度上限按优化器、batch 与 LR scale 计算；`training.gradient_clip > 0` 则以平均梯度尺度覆盖上限。梯度日志仍为裁剪前平均 loss 的梯度范数。SGD 的衰减加入优化器梯度，AdamW/Muon 的衰减解耦施加，均不重复加入 loss。价值目标来自真实终局，未完成对局不会凭空补零价值。
 
-Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；每个分段开始重置同步计数但不复制权重；完整训练轮结束丢弃未同步的 fast 权重，保留优化器状态、消费计数和成功更新计数。`training.sub_epochs`默认1，可将实际batch预算按floor等分为非空分段，实际步数较少时减少段数；分段计数与整轮batch计数分别保存，LR/WD和范数采样仍沿整轮时钟。该单遍与训练额度预算是用户适配，不照抄来源文件概率预算。来源epoch末复制slow后到下个subepoch才重置counter，本地轮末立即将counter归零；下一段的优化执行一致。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
+Lookahead 同步时将 fast 权重向 slow 权重平均，LR 按 alpha 补偿；实际额度使所有分段都短于配置的同步周期时，本轮周期缩短至最长分段的批数，确保至少执行一次 slow 更新，并在分段开始日志记录生效周期；每个分段开始重置同步计数但不复制权重；完整训练轮结束丢弃未同步的 fast 权重，保留优化器状态、消费计数和成功更新计数。`training.sub_epochs`默认1，可将实际batch预算按floor等分为非空分段，实际步数较少时减少段数；分段计数与整轮batch计数分别保存，LR/WD和范数采样仍沿整轮时钟。该单遍与训练额度预算是用户适配，不照抄来源文件概率预算。来源epoch末复制slow后到下个subepoch才重置counter，本地轮末立即将counter归零；下一段的优化执行一致。中断 learner 保存 fast、slow 和同步计数，恢复继续同一周期。SWA 使用来源的指数平均规则，仅在 Lookahead 同步后采样，首个样本直接复制；BN buffers 在采样时直接复制，不参与参数平均。采样累积跨轮保留，未得到 SWA 样本时发布当前模型。
 
 LR/WD 在轮开始刷新，之后按本轮消费 batch 数每 5 批刷新，累计消费超过 2 亿样本后改为每 50 批；刷新使用消费后的计数，作用于下一 batch。范数在更新前测量，默认每 100 batch 取 snapshot，先进入统计再刷新 WD、执行 Lookahead 与 SWA。关闭 `optimizer.norm_only_at_print` 时逐 batch 累积均值，在打印点把历史和及权重同时缩为 0.001；来源的 `norm_*_batch` 没有逐 batch 的 0.995 EMA 衰减。该模式下，启用 `optimizer.lookahead_print` 且 `lookahead_alpha<1` 时只在 Lookahead 周期起点累积范数；这会改变自适应 weight decay，并非纯日志选项。loss 仍逐 batch 累积，日志按 `training.log_every` 或保存边界输出区间均值。
 
@@ -256,7 +256,7 @@ learner 从该轮窗口快照中最多读取一遍，训练步数受 `train.cfg`
 
 ### PDA、侧分支与重分析
 
-Hint与game fork的生产入口为 [sampling.cpp](../cpp/src/selfplay/sampling.cpp)，预算入口为 [search_limits.cpp](../cpp/src/selfplay/search_limits.cpp)。`[hint_positions]` 无外部语料时概率0；开启须指定有效文件。每个非注释行格式为 `size rule sampling_weight hint_local_index prefix_count prefix_local_indices...`；索引采用该行实际尺寸的零起始行优先编号，载入时转成canvas编号。支持三种当前NOVC棋规；从空盘完整重放prefix，拒绝非法/终局前缀、占用提示、无正抽样质量和多余字段。抽位置按非负weight（来源hint的lambda=0）；没有SGF、设置子、Go komi/seki或额外的corpus训练权重，本范围每局有效性保持默认1。相对文件相对于所选配置目录，内容SHA256进入生效配置fingerprint；native每次产样请求读取文件后校验该哈希，解析已校验的同一份字节。运行中改动语料会明确失败，改语料不能沿用原续训配置。
+Hint与game fork的生产入口为 [sampling.cpp](../cpp/src/selfplay/sampling.cpp)，预算入口为 [search_limits.cpp](../cpp/src/selfplay/search_limits.cpp)。`[hint_positions]` 无外部语料时概率0；开启须指定有效文件。每个非注释行格式为 `size rule sampling_weight hint_local_index prefix_count prefix_local_indices...`；索引采用该行实际尺寸的零起始行优先编号，载入时转成canvas编号。支持三种当前NOVC棋规；从空盘完整重放prefix，拒绝非法/终局前缀、占用提示、无正抽样质量和多余字段。抽位置按非负weight（来源hint的lambda=0）；没有SGF、设置子、Go komi/seki或额外的corpus训练权重，本范围每局有效性保持默认1。相对文件相对于所选配置目录；native每次产样请求读取并解析该文件。运行期间及续训时应保持外部语料不变。
 
 精确hint要求提示起始turn、棋盘、执子与棋规匹配。该手visits和显式有限playouts乘4，跳过PCR和Reduce Visits，然后再施加PDA；无限playout保留无额外上限，int32溢出明确拒绝。根清图，先执行根policy温度/噪声，再按来源float操作从所有合法prior移出2%质量给hint。根探索在其边权重加下一次预期权重仍小于最重其他边的0.8倍时强制探索，含pending virtual weight；移除hint时清图。后6手、hintFork起点后6手cheap概率减半，六手边界恢复原概率；局后force-full reanalysis跳过hint/PCR，保留原历史的Reduce Visits和PDA。hint强制探索的首个训练search WDL由下一手正确翻转视角的值替换，只有一手则用真实终局；在reanalysis前和替换后刷新，原始行动及历史预算仍保留。
 
@@ -264,7 +264,7 @@ Early/game fork按来源先抽early，失败才抽late；baseline概率及候选
 
 对局线程共享随机取出并移除的fork池，池跨同一native worker的轮次及模型释放/更换保留，进程重启重建；不保证跨并发调度或重启复现同一fork顺序。池中位置优先于外部hint抽样。Fork跳过平衡开局、policy init和PDA抽样；外部hint跳过平衡/policy init，仍按普通局抽PDA。完整历史按独立initial前缀保存，前缀不训练；原始记录分开保存balanced/policy/initial计数、起点kind与hint action，不能将initial计成平衡或policy开局。hintFork没有再次强制hint，仅执行六手cheap减半。来源完整预算函数3072组合与C++独立prior/访问/续接检查见 [check_katago_forks.py](../tests/reference/check_katago_forks.py)、[sampling_test.cpp](../cpp/tests/sampling_test.cpp)。
 
-PDA 在普通局以配置概率抽样：优势方均匀黑/白，doubling 值 `d` 均匀于 `[0,log2(max_ratio))`。令 `r=2^d`，先执行 PCR 或 Reduce Visits，再把优势方 visits/playouts 乘 `2r/(1+r)`，另一方乘 `2/(1+r)` 并 round；结果低于来源下限 5 或超出可表示范围明确失败。EtaZero 的 int32-max playout 字段表示无额外上限，仍保持无额外上限；显式有限值执行同一倍数。PDA 每手强制清图，输入随真实玩家翻转符号，在所有搜索深度、D4、cache、数据和模型导出中保持。当前 `Game` 保存条件，完整图身份包含它。默认 Eval/Match 的 `playout_doubling_advantage=0`；显式设置是固定搜索条件，预算仍由该 profile 决定，用于条件评估。五子棋无 handicap/komi，不加补偿或 PDA 后再次平衡的研究方案。
+PDA 在普通局以配置概率抽样：优势方均匀黑/白，doubling 值 `d` 均匀于 `[0,log2(max_ratio))`。令 `r=2^d`，先执行 PCR 或 Reduce Visits，再把优势方 visits/playouts 乘 `2r/(1+r)`，另一方乘 `2/(1+r)` 并 round；结果低于来源下限 5 或超出可表示范围明确失败。启动预检查仅覆盖可达预算：全 cheap 且既无 hint 也无有效 reanalysis 时，不检查 full/Reduce Visits 分支；hint 后六手的 cheap 概率减半、force-full reanalysis 都使 full 分支重新可达。EtaZero 的 int32-max playout 字段表示无额外上限，仍保持无额外上限；显式有限值执行同一倍数。PDA 每手强制清图，输入随真实玩家翻转符号，在所有搜索深度、D4、cache、数据和模型导出中保持。当前 `Game` 保存条件，完整图身份包含它。默认 Eval/Match 的 `playout_doubling_advantage=0`；显式设置是固定搜索条件，预算仍由该 profile 决定，用于条件评估。五子棋无 handicap/komi，不加补偿或 PDA 后再次平衡的研究方案。
 
 Side 在主局搜索后，以配置概率排除实际着，按来源 70% 网络温度 1、25% 温度 2、5% 均匀空点抽替代着；提前胜/禁手失利/满盘的候选丢弃。主局结束、重分析完成后处理侧分支队列：清除 PDA，独立 full search，保存自己的观测、policy、visits 与 WDL，初始频率 1。分支选择回复着使用恢复后的 LCB；以 0.25 概率续走回复着，再用普通 NN 温度 1 抽另一替代着，无 ban，非终局加入队尾。每次递归至少加两子，有限 NOVC 棋盘不需要截断深度。侧数据无主局终局、opponent/error/默认 optimistic 监督，主 value/TD 都取分支搜索 WDL；没有冒充完整对局或新增 plies/games。
 
