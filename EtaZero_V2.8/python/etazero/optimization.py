@@ -139,18 +139,26 @@ def optimizer_for(model, config):
     return optimizer_from_groups(groups, options['kind'])
 
 
-def optimization_for(model, config, optimizer, state=None):
+def optimization_for(model, config, optimizer, state=None, round_steps=None):
     if 'plain_optimizer' in config or not config.get('muzero_training', {}).get('katago_optimizer', True):
         from .plain_optimization import PlainOptimization
         return PlainOptimization(model, config, optimizer, state)
-    return Optimization(model, config, optimizer, state)
+    return Optimization(model, config, optimizer, state, round_steps=round_steps)
 
 
 class Optimization:
     """Own the schedule, slow weights and inference average alongside an optimizer."""
-    def __init__(self, model, config, optimizer, state=None):
+    def __init__(self, model, config, optimizer, state=None, round_steps=None):
         self.model, self.optimizer = model, optimizer
         self.options, self.batch_size = config['optimizer'], config['training']['batch_size']
+        self.lookahead_k = self.options['lookahead_k']
+        if round_steps is not None:
+            segments = min(config['training']['sub_epochs'], round_steps)
+            # A quota-limited round must reach at least one slow-weight update.
+            # Derive this from the immutable plan on resume; ordinary rounds
+            # keep KataGo's cadence and incomplete-cycle discard unchanged.
+            longest_segment = (round_steps + segments - 1) // segments
+            self.lookahead_k = min(self.lookahead_k, longest_segment)
         self.period = self.options['swa_period_samples'] or max(1, config['training']['train_steps'] * self.batch_size // 2)
         self.baselines = model_norms(optimizer.param_groups) if state is None else state['baselines']
         self.norms = {} if state is None else state['norms']
@@ -249,7 +257,7 @@ class Optimization:
         synced = True
         if self.options['lookahead_alpha'] < 1:
             self.counter += 1
-            synced = self.counter == self.options['lookahead_k']
+            synced = self.counter == self.lookahead_k
             if synced:
                 for name, p in self.model.named_parameters():
                     self.slow[name].add_(p - self.slow[name], alpha=self.options['lookahead_alpha'])
