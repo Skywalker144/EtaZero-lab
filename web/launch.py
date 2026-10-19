@@ -1,4 +1,4 @@
-"""Choose the latest version and build only when native inputs have changed."""
+"""Choose the latest version; CMake handles incremental native builds."""
 import argparse
 import os
 from pathlib import Path
@@ -11,21 +11,6 @@ def latest_version(root):
     versions = [path for path in root.glob('EtaZero_V*')
                 if path.is_dir() and re.fullmatch(r'EtaZero_V\d+(?:\.\d+)*', path.name)]
     return max(versions, key=lambda path: tuple(map(int, path.name.removeprefix('EtaZero_V').split('.'))))
-
-
-def needs_build(root, binary):
-    from etazero.build import verify_build
-    from etazero.storage import load_json, sha256
-
-    try:
-        binary_hash = verify_build(binary)
-        paths = [path for path in (root / 'cpp').rglob('*') if path.is_file()]
-        paths.append(root / 'python/etazero/schema.py')
-        sources = {str(path.relative_to(root)): sha256(path) for path in paths}
-        manifest = load_json(binary.parent / 'build_manifest.json')
-        return binary_hash != manifest['binary_sha256'] or sources != manifest['sources']
-    except (OSError, ValueError, KeyError, TypeError):
-        return True
 
 
 def main():
@@ -43,7 +28,7 @@ def main():
     if '--help' in remaining or '-h' in remaining:
         print('web/webui.sh --rebuild：强制重新检查并构建本版本原生程序。', flush=True)
         return serve(args)
-    if options.binary is None and (options.rebuild or needs_build(root, root / 'build/etazero')):
+    if options.binary is None:
         print(f'EtaZero Web: 正在构建 {root.name}', flush=True)
         subprocess.run(['bash', str(root / 'scripts/build.sh')], check=True)
     elif options.rebuild:
