@@ -1,6 +1,6 @@
 """Full-game records, checked AlphaZero views, and a derived unique-row catalog."""
 import json
-import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
 import numpy as np
@@ -28,6 +28,33 @@ def game_row_ranges(a):
     if ((totals > 0) & (ends <= starts)).any() or int((ends-starts).sum()) != count:
         raise ValueError('Shard includes an unselected nonempty trajectory')
     return totals, starts, ends
+
+
+class _RawArrays(dict):
+    """Materialize each requested NPZ member once while its file is open."""
+    def __init__(self, archive):
+        super().__init__()
+        self.archive = archive
+
+    def __missing__(self, key):
+        value = self.archive[key]
+        dtype = 'int16' if key.startswith('trajectory_') else RAW_DTYPES[key]
+        if value.dtype != np.dtype(dtype):
+            raise ValueError(f"{key}: raw dtype mismatch")
+        self[key] = value
+        return value
+
+
+@contextmanager
+def open_raw(path):
+    """Read only consumed fields; full trajectory auditing remains in read_raw."""
+    with np.load(path, allow_pickle=False) as archive:
+        arrays = _RawArrays(archive)
+        m = metadata(arrays)
+        if (m['contract'] != CONTRACT_ID or m['games'] <= 0 or m['plies'] <= 0 or
+                not 5 <= m['canvas'] <= 25 or m.get('algorithm', 'alphazero') not in ('alphazero', 'muzero')):
+            raise ValueError(f'Invalid raw identity/dimensions: {path}')
+        yield arrays
 
 
 def read_raw(path, *, deep=True):
@@ -328,7 +355,19 @@ def training_view(a, targets=TRAIN_TARGETS):
     return alphazero_training_view(a, targets)
 
 
-def alphazero_training_view(a, targets=TRAIN_TARGETS):
+def full_trajectory_td(a):
+    """Compute each complete trajectory once, shared by root and unroll targets."""
+    td = np.empty((len(a['actions']), 3, 3), np.float32)
+    for g, size in enumerate(a['sizes']):
+        lo, hi = a['game_offsets'][g:g+2]
+        ol = a['observation_offsets'][g]
+        winner = a['winners'][g]
+        terminal = np.array([winner == 1, winner == 0, winner == -1], np.float64)
+        td[lo:hi] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(size)**2)
+    return td
+
+
+def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     # Each sampled position is stored once; multiplicity is resolved only here.
     samples = a['sample_indices']
     rows = np.repeat(np.arange(len(samples)), a['row_repeats'][samples])
@@ -336,13 +375,8 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS):
     games = np.searchsorted(a['game_offsets'][1:], ix, side='right')
     obs_ix = a['observation_offsets'][games] + ix-a['game_offsets'][games]
     result = a['winners'][games] * a['players'][obs_ix]
-    td = np.empty((len(a['actions']), 3, 3), np.float32) if 'td_value' in targets else None
-    for g, size in enumerate(a['sizes']) if td is not None else ():
-        lo, hi = a['game_offsets'][g:g+2]
-        ol = a['observation_offsets'][g]
-        winner = a['winners'][g]
-        terminal = np.array([winner == 1, winner == 0, winner == -1], np.float64)
-        td[lo:hi] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(size)**2)
+    if 'td_value' in targets and td is None:
+        td = full_trajectory_td(a)
     obs = a["observations"][obs_ix]
     globals = a["globals"][obs_ix]
     dropped = a["forbidden_input"] == 0
@@ -427,11 +461,17 @@ class Catalog:
             self.db.close()
             raise ValueError('Derived catalog schema differs; rebuild catalog.sqlite from the raw shards')
         self.db.execute('CREATE INDEX IF NOT EXISTS shard_timeline ON shards(iteration,created,id)')
-        self.db.execute("CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, rows INTEGER, total INTEGER, fingerprint TEXT)")
-        if {row[1] for row in self.db.execute('PRAGMA table_info(games)')} != {'id','rows','total','fingerprint'}:
+        self.db.execute("CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, rows INTEGER, total INTEGER)")
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(games)')}
+        if columns == {'id','rows','total','fingerprint'}:
+            # Discard only the obsolete derived digest; retain resume counts/spans.
+            self.db.execute('ALTER TABLE games DROP COLUMN fingerprint')
+            columns.remove('fingerprint')
+        if columns != {'id','rows','total'}:
             self.db.close()
             raise ValueError('Derived catalog schema differs; rebuild catalog.sqlite from the raw shards')
         self.db.execute('CREATE TABLE IF NOT EXISTS game_segments (game TEXT, start INTEGER, end INTEGER, shard TEXT, PRIMARY KEY(game,start))')
+        self.db.execute('CREATE INDEX IF NOT EXISTS segments_by_shard ON game_segments(shard)')
         self.db.execute('CREATE TABLE IF NOT EXISTS totals (id INTEGER PRIMARY KEY CHECK(id=1), rows INTEGER, games INTEGER)')
         self.db.execute('INSERT OR IGNORE INTO totals VALUES (1,0,0)')
         self.db.execute('CREATE INDEX IF NOT EXISTS shard_mtime ON shards(mtime DESC)')
@@ -460,74 +500,59 @@ class Catalog:
                     if stat.st_size != size:raise ValueError(f'Committed raw shard changed size: {path}')
                     with self.db:self.db.execute('UPDATE shards SET mtime=?,size=? WHERE path=?',(stat.st_mtime_ns,stat.st_size,relative))
                 continue
-            a = read_raw(path, deep=False)
-            m = metadata(a)
-            ids, offsets, prefix = a["game_ids"], a["game_offsets"], a["opening_moves"]
-            winners, status = a['winners'], a['opening_status']
-            totals, starts, ends = game_row_ranges(a)
-            game_rows = ends-starts
-            owners = starts == 0
-            fingerprints=[]
-            for g in range(len(ids)):
-                lo,hi=offsets[g:g+2];ol,oh=a['observation_offsets'][g:g+2]
-                digest=hashlib.sha256()
-                for key in ('seeds','sizes','rules','winners','reasons','opening_moves','opening_status','opening_attempts',
-                            'balanced_moves','policy_moves','initial_position_moves','initial_position_kind','hint_actions'):
-                    digest.update(a[key][g:g+1].tobytes())
-                for key in ('actions','row_repeats','search_wdl','network_wdl'):
-                    digest.update(a[key][lo:hi].tobytes())
-                for key in ('observations','globals'):
-                    digest.update(a[key][ol:oh].tobytes())
+            with open_raw(path) as a:
+                m = metadata(a)
+                ids, offsets, prefix = a["game_ids"], a["game_offsets"], a["opening_moves"]
+                winners, status = a['winners'], a['opening_status']
+                totals, starts, ends = game_row_ranges(a)
+                game_rows = ends-starts
+                owners = starts == 0
+                weights = game_weight_statistics(a)
+                stats = {'games':int(owners.sum()),'rows':m['rows'],'plies':int(np.diff(offsets)[owners].sum()),
+                         'black_wins':int((winners[owners]==1).sum()),'white_wins':int((winners[owners]==-1).sum()),
+                         'draws':int((winners[owners]==0).sum()),'opening_moves':int(prefix[owners].sum()),
+                         'balanced_games':int((status[owners]==1).sum()),'opening_failures':int((status[owners]==2).sum()),
+                         'opening_attempts':int(a['opening_attempts'][owners].sum()),'policy_moves':int(a['policy_moves'][owners].sum())}
                 if 'root_policy_invalid_mass_count' in m:
-                    digest.update(np.asarray(m['root_policy_invalid_mass_sum'][g:g+1], dtype='<f8').tobytes())
-                    digest.update(np.asarray(m['root_policy_invalid_mass_count'][g:g+1], dtype='<u8').tobytes())
-                if m.get('algorithm') == 'muzero':
-                    digest.update(str(m['unroll_steps']).encode())
-                    for key in ('trajectory_policy','trajectory_q_values','trajectory_q_visits',
-                                'target_weights','train_mask','reanalyzed','reanalysis_used_outcome'):
-                        digest.update(a[key][lo:hi].tobytes())
-                fingerprints.append(digest.hexdigest())
-            weights = game_weight_statistics(a)
-            stats = {'games':int(owners.sum()),'rows':m['rows'],'plies':int(np.diff(offsets)[owners].sum()),
-                     'black_wins':int((winners[owners]==1).sum()),'white_wins':int((winners[owners]==-1).sum()),
-                     'draws':int((winners[owners]==0).sum()),'opening_moves':int(prefix[owners].sum()),
-                     'balanced_games':int((status[owners]==1).sum()),'opening_failures':int((status[owners]==2).sum()),
-                     'opening_attempts':int(a['opening_attempts'][owners].sum()),'policy_moves':int(a['policy_moves'][owners].sum())}
-            if 'root_policy_invalid_mass_count' in m:
-                stats.update(root_policy_invalid_mass_sum=float(np.asarray(m['root_policy_invalid_mass_sum'])[owners].sum()),
-                             root_policy_invalid_mass_count=int(np.asarray(m['root_policy_invalid_mass_count'])[owners].sum()))
-            if (m["contract"] != CONTRACT_ID or m["run_id"] != self.run_id or
-                    models.get(m["iteration_id"]) != m["model_id"] or len(ids) != m["games"] or
-                    offsets.shape != (len(ids)+1,) or offsets[0] != 0 or offsets[-1] != m["plies"] or prefix.shape != (len(ids),) or
-                    (np.diff(offsets) <= 0).any() or (prefix < 0).any() or (prefix > np.diff(offsets)).any() or
-                    int(game_rows.sum()) != m["rows"]):
-                raise ValueError(f"Raw shard identity/count mismatch: {path}")
-            with self.db:
-                self.db.execute('INSERT INTO shards VALUES (?,?,?,?,?,?,?,?,?,?)',
-                                (m['shard_id'],relative,json.dumps(m),json.dumps(weights),m['iteration_id'],m['created_ns'],m['rows'],json.dumps(stats),stat.st_mtime_ns,stat.st_size))
-                added_games=0
-                for game_id, rows, total, start, end, fingerprint in zip(ids,game_rows,totals,starts,ends,fingerprints):
-                    identity = f'{m["run_id"]}:{m["attempt_id"]}:{m["worker_id"]}:{int(game_id)}'
-                    existing=self.db.execute('SELECT total,fingerprint FROM games WHERE id=?',(identity,)).fetchone()
-                    if existing and existing!=(int(total),fingerprint):
-                        raise ValueError(f'Conflicting trajectory fragments: {identity}')
-                    # The primary key rejects exact duplicates; the interval
-                    # check also rejects overlapping fragments with new starts.
-                    self.db.execute('INSERT INTO game_segments VALUES (?,?,?,?)',(identity,int(start),int(end),m['shard_id']))
-                    overlap=self.db.execute('SELECT 1 FROM game_segments WHERE game=? AND shard<>? AND start<? AND end>?',
-                                            (identity,m['shard_id'],int(end),int(start))).fetchone()
-                    if overlap:raise ValueError(f'Overlapping training row fragments: {identity}')
-                    if existing:self.db.execute('UPDATE games SET rows=rows+? WHERE id=?',(int(rows),identity))
-                    else:
-                        self.db.execute('INSERT INTO games VALUES (?,?,?,?)',(identity,int(rows),int(total),fingerprint));added_games+=1
-                self.db.execute('UPDATE totals SET rows=rows+?,games=games+? WHERE id=1',(m['rows'],added_games))
-            if m['model_id'].startswith('random:'):
-                self.random_rows += m['rows']
+                    stats.update(root_policy_invalid_mass_sum=float(np.asarray(m['root_policy_invalid_mass_sum'])[owners].sum()),
+                                 root_policy_invalid_mass_count=int(np.asarray(m['root_policy_invalid_mass_count'])[owners].sum()))
+                if (m["contract"] != CONTRACT_ID or m["run_id"] != self.run_id or
+                        models.get(m["iteration_id"]) != m["model_id"] or len(ids) != m["games"] or
+                        offsets.shape != (len(ids)+1,) or offsets[0] != 0 or offsets[-1] != m["plies"] or prefix.shape != (len(ids),) or
+                        (np.diff(offsets) <= 0).any() or (prefix < 0).any() or (prefix > np.diff(offsets)).any() or
+                        int(game_rows.sum()) != m["rows"]):
+                    raise ValueError(f"Raw shard identity/count mismatch: {path}")
+                with self.db:
+                    self.db.execute('INSERT INTO shards VALUES (?,?,?,?,?,?,?,?,?,?)',
+                                    (m['shard_id'],relative,json.dumps(m),json.dumps(weights),m['iteration_id'],m['created_ns'],m['rows'],json.dumps(stats),stat.st_mtime_ns,stat.st_size))
+                    added_games=0
+                    for game_id, rows, total, start, end in zip(ids,game_rows,totals,starts,ends):
+                        identity = f'{m["run_id"]}:{m["attempt_id"]}:{m["worker_id"]}:{int(game_id)}'
+                        existing=self.db.execute('SELECT total FROM games WHERE id=?',(identity,)).fetchone()
+                        if existing and existing!=(int(total),):
+                            raise ValueError(f'Conflicting trajectory fragments: {identity}')
+                        # The primary key rejects exact duplicates; the interval
+                        # check also rejects overlapping fragments with new starts.
+                        self.db.execute('INSERT INTO game_segments VALUES (?,?,?,?)',(identity,int(start),int(end),m['shard_id']))
+                        overlap=self.db.execute('SELECT 1 FROM game_segments WHERE game=? AND shard<>? AND start<? AND end>?',
+                                                (identity,m['shard_id'],int(end),int(start))).fetchone()
+                        if overlap:raise ValueError(f'Overlapping training row fragments: {identity}')
+                        if existing:self.db.execute('UPDATE games SET rows=rows+? WHERE id=?',(int(rows),identity))
+                        else:
+                            self.db.execute('INSERT INTO games VALUES (?,?,?)',(identity,int(rows),int(total)));added_games+=1
+                    self.db.execute('UPDATE totals SET rows=rows+?,games=games+? WHERE id=1',(m['rows'],added_games))
+                if m['model_id'].startswith('random:'):
+                    self.random_rows += m['rows']
 
-    def entries(self, window_rows=None):
+    def entries(self, window_rows=None, *, include_game_rows=False):
         result, rows = [], 0
-        for p,m,w,n,mtime in self.db.execute('SELECT path,meta,weights,rows,mtime FROM shards ORDER BY mtime DESC,rowid DESC'):
-            result.append({'path':p,'metadata':json.loads(m),'weight_stats':json.loads(w),'mtime_ns':mtime});rows += n
+        for shard,p,m,w,n,mtime in self.db.execute('SELECT id,path,meta,weights,rows,mtime FROM shards ORDER BY mtime DESC,rowid DESC'):
+            entry = {'path':p,'metadata':json.loads(m),'weight_stats':json.loads(w),'mtime_ns':mtime}
+            if include_game_rows:
+                # Insertion order is the raw file's game order, including zero-row games.
+                entry['game_rows'] = [list(row) for row in self.db.execute(
+                    'SELECT game,end-start FROM game_segments WHERE shard=? ORDER BY rowid', (shard,))]
+            result.append(entry);rows += n
             if window_rows is not None and rows >= window_rows:
                 break
         return result[::-1]
