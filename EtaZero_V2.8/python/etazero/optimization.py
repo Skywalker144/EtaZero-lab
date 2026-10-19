@@ -133,10 +133,9 @@ def optimizer_for(model, config):
         return muzero_optimizer(model, config)
     groups = parameter_groups(model)
     options = config['optimizer']
-    baselines = model_norms(groups)
     for group in groups:
         group['lr'], group['weight_decay'] = group_settings(
-            group['group_name'], options, config['training']['batch_size'], 0, {}, baselines, model.norm_kind)
+            group['group_name'], options, config['training']['batch_size'], 0, {}, {}, model.norm_kind)
     return optimizer_from_groups(groups, options['kind'])
 
 
