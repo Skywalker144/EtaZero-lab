@@ -10,4 +10,3 @@ cmake -S "$ETA_ROOT/cpp" -B "$ETA_ROOT/build" -DCMAKE_BUILD_TYPE=Release \
     -DPython3_EXECUTABLE="$CONDA_PREFIX/bin/python" -DCUDA_TOOLKIT_ROOT_DIR="$CONDA_PREFIX" \
     -DTORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}" "$@"
 cmake --build "$ETA_ROOT/build" --parallel "${BUILD_JOBS:-2}"
-python "$ETA_ROOT/scripts/write_build_manifest.py" "$ETA_ROOT/build"
