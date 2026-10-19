@@ -7,7 +7,7 @@ use output roles. No AlphaZero model layout or parameter traversal is changed.
 import torch
 
 from ..network import BiasMask, FixedScaleMask, MaskedBatchNorm
-from ..optimization import group_settings, model_norms, optimizer_from_groups
+from ..optimization import group_settings, optimizer_from_groups
 from .resnet import MaskedNorm
 
 
@@ -43,8 +43,7 @@ def optimizer_for(model, config):
         return plain_optimizer(model, kind, plain, parameter_groups(model) if kind == 'muon' else None)
     groups = parameter_groups(model)
     options = config['optimizer']
-    baselines = model_norms(groups)
     for group in groups:
         group['lr'], group['weight_decay'] = group_settings(
-            group['group_name'], options, config['training']['batch_size'], 0, {}, baselines, model.norm_kind)
+            group['group_name'], options, config['training']['batch_size'], 0, {}, {}, model.norm_kind)
     return optimizer_from_groups(groups, options['kind'])
