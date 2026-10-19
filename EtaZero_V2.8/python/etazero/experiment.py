@@ -112,8 +112,12 @@ def prepare_initializations(work, arms):
     from .network import make_network
     from .training import model_identity
     references = {}
+    prepared = {}
     for arm in arms:
         key = initialization_key(arm['config'])
+        if key in prepared:
+            references[arm['name']] = prepared[key]
+            continue
         path = work/'.internal/initializations'/f'{key}.pt'
         record = path.with_suffix('.json')
         if record.exists():
@@ -138,6 +142,7 @@ def prepare_initializations(work, arms):
                     atomic_write(path, lambda p: torch.save(value, p), immutable=True)
             reference = {'key': key, 'path': str(path), 'sha256': sha256(path)}
             save_json(record, reference, immutable=True)
+        prepared[key] = reference
         references[arm['name']] = reference
     return references
 
