@@ -94,7 +94,8 @@ def round_history(run_dir, iteration, final_step, offset):
         counters = [e for (iteration, _, _), e in inference.items() if iteration == row['iteration']]
         row['requests'] = sum(e['requests'] for e in counters)
         row['batches'] = sum(e['batches'] for e in counters)
-        row['queue_wait_us'] = sum(e['queue_wait_us'] for e in counters)
+        if counters and all('queue_wait_us' in e for e in counters):
+            row['queue_wait_us'] = sum(e['queue_wait_us'] for e in counters)
         row['submitted'] = sum(e['submitted'] for e in counters)
         row['cache_hits'] = sum(e['cache_hits'] for e in counters)
     return history[iteration]
@@ -322,7 +323,7 @@ def performance_figure(history, batch_size):
         for axis, numerator, denominator, label in ((axes[3], 'requests', 'batches', 'Mean batch'),
                                                     (axes[4], 'queue_wait_us', 'requests', 'Queue wait'),
                                                     (axes[5], 'cache_hits', 'submitted', 'Cache hits')):
-            rows = [r for r in history if r.get(denominator, 0) > 0]
+            rows = [r for r in history if numerator in r and r.get(denominator, 0) > 0]
             _series(axis, [(label, BLUE, [r['iteration'] for r in rows], [r[numerator]/r[denominator] for r in rows])])
         figure.supxlabel('Stage wall time includes setup, checkpoint and export costs. '
                          'Incomplete phase attempts have no duration and are excluded.', fontsize=10, color='#8a93a3')
