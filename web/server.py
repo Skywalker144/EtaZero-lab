@@ -150,7 +150,7 @@ def main(argv=None):
     if not args.binary.is_file():
         parser.error('缺少 etazero，请先运行 web/webui.sh 构建')
     try:
-        verify_build(args.binary)
+        verify_build(args.binary, record_identity=False)
         models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
         config = load_engine_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
         config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
