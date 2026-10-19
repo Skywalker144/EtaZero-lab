@@ -139,9 +139,11 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 ### 窗口与 shuffle
 
+shuffle 使用 Linux spawn 进程池；worker 初始化时绑定控制器的 parent-death signal，控制器被 SIGKILL 后空闲 worker 也会退出，不增加逐任务或逐 batch 轮询。
+
 训练派生视图仅生成已启用 loss 所需的目标；关闭 Q head 时，不转换、shuffle、解压、D4 或上传 Q 值和访问数。MuZero 关闭辅助 loss 时仅生成主 policy 与终局 value，保留展开权重、序列 mask 和吸收态标志。原始对局继续保留全部目标。manifest 与视图缓存身份记录实际目标集合；资源规划保留完整目标的保守估计，避免改变分组、分桶、采样舍入或随机流。
 
-正常运行以 catalog 的累计原始／随机行数计算窗口，只查询并处理实际窗口中的分片，复用已入库的文件 mtime；完整历史文件核对在启动与恢复时执行。
+正常运行以 catalog 的累计原始／随机行数计算窗口，只查询并处理实际窗口中的分片，复用已入库的文件 mtime；完整历史文件核对在启动与恢复时执行。启用验证时，逐局划分复用 catalog 已记录的 game identity 和分片行区间，不每轮重新解压原始分片；关闭验证时不查询这些区间。
 
 [shuffler](../python/etazero/shuffle.py) 使用 KataGo 的 power-law 窗口。窗口累计 `N = min(random_rows,m) + postrandom_rows`，random身份来自原始数据的 `model_id = random:seed`（判断前缀`random:`）；该封顶只用于窗口，不改变真实累计产样和quota。按文件实际mtime从近期向前选择完整分片至窗口阈值，最后一片允许超额。相同mtime按catalog稳定输入顺序打破平局，不声称复现来源文件系统遍历顺序。
 
@@ -152,7 +154,7 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 两阶段shuffle对保留行独立均匀分桶，再按固定计划的桶数和每桶文件数输出：`B=max(1,round(approx_rows_per_wave/bucket_rows))`，`F=bucket_rows/training_shard_rows`，要求整除；真实桶内按 `floor(j·N/F)` 等分。training_shard_rows是名义大小，真实文件可更大、更小或空，不根据实际桶大小重新决定F。所有字段共同排列。source的均匀排列＋multinomial桶计数与该随机分配分布相同；这里使用可重建的独立SeedSequence流，不宣称来源os.urandom序列相同。初次采样、wave内scatter和merge分别使用含partition/stage/wave/group/bucket的命名空间，跨桶任务不复用流。
 
 来源shuffle CLI默认 `min_rows=250000,p=1,a=1`，K必填，group80000、输出70000、桶默认等于输出；`selfplay/shuffle.sh` 显式使用 `p=.65,a=.4,K=20000000`，普通分支MD5留出1%，SKIP_VALIDATE分支全作train。`synchronous_loop.sh` 还覆盖m100000、s50000、K600000并设置SKIP_VALIDATE=1。EtaZero的窗口、保留目标与本机shuffle资源参数以 [train.cfg](../configs/baseline/train.cfg) 为准；项目配置可参考 [KataGomo shuffle profile](/home/sky/RL/SkyZero/KataGomo/python/shuffle.sh:49)，具体窗口、验证开关和资源数值由所选配置确定。本地采用训练额度与单遍快照限制；同步示例中的具体训练数量不是本地配置默认。
-首次消费原始分片时检查字段、dtype、shape、offset 和行区间，在 `.internal/training_views/` 保存 DEFLATE level 1 压缩的紧凑训练视图。缓存使用契约、原始 shard 身份与实际目标集合定位，不维护认证证书，不在命中时重新扫描文件哈希。原始分片保持不可变，缓存不代替轨迹；损坏 NPZ 由读取器明确报错。已离开当前窗口的视图在本轮提交后回收。
+原始分片按需解压实际消费的字段，同一次打开内复用已读取数组；catalog 只读取计数和统计字段，训练视图按启用目标读取观测及监督。消费时检查契约、dtype 和行区间，完整轨迹校验由显式检查承担。首次转换时在 `.internal/training_views/` 保存 DEFLATE level 1 压缩的紧凑训练视图。缓存使用契约、原始 shard 身份与实际目标集合定位，不维护认证证书，不在命中时重新扫描文件哈希。原始分片保持不可变，缓存不代替轨迹；损坏 NPZ 由读取器明确报错。已离开当前窗口的视图在本轮提交后回收。
 
 `shuffle.waves > 1` 先在输入组中完成一次采样，将保留的每行独立均匀分配到一个 wave，再逐 wave 执行两阶段 shuffle；第二阶段不重复采样，完成后立即删除该 wave 的临时文件。额外 I/O 换取更低的同时存活分桶文件数量，不改变已选样本集合。
 
@@ -232,7 +234,7 @@ learner 装载各组件后释放临时 checkpoint 容器，避免模型、Lookah
 
 清理依据有界活跃 checkpoint 索引和 state 最终引用，先检查待保留文件，再删除已完成轮的中间 payload 和过期轮末 payload，随后原子更新索引。删除过程中中断可重复执行；启动时也补做清理。未提交轮的注册 checkpoint 保留。
 
-[exporter](../python/etazero/export.py) 优先使用已采样的 SWA 权重，无采样时使用训练权重，并在 manifest 中记录选择与采样次数。在实际推理设备上预计算 evaluation normalization 的 FP32 逆标准差，保留原归一化运算顺序、卷积权重、精度设置与 mask 位置，再导出独立 TorchScript 模型。归一化仅对新建中间量分开执行原地乘、加，避免 JIT 融合改变舍入。每轮导出只生成模型、记录 manifest 和 SHA-256 并原子发布，不执行 eager / TorchScript / C++ 数值对照或 FP16 对 FP32 的容差检查；这些检查由独立推理测试承担。checkpoint 身份与恢复条件、模型 manifest、契约、路径和文件大小检查继续保留，实际推理时检查输出维度和非有限值。不修改训练网络和 checkpoint，整轮提交后更新 `models/current.json`，身份来自 checkpoint，不依赖 mtime，没有比赛胜率门控。
+[exporter](../python/etazero/export.py) 优先使用已采样的 SWA 权重，无采样时使用训练权重，并在 manifest 中记录选择与采样次数。在实际推理设备上预计算 evaluation normalization 的 FP32 逆标准差，保留原归一化运算顺序、卷积权重、精度设置与 mask 位置，再导出独立 TorchScript 模型。归一化仅对新建中间量分开执行原地乘、加，避免 JIT 融合改变舍入。每轮导出只生成模型、记录 manifest 并原子发布，不计算模型文件哈希，不执行 eager / TorchScript / C++ 数值对照或 FP16 对 FP32 的容差检查；这些检查由独立推理测试承担。checkpoint 身份与恢复条件、模型 manifest、契约、路径和文件大小检查继续保留，实际推理时检查输出维度和非有限值。不修改训练网络和 checkpoint，整轮提交后更新 `models/current.json`，身份来自 checkpoint，不依赖 mtime，没有比赛胜率门控。
 
 `.internal/state.json` 是整轮提交的唯一权威：完成自对弈、shuffle、训练和导出，保存逐轮指标后原子推进 state；绘图独立于提交。启动核对模型 manifest、契约、路径、文件大小和 checkpoint 引用，按 state 修复发布指针；不重新哈希模型与 checkpoint。iteration 0 的 bootstrap 同样按完整轮提交。
 
@@ -247,7 +249,7 @@ learner 装载各组件后释放临时 checkpoint 容器，避免模型、Lookah
 
 ### 运行观测与证据
 
-每次执行保存生效配置、完整源码快照、Git 身份与工作树状态、依赖与硬件、设备、种子、worker 命令、stdout/stderr，以及模型和数据来源。源码快照排除版本根目录的 `data/`、构建和运行产物，避免把其他运行的数据纳入源码身份。构建清单记录生产源码与二进制身份用于追溯；运行入口检查 LibTorch 构建能力，源码依赖和增量编译由 CMake 管理，不再逐文件哈希并阻止运行。
+每次执行保存生效配置、完整源码快照、Git 身份与工作树状态、依赖与硬件、设备、种子、worker 命令、stdout/stderr，以及模型和数据来源。源码快照排除版本根目录的 `data/`、构建和运行产物，避免把其他运行的数据纳入源码身份。构建清单由 CMake 生成，仅记录 LibTorch 构建能力；源码依赖和增量编译由 CMake 管理。源码与二进制身份在运行记录中追溯，构建入口不另行全量哈希源码和二进制。
 
 `logs/events.jsonl` 记录计划、缺口、实际产量、推理请求/批数/最大批大小、缓存命中与各服务实际处理行数、shuffle 资源估算、损失与梯度、checkpoint、发布和阶段耗时。`inference_setup` 单独记录 selfplay 初始化总耗时、模型读取、权重准备、图准备耗时及是否复用 JIT；这些时间仍包含在 selfplay 阶段中，不重复累加。每轮仅从该轮 journal 起始字节位置汇总指标，按已消费 step 去重，保存为独立 `logs/iterations/*.json`。绘图读取已提交轮次的这些记录，不遍历 checkpoint 父链或全部 batch 日志，保留原始值，不隐式平滑。
 
@@ -321,7 +323,7 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 
 `logs/performance.png` 单独显示各阶段已结算尝试的累计净墙钟、有效行／自对弈秒、已提交训练样本／训练秒，以及 NN 平均 batch 和缓存命中率。排队时间面板仅显示日志中实际包含的测量；正常推理不采集此项，面板显示缺测。训练耗时包含对象创建、数据等待、计算和 checkpoint 等开销。未结算的 SIGKILL 阶段缺少净耗时，不进入分母；当前未完成训练轮次也不显示吞吐，因此这些图不能直接作为完整跨中断端到端性能比较。推理计数按 iteration、attempt、worker 去重。bootstrap 使用 random evaluator，未发生网络组批时相关面板无值。
 
-MuZero 概览保留逐展开步 loss 与全模型梯度统计；正常训练不额外采集根非法策略质量和分模块梯度范数，对应面板显示缺测，不用零值替代。逐展开步 loss 保留实际前向监督权重，不乘只影响反向的 `1/K`。详见 [MuZero 训练诊断图](muzero.md#训练诊断图)。
+MuZero 概览保留逐展开步 loss 与全模型梯度统计；正常训练不额外采集根非法策略质量和分模块梯度范数；根非法策略质量面板显示缺测，不用零值替代，分模块梯度不设置面板。逐展开步 loss 保留实际前向监督权重，不乘只影响反向的 `1/K`。详见 [MuZero 训练诊断图](muzero.md#训练诊断图)。
 
 每轮先 flush 日志、保存指标并提交 state，然后更新模型发布指针、清理 checkpoint，自动绘制三张 PNG 后进入下一轮。正常停止或恢复后未完成新轮次时，也会重建已提交轮次的图；也可在运行中通过独立的 `plot` 命令查看已提交指标。绘图不计入训练预算、不修改 checkpoint、数据或随机流；失败记录 `plot_failed` 并提示，后续轮次、手动 `plot` 或重启可重试。
 
@@ -351,7 +353,7 @@ dry-run 与执行共用同一份生效计划；实际执行将其保存到调度
 
 指定 GPU 槽位时，子进程的 `CUDA_VISIBLE_DEVICES` 设为该槽，CUDA devices 映射为 `cuda:0`，CPU devices 保留。每臂至多一个 selfplay device，多设备配置会明确拒绝；GPU 槽位不得重复。每臂使用普通训练相同的输出目录解析；例如 `configs/<伞目录>` 的各臂默认位于 `data/<伞目录>/<臂名>/`。重复、嵌套或包含调度目录的路径会在启动前拒绝。生成给子进程的配置写入最终绝对输出路径，不按调度临时配置的位置重新映射。GPU 槽位仅控制本次 scheduler，不管理外部任务或保留宿主 GPU。
 
-共享初始化文件保存于调度目录 `.internal/initializations/`，按网络结构、seed 与契约分组并校验 SHA-256。仅为没有运行记录的新臂准备初始化；已有运行沿用训练目录保存的恢复状态与权重来源，不受当前 `shared_init` 或调度目录变化影响。初始化只携带模型参数及 buffers，各新臂重新初始化 optimizer、计数和 RNG；random bootstrap 仍各自生成，不共享对局、回放或首轮训练后的模型。结构或种子不同的臂得到不同初始化；相同种子的随机对局可能相同，但产物与生命周期独立。`shared_init = false` 时新臂由自己的初始化路径启动。
+共享初始化文件保存于调度目录 `.internal/initializations/`，按网络结构、seed 与契约分组，每个唯一初始化在一次调度准备中只处理一次。仅为没有运行记录的新臂准备初始化；已有运行沿用训练目录保存的恢复状态与权重来源，不受当前 `shared_init` 或调度目录变化影响。初始化只携带模型参数及 buffers，各新臂重新初始化 optimizer、计数和 RNG；random bootstrap 仍各自生成，不共享对局、回放或首轮训练后的模型。结构或种子不同的臂得到不同初始化；相同种子的随机对局可能相同，但产物与生命周期独立。`shared_init = false` 时新臂由自己的初始化路径启动。
 
 调度目录公开 `configs/<臂名>/` 的解析配置与 `logs/<臂名>.runner.log`，当前计划、状态与锁位于 `.internal/`。每次启动按当前伞配置与臂目录编排，不登记或锁定历史架构、优化器、成员、输出路径或 `shared_init` 设置；可以修改、新增或移除臂，并复用原调度目录。已达累计时间或轮数预算的训练目录跳过，未达预算的已有运行交给训练入口恢复，没有运行记录的臂从头训练。完成判断只读取训练目录的持久化 state 与累计已提交轮次时间。训练入口负责已有运行的模型、优化器和数据配置校验；切换架构等训练条件时，应先保留旧训练目录，再使用空目录启动新运行。调度日志按臂名追加，当前计划与解析配置刷新，实际运行证据由各训练目录保存。并发启动同一调度目录会被锁拒绝。
 
