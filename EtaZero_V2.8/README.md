@@ -6,7 +6,7 @@ EtaZero 面向 Freestyle、Standard、Renju 五子棋及 Hex。支持 AlphaZero 
 
 ## 构建与小规模验证
 
-以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖 C++17、CMake、zlib、OpenSSL Crypto 和该环境的 LibTorch。
+以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖 C++17、CMake、zlib 和该环境的 LibTorch。
 
 ```bash
 bash scripts/build.sh
