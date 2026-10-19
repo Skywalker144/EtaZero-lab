@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import signal
 import pytest
 from etazero.export import verify_export
 from etazero.runtime import recover_iteration, run_training
@@ -11,16 +13,53 @@ from etazero.schema import CONTRACT_ID
 from etazero.storage import save_json, sha256
 
 
+def test_shuffle_workers_exit_when_controller_is_killed(tmp_path):
+    script=tmp_path/'controller.py'
+    script.write_text("""import os,sys
+from etazero.shuffle import shuffle_pool
+if __name__ == '__main__':
+    pool=shuffle_pool(1)
+    print(pool.submit(os.getpid).result(timeout=20),flush=True)
+    sys.stdin.readline()
+""")
+    process=subprocess.Popen([sys.executable,str(script)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE,text=True,start_new_session=True)
+    worker=None
+    try:
+        worker=int(process.stdout.readline())
+        process.kill()
+        # Inherited stdout/stderr close only after the worker and tracker exit.
+        process.communicate(timeout=15)
+        assert process.returncode == -signal.SIGKILL
+        stat=Path(f'/proc/{worker}/stat')
+        deadline=time.monotonic()+5
+        while stat.exists() and stat.read_text().split()[2]!='Z' and time.monotonic()<deadline:
+            time.sleep(.01)
+        assert not stat.exists() or stat.read_text().split()[2]=='Z'
+    finally:
+        if process.poll() is None:process.kill();process.wait()
+        if worker is not None:
+            try:os.kill(worker,signal.SIGKILL)
+            except ProcessLookupError:pass
+
+
+def test_shuffle_parent_death_race_exits_before_work():
+    result=subprocess.run([sys.executable,'-c',
+                           'import os; from etazero.shuffle import _follow_parent; _follow_parent(os.getppid()+1)'],timeout=20)
+    assert result.returncode == -signal.SIGKILL
+
+
 def exported(root):
     path=root/'models/fixed/model.pt';path.parent.mkdir(parents=True);path.write_bytes(b'complete artifact')
     info={'id':'fixed','path':'models/fixed/model.pt','contract':CONTRACT_ID,'canvas':6,
-          'checkpoint':{'id':'fixed'},'weights':'model','sha256':sha256(path),'bytes':path.stat().st_size}
+          'checkpoint':{'id':'fixed'},'weights':'model','bytes':path.stat().st_size}
     save_json(path.parent/'manifest.json',info)
     return path,info
 
 
-def test_export_requires_complete_manifest_and_matching_payload(tmp_path):
+def test_export_requires_complete_manifest_and_matching_payload(tmp_path, monkeypatch):
     path,info=exported(tmp_path)
+    monkeypatch.setattr('etazero.storage.sha256', lambda p: pytest.fail('Publication must not rehash model payloads'))
     assert verify_export(tmp_path,info,6)==info
     path.write_bytes(b'partial')
     with pytest.raises(ValueError,match='size'):verify_export(tmp_path,info,6)

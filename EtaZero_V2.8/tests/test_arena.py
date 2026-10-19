@@ -8,7 +8,7 @@ from etazero.config import ROOT, fingerprint, load_config
 from etazero.engine_config import load_engine_config
 from etazero.arena import Player, build_schedule, discover_players, PairStore, save_manifest
 from etazero.runtime import recover_iteration
-from etazero.storage import save_json, load_json, sha256
+from etazero.storage import save_json, load_json
 from etazero.schema import CONTRACT_ID
 
 
@@ -56,21 +56,27 @@ def test_manifest_and_partial_pair_resume(tmp_path):
     assert PairStore(tmp_path/'pair',4).tasks(71)==tasks
 
 
-def test_committed_selection_and_schedule(tmp_path):
+def test_committed_selection_and_schedule(tmp_path, monkeypatch):
     arm=tmp_path/'a'
     save_json(arm/'.internal/state.json',{'iteration':6,'elapsed_seconds':25})
     for i in range(7):
         model=None
         if i:
             path=arm/'models'/str(i)/'model.pt';path.parent.mkdir(parents=True);path.write_bytes(str(i).encode())
-            model={'id':str(i),'path':str(path.relative_to(arm)),'sha256':sha256(path),'contract':CONTRACT_ID,'canvas':6}
+            model={'id':str(i),'path':str(path.relative_to(arm)),'contract':CONTRACT_ID,'canvas':6,'bytes':path.stat().st_size}
             save_json(path.parent/'manifest.json',model)
         save_json(arm/'logs/iterations'/f'{i:06d}.json',{'iteration':i,'elapsed_seconds':i*i,'model':model})
-    players=discover_players(tmp_path,2)
+    original_open = Path.open
+    def metadata_only(path, *args, **kwargs):
+        assert path.name != 'model.pt', 'Elo discovery must not reread model payloads'
+        return original_open(path, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'open', metadata_only)
+        players=discover_players(tmp_path,2)
     assert [p.iteration for p in players]==[1,2,4,5]
     assert [p.seconds for p in players]==[1,4,16,25]
     assert ('a:00000001','a:00000004') in build_schedule(players,2)
-    cross=players+[Player('b:1','b',1,9,'/b','hash')]
+    cross=players+[Player('b:1','b',1,9,'/b')]
     assert any('b:1' in pair for pair in build_schedule(cross,2))
     (arm/'models/2/model.pt').write_bytes(b'changed')
     with pytest.raises(ValueError):discover_players(tmp_path,2)

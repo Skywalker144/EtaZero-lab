@@ -15,7 +15,7 @@ from etazero.config import ROOT, load_config
 from etazero.engine_config import load_engine_config
 from etazero.experiment import experiment_plan, run_experiment, Scheduler
 from etazero.schema import CONTRACT_ID
-from etazero.storage import load_json, save_json, sha256
+from etazero.storage import load_json, save_json
 
 
 def match_profile(directory, contents=''):
@@ -28,8 +28,8 @@ def history(root, times, algorithm=None):
         model = root/'models'/str(i)/'model.pt'
         model.parent.mkdir(parents=True, exist_ok=True)
         model.write_bytes(f'{root.name}:{i}'.encode())
-        info = {'id': str(i), 'path': str(model.relative_to(root)), 'sha256': sha256(model),
-                'canvas': 15, 'contract': CONTRACT_ID}
+        info = {'id': str(i), 'path': str(model.relative_to(root)),
+                'canvas': 15, 'contract': CONTRACT_ID, 'bytes': model.stat().st_size}
         if algorithm:
             info['algorithm'] = algorithm
         save_json(model.parent/'manifest.json', info)
@@ -202,7 +202,7 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
 
 
 def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path):
-    manifest = {'players': [{'id':'a','sha256':'aa'}, {'id':'b','sha256':'bb'}],
+    manifest = {'players': [{'id':'a','model':'/a/model.pt'}, {'id':'b','model':'/b/model.pt'}],
                 'config': {'match': {'seed':1, 'visits':100, 'games':4}},
                 'binary_sha256':'bin', 'execution': {'max_loaded_models':4},
                 'source_sha256': {'engine_config.py':'compiler', 'elo.py':'fit'}}
@@ -212,23 +212,22 @@ def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path
     other = copy.deepcopy(manifest)
     other.update(anchor='b', sampling={'sample_seconds':32}, games_per_pair=40)
     other['config']['match']['games'] = 40
-    other['source_sha256']['elo.py'] = 'new-fit'
-    other['players'][0].update(model='/moved/model.pt', seconds=1000)
+    other['source_sha256'].update({'elo.py': 'new-fit', 'engine_config.py': 'new-comment'})
+    other['players'][0].update(seconds=1000, sample_horizon=2000)
     assert pair_identity(other, pair) == original
-    for group, key, value in [('config', 'visits', 200), ('execution', 'max_loaded_models', 8),
-                               ('source_sha256', 'engine_config.py', 'changed')]:
+    for group, key, value in [('config', 'visits', 200), ('config', 'seed', 17), ('execution', 'max_loaded_models', 8)]:
         changed = copy.deepcopy(manifest)
         target = changed[group]['match'] if group == 'config' else changed[group]
         target[key] = value
         assert pair_identity(changed, pair) != original
     changed = copy.deepcopy(manifest); changed['binary_sha256'] = 'new-bin'
     assert pair_identity(changed, pair) != original
-    changed = copy.deepcopy(manifest); changed['players'][0]['sha256'] = 'new-model'
+    changed = copy.deepcopy(manifest); changed['players'][0]['model'] = '/new/model.pt'
     assert pair_identity(changed, pair) != original
 
 
 def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_path):
-    manifest = {'players':[{'id':'a','sha256':'aa'}, {'id':'b','sha256':'bb'}],
+    manifest = {'players':[{'id':'a','model':'/a/model.pt'}, {'id':'b','model':'/b/model.pt'}],
                 'config':{'match':{'seed':1}}, 'binary_sha256':'bin', 'games_per_pair':4}
     pair = {'id':identity(('a','b')), 'players':['a','b']}
     manifest['pairs'] = [pair]
@@ -252,6 +251,101 @@ def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_pat
     game = load_json(p); game['winner'] = 1; save_json(p,game)
     assert prepare_pairs(tmp_path, tmp_path/'fourth', manifest) == 4
     assert load_json(tmp_path/'fourth'/'pairs'/pair['id']/'games/00000000.json')['winner'] == 0
+
+
+def test_unchanged_cache_merge_reads_each_record_once_and_writes_nothing(tmp_path, monkeypatch):
+    from collections import Counter
+    from etazero.elo_cache import merge_pair
+    manifest = {'config': {'match': {'seed': 1}}, 'games_per_pair': 4}
+    pair = {'id': identity(('a', 'b'))}
+    source, destination = tmp_path/'source', tmp_path/'destination'
+    complete_fake_pair(manifest, pair, source)
+    seed = pair_seed(manifest, pair)
+    merge_pair(source, 4, destination, 4, seed)
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob('*.json')}
+    reads = Counter()
+    original = Path.read_text
+    def read(path, *args, **kwargs):
+        reads[path] += 1
+        return original(path, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_text', read)
+        merge_pair(source, 4, destination, 4, seed)
+    assert len(reads) == 13 and set(reads.values()) == {1}
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob('*.json')}
+
+
+def test_complete_cache_does_not_rescan_historical_sessions(tmp_path, monkeypatch):
+    manifest = {'players': [{'id':'a','model':'/a'}, {'id':'b','model':'/b'}],
+                'config': {'match': {'seed': 1}}, 'binary_sha256': 'bin', 'games_per_pair': 4,
+                'pairs': [{'id':identity(('a','b')), 'players':['a','b']}]}
+    old = tmp_path/'old'
+    save_json(old/'manifest.json', manifest)
+    pair = manifest['pairs'][0]
+    complete_fake_pair(manifest, pair, old/'pairs'/pair['id'])
+    assert prepare_pairs(tmp_path, tmp_path/'first', manifest) == 4
+    original = Path.iterdir
+    def iterdir(path):
+        assert path != tmp_path, 'Complete cache must not scan session history'
+        return original(path)
+    monkeypatch.setattr(Path, 'iterdir', iterdir)
+    assert prepare_pairs(tmp_path, tmp_path/'second', manifest) == 4
+
+
+def test_source_changes_do_not_change_session_or_match_identity(tmp_path, monkeypatch):
+    match_profile(tmp_path, '[match]\ndevice=cpu\n')
+    data = tmp_path/'data'
+    for arm in ('a', 'b'):
+        history(data/arm, [10, 20])
+    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    monkeypatch.setattr('etazero.autoelo.sha256', lambda _: 'first-source')
+    first = autoelo_plan(tmp_path, tmp_path/'binary', data=data, environ={})
+    monkeypatch.setattr('etazero.autoelo.sha256', lambda _: 'changed-comment-or-fit')
+    second = autoelo_plan(tmp_path, tmp_path/'binary', data=data, environ={})
+    assert first['source_sha256'] != second['source_sha256']
+    assert first['output'] == second['output'] and first['manifest'] == second['manifest']
+
+
+def test_cache_excludes_trials_with_content_derived_inference_seeds(tmp_path):
+    import copy
+    manifest = {'players': [{'id': 'a', 'model': '/a/model.pt'}, {'id': 'b', 'model': '/b/model.pt'}],
+                'config': {'match': {'seed': 1}}, 'binary_sha256': 'bin', 'games_per_pair': 4,
+                'pairs': [{'id': identity(('a', 'b')), 'players': ['a', 'b']}]}
+    old = copy.deepcopy(manifest)
+    for player in old['players']:
+        player['sha256'] = 'old-content-hash'
+    previous = tmp_path/'old'
+    save_json(previous/'manifest.json', old)
+    complete_fake_pair(old, old['pairs'][0], previous/'pairs'/old['pairs'][0]['id'])
+    assert prepare_pairs(tmp_path, tmp_path/'new', manifest) == 0
+    assert len(PairStore(previous/'pairs'/old['pairs'][0]['id'], 4).games()) == 4
+
+
+def test_arena_deduplicates_paths_and_uses_config_seed_independent_of_schedule(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    import shlex
+    players = [Player('a', 'a', 1, 1, str(tmp_path/'a.pt')),
+               Player('b', 'b', 1, 1, str(tmp_path/'b.pt')),
+               Player('alias', 'alias', 1, 1, str(tmp_path/'a.pt'))]
+    manifest = {'players': [asdict(p) for p in players], 'games_per_pair': 4,
+                'config': {'match': {'seed': 37, 'device': 'cpu', 'board_size': 5, 'rule': 'freestyle'}},
+                'pairs': [{'id': identity(pair), 'players': list(pair)}
+                          for pair in [('a', 'b'), ('alias', 'b')]]}
+    monkeypatch.setattr('etazero.arena.model_info', lambda p: (Path(p), {'id': 'same-export-label'}))
+    for order in (0, 1):
+        manifest['pairs'].reverse()
+        output = tmp_path/str(order)
+        output.mkdir()
+        def complete(*args):
+            for pair in manifest['pairs']:
+                complete_fake_pair(manifest, pair, output/'pairs'/pair['id'])
+        monkeypatch.setattr('etazero.arena._run_native', complete)
+        execute_arena(Path('/unused'), tmp_path/'cfg', output, manifest, 2, threading.Event())
+        models = [shlex.split(row) for row in (output/'models.txt').read_text().splitlines()]
+        assert len(models) == 2
+        assert {path: int(seed) for _, path, seed in models} == {p.model: 37 for p in players}
+        tasks = [row.split() for row in (output/'tasks.txt').read_text().splitlines()]
+        assert len({tuple(row[1:3]) for row in tasks}) == 1
 
 
 def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_path, monkeypatch):
@@ -425,11 +519,7 @@ def test_shared_native_routes_pairs_deduplicates_models_and_resumes_one_side(tmp
     from dataclasses import asdict
     for arm in ('a', 'b', 'c'):
         history(tmp_path/arm, [1])
-        # Export IDs must be globally unique, as with real published models.
-        path = tmp_path/arm/'models/1/manifest.json'
-        info = load_json(path); info['id'] = arm; save_json(path, info)
-        row_path = tmp_path/arm/'logs/iterations/000001.json'
-        row = load_json(row_path); row['model'] = info; save_json(row_path, row)
+        # Different paths may carry the same exported checkpoint label.
     players = discover_players(tmp_path)
     manifest = {'players': [asdict(p) for p in players], 'games_per_pair': 4,
                 'config': {'match': {'seed': 1, 'device': 'cpu', 'board_size': 5, 'rule': 'freestyle'}},
@@ -462,6 +552,10 @@ print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
     with pytest.raises(RuntimeError, match='Arena exited 1'):
         execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
     assert len((output/'models.txt').read_text().splitlines()) == 3
+    import shlex
+    models = [shlex.split(line) for line in (output/'models.txt').read_text().splitlines()]
+    assert {row[1] for row in models} == {player.model for player in players}
+    assert all(row[0] == row[1] and int(row[2]) == 1 for row in models)
     first = output/'pairs'/manifest['pairs'][0]['id']/'games/00000000.json'
     original = first.read_bytes()
     from tqdm import tqdm
@@ -472,6 +566,7 @@ print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
         return bar
     monkeypatch.setattr('etazero.arena.tqdm', record_progress)
     execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
+    assert [shlex.split(line) for line in (output/'models.txt').read_text().splitlines()] == models
     progress = next(bar for bar in bars if bar.desc == 'Arena games')
     assert progress.initial == 1 and progress.n == 8
     assert progress.postfix == 'window=1 playing'
@@ -490,7 +585,7 @@ def test_model_inspection_deduplicates_checks_and_rejects_changed_files(tmp_path
         calls.append(path)
         if path.name == 'changed':
             raise ValueError('changed model')
-        return path, {'sha256': path.name}
+        return path, {'id': path.name}
     monkeypatch.setattr('etazero.arena.model_info', inspect)
     paths = [tmp_path/'a', tmp_path/'b', tmp_path/'a']
     assert list(inspect_models(paths)) == paths[:2]
@@ -521,7 +616,7 @@ def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path
         cancel.set()
     store.accept = accept
     monkeypatch.setattr('etazero.arena.model_info', lambda path: (Path(path), {'id':str(path)}))
-    players = tuple(Player(name, name, 1, 1, name, '') for name in ('a', 'b'))
+    players = tuple(Player(name, name, 1, 1, name) for name in ('a', 'b'))
     started = time.monotonic()
     with pytest.raises(RuntimeError, match='Match exited'):
         execute_pair(binary, tmp_path/'cfg', players, store, 1, cancel)
@@ -532,7 +627,7 @@ def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path
 def test_shared_arena_cancellation_flushes_an_opening(tmp_path, monkeypatch):
     from dataclasses import asdict
     pair_id = identity(('a', 'b'))
-    players = [Player(name, name, 1, 1, name, 'hash') for name in ('a', 'b')]
+    players = [Player(name, name, 1, 1, name) for name in ('a', 'b')]
     manifest = dict(players=[asdict(p) for p in players], games_per_pair=4,
                     pairs=[dict(id=pair_id, players=['a', 'b'])],
                     config={'match': {'seed': 1, 'device': 'cpu', 'board_size': 5, 'rule': 'renju'}})
@@ -541,7 +636,7 @@ def test_shared_arena_cancellation_flushes_an_opening(tmp_path, monkeypatch):
         f'print(json.dumps(dict(type="opening",pair="{pair_id}",id=0,generator=0,seed=1,moves=[12],value=0)),flush=True)\n'
         'time.sleep(5)\n')
     binary.chmod(0o755)
-    monkeypatch.setattr('etazero.arena.model_info', lambda p: (Path(p), {'id': str(p), 'sha256': 'hash'}))
+    monkeypatch.setattr('etazero.arena.model_info', lambda p: (Path(p), {'id': str(p)}))
     cancel = threading.Event()
     original = PairStore.accept
     def accept(self, event):

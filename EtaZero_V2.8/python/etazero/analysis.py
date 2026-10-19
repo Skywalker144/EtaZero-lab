@@ -5,14 +5,16 @@ import subprocess
 import uuid
 from .config import fingerprint, write_native
 from .schema import CONTRACT_ID
-from .storage import load_json, save_json, sha256
+from .storage import load_json, save_json
 
 
 def model_info(path,canvas=None):
     path=Path(path).resolve()
     info=load_json(path.parent/"manifest.json")
-    if info["contract"]!=CONTRACT_ID or (canvas is not None and info["canvas"]!=canvas) or sha256(path)!=info["sha256"]:
-        raise ValueError(f"Inference model contract/checksum mismatch: {path}")
+    if info["contract"]!=CONTRACT_ID or (canvas is not None and info["canvas"]!=canvas):
+        raise ValueError(f"Inference model contract/canvas mismatch: {path}")
+    if path.stat().st_size != info["bytes"]:
+        raise ValueError(f"Inference model size mismatch: {path}")
     return path,info
 
 
@@ -65,7 +67,7 @@ def stream_analysis(config, binary, run_dir, model=None, protocol='text'):
     import tempfile
     from .runtime import verify_build
     from .engine_config import validate_engine_config
-    verify_build(binary)
+    verify_build(binary, record_identity=False)
     validate_engine_config(config)
     model,info=model_info(select_model(run_dir,model))
     c=config['analysis']

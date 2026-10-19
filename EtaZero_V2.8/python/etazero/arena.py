@@ -1,6 +1,5 @@
 """Resumable paired matches and equal committed-time Elo, adapted from MuZero_V2."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import hashlib
 from itertools import combinations
@@ -29,16 +28,7 @@ class Player:
     iteration: int
     seconds: float
     model: str
-    sha256: str
     sample_horizon: float | None = None
-
-
-def file_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def identity(value) -> str:
@@ -67,13 +57,8 @@ def time_sample_indices(times: list[float], sample_seconds: float, *,
 
 
 def inspect_models(paths):
-    """Check each unique file once per stage, with bounded parallel hashing."""
-    paths = list(dict.fromkeys(paths))
-    workers = min(4, len(os.sched_getaffinity(0)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return dict(zip(paths, tqdm(pool.map(model_info, paths), total=len(paths),
-                                   desc='Validate models', unit='model', dynamic_ncols=True,
-                                   disable=None)))
+    """Read metadata for each unique model path."""
+    return {path: model_info(path) for path in dict.fromkeys(paths)}
 
 
 def discover_players(root: Path, stride: int = 1, *,
@@ -135,7 +120,7 @@ def discover_players(root: Path, stride: int = 1, *,
         if info != row['model']:
             raise ValueError(f'Model differs from committed record: {model}')
         players.append(Player(f'{name}:{number:08d}', name, number, row['elapsed_seconds'],
-                              str(model), info['sha256'], sample_horizons.get(name)))
+                              str(model), sample_horizons.get(name)))
     if len(players) < 2:
         raise ValueError('Need at least two committed models')
     return players
@@ -212,11 +197,7 @@ class PairStore:
         self.directory = directory
         self.total = games
 
-    def accept(self, event: dict) -> None:
-        if event['type'] == 'match_stats':
-            # Each invocation (including a resumed partial pair) is retained.
-            write_json(self.directory/'performance'/f'{identity(event)}.json', event)
-            return
+    def _validate(self, event, openings=None):
         kind, index = event['type'], event['id']
         if type(index) is not int or index < 0:
             raise ValueError('Invalid event ID')
@@ -230,7 +211,8 @@ class PairStore:
         elif kind == 'game':
             if index >= self.total or event['opening_id'] != index // 2 or event['black_a'] is not (index % 2 == 0) or event['winner'] not in (-1, 0, 1):
                 raise ValueError('Invalid game assignment')
-            opening = json.loads((self.directory / 'openings' / f'{index//2:08d}.json').read_text())
+            opening = (openings[index//2] if openings is not None else
+                       json.loads((self.directory / 'openings' / f'{index//2:08d}.json').read_text()))
             if moves[:len(opening['moves'])] != opening['moves'] or len(moves) <= len(opening['moves']):
                 raise ValueError('Game does not continue its opening')
             if not math.isfinite(event['seconds']) or event['seconds'] < 0:
@@ -238,6 +220,15 @@ class PairStore:
             folder = 'games'
         else:
             raise ValueError(f'Unknown match event: {kind}')
+        return folder
+
+    def accept(self, event: dict) -> None:
+        if event['type'] == 'match_stats':
+            # Each invocation (including a resumed partial pair) is retained.
+            write_json(self.directory/'performance'/f'{identity(event)}.json', event)
+            return
+        folder = self._validate(event)
+        index = event['id']
         path = self.directory / folder / f'{index:08d}.json'
         if path.exists():
             if json.loads(path.read_text()) != event:
@@ -245,17 +236,28 @@ class PairStore:
         else:
             write_json(path, event)
 
-    def tasks(self, seed: int) -> list[dict]:
+    def read(self):
+        """Load and validate each immutable record once for this operation."""
+        openings, games = {}, {}
+        for folder, kind, rows in (('openings', 'opening', openings), ('games', 'game', games)):
+            for path in sorted((self.directory/folder).glob('*.json')):
+                row = json.loads(path.read_text())
+                if row['type'] != kind or path.name != f"{row['id']:08d}.json":
+                    raise ValueError(f'Invalid result identity: {path}')
+                self._validate(row, openings)
+                rows[row['id']] = row
+        return openings, games
+
+    def tasks(self, seed: int, records=None) -> list[dict]:
+        openings, games = self.read() if records is None else records
         tasks = []
         for index in range(self.total // 2):
             mask = sum(1 << color for color in (0, 1)
-                       if not (self.directory / 'games' / f'{2*index+color:08d}.json').exists())
-            opening_path = self.directory / 'openings' / f'{index:08d}.json'
+                       if 2*index+color not in games)
             opening_seed = (seed + index * 0x9e3779b97f4a7c15) % (1 << 64)
             moves = None
-            if opening_path.exists():
-                opening = json.loads(opening_path.read_text())
-                self.accept(opening)
+            if index in openings:
+                opening = openings[index]
                 if opening['seed'] != opening_seed or opening['generator'] != index % 2:
                     raise ValueError('Saved opening does not match scheduled seed/generator')
                 moves = opening['moves']
@@ -265,14 +267,7 @@ class PairStore:
         return tasks
 
     def games(self) -> list[dict]:
-        rows = []
-        for path in sorted((self.directory / 'games').glob('*.json')):
-            row = json.loads(path.read_text())
-            if row['type'] != 'game' or path.name != f"{row['id']:08d}.json":
-                raise ValueError(f'Invalid result identity: {path}')
-            self.accept(row)
-            rows.append(row)
-        return rows
+        return list(self.read()[1].values())
 
 
 def _run_native(command, log_path, accept, cancel, environ):
@@ -313,8 +308,9 @@ def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], sto
                  seed: int, cancel: Event | None = None, environ: dict | None = None) -> None:
     if cancel is not None and cancel.is_set():
         return
-    completed = len(store.games())
-    tasks = store.tasks(seed)
+    records = store.read()
+    completed = len(records[1])
+    tasks = store.tasks(seed, records)
     if not tasks:
         return
     task_path = store.directory / 'tasks.txt'
@@ -356,10 +352,6 @@ def load_results(output: Path) -> tuple[dict, list[dict]]:
 
 def native_config(config, players):
     infos = inspect_models([player.model for player in players])
-    for player in players:
-        _, info = infos[player.model]
-        if info['sha256'] != player.sha256:
-            raise ValueError(f'Model changed: {player.model}')
     canvas = validate_match_models(config, [infos[player.model][1] for player in players])
     return {**config, 'network': {'canvas': canvas}}
 
@@ -387,33 +379,28 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
     players = {p['id']: Player(**p) for p in manifest['players']}
     stores, models, indices, assignments = {}, [], {}, []
     profile = manifest['config']['match']
-    # Pair count can greatly exceed model count; do not rehash both weights
-    # for every edge in the comparison graph.
+    # Pair count can greatly exceed model count; share metadata across edges.
     infos = inspect_models([player.model for player in players.values()])
     completed = 0
     for pair in manifest['pairs']:
         store = PairStore(output/'pairs'/pair['id'], manifest['games_per_pair'])
-        completed += len(store.games())
+        records = store.read()
+        completed += len(records[1])
         seed = (profile['seed'] + int(pair['id'][:16], 16)) % (1 << 64)
-        tasks = store.tasks(seed)
+        tasks = store.tasks(seed, records)
         if not tasks:
             continue
         stores[pair['id']] = store
         slots = []
         for player_id in pair['players']:
             player = players[player_id]
-            path, info = infos[player.model]
-            if info['sha256'] != player.sha256:
-                raise ValueError(f'Model changed: {path}')
-            key = info['id']
-            if key in indices:
-                previous = models[indices[key]]
-                if previous['sha256'] != player.sha256 or previous['path'] != str(path):
-                    raise ValueError(f'Model identity collision: {key}')
-            else:
+            path, _ = infos[player.model]
+            key = str(path)
+            if key not in indices:
                 indices[key] = len(models)
-                model_seed = (profile['seed'] + int(identity((key, player.sha256))[:16], 16)) % (1 << 64)
-                models.append(dict(id=key, path=str(path), sha256=player.sha256, seed=model_seed))
+                # Like an explicit KataGo nnRandSeed: model contents and the
+                # order of pending pairs do not determine the inference seed.
+                models.append(dict(id=key, path=key, seed=profile['seed']))
             slots.append(indices[key])
         for task in tasks:
             suffix = '-1' if task['moves'] is None else f"{len(task['moves'])} " + ' '.join(map(str, task['moves']))
@@ -511,7 +498,7 @@ def single_match(config, binary, model_a, model_b, output, games=None):
     players = []
     for label, path in (('a', model_a), ('b', model_b)):
         path, info = model_info(path)
-        players.append(Player(label, label, info['checkpoint']['iteration'], 0, str(path), info['sha256']))
+        players.append(Player(label, label, info['checkpoint']['iteration'], 0, str(path)))
     native = native_config(config, players)
     count = config['match']['games'] if games is None else games
     PairStore(Path(output),count)

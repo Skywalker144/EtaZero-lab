@@ -1,6 +1,4 @@
-"""Reuse raw paired matches independently of sampling, fitting and run paths."""
-from pathlib import Path
-
+"""Reuse raw paired matches for immutable model paths and match conditions."""
 from .arena import PairStore, identity
 from .storage import load_json, save_json
 
@@ -13,53 +11,51 @@ def pair_identity(manifest, pair):
     players = {p['id']: p for p in manifest['players']}
     config = {group: dict(values) for group, values in manifest['config'].items()}
     config['match'].pop('games', None)
-    # Paths, elapsed training time, sampling, anchor and fitting source do not
-    # affect a native match. Search/batching settings and binary identity do.
-    return {'models': [{'id': p, 'sha256': players[p]['sha256']} for p in pair['players']],
+    # Published model paths are immutable. No weight-file hashing is needed.
+    return {'models': [players[p]['model'] for p in pair['players']],
             'config': config, 'binary_sha256': manifest['binary_sha256'],
-            'execution': manifest.get('execution', {}), 'seed': pair_seed(manifest, pair),
-            'engine_config_sha256': manifest.get('source_sha256', {}).get('engine_config.py')}
+            'execution': manifest.get('execution', {}), 'seed': pair_seed(manifest, pair)}
 
 
 def merge_pair(source, source_total, destination, destination_total, seed):
     """Keep the first recorded trial for each opening; never count reruns twice."""
     src, dst = PairStore(source, source_total), PairStore(destination, destination_total)
-    games = src.games()
-    src.tasks(seed)  # Validate persisted opening seeds, including partial pairs.
-    dst.games()
-    dst.tasks(seed)
+    source_records, destination_records = src.read(), dst.read()
+    src.tasks(seed, source_records)  # Check seeds without rereading records.
+    dst.tasks(seed, destination_records)
+    openings, games = source_records
+    destination_openings, destination_games = destination_records
     provenance_path = destination/'provenance.json'
     provenance = load_json(provenance_path) if provenance_path.exists() else {}
     source_provenance = (load_json(source/'provenance.json')
                          if (source/'provenance.json').exists() else {})
+    source_path = str(source.resolve())
     changed = False
-    for path in sorted((source/'openings').glob('*.json')):
-        opening = load_json(path)
+    for opening in openings.values():
         if opening['id'] >= destination_total // 2:
             continue
-        target = destination/'openings'/path.name
         # Independent historical reruns can have different stochastic outcomes.
         # Keep one trial per opening, with both colors coming from that trial.
         origin = provenance.get(str(opening['id']))
-        source_origin = source_provenance.get(str(opening['id']), str(source.resolve()))
-        if target.exists() and (load_json(target) != opening or
+        source_origin = source_provenance.get(str(opening['id']), source_path)
+        if opening['id'] in destination_openings and (destination_openings[opening['id']] != opening or
                                (origin is not None and origin != source_origin)):
             continue
-        if not target.exists():
+        if opening['id'] not in destination_openings:
             dst.accept(opening)
             changed = True
         if origin is None:
             provenance[str(opening['id'])] = source_origin
             changed = True
-        for game in games:
-            if game['opening_id'] != opening['id']:
+        for index in (2*opening['id'], 2*opening['id']+1):
+            if index not in games:
                 continue
-            result = destination/'games'/f"{game['id']:08d}.json"
-            if result.exists():
+            game = games[index]
+            if index in destination_games:
                 # Resuming our own snapshot must agree; other historical trials
                 # remain intact in their original sessions and are not merged.
-                if load_json(result) != game:
-                    raise ValueError(f'Conflicting cached trial: {result}')
+                if destination_games[index] != game:
+                    raise ValueError(f'Conflicting cached trial: {destination}/games/{index:08d}.json')
             else:
                 dst.accept(game)
                 changed = True
@@ -78,6 +74,9 @@ def prepare_pairs(base, output, manifest):
     """Import matching historical trials, then hydrate this immutable schedule."""
     targets = {identity(pair_identity(manifest, pair)): pair for pair in manifest['pairs']}
     pool = base/'pair_cache'
+    def complete(key):
+        return all((pool/key/'games'/f'{i:08d}.json').is_file()
+                   for i in range(manifest['games_per_pair']))
     for key, pair in targets.items():
         directory = pool/key
         payload = pair_identity(manifest, pair)
@@ -92,18 +91,27 @@ def prepare_pairs(base, output, manifest):
         if source.exists():
             merge_pair(source, manifest['games_per_pair'], directory,
                        cache_capacity(directory, manifest['games_per_pair']), pair_seed(manifest, pair))
-    # Stable order makes the canonical trial independent of directory traversal.
-    for session in sorted(base.iterdir()):
+    # Complete cached pairs need no historical import. Stable ordering still
+    # selects the first recorded trial when filling a missing pair or opening.
+    needed = {key for key in targets if not complete(key)}
+    for session in sorted(base.iterdir()) if needed else ():
+        if not needed:
+            break
         if session.is_symlink() or session == output or not (session/'manifest.json').is_file():
             continue
         old = load_json(session/'manifest.json')
+        # These trials used content-derived inference seeds, not match.seed.
+        if any('sha256' in player for player in old['players']):
+            continue
         for pair in old['pairs']:
             key = identity(pair_identity(old, pair))
-            if key not in targets:
+            if key not in needed:
                 continue
             directory = pool/key
             merge_pair(session/'pairs'/pair['id'], old['games_per_pair'], directory,
                        cache_capacity(directory, old['games_per_pair']), pair_seed(old, pair))
+            if complete(key):
+                needed.remove(key)
     for key, pair in targets.items():
         directory = pool/key
         merge_pair(directory, cache_capacity(directory, manifest['games_per_pair']),

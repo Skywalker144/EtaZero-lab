@@ -118,7 +118,7 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
     if anchor not in {p.id for p in players}:
         raise ValueError(f'Unknown anchor: {anchor}')
     anchor_player = next(p for p in players if p.id == anchor)
-    anchor_record = {'id': anchor, 'sha256': anchor_player.sha256}
+    anchor_record = {'id': anchor, 'model': anchor_player.model}
     if pinned and anchor == pinned['id'] and anchor_record != pinned:
         raise ValueError('Pinned Elo anchor model changed; use a separate result root')
     manifest = {'version': 1, 'players': [asdict(p) for p in players], 'config': config,
@@ -128,15 +128,15 @@ def autoelo_plan(directory, binary, *, data=None, arms=None, output=None,
                 'execution': {'max_loaded_models': settings['max_loaded_models'],
                               'model_load_workers': settings['model_load_workers'],
                               'cuda_visible_devices': profile['cuda_visible_devices']}}
-    manifest['source_sha256'] = {name: sha256(Path(__file__).parent/name)
-                               for name in ('autoelo.py', 'arena.py', 'elo.py', 'elo_cache.py',
-                                            'engine_config.py')}
+    sources = {name: sha256(Path(__file__).parent/name)
+               for name in ('autoelo.py', 'arena.py', 'elo.py', 'elo_cache.py', 'engine_config.py')}
     # Store JSON-native values so in-memory and reloaded manifests compare equal.
     manifest = json.loads(json.dumps(manifest))
     session = base/identity(manifest)[:16]
     names = {p.id: p.arm for p in players}
     return {'directory': str(directory), 'base': str(base), 'output': str(session),
             'settings': settings, 'manifest': manifest,
+            'source_sha256': sources,
             'anchor_record': anchor_record,
             'summary': {'players_per_arm': {name: sum(p.arm == name for p in players)
                        for name in sorted({p.arm for p in players})}, 'pairs': len(schedule),
@@ -163,15 +163,12 @@ def run_autoelo(plan, binary):
             save_json(anchor_path, plan['anchor_record'], immutable=True)
         elif not plan['settings']['anchor'] and load_json(anchor_path) != plan['anchor_record']:
             raise ValueError('Pinned Elo anchor changed after planning; recreate the plan')
-        for name, checksum in plan['manifest']['source_sha256'].items():
+        source_id = identity(plan['source_sha256'])
+        for name in plan['source_sha256']:
             source = Path(__file__).parent/name
-            if sha256(source) != checksum:
-                raise ValueError(f'Elo source changed after planning: {name}; recreate the plan')
-            destination = output/'source'/name
+            destination = output/'source'/source_id/name
             if not destination.exists():
                 atomic_write(destination, lambda p, source=source: p.write_bytes(source.read_bytes()), immutable=True)
-            elif sha256(destination) != checksum:
-                raise ValueError(f'Saved Elo source changed: {destination}')
         save_json(output/'plan.json', plan)
         save_json(output/'status.json', {'status': 'running'})
         started = time.monotonic()
@@ -199,6 +196,7 @@ def run_autoelo(plan, binary):
         seconds = time.monotonic()-started
         count = result['games']-before
         performance = {'seconds': seconds, 'new_games': count,
+                       'source_id': source_id, 'source_sha256': plan['source_sha256'],
                        'reused_games': before,
                        'new_games_per_second': count/seconds if seconds else 0,
                        'game_threads': plan['settings']['game_threads'],

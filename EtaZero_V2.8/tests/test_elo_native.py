@@ -31,7 +31,8 @@ def test_mixed_arena_residency_and_partial_resume(tmp_path, rule):
         write_native(config, run/'config/effective.cfg')
         checkpoint = initialize(run, config)
         exported = export_model(run, config, checkpoint)
-        players.append(Player(str(index), str(index), 1, index+1, str(run/exported['path']), exported['sha256']))
+        assert 'sha256' not in exported
+        players.append(Player(str(index), str(index), 1, index+1, str(run/exported['path'])))
     config = load_engine_config(CONFIGS/'muzero', match=True, environ={})
     config['match'].update(board_size=5, rule=rule, visits=4, game_threads=7, max_batch=8,
                            server_threads=2, cache_entries=8, inference_precision='float16')
@@ -43,6 +44,9 @@ def test_mixed_arena_residency_and_partial_resume(tmp_path, rule):
     output = tmp_path/'arena'
     result = run_arena(output, manifest, binary, 2, 2)
     assert result['games'] == 12
+    import shlex
+    model_seeds = {row[1]: int(row[2]) for row in map(shlex.split, (output/'models.txt').read_text().splitlines())}
+    assert model_seeds == {player.model: config['match']['seed'] for player in players}
     files = {p: p.read_bytes() for p in output.glob('pairs/*/games/*.json')}
     openings = {p: p.read_bytes() for p in output.glob('pairs/*/openings/*.json')}
     assert len(files) == 12 and len(openings) == 6

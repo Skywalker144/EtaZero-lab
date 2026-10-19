@@ -7,7 +7,7 @@ import torch
 from .network import make_network, inference_network
 from .optimization import inference_weights
 from .schema import CONTRACT_ID
-from .storage import load_json, save_json, sha256, sync_directory
+from .storage import load_json, save_json, sync_directory
 from .training import load_checkpoint, device_check
 
 
@@ -64,7 +64,7 @@ def export_model(run_dir, config, checkpoint):
     averaged = 0 if swa is None else int(swa['n_averaged'].item())
     info = {"id":checkpoint["id"],"checkpoint":checkpoint,"contract":CONTRACT_ID,"canvas":canvas,
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
-            "path":str(Path("models")/checkpoint["id"]/"model.pt"),"sha256":sha256(stage/"model.pt"),
+            "path":str(Path("models")/checkpoint["id"]/"model.pt"),
             "bytes":(stage/"model.pt").stat().st_size,
             'inference_precision':config['inference']['inference_precision'],'backend':'libtorch',
             'normalization': {'fixup': 'masked_fixup_bias', 'fixscaleonenorm': 'precomputed_inv_std',
