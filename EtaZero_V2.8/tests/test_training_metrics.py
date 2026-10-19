@@ -7,17 +7,17 @@ from etazero.storage import save_json
 
 def test_all_batch_means_extrema_and_resume_are_independent_of_print_cadence():
     a = TrainingMetrics()
-    a.add({'loss': 2.}, 3., False, False, [1., 1.], {'dynamics': 2.})
+    a.add({'loss': 2.}, 3., False, False, [1., 1.])
     a.add({'loss': 8.}, 600., False, True, [3., 5.])
     b = TrainingMetrics(a.state)
-    b.add({'loss': 5.}, float('inf'), True, True, [2., 3.], {'dynamics': float('inf')})
+    b.add({'loss': 5.}, float('inf'), True, True, [2., 3.])
     result = b.summary()
     assert result['steps'] == 3 and a.summary()['steps'] == 2
     assert result['loss'] == 5. and result['grad_norm'] == 301.5
     assert result['max_grad_norm'] == 600 and result['max_loss'] == 8
     assert result['clipped_steps'] == result['amp_skipped_steps'] == 1
-    assert result['step_losses'] == [2., 3.] and result['grad_norms'] == {'dynamics': 2.}
-    assert result['step_loss_updates'] == 3 and result['module_gradient_steps'] == 1
+    assert result['step_losses'] == [2., 3.]
+    assert result['step_loss_updates'] == 3
 
 
 def test_all_skipped_has_no_fabricated_gradient_measurement():

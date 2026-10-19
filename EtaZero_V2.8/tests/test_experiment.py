@@ -189,7 +189,7 @@ def journal(root, events):
                 continue
             metrics.add({k: batch[k] for k in METRICS if k != 'grad_norm'},
                         batch['grad_norm'], batch.get('amp_skipped', False), False,
-                        batch.get('step_losses'), batch.get('grad_norms'))
+                        batch.get('step_losses'))
         event['round_metrics'] = metrics.summary()
     path = root/'logs/events.jsonl'; path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(''.join(json.dumps(e)+'\n' for e in events))

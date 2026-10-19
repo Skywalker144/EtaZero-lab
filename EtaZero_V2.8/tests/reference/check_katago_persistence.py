@@ -64,7 +64,7 @@ def check():
         # A post-resume batch extends the persisted sums without losing or
         # counting the skipped batch's gradients.
         for accumulator in (metrics,restored_metrics):
-            accumulator.add({'loss':4.},3.,False,False,step_losses=[1.,3.],grad_norms={'dynamics':3.})
+            accumulator.add({'loss':4.},3.,False,False,step_losses=[1.,3.])
         assert restored_metrics.summary()==metrics.summary()
         assert set(saved['rng'])=={'python','numpy','torch','cuda'}
         assert set(saved['optimization'])>={'slow','lookahead_counter','swa','swa_samples','consumed_samples','optimizer_steps',

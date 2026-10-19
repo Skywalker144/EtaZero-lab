@@ -6,9 +6,9 @@ class TrainingMetrics:
     def __init__(self, state=None):
         self.state = copy.deepcopy(state) if state is not None else dict(
             steps=0, amp_skipped_steps=0, clipped_steps=0, sums={}, counts={}, maxima={},
-            step_sums=[], step_loss_updates=0, module_sums={}, module_gradient_steps=0)
+            step_sums=[], step_loss_updates=0)
 
-    def add(self, losses, grad_norm, skipped, clipped, step_losses=None, grad_norms=None):
+    def add(self, losses, grad_norm, skipped, clipped, step_losses=None):
         s = self.state
         s['steps'] += 1
         s['amp_skipped_steps'] += int(skipped)
@@ -30,10 +30,6 @@ class TrainingMetrics:
                 raise ValueError('Unroll length changed within a training round')
             s['step_sums'] = [a+b for a,b in zip(s['step_sums'], step_losses)]
             s['step_loss_updates'] += 1
-        if grad_norms and not skipped:
-            for name, value in grad_norms.items():
-                s['module_sums'][name] = s['module_sums'].get(name, 0.) + value
-            s['module_gradient_steps'] += 1
 
     def summary(self):
         s = self.state
@@ -46,7 +42,4 @@ class TrainingMetrics:
         if s['step_loss_updates']:
             result.update(step_loss_updates=s['step_loss_updates'],
                           step_losses=[v/s['step_loss_updates'] for v in s['step_sums']])
-        if s['module_gradient_steps']:
-            result.update(module_gradient_steps=s['module_gradient_steps'],
-                          grad_norms={k: v/s['module_gradient_steps'] for k,v in s['module_sums'].items()})
         return result
