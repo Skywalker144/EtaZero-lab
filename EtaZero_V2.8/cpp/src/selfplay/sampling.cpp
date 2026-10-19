@@ -1,7 +1,6 @@
 #include "etazero/sampling.h"
 #include <cmath>
 #include <iterator>
-#include <openssl/evp.h>
 namespace etazero {
 void ForkPool::add(InitialPosition position) {
     if(position.game.finished())throw std::runtime_error("Cannot enqueue terminal fork");
@@ -32,13 +31,6 @@ std::vector<InitialPosition> load_hint_positions(const Config& c,int canvas) {
     std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot open Gomoku hint positions: "+path);
     std::string contents{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
     if(file.bad())throw std::runtime_error("Cannot read Gomoku hint positions: "+path);
-    unsigned char digest[EVP_MAX_MD_SIZE];unsigned int length=0;
-    if(EVP_Digest(contents.data(),contents.size(),digest,&length,EVP_sha256(),nullptr)!=1)
-        throw std::runtime_error("Cannot hash Gomoku hint positions: "+path);
-    std::string checksum;checksum.reserve(2*length);
-    for(unsigned int i=0;i<length;++i){checksum.push_back("0123456789abcdef"[digest[i]>>4]);checksum.push_back("0123456789abcdef"[digest[i]&15]);}
-    if(checksum!=c.text("hint_positions.positions_sha256"))throw std::runtime_error("Hint positions checksum mismatch: "+path);
-    // Parse the checked bytes so a concurrent file replacement cannot change the input.
     std::istringstream input(contents);
     for(std::string line;std::getline(input,line);) {
         line=trim(line);if(line.empty() || line[0]=='#')continue;

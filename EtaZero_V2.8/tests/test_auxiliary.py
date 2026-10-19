@@ -321,4 +321,5 @@ def test_hint_game_fork_defaults_bounds_and_input_identity(tmp_path):
     (profile/'positions.txt').write_text('5 renju 1 12 2 0 5\n')
     one=load_config(profile);assert one['hint_positions']['positions_file']==str(profile/'positions.txt')
     (profile/'positions.txt').write_text('5 renju 1 13 2 0 5\n')
-    two=load_config(profile);assert fingerprint(one)!=fingerprint(two)
+    two=load_config(profile);assert fingerprint(one)==fingerprint(two)
+    assert "positions_sha256" not in two["hint_positions"]

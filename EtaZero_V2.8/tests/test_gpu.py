@@ -446,7 +446,7 @@ def test_resume_finishes_cleanup_after_round_commit(tmp_path,gpu_config,monkeypa
     assert run_history(tmp_path)==history
     assert all(sha256(p)==digest for p,digest in preserved.items())
     resumed=run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)
-    assert resumed['checkpoint']['total_steps']==8
+    assert_training_budget(tmp_path,resumed,c)
 
 
 def test_unbounded_replay_window_pipeline(tmp_path,gpu_config):
@@ -462,9 +462,9 @@ def test_unbounded_replay_window_pipeline(tmp_path,gpu_config):
     assert snapshot['selection']['raw_rows']==generated_rows
     assert snapshot['desired_rows']==usable and usable>c['replay']['min_rows']
     selected=sum(source['metadata']['rows'] for source in snapshot['sources'])
-    assert snapshot['rows']==snapshot['selection']['window_rows']==selected>=usable
+    assert snapshot['rows']+snapshot['validation_rows']==snapshot['selection']['window_rows']==selected>=usable
     assert selected-snapshot['sources'][-1]['metadata']['rows']<usable
-    assert state['checkpoint']['total_steps']==8
+    assert_training_budget(tmp_path,state,c)
 
 
 def test_sampled_replay_pipeline_and_resume(tmp_path,gpu_config):
@@ -476,7 +476,7 @@ def test_sampled_replay_pipeline_and_resume(tmp_path,gpu_config):
         status=load_json(tmp_path/'.internal/iterations'/f'{iteration:06d}'/'status.json')
         snapshot=load_json(tmp_path/'snapshots'/status['snapshot_id']/'manifest.json')
         assert snapshot['keep_prob']<1 and 0<snapshot['rows']<snapshot['window_rows']
-    assert state['checkpoint']['total_steps']==8
+    assert_training_budget(tmp_path,state,c)
     assert run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)==state
 
 
@@ -930,12 +930,13 @@ def test_stage_failure_recovery(tmp_path,gpu_config,monkeypatch,phase):
     assert list((tmp_path/"selfplay"/"iteration_000002").rglob("*.npz"))
     if checkpoint:
         current=load_json(tmp_path/".internal/iterations"/"000001"/"status.json")["checkpoint"]
-        assert (current==checkpoint)==(phase=="after_publish")
+        assert (current==checkpoint)==(phase in ("export","after_publish"))
 
 
 def test_forced_process_kill_during_training(tmp_path,gpu_config):
     configs=tmp_path/"configs";shutil.copytree(CONFIGS,configs)
-    (configs/"smoke_test"/"train.cfg.local").write_text("[training]\ntrain_steps=100\ncheckpoint_every=2\nreplay_ratio=8\n")
+    (configs/"smoke_test"/"train.cfg.local").write_text("[training]\ntrain_steps=100\ncheckpoint_every=2\nreplay_ratio=8\n"
+        "[replay]\nmin_rows=1024\nkeep_target_rows=all\n[shuffle]\nbucket_rows=1024\ntraining_shard_rows=1024\n")
     root=tmp_path/"run";c=load_config(configs/"smoke_test",run_dir=root)
     env=os.environ.copy();env["PYTHONPATH"]=str(ROOT/"python")
     command=[sys.executable,"-m","etazero","run","--config-dir",str(configs/"smoke_test"),
@@ -957,7 +958,8 @@ def test_forced_process_kill_during_training(tmp_path,gpu_config):
                 process.kill()
             process.wait()
     persisted=load_json(progress)["checkpoint"]
-    assert 2<=persisted["step"]<100
+    budget=load_json(root/'.internal/iterations/000001/status.json')
+    assert 2<=persisted["step"]<budget['train_steps']==100
     plan_hash=sha256(root/".internal/iterations"/"000001"/"plan.json")
     raw={p:sha256(p) for p in (root/"selfplay").rglob("*.npz")}
     state=run_training(root,c,BINARY,resume=True,max_iteration=1)
@@ -1527,7 +1529,11 @@ def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     root = tmp_path/'run'; work = tmp_path/'scheduler'
     (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 1\nmax_hours = 0\narm_gpus = 0\nshared_init = false\nautoelo = false\n')
     derive_config(arm, CONFIGS/'smoke_test', f'run_dir = {root}\n')
-    (arm/'train.cfg.local').write_text('[training]\ntrain_steps = 200\ncheckpoint_every = 20\n')
+    # The immutable snapshot must supply 200 distinct complete batches; the
+    # learner no longer cycles a small snapshot to meet a configured upper cap.
+    (arm/'train.cfg.local').write_text('[training]\ntrain_steps = 200\ncheckpoint_every = 20\n'
+                                     '[replay]\nmin_rows = 2048\nkeep_target_rows = all\n'
+                                     '[shuffle]\nbucket_rows = 2048\ntraining_shard_rows = 2048\n')
     command = [sys.executable, '-m', 'etazero.experiment', '--config-dir', str(umbrella),
                '--work-dir', str(work), '--binary', str(BINARY)]
     env = {**os.environ, 'PYTHONPATH': str(ROOT/'python')}
@@ -1551,7 +1557,7 @@ def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
                 process.terminate(); process.wait(timeout=30)
     old = load_json(progress)['checkpoint']
     old_hash = sha256(root/old['path'])
-    assert old['total_steps'] >= 20
+    assert 20 <= old['total_steps'] < 200
     assert load_json(work/'.internal/status.json')['arms']['a']['status'] == 'interrupted'
     result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=180)
     assert result.returncode == 0, result.stdout+result.stderr
@@ -1630,7 +1636,7 @@ def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch
     torch._dynamo.reset()
     resumed=run_training(root,c,BINARY,resume=True,max_iteration=2)
     rows=verify_time(resumed)
-    assert resumed['checkpoint']['total_steps']==8
+    assert_training_budget(root,resumed,c)
     assert rows[-1]['compile_seconds']>0
     assert load_json(root/'.internal/iterations/000002/plan.json')['input_checkpoint']==base['checkpoint']
     assert not (root/pending['path']).exists()
@@ -1789,11 +1795,11 @@ def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookba
                              reduce_visits_threshold_lookback=lookback,reduced_visits_min=2,reduced_visits_weight=0.1)
     root=tmp_path/'run'
     state=run_training(root,c,BINARY,max_iteration=2)
-    assert state['checkpoint']['total_steps']==8 and state['checkpoint']['total_samples']==64
+    assert_training_budget(root,state,c)
     files={p:sha256(p) for p in (root/'selfplay').rglob('*.npz')}
     assert run_training(root,c,BINARY,resume=True,max_iteration=2)==state
     state=run_training(root,c,BINARY,resume=True,max_iteration=3)
-    assert state['checkpoint']['total_steps']==12 and state['checkpoint']['total_samples']==96
+    assert_training_budget(root,state,c)
     assert all(sha256(p)==digest for p,digest in files.items())
     cheap_count=reduced_count=reduced_weight_count=reduced_after_cheap=cheap_reply_count=0
     for path in sorted((root/'selfplay').rglob('*.npz')):
@@ -1937,7 +1943,7 @@ def test_target_five_sizes_three_rules_cuda_and_unsupported_requests(tmp_path,gp
             evidence.append({'size':size,'rule':rule,'wdl':native['raw_wdl']})
     # Native command parsing must reject rectangular strings, rather than stoi
     # silently accepting the initial integer and running on a square board.
-    for flag,value,error in [('--size','15x14','Invalid integer'),('--rule','vc1_b','Unknown Gomoku rule'),('--size','16','Invalid canvas')]:
+    for flag,value,error in [('--size','15x14','Invalid integer'),('--rule','vc1_b','Unknown game rule'),('--size','16','Invalid canvas')]:
         current=command.copy();current[current.index(flag)+1]=value
         result=subprocess.run(current,text=True,capture_output=True,timeout=30)
         assert result.returncode==1 and error in result.stderr
@@ -1972,20 +1978,25 @@ def test_auxiliary_outputs_train_export_native_cuda(tmp_path,pipeline,gpu_config
     names=('policy_loss','opponent_policy_loss','soft_policy_loss','soft_opponent_policy_loss','value_loss',
            'td_value_long_loss','td_value_mid_loss','td_value_short_loss','long_optimistic_policy_loss',
            'short_optimistic_policy_loss','shortterm_value_error_loss')
-    assert len(updates)==8
+    assert_training_budget(root,state,c)
+    assert len(updates)==saved['total_steps']  # This fixture logs each batch.
     for e in updates:
         assert e['loss']==pytest.approx(sum(e[n] for n in names),rel=2e-6)
         assert all(np.isfinite(e[n]) for n in names)
     assert any(e['shortterm_value_error_loss']>0 for e in updates)
 
 
-def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config):
+@pytest.mark.parametrize('batch_size,steps,k', [(5,2,2),(11,1,6)])
+def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config,batch_size,steps,k):
     from etazero.data import metadata,training_view
     from etazero.shuffle import build_snapshot
     from etazero.storage import save_json
     c=copy.deepcopy(gpu_config)
     c['replay'].update(min_rows=11,keep_target_rows='all')
-    c['training'].update(batch_size=11,train_steps=2)
+    # Two complete batches consume 10 of the 11 distinct rows, necessarily
+    # including at least one of the two side rows, without recycling the file.
+    c['training'].update(batch_size=batch_size,train_steps=steps)
+    c['optimizer']['lookahead_k']=k
     c['shuffle'].update(bucket_rows=11,training_shard_rows=11)
     root=tmp_path/'run';directory=root/'selfplay/worker'
     subprocess.run([str(ROOT/'build/record_contract_test'),str(directory)],check=True,capture_output=True,text=True)
@@ -1993,10 +2004,13 @@ def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config):
     assert not view['full_game_weight'][-2:].any()
     snapshot=build_snapshot(root,1,[{'path':str(path.relative_to(root)), 'sha256':sha256(path),'metadata':metadata(raw)}],c)
     initial=initialize(root,c)
-    plan={'iteration':1,'snapshot_id':snapshot,'train_steps':2,'batch_size':11}
+    before=load_checkpoint(root,initial,c)
+    plan={'iteration':1,'snapshot_id':snapshot,'train_steps':steps,'batch_size':batch_size}
     events=[]
     reference,done=train_iteration(root,c,plan,initial,lambda event,**fields:events.append({'event':event,**fields}))
-    assert done and reference['total_samples']==22 and reference['optimizer_steps']==2
+    assert done and reference['total_samples']==batch_size*steps and reference['optimizer_steps']==steps
+    after=load_checkpoint(root,reference,c)
+    assert any(not torch.equal(before['model'][name],after['model'][name]) for name in after['optimization']['slow'])
     assert all(np.isfinite(e['loss']) for e in events if e['event']=='update')
     assert all(e['td_value_short_loss']>0 for e in events if e['event']=='update')
     write_native(c,root/'config/effective.cfg')
@@ -2342,7 +2356,6 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
     if kind=='hint':
         positions=tmp_path/'positions.txt';positions.write_text('5 renju 1 12 2 0 5\n')
         c['hint_positions'].update(hint_positions_prob=1,positions_file=str(positions))
-        c['hint_positions']['positions_sha256']=sha256(positions)
     validate(c)
     scripted=torch.jit.script(PdaCudaModel(c['network']['canvas']).cuda().eval());model=tmp_path/'model.pt';scripted.save(str(model))
     root=tmp_path/'run';root.mkdir();write_native(c,root/'effective.cfg');directory=root/'selfplay/worker'
@@ -2350,14 +2363,6 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
          '--device','cuda:0','--games','6','--output',str(directory),'--run-id','forks','--attempt-id',kind,'--config-id',kind,
          '--source-id','test','--iteration','2','--worker','0','--seed','734'],text=True,capture_output=True,timeout=120)
     (root/'stdout.log').write_text(result.stdout);(root/'stderr.log').write_text(result.stderr);assert result.returncode==0,result.stderr
-    if kind=='hint':
-        positions.write_text('5 renju 1 13 2 0 5\n')
-        rejected_directory=root/'selfplay/rejected'
-        command=result.args.copy();command[command.index('--output')+1]=str(rejected_directory)
-        rejected=subprocess.run(command,text=True,capture_output=True,timeout=30)
-        assert rejected.returncode!=0 and 'Hint positions checksum mismatch' in rejected.stderr
-        assert not rejected_directory.exists()
-        positions.write_text('5 renju 1 12 2 0 5\n')
     from etazero.data import game_row_ranges
     entries=[];seen=[];games=[]
     for path in directory.glob('*.npz'):

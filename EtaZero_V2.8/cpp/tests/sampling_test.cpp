@@ -44,39 +44,32 @@ struct ReplayBoundaryFork : Evaluator {
         return e;
     }
 };
-static void check_hint_integrity() {
+static void check_hint_input() {
     auto directory=std::filesystem::temp_directory_path()/
         ("etazero_hint_test_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directory(directory);
     auto positions=directory/"positions.txt",config=directory/"effective.cfg";
-    auto write_config=[&](int probability,const std::string& hash) {
+    auto write_config=[&](int probability) {
         std::ofstream output(config);output<<"[hint_positions]\nhint_positions_prob="<<probability
             <<"\npositions_file="<<positions.string()<<"\n";
-        if(!hash.empty())output<<"positions_sha256="<<hash<<"\n";
     };
-    // hashlib.sha256(b"5 freestyle 1 0 0\n"), independent of the native digest code.
-    const std::string expected="3ea34288d64b676760e9bfb1e8d0fb419a346ed272f814cfa07c2a69bebdebcc";
     try {
+        write_config(1);Config enabled(config.string());
         {std::ofstream output(positions);output<<"5 freestyle 1 0 0\n";}
-        write_config(1,expected);Config enabled(config.string());
         auto loaded=load_hint_positions(enabled,6);
-        check(loaded.size()==1 && loaded[0].hint_action==0,"Matching hint hash accepted");
-        for(const char* content:{"5 freestyle 1 1 0\n","5 freestyle 1 0 0\r\n"}) {
-            {std::ofstream output(positions,std::ios::binary);output<<content;}
-            bool rejected=false;
-            try{load_hint_positions(enabled,6);}catch(const std::runtime_error& error){rejected=std::string(error.what()).find("checksum mismatch")!=std::string::npos;}
-            check(rejected,"Changed hint bytes rejected with unchanged configuration");
-        }
-        {std::ofstream output(positions);output<<"5 freestyle 1 0 0\n";}
-        check(load_hint_positions(enabled,6).size()==1,"Restored hint bytes accepted");
-        write_config(1,"");bool rejected=false;
-        try{load_hint_positions(Config(config.string()),6);}catch(const std::runtime_error&){rejected=true;}
-        check(rejected,"Enabled hints require recorded SHA256");
-        write_config(0,"");std::filesystem::remove(positions);
-        check(load_hint_positions(Config(config.string()),6).empty(),"Disabled hints do not require input/hash");
+        check(loaded.size()==1 && loaded[0].hint_action==0,"Valid hint input accepted");
+        {std::ofstream output(positions);output<<"5 freestyle 1 1 0\r\n";}
+        check(load_hint_positions(enabled,6)[0].hint_action==1,"Current hint input parsed without byte certification");
+        {std::ofstream output(positions);output<<"5 freestyle 1 0 1 0\n";}
+        bool rejected=false;
+        try{load_hint_positions(enabled,6);}catch(const std::runtime_error&){rejected=true;}
+        check(rejected,"Occupied hint action rejected");
+        write_config(0);std::filesystem::remove(positions);
+        check(load_hint_positions(Config(config.string()),6).empty(),"Disabled hints do not read input");
     } catch(...) {std::filesystem::remove_all(directory);throw;}
     std::filesystem::remove_all(directory);
 }
+
 int main(int argc,char** argv) {
     if(argc>1 && std::string(argv[1])=="--limits") {
         double d;int adv,pla,current,turn,hint,exact,hint_fork,force,cheap,count,clear;
@@ -110,7 +103,7 @@ int main(int argc,char** argv) {
         }
         return 0;
     }
-    check_hint_integrity();
+    check_hint_input();
     SelfplaySearchConfig c{400,70,.6,0,false,true,.9,3,350,.1};
     auto strong=selfplay_search_limits(c,{},false,{3,1},1),weak=selfplay_search_limits(c,{},false,{3,1},-1);
     check(strong.search.max_visits==711 && weak.search.max_visits==89,"PDA full round budgets");

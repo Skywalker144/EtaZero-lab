@@ -50,6 +50,89 @@ def native_selfplay(tmp_path,c):
                           capture_output=True,text=True,timeout=30)
 
 
+@pytest.mark.parametrize('field', ['cheap','reduced','playouts','full','overflow','hint','hint_playouts'])
+def test_pda_budget_bounds_fail_before_any_game(tmp_path,field):
+    c=load_config(CONFIGS/'smoke_test')
+    c['pda'].update(normal_asymmetric_playout_prob=.000001,max_asymmetric_ratio=8)
+    c['search'].update(full_search_visits=100,cheap_search_visits=30,cheap_search_probs=.5,max_playouts=2**31-1)
+    c['reduce_visits'].update(reduce_visits=True,reduced_visits_min=30)
+    if field=='cheap':c['search']['cheap_search_visits']=20
+    if field=='reduced':c['reduce_visits']['reduced_visits_min']=20
+    if field=='playouts':c['search'].update(cheap_search_probs=0,max_playouts=20);c['reduce_visits']['reduce_visits']=False
+    if field=='full':c['search'].update(full_search_visits=20,cheap_search_probs=0);c['reduce_visits']['reduce_visits']=False
+    if field=='overflow':c['search']['full_search_visits']=2**31-1
+    if field.startswith('hint'):
+        c['hint_positions'].update(hint_positions_prob=1,positions_file='unused-before-budget-validation')
+        c['search']['full_search_visits' if field=='hint' else 'max_playouts']=400_000_000
+    with pytest.raises(ValueError, match='PDA'):validate(c)
+    result=native_selfplay(tmp_path,c)
+    assert result.returncode!=0 and 'PDA' in result.stderr,result.stderr
+    assert not list((tmp_path/'raw').rglob('*.npz'))
+
+
+@pytest.mark.parametrize('ratio,probability,minimum', [(8,1,21),(1,1,2),(100,0,2)])
+def test_pda_budget_rounding_and_disabled_boundaries(tmp_path,ratio,probability,minimum):
+    c=sampling_config(False)
+    c['pda'].update(normal_asymmetric_playout_prob=probability,max_asymmetric_ratio=ratio)
+    c['environment'].update(sizes='5',size_weights='1',rules='freestyle',rule_weights='1')
+    c['parallelism'].update(game_threads=1,search_threads=1)
+    c['search'].update(full_search_visits=minimum,cheap_search_visits=minimum)
+    c['reduce_visits']['reduced_visits_min']=minimum
+    validate(c)
+    result=native_selfplay(tmp_path,c)
+    assert result.returncode==0,result.stderr
+
+
+def all_cheap_pda_config():
+    c=sampling_config(False)
+    c['environment'].update(sizes='5',size_weights='1',rules='freestyle',rule_weights='1')
+    c['parallelism'].update(game_threads=1,search_threads=1)
+    c['side_positions']['side_position_prob']=0
+    c['pda'].update(normal_asymmetric_playout_prob=1,max_asymmetric_ratio=8)
+    c['search'].update(full_search_visits=100,cheap_search_visits=30,
+                       cheap_search_probs=1,cheap_search_target_weight=.25)
+    c['reduce_visits'].update(reduce_visits=True,reduced_visits_min=2)
+    c['reanalysis'].update(use_reanalyze=False,reanalyze_prop=0,
+                           reanalyze_policy_surprise_weight=1,reanalyze_value_surprise_weight=0,
+                           reanalyze_surprise_exponent=1,reanalyze_use_outcome_targets=False)
+    return c
+
+
+@pytest.mark.parametrize('full,playouts,reanalysis', [
+    (100,2**31-1,False), (2**31-1,2**31-1,False),
+    (100,2**31-2,False), (100,2**31-1,True)])
+def test_pda_ignores_unreachable_full_and_reduced_budgets(tmp_path,full,playouts,reanalysis):
+    c=all_cheap_pda_config()
+    c['search'].update(full_search_visits=full,max_playouts=playouts)
+    c['reanalysis']['use_reanalyze']=reanalysis  # Enabled with zero proportion still cannot force full.
+    validate(c)
+    result=native_selfplay(tmp_path,c)
+    assert result.returncode==0,result.stderr
+    shards=list((tmp_path/'raw').glob('*.npz'))
+    assert shards
+    for path in shards:
+        raw=read_raw(path)
+        assert raw['cheap_search'].all() and not raw['reanalyzed'].any()
+
+
+@pytest.mark.parametrize('branch', ['ordinary','hint','reanalysis'])
+@pytest.mark.parametrize('budget', ['reduced','full'])
+def test_pda_checks_full_budgets_when_the_branch_is_reachable(tmp_path,branch,budget):
+    c=all_cheap_pda_config()
+    if budget=='full':
+        # Keep the hint's fourfold cap representable before PDA scaling.
+        c['search']['full_search_visits']=400_000_000 if branch=='hint' else 2**31-1
+        c['reduce_visits']['reduced_visits_min']=30
+    if branch=='ordinary':c['search']['cheap_search_probs']=.999999
+    if branch=='hint':
+        c['hint_positions'].update(hint_positions_prob=.000001,positions_file='unused-before-budget-validation')
+    if branch=='reanalysis':c['reanalysis'].update(use_reanalyze=True,reanalyze_prop=.000001)
+    with pytest.raises(ValueError,match='PDA'):validate(c)
+    result=native_selfplay(tmp_path,c)
+    assert result.returncode!=0 and 'PDA' in result.stderr,result.stderr
+    assert not list((tmp_path/'raw').rglob('*.npz'))
+
+
 @pytest.mark.parametrize('enabled',[False,True])
 @pytest.mark.parametrize('section,key,value',[
     ('opening','probability',-.1),('opening','probability',1.1),

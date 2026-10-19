@@ -243,8 +243,7 @@ def load_config(directory, run_dir=None):
     if hints['positions_file']:
         path=Path(hints['positions_file']);path=path if path.is_absolute() else directory/path
         hints['positions_file']=str(path.resolve())
-        if not path.is_file():raise ValueError('Missing hint positions file')
-        hints['positions_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+        if hints['hint_positions_prob'] > 0 and not path.is_file():raise ValueError('Missing hint positions file')
     validate(config)
     if run_dir is not None:
         if not str(run_dir).strip():
@@ -446,6 +445,30 @@ def validate(c):
         raise ValueError('Invalid side position probability')
     if not 0<=c['pda']['normal_asymmetric_playout_prob']<=1 or not 1<=c['pda']['max_asymmetric_ratio']<=100:
         raise ValueError('Invalid PDA probability/maximum ratio')
+    if c['pda']['normal_asymmetric_playout_prob'] > 0 and c['pda']['max_asymmetric_ratio'] > 1:
+        # Bound every attainable PCR / Reduce Visits budget before sampling a
+        # game. Positive std::round in the native path is floor(x + 0.5).
+        # KataGo makes PCR and Reduce Visits exclusive. Hints lower PCR's
+        # probability for six turns; reanalysis can explicitly force full.
+        full_possible = (search['cheap_search_probs'] < 1 or hints['hint_positions_prob'] > 0 or
+                         (ra['use_reanalyze'] and ra['reanalyze_prop'] > 0))
+        budgets = []
+        if full_possible:
+            budgets.append(search['full_search_visits'])
+            if c['reduce_visits']['reduce_visits']:
+                budgets.append(c['reduce_visits']['reduced_visits_min'])
+            if search['max_playouts'] != 2**31 - 1:
+                budgets.append(search['max_playouts'])
+        if search['cheap_search_probs'] > 0:
+            budgets.append(search['cheap_search_visits'])
+        if hints['hint_positions_prob'] > 0:
+            budgets.append(4 * search['full_search_visits'])
+            if search['max_playouts'] != 2**31 - 1:
+                budgets.append(4 * search['max_playouts'])
+        ratio = c['pda']['max_asymmetric_ratio']
+        if (math.floor(min(budgets) * 2 / (1 + ratio) + .5) < 5 or
+                math.floor(max(budgets) * 2 * ratio / (1 + ratio) + .5) > 2**31 - 1):
+            raise ValueError('PDA-scaled full/cheap/reduced/hint/playout budgets must stay in [5, int32 max]')
     if c['surprise_weighting']['policy_surprise_data_weight'] + c['surprise_weighting']['value_surprise_data_weight'] > 1:
         raise ValueError('Surprise weight fractions must sum to <= 1')
     if c["training"]["amp"] not in ("off", "float16", "bfloat16"):

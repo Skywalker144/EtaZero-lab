@@ -35,7 +35,32 @@ SelfplaySearchConfig selfplay_search_config(const Config& c) {
         c.boolean("search.clear_before_search"),c.boolean("reduce_visits.reduce_visits"),
         c.number("reduce_visits.reduce_visits_threshold"),c.integer("reduce_visits.reduce_visits_threshold_lookback"),
         c.integer("reduce_visits.reduced_visits_min"),c.number("reduce_visits.reduced_visits_weight")};
-    result.max_playouts=c.integer("search.max_playouts");validate(result);return result;
+    result.max_playouts=c.integer("search.max_playouts");validate(result);
+    const double probability=c.number("pda.normal_asymmetric_playout_prob"),ratio=c.number("pda.max_asymmetric_ratio");
+    if(!std::isfinite(probability) || probability<0 || probability>1 || !std::isfinite(ratio) || ratio<1 || ratio>100)
+        throw std::runtime_error("Invalid PDA sampling parameters");
+    if(probability>0 && ratio>1) {
+        // The two extrema cover every sampled ratio and interpolated reduction.
+        // Forks clear PDA; directly sampled hints can retain it.
+        const bool hints=c.number("hint_positions.hint_positions_prob")>0;
+        // Source PCR excludes Reduce Visits; hints lower its probability and
+        // reanalysis can force a full search even with cheap_probability == 1.
+        const bool full_possible=result.cheap_probability<1 || hints ||
+            (c.boolean("reanalysis.use_reanalyze") && c.number("reanalysis.reanalyze_prop")>0);
+        PlayoutAdvantage maximum{std::log2(ratio),1};
+        for(int player:{-1,1}) {
+            if(full_possible) {
+                selfplay_search_limits(result,{},false,maximum,player);
+                if(result.reduce_visits)selfplay_search_limits(result,std::vector<double>(result.reduce_lookback,1),false,maximum,player);
+            }
+            if(result.cheap_probability>0)selfplay_search_limits(result,{},true,maximum,player);
+            if(hints) {
+                SelfplaySearchContext hint;hint.exact_hint=true;hint.hint_action=0;
+                selfplay_search_limits(result,{},false,maximum,player,hint);
+            }
+        }
+    }
+    return result;
 }
 double cheap_search_probability(const SelfplaySearchConfig& c,const SelfplaySearchContext& context) {
     if(context.force_full || context.exact_hint)return 0;
@@ -48,7 +73,6 @@ SelfplaySearchLimits selfplay_search_limits(const SelfplaySearchConfig& c,
     bool hinted=!context.force_full && context.exact_hint;
     if(context.force_full || hinted)cheap_selected=false;
     if(hinted && context.hint_action<0)throw std::runtime_error("Exact hint lacks action");
-    validate(c);
     if((cheap_selected && c.cheap_visits>c.max_playouts) ||
        (!cheap_selected && !hinted && c.reduce_visits && c.reduced_visits_min>c.max_playouts))
         throw std::runtime_error("PCR / Reduce Visits cap exceeds explicit playout ceiling");
