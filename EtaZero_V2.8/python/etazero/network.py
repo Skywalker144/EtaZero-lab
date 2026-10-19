@@ -423,6 +423,11 @@ class InferencePolicyValueNet(nn.Module):
     def metadata(self) -> tuple[int, str]:
         return self.model.metadata()
 
+    @torch.jit.export
+    def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        policy, value, _, _ = self.model.forward_all(obs, globals)
+        return policy, value
+
     def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         policy, value, _, raw = self.model.forward_all(obs, globals)
         stdev = 0.5 * torch.nn.functional.softplus(raw.float() * 0.5)
