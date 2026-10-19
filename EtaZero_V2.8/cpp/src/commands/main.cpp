@@ -436,13 +436,7 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
     const bool hex_white=game.rule()==Rule::HEX && game.player()==-1;
     if(hex_white)obs=obs.transpose(2,3).contiguous();
     auto globals=torch::from_blob(observation.data()+INPUT_PLANES*area,{1,GLOBAL_FEATURES},torch::kFloat32).to(device);
-    auto network=model.attr("model").toModule();
-    auto metadata=model.get_method("metadata")({}).toTuple();
-    c10::IValue output;
-    if(metadata->elements().size()==4) {
-        auto hidden=network.attr("representation").toModule().forward({obs,globals});
-        output=network.attr("prediction").toModule().forward({hidden});
-    } else output=network.get_method("forward_all")({obs,globals});
+    auto output=model.get_method("raw")({obs,globals});
     auto logits=output.toTuple()->elements()[0].toTensor();
     if(logits.dim()!=3 || logits.size(0)!=1 || logits.size(1)<6 || logits.size(2)!=area)
         throw std::runtime_error("Web policy output shape mismatch");
