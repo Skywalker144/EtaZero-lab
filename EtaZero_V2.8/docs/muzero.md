@@ -98,16 +98,11 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 
 `training.png` 布局为四行两列，每轮提交后自动更新，正常停止或恢复后也会重建，也可通过 `scripts/run.sh plot --run-dir ...` 查看已提交轮次。
 
-MuZero 概览中的缓存面板使用 **Root NN invalid policy mass**：对主 policy 原始 logits 以温度 1 在实际棋盘上归一化，求已占用位置的概率质量。排除画布外位置，不混入 optimistic policy、根温度或噪声；Renju 禁手允许落子后判负，不属于此处的占用掩码。每轮按实际自对弈落子前的根等权取均值，包含 cheap/full，排除开局初始化、side 与重分析。随机冷启动及未采集轮次显示缺测。百分比纵轴从 0 开始，按测量值自动缩放。每局的 sum/count 随原始对局元数据保存，跨分片只汇总一次；统计在 CPU 根预测上完成，不增加推理或 GPU 同步。MuZero 概览全部曲线不使用 marker；缓存计数仍显示在性能图中。该均值受局长与尺寸分布影响，不单独表示棋力。
+正常训练逐 batch 记录全模型梯度范数、AMP 状态和逐展开步 loss，按 `training.log_every` 聚合写出；不额外归约 representation/dynamics/prediction 三段梯度，也不在自对弈根上重新计算非法策略概率质量。根非法策略质量和模块梯度面板在没有测量时显示缺测，不用零值代替。自动绘图和其他训练面板保持原有调度。
 
-第四行提供两项展开训练诊断：
+**Loss by unroll step** 的横轴为 0 至 K，0 是 representation 的根预测，展示最新已完成轮次与有测量轮次的算术均值。每步包含完整 heads 的带权 loss，以整个起点 batch 为分母，保留真实后续步权重、side mask 和吸收态目标；各步之和等于日志总 loss，没有乘只作用于反向的 `1/K`。
 
-- **Loss by unroll step**：横轴为 0 至 K，0 是 representation 的根预测。展示最新已完成轮次与所有有测量轮次的算术均值。每步包含该步完整 heads 的带权 loss，以整个起点 batch 为分母，保留真实后续步权重、side mask 和吸收态目标；各步之和等于日志总 loss。这里没有乘只作用于反向传播的 `1/K`，曲线不是单步梯度贡献。
-- **Gradient norms by module**：以累计训练样本量展示 representation h、dynamics g、prediction f，横轴刻度采用紧凑科学计数法，顶部按轮末记录标注累计运行时间（小时）。采用实际反传（已包含 hidden/loss 梯度缩放）经 AMP 反缩放后、裁剪前的参数梯度 L2 范数；总和反传时除以 batch size，均值反传时直接记录，与已有 Network 梯度图保持平均 loss 口径。三段没有共享参数，每次更新的三个范数平方和等于总范数平方；轮次均值不再要求满足该等式。side-only batch 的 dynamics 没有梯度，记录真实零值。
-
-loss 均值包含 AMP 跳步消费，梯度均值只采用成功更新；原始 overflow 仍保存在日志。模块梯度只在本轮首批、`optimizer.norm_interval` 的整倍数批及末批测量，跳步不进入聚合；更新日志可以汇总多个 batch，`grad_norms` 的有无取决于该日志区间是否包含成功且有测量的 batch，不能只由末批的 `amp_skipped` 判断。所有曲线读取已提交逐轮指标；轮内恢复同时恢复指标累积和，以最终消费游标的 `round_metrics` 汇总，不重复计入重算更新。诊断只读取并 detach 已算出的 loss 和梯度，不额外反传或改变优化器更新。旧日志未记录这两类指标时显示缺测，不能事后从总 loss 或总梯度还原。
-
-全模型范数和逐展开步 loss 逐 batch 采集，按 `training.log_every` 聚合写出；三个模块范数仅在首 batch、`optimizer.norm_interval` 时点和轮末采集。模块曲线是这些成功更新的采样均值，缺测 batch 不进入分母；与历史逐 batch 采集的模块范数均值口径不同。采集频率不改变裁剪、范数衰减策略或训练时钟。
+loss 均值包含 AMP 跳步消费，全模型梯度均值只采用成功更新；原始 overflow 保存在日志。轮内恢复同时恢复指标累积和，以最终消费游标的 `round_metrics` 汇总，避免重复计入重算更新。非有限 loss/梯度检查、裁剪及优化器范数衰减策略不依赖分模块诊断。
 
 ## 验证入口与限制
 
