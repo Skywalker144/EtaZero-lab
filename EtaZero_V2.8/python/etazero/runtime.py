@@ -1,11 +1,9 @@
 """Round controller: plan -> selfplay -> snapshot -> single-pass training -> publication."""
 import datetime
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
 import fcntl
 import json
 import math
-import multiprocessing
 import os
 from pathlib import Path
 import platform
@@ -21,7 +19,7 @@ from .compiler import WorkTimer, compilation_enabled
 from .data import Catalog
 from .native import NativeWorker
 from .export import export_model, verify_export
-from .shuffle import build_snapshot, desired_window, prune_derived, view_key
+from .shuffle import build_snapshot, desired_window, prune_derived, view_key, shuffle_pool
 from .storage import atomic_write, load_json, save_json, sha256, sync_directory
 from .training import initialize, train_iteration, prune_checkpoints
 from .build import verify_build
@@ -296,7 +294,7 @@ class Controller:
             (root/name).mkdir(parents=True,exist_ok=True)
         if state["checkpoint"] is None:
             origin=info["weights_initialization"]
-            if origin and sha256(origin["path"])!=origin["sha256"]:
+            if resume and origin and sha256(origin["path"])!=origin["sha256"]:
                 raise ValueError("Weights initialization source changed")
             state["checkpoint"]=initialize(root,c,origin["path"] if origin else None);self.state(state)
         self.prune_checkpoints()
@@ -488,12 +486,12 @@ class Controller:
                         manifest['recipe']['shuffle'] == self.config['shuffle']):
                     return manifest['id']
         if self.shuffle_pool is None:
-            self.shuffle_pool=ProcessPoolExecutor(max_workers=self.config['shuffle']['workers'],
-                                                 mp_context=multiprocessing.get_context('spawn'))
+            self.shuffle_pool=shuffle_pool(self.config['shuffle']['workers'])
         from .shuffle import desired_window
         counts=self.catalog.replay_counts(self.config['replay']['min_rows'])
         desired=desired_window(counts['usable_rows'],self.config['replay'])
-        return build_snapshot(self.root,self.current_iteration,self.catalog.entries(desired),self.config,
+        entries = self.catalog.entries(desired, include_game_rows=not self.config['training']['skip_validation'])
+        return build_snapshot(self.root,self.current_iteration,entries,self.config,
                               pool=self.shuffle_pool,counts=counts)
 
     def produce(self,plan):
