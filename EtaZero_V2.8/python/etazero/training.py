@@ -284,7 +284,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
         muzero = config['agent']['algorithm'] == 'muzero'
         forward=torch.compile(forward,fullgraph=not muzero,dynamic=muzero,options=options)
     optimizer = optimizer_for(model,config); optimizer.load_state_dict(checkpoint["optimizer"])
-    optimization = optimization_for(model, config, optimizer, checkpoint['optimization'])
+    optimization = optimization_for(model, config, optimizer, checkpoint['optimization'], round_steps=plan['train_steps'])
     scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
     scaler.load_state_dict(checkpoint["scaler"])
     restore_rng(checkpoint["rng"])
@@ -330,7 +330,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                 optimization.begin_subepoch()
             if optimization.subepoch_batches==0:
                 log('subepoch_start',iteration=iteration,subepoch=optimization.subepoch,
-                    consumed_step=step,end_step=ends[optimization.subepoch],lookahead_counter=optimization.counter)
+                    consumed_step=step,end_step=ends[optimization.subepoch],lookahead_counter=optimization.counter,
+                    lookahead_k=getattr(optimization, 'lookahead_k', None))
             if prefetch:
                 tensors,consumed_state = prefetch.next(prefetch_next=step+1<plan["train_steps"])
             else:
