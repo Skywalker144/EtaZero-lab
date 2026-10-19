@@ -8,7 +8,7 @@ checkpointed RNG, while absent side continuations are fully masked.
 import math
 import numpy as np
 
-from ..data import metadata, alphazero_training_view, trajectory_td_targets, TRAIN_TARGETS, TRAIN_POLICY_TARGETS
+from ..data import metadata, alphazero_training_view, full_trajectory_td, TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 from ..schema import PLANES, GLOBALS
 
 TARGETS = TRAIN_TARGETS
@@ -36,7 +36,8 @@ def validate_trajectory(a):
 
 
 def training_view(a, targets=TARGETS):
-    root = alphazero_training_view(a, targets)
+    td = full_trajectory_td(a) if 'td_value' in targets else None
+    root = alphazero_training_view(a, targets, td=td)
     m = metadata(a); k = m['unroll_steps']; n = len(root['value']); area = m['canvas'] ** 2
     result = {key: root[key] for key in ('obs', 'globals')}
     for key in targets:
@@ -50,16 +51,12 @@ def training_view(a, targets=TARGETS):
     result['step_weights'][:, 0] = result['sequence_mask'][:, 0] = 1
     # The writer stores complete games even when a shard contains only a span
     # of their repeated start rows. Construct the same ordering as AlphaZero.
-    starts = []; td = {}
-    for g, size in enumerate(a['sizes']):
-        lo, hi = a['game_offsets'][g:g+2]; ol = a['observation_offsets'][g]
+    starts = []
+    for g in range(len(a['sizes'])):
+        lo, hi = a['game_offsets'][g:g+2]
         starts.extend((g, int(t)) for t in np.repeat(np.arange(lo, hi), a['row_repeats'][lo:hi]))
         side_count = int(a['side_row_repeats'][a['side_game_indices'] == g].sum())
         starts.extend((g, -1) for _ in range(side_count))
-        winner = a['winners'][g]
-        terminal = np.array([winner == 1, winner == 0, winner == -1], np.float64)
-        if 'td_value' in targets:
-            td[g] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(size)**2)
     starts = starts[m['row_begin']:m['row_begin'] + n]
     if len(starts) != n:
         raise ValueError('MuZero start-row ordering mismatch')
@@ -104,7 +101,7 @@ def training_view(a, targets=TARGETS):
             gate = not a['reanalyzed'][current] or bool(a['reanalysis_used_outcome'][current])
             if 'td_value' in targets:
                 result['full_game_weight'][row, step] = gate
-                result['td_value'][row, step] = td[g][current-lo]
+                result['td_value'][row, step] = td[current]
             if 'opponent_policy' in targets and current+1 < hi and gate:
                 result['opponent_policy'][row, step] = a['trajectory_policy'][current+1]
                 result['opponent_policy_weight'][row, step] = 1
