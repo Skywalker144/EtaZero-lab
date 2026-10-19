@@ -106,7 +106,7 @@ def test_invalid_game_measurements_are_rejected(total, count):
 
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
-def test_cuda_invalid_mass_pipeline_and_resume(tmp_path):
+def test_cuda_pipeline_skips_optional_diagnostics_and_resumes(tmp_path):
     import torch
     from etazero.config import validate
     from etazero.plotting import run_history
@@ -124,7 +124,6 @@ def test_cuda_invalid_mass_pipeline_and_resume(tmp_path):
     validate(config)
     root = tmp_path/'run'
     state = run_training(root, config, ROOT/'build/etazero', max_iteration=3)
-    totals = {}
     seen = set()
     cheap = reanalyzed = sides = 0
     files = {path: sha256(path) for path in (root/'selfplay').rglob('*.npz')}
@@ -139,32 +138,21 @@ def test_cuda_invalid_mass_pipeline_and_resume(tmp_path):
             count = meta['root_policy_invalid_mass_count'][i]
             total = meta['root_policy_invalid_mass_sum'][i]
             lo, hi = raw['game_offsets'][i:i+2]
-            if meta['model_id'].startswith('random:'):
-                assert count == total == 0
-            else:
-                assert count == hi-lo-raw['opening_moves'][i]
-                assert 0 <= total <= count
-                sums = totals.setdefault(meta['iteration_id'], [0., 0])
-                sums[0] += total
-                sums[1] += count
+            assert count == total == 0
+            if not meta['model_id'].startswith('random:'):
                 cheap += raw['cheap_search'][lo:hi].sum()
                 reanalyzed += raw['reanalyzed'][lo:hi].sum()
                 sides += np.count_nonzero(raw['side_game_indices'] == i)
     assert cheap and reanalyzed and sides
-    assert len(totals) == 2
     history = run_history(root)
     for row in history:
-        if row['iteration'] in totals:
-            total, count = totals[row['iteration']]
-            assert row['root_policy_invalid_mass_count'] == count
-            assert row['root_policy_invalid_mass'] == pytest.approx(total/count)
-        else:
-            assert 'root_policy_invalid_mass' not in row
+        assert 'root_policy_invalid_mass' not in row
+        assert 'queue_wait_us' not in row
     assert run_training(root, config, ROOT/'build/etazero', resume=True, max_iteration=3) == state
     assert all(sha256(path) == digest for path, digest in files.items())
     rebuilt = Catalog(root, state['run_id'], '')
     try:
-        for iteration, (total, count) in totals.items():
-            assert rebuilt.statistics(iteration)['root_policy_invalid_mass'] == pytest.approx(total/count)
+        for iteration in range(state['iteration']):
+            assert 'root_policy_invalid_mass' not in rebuilt.statistics(iteration)
     finally:
         rebuilt.close()
