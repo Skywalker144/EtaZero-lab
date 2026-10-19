@@ -468,7 +468,7 @@ def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
     hashes={p.name:sha256(p) for p in (snapshot/'data').glob('*.npz')}
     # Cache hits must not invoke trajectory decoding/validation again.
     with monkeypatch.context() as patch:
-        patch.setattr(shuffle,'read_raw',lambda *a:(_ for _ in ()).throw(AssertionError('revalidated')))
+        patch.setattr(shuffle,'open_raw',lambda *a:(_ for _ in ()).throw(AssertionError('revalidated')))
         view=shuffle._source_view(path,view_key(entries[0],targets),tmp_path/'.internal/training_views',targets)
         assert len(view['value'])==9
     prune_derived(tmp_path,[identity],set())
