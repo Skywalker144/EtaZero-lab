@@ -6,19 +6,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(SCHEMA_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/etazero/schema.h)
 add_custom_command(OUTPUT ${SCHEMA_HEADER}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../python/etazero/schema.py ${SCHEMA_HEADER}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../python/etazero/schema.py VERBATIM)
 add_library(etazero_core src/game/rules.cpp src/search/search.cpp src/search/search_math.cpp src/search/subtree_value_bias.cpp src/search/gumbel.cpp src/search/gumbel_search.cpp src/inference/batcher.cpp src/selfplay/record.cpp src/selfplay/opening.cpp src/selfplay/search_limits.cpp src/selfplay/sampling.cpp src/inference/random_evaluator.cpp ${SCHEMA_HEADER})
 target_include_directories(etazero_core PUBLIC include ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(etazero_core PUBLIC Threads::Threads ZLIB::ZLIB OpenSSL::Crypto)
+target_link_libraries(etazero_core PUBLIC Threads::Threads ZLIB::ZLIB)
 target_compile_options(etazero_core PRIVATE -Wall -Wextra -Wpedantic)
 target_sources(etazero_core PRIVATE src/search/analysis.cpp)
 add_library(etazero_muzero src/muzero/batcher.cpp src/muzero/search.cpp src/muzero/gumbel_search.cpp)
 target_link_libraries(etazero_muzero PUBLIC etazero_core)
 option(ETAZERO_WITH_TORCH "Build native model inference and commands" ON)
+# Runtime records source snapshots and binary identity; this is only capability metadata.
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/build_manifest.json"
+    CONTENT "{\"with_torch\": $<IF:$<BOOL:${ETAZERO_WITH_TORCH}>,true,false>}\n")
 if(ETAZERO_WITH_TORCH)
     find_package(Torch REQUIRED)
     separate_arguments(TORCH_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
