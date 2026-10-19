@@ -11,7 +11,7 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import ROOT, load_config, resume_config, validate
-from etazero.data import Catalog, read_raw, validate_raw, training_view, training_targets
+from etazero.data import Catalog, open_raw, read_raw, validate_raw, training_view, training_targets, TRAIN_TARGETS
 from etazero.muzero.data import replay_weight_mean
 from etazero.reader import BatchReader
 from etazero.runtime import Controller, run_training
@@ -37,9 +37,122 @@ def test_catalog_materializes_each_npz_member_once(tmp_path, monkeypatch):
     try:
         catalog.scan({1: 'model'})
         assert counts and set(counts.values()) == {1}
+        assert not {'observations', 'globals', 'policies', 'q_values', 'q_visits'} & counts.keys()
         first = counts.copy()
         catalog.scan({1: 'model'})
         assert counts == first and catalog.counts() == (9, 1)
+    finally:
+        catalog.close()
+
+
+def test_catalog_holdout_reuses_game_spans_without_reopening_raw(tmp_path, monkeypatch):
+    from etazero.shuffle import split_sources, build_snapshot
+    from test_replay import holdout_entries
+    entries = holdout_entries(tmp_path, copies=2)
+    catalog = Catalog(tmp_path, 'test', 'config')
+    try:
+        catalog.scan({1: 'model'})
+        indexed = catalog.entries(include_game_rows=True)
+    finally:
+        catalog.close()
+    # Compare both partitions and exact row ranges against the uncatalogued path.
+    uncatalogued = [{k:v for k,v in e.items() if k != 'game_rows'} for e in indexed]
+    expected = split_sources(tmp_path, uncatalogued)
+    config = load_config(CONFIGS/'smoke_test')
+    config['training']['skip_validation'] = False
+    config['replay']['min_rows'] = sum(e['metadata']['rows'] for e in entries)
+    class SerialPool:
+        map = staticmethod(map)
+    before = build_snapshot(tmp_path, 1, uncatalogued, config, pool=SerialPool())
+    monkeypatch.setattr('etazero.shuffle.open_raw', lambda _: pytest.fail('Holdout must reuse catalog spans'))
+    for _ in range(2):
+        actual = split_sources(tmp_path, indexed)
+        for want, got in zip(expected, actual):
+            assert want == [{k:v for k,v in e.items() if k != 'game_rows'} for e in got]
+    assert sum(len(part) for part in actual) == len(entries)
+    after = build_snapshot(tmp_path, 1, indexed, config, pool=SerialPool())
+    def payloads(snapshot):
+        directory = tmp_path/'snapshots'/snapshot/'data'
+        return {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob('*.npz')}
+    assert payloads(before) == payloads(after)
+
+
+def test_muzero_shares_full_trajectory_td_between_root_and_unroll(monkeypatch):
+    import etazero.data as data
+    raw, meta = winning_record()
+    meta.update(algorithm='muzero', unroll_steps=3)
+    raw['metadata'] = np.frombuffer(json.dumps(meta).encode(), np.uint8)
+    for key in ('policy', 'q_values', 'q_visits'):
+        raw['trajectory_'+key] = raw['policies' if key == 'policy' else key].copy()
+    original = data.trajectory_td_targets
+    calls = []
+    def counted(*args):
+        result = original(*args)
+        calls.append(result)
+        return result
+    monkeypatch.setattr(data, 'trajectory_td_targets', counted)
+    view = training_view(raw)
+    assert len(calls) == 1
+    for row in range(meta['plies']):
+        for step in range(4):
+            if row+step < meta['plies']:
+                np.testing.assert_array_equal(view['td_value'][row,step], calls[0][row+step])
+            else:
+                player = raw['players'][row] * (-1 if step % 2 else 1)
+                expected = np.tile([player == 1, False, player == -1], (3,1))
+                np.testing.assert_array_equal(view['td_value'][row,step], expected)
+    calls.clear()
+    training_view(raw, ('policy', 'value'))
+    assert not calls
+
+
+@pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
+@pytest.mark.parametrize('targets', [TRAIN_TARGETS, ('policy', 'value')])
+def test_selective_decode_preserves_training_arrays(tmp_path, monkeypatch, algorithm, targets):
+    raw, meta = winning_record()
+    if algorithm == 'muzero':
+        meta.update(algorithm='muzero', unroll_steps=3)
+        raw['metadata'] = np.frombuffer(json.dumps(meta).encode(), np.uint8)
+        for key in ('policy', 'q_values', 'q_visits'):
+            raw['trajectory_' + key] = raw['policies' if key == 'policy' else key].copy()
+    path = tmp_path/'raw.npz'
+    save_npz(path, raw)
+    expected = training_view(read_raw(path), targets)
+    from numpy.lib.npyio import NpzFile
+    counts = Counter()
+    getitem = NpzFile.__getitem__
+    def counted(self, key):
+        counts[key] += 1
+        return getitem(self, key)
+    monkeypatch.setattr(NpzFile, '__getitem__', counted)
+    with open_raw(path) as arrays:
+        actual = training_view(arrays, targets)
+    assert actual.keys() == expected.keys()
+    for key in expected:
+        np.testing.assert_array_equal(actual[key], expected[key])
+    assert set(counts.values()) == {1}
+    if 'q_values' not in targets:
+        assert not {'q_values', 'q_visits', 'side_q_values', 'side_q_visits',
+                    'trajectory_q_values', 'trajectory_q_visits'} & counts.keys()
+
+
+def test_catalog_discards_old_digest_without_losing_resume_rows(tmp_path):
+    raw, _ = winning_record()
+    save_npz(tmp_path/'selfplay/game.npz', raw)
+    catalog = Catalog(tmp_path, 'test', 'config')
+    try:
+        catalog.scan({1: 'model'})
+        expected = catalog.entries()
+        with catalog.db:
+            catalog.db.execute('ALTER TABLE games ADD COLUMN fingerprint TEXT')
+            catalog.db.execute("UPDATE games SET fingerprint='obsolete'")
+    finally:
+        catalog.close()
+    catalog = Catalog(tmp_path, 'test', 'config')
+    try:
+        catalog.scan({1: 'model'})
+        assert catalog.counts() == (9, 1) and catalog.entries() == expected
+        assert {row[1] for row in catalog.db.execute('PRAGMA table_info(games)')} == {'id', 'rows', 'total'}
     finally:
         catalog.close()
 
