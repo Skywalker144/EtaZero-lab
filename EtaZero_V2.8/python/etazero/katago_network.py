@@ -125,6 +125,10 @@ class SearchOutputs(nn.Module):
         return (policy[:, 0].type_as(value), value, policy[:, 5].type_as(value),
                 0.5 * torch.nn.functional.softplus(raw.float() * 0.5))
 
+    def raw(self, obs, globals):
+        policy, value, _, _ = self.model.forward_all(obs, globals)
+        return policy.type_as(value), value
+
 
 class SerializedSearch(nn.Module):
     def __init__(self, graph, canvas):
@@ -134,6 +138,10 @@ class SerializedSearch(nn.Module):
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:
         return self.canvas, self.contract
+
+    @torch.jit.export
+    def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.graph.raw(obs, globals)
 
     def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.graph(obs, globals)
@@ -196,18 +204,20 @@ def inference_network(model):
     # Source uses Python shared-data objects for registers and GAB/TAB. Trace
     # their tensor operations at fixed canvas; batch dimensions remain dynamic.
     with torch.no_grad():
-        graph = torch.jit.trace(SearchOutputs(result).eval(), (obs, globals), check_trace=False)
+        graph = torch.jit.trace_module(SearchOutputs(result).eval(),
+                                       {'forward': (obs, globals), 'raw': (obs, globals)}, check_trace=False)
     # Tracing records .device as the tracing device. Recover a tensor-derived
     # device so the saved graph can be moved to CPU or another CUDA device.
-    forward_graph = graph.forward.graph
-    torch._C._jit_pass_inline(forward_graph)
-    spatial = list(forward_graph.inputs())[1]
-    device_node = forward_graph.create('prim::device', [spatial])
-    device_node.output().setType(torch._C.DeviceObjType.get())
-    device_node.insertBefore(next(forward_graph.nodes()))
-    for node in list(forward_graph.nodes()):
-        if node.kind() == 'prim::Constant' and node.output().type().kind() == 'DeviceObjType':
-            node.output().replaceAllUsesWith(device_node.output())
-            node.destroy()
-    torch._C._jit_pass_lint(forward_graph)
+    for method in (graph.forward, graph.raw):
+        forward_graph = method.graph
+        torch._C._jit_pass_inline(forward_graph)
+        spatial = list(forward_graph.inputs())[1]
+        device_node = forward_graph.create('prim::device', [spatial])
+        device_node.output().setType(torch._C.DeviceObjType.get())
+        device_node.insertBefore(next(forward_graph.nodes()))
+        for node in list(forward_graph.nodes()):
+            if node.kind() == 'prim::Constant' and node.output().type().kind() == 'DeviceObjType':
+                node.output().replaceAllUsesWith(device_node.output())
+                node.destroy()
+        torch._C._jit_pass_lint(forward_graph)
     return SerializedSearch(graph, result.canvas).eval()
