@@ -36,12 +36,13 @@ std::vector<float> transform_input(const std::vector<float>& obs,const std::vect
 }
 void restore_output(Evaluation& output,const std::vector<int>& mapping) {
     if(output.logits.size()!=mapping.size())throw std::runtime_error("Invalid symmetry policy shape");
-    auto logits=output.logits;
-    for(size_t a=0;a<mapping.size();++a)output.logits[a]=logits[mapping[a]];
+    thread_local std::vector<double> scratch;
+    scratch=output.logits;
+    for(size_t a=0;a<mapping.size();++a)output.logits[a]=scratch[mapping[a]];
     if(output.has_auxiliary) {
         if(output.optimistic_logits.size()!=mapping.size())throw std::runtime_error("Invalid optimistic symmetry shape");
-        auto optimistic=output.optimistic_logits;
-        for(size_t a=0;a<mapping.size();++a)output.optimistic_logits[a]=optimistic[mapping[a]];
+        scratch=output.optimistic_logits;
+        for(size_t a=0;a<mapping.size();++a)output.optimistic_logits[a]=scratch[mapping[a]];
     }
 }
 std::vector<std::unique_ptr<Backend>> single(std::unique_ptr<Backend> backend) {
@@ -91,7 +92,7 @@ void BatchEvaluator::drain() {
     if(failure_)std::rethrow_exception(failure_);
 }
 void BatchEvaluator::reset_stats() {
-    drain();requests=0;batches=0;max_observed_batch=0;wait_microseconds=0;cache_hits=0;submitted=0;
+    drain();requests=0;batches=0;max_observed_batch=0;cache_hits=0;submitted=0;
     std::fill(rows_by_server.begin(),rows_by_server.end(),0);
 }
 Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
@@ -108,7 +109,7 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     // One thread-local request replaces per-query shared_ptr/promise allocations.
     thread_local Request local;
     Request* request=&local;
-    ++submitted;
+    submitted.fetch_add(1,std::memory_order_relaxed);
     request->use_cache=!skip_cache && !cache_.empty();request->symmetry=symmetry;
     if (request->use_cache) {
         // Pack binary spatial planes and append exact global float bytes. The
@@ -141,7 +142,7 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
             { std::lock_guard<std::mutex> lock(mutex_);
               if (failure_) std::rethrow_exception(failure_);
               if (closing_) throw std::runtime_error("Inference service is closing"); }
-            ++cache_hits;return *found;
+            cache_hits.fetch_add(1,std::memory_order_relaxed);return *found;
         }
     }
     if(randomize) {
@@ -156,7 +157,6 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
         transformed[p*area+mapping[a]]=obs[p*area+a];
     std::copy(obs.begin()+INPUT_PLANES*area,obs.end(),transformed.begin()+INPUT_PLANES*area);
     request->owner=this;request->observation=&transformed;
-    request->submitted = std::chrono::steady_clock::now();
     {std::lock_guard<std::mutex> lock(request->mutex);request->done=false;request->error=nullptr;}
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -196,11 +196,9 @@ void BatchEvaluator::serve(size_t index) {
         }
         changed_.notify_all();
         try {
-            auto now = std::chrono::steady_clock::now();
             for (const auto& r : batch) {
                 if(r->owner!=this || r->observation->size()!=input_size_)
                     throw std::runtime_error("Mixed inference contract/model in batch");
-                wait_microseconds.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(now-r->submitted).count());
                 inputs.push_back(r->observation);
             }
             auto outputs = backends_[index]->evaluate(inputs);
@@ -217,10 +215,10 @@ void BatchEvaluator::serve(size_t index) {
                 throw std::runtime_error("Backend auxiliary output violates capability contract");
             for(size_t i=0;i<outputs.size();++i)
                 restore_output(outputs[i],mappings_[batch[i]->symmetry]);
-            requests.fetch_add(batch.size()); batches.fetch_add(1);
+            requests.fetch_add(batch.size(),std::memory_order_relaxed); batches.fetch_add(1,std::memory_order_relaxed);
             rows_by_server[index]+=batch.size();
-            uint64_t previous=max_observed_batch.load();
-            while (previous<batch.size() && !max_observed_batch.compare_exchange_weak(previous,batch.size())) {}
+            uint64_t previous=max_observed_batch.load(std::memory_order_relaxed);
+            while (previous<batch.size() && !max_observed_batch.compare_exchange_weak(previous,batch.size(),std::memory_order_relaxed)) {}
             for (size_t i = 0; i < batch.size(); ++i) {
                 if (batch[i]->use_cache) {
                     auto& r=*batch[i];

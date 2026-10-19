@@ -39,7 +39,7 @@ public:
 };
 class InferenceService : public Evaluator {
 public:
-    std::atomic<uint64_t> requests{0}, batches{0}, max_observed_batch{0}, wait_microseconds{0};
+    std::atomic<uint64_t> requests{0}, batches{0}, max_observed_batch{0};
     std::atomic<uint64_t> cache_hits{0}, submitted{0};
     std::vector<uint64_t> rows_by_server;
     virtual void finish() = 0;
@@ -66,7 +66,6 @@ class BatchEvaluator final : public InferenceService {
         void fail(std::exception_ptr value) {
             std::lock_guard<std::mutex> lock(mutex);error=value;done=true;changed.notify_one();
         }
-        std::chrono::steady_clock::time_point submitted;
     };
     std::vector<std::unique_ptr<Backend>> backends_;
     struct CacheEntry { std::string key; std::shared_ptr<const Evaluation> output; };

@@ -206,7 +206,7 @@ void moves(Game& g, const std::string& text) {
 }
 void stats(InferenceService& e) {
     std::cout << "{\"event\":\"inference\",\"requests\":" << e.requests << ",\"batches\":" << e.batches
-              << ",\"max_batch\":" << e.max_observed_batch << ",\"queue_wait_us\":" << e.wait_microseconds
+              << ",\"max_batch\":" << e.max_observed_batch
               << ",\"submitted\":" << e.submitted << ",\"cache_hits\":" << e.cache_hits << ",\"rows_by_server\":";
     array(std::cout,e.rows_by_server);std::cout<<"}"<<std::endl;
 }
@@ -273,14 +273,9 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                     bool cheap=cheap_probability>0 && std::bernoulli_distribution(cheap_probability)(rng);
                     auto limits=selfplay_search_limits(search_config,historical_values,cheap,advantage,game.player(),context);
                     limits.search.should_stop=[&]{return stop_requested.load() || failure.load();};
-                    limits.search.collect_root_policy_invalid_mass=!random && source.unroll_steps>0;
                     auto result = search.run(game,temp,limits.search);
                     if(stop_requested || failure)break;
                     if(result.action<0)throw std::runtime_error("Selfplay search has no move: zero playout budget");
-                    if(limits.search.collect_root_policy_invalid_mass) {
-                        record.root_policy_invalid_mass_sum+=result.root_policy_invalid_mass;
-                        ++record.root_policy_invalid_mass_count;
-                    }
                     Step step{game.player(),result.action,result.simulations,static_cast<float>(temp),0,
                               game.observation(),std::move(result.policy),std::move(result.visits)};
                     step.cheap_search=limits.cheap_search;step.target_weight=limits.target_weight;

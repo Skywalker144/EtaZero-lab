@@ -54,7 +54,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
         std::ostringstream row;row<<'{';
         if(!single_pair)row<<"\"type\":\"model_stats\",\"model\":"<<quote(models[index].id)<<',';
         row<<"\"requests\":"<<service.requests.load()<<",\"batches\":"<<service.batches.load()
-            <<",\"max_batch\":"<<service.max_observed_batch.load()<<",\"queue_wait_us\":"<<service.wait_microseconds.load()
+            <<",\"max_batch\":"<<service.max_observed_batch.load()
             <<",\"submitted\":"<<service.submitted.load()<<",\"cache_hits\":"<<service.cache_hits.load()<<'}';
         if(single_pair)pair_stats[index]=row.str();else emit(row.str());
         resident.erase(index);

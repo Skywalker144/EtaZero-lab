@@ -101,7 +101,6 @@ def request(worker, directory, model, model_id, games, seed, device, timeout, ev
                   rows_per_second=rows/seconds, simulations_per_second=simulations/seconds,
                   cpu_cores_used=(cpu_end-cpu_start)/seconds,
                   mean_batch=inference['requests']/max(1, inference['batches']),
-                  mean_queue_us=inference['queue_wait_us']/max(1, inference['requests']),
                   cache_hit_rate=inference['cache_hits']/max(1, inference['submitted']),
                   inference=inference, resource_samples=samples)
     for key in ('gpu_percent', 'gpu_power_w'):
