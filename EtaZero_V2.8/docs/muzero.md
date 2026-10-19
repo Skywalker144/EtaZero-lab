@@ -98,7 +98,7 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 
 `training.png` 布局为四行两列，每轮提交后自动更新，正常停止或恢复后也会重建，也可通过 `scripts/run.sh plot --run-dir ...` 查看已提交轮次。
 
-正常训练逐 batch 记录全模型梯度范数、AMP 状态和逐展开步 loss，按 `training.log_every` 聚合写出；不额外归约 representation/dynamics/prediction 三段梯度，也不在自对弈根上重新计算非法策略概率质量。根非法策略质量和模块梯度面板在没有测量时显示缺测，不用零值代替。自动绘图和其他训练面板保持原有调度。
+正常训练逐 batch 记录全模型梯度范数、AMP 状态和逐展开步 loss，按 `training.log_every` 聚合写出；不额外归约 representation/dynamics/prediction 三段梯度，也不在自对弈根上重新计算非法策略概率质量。根非法策略质量面板在没有测量时显示缺测，不用零值代替；不设置模块梯度面板。自动绘图和其他训练面板保持原有调度。
 
 **Loss by unroll step** 的横轴为 0 至 K，0 是 representation 的根预测，展示最新已完成轮次与有测量轮次的算术均值。每步包含完整 heads 的带权 loss，以整个起点 batch 为分母，保留真实后续步权重、side mask 和吸收态目标；各步之和等于日志总 loss，没有乘只作用于反向的 `1/K`。
 
