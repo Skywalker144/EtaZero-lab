@@ -90,6 +90,46 @@ def id_snapshot(root,counts,validation=False):
     return snapshot
 
 
+def test_round_budget_limits_prefetch_and_preserves_consumed_cursor(tmp_path, monkeypatch):
+    snapshot=id_snapshot(tmp_path,[5,9,8])
+    reader=BatchReader(snapshot,4,8,17,shuffle_files=False,max_batches=3)
+    loaded=[];original=reader._load
+    def load(index):
+        loaded.append(index)
+        return original(index)
+    monkeypatch.setattr(reader,'_load',load)
+    prepared=BatchPrefetcher(reader,4)
+    try:
+        first,cursor=prepared.next()
+        expected=[prepared.next()[0] for _ in range(2)]
+        with pytest.raises(StopIteration):prepared.next()
+        assert first['globals'][:,5].tolist()==[0,1,2,3]
+        assert cursor['index']==0 and cursor['offset']==4
+        resumed=BatchReader(snapshot,4,8,999,cursor,shuffle_files=False,max_batches=2)
+        try:
+            for batch in expected:
+                actual=resumed.next()
+                for key in batch:np.testing.assert_array_equal(actual[key],batch[key])
+            with pytest.raises(StopIteration):resumed.next()
+        finally:resumed.close()
+    finally:prepared.close();reader.close()
+    assert sorted(loaded)==[0,1]
+
+
+def test_zero_and_excess_round_batch_budgets(tmp_path, monkeypatch):
+    snapshot=id_snapshot(tmp_path,[8])
+    reader=BatchReader(snapshot,4,2,17,max_batches=0)
+    monkeypatch.setattr(reader,'_load',lambda _:pytest.fail('Zero budget must not read files'))
+    try:
+        with pytest.raises(StopIteration):reader.next()
+        assert not reader.pending
+    finally:reader.close()
+    with pytest.raises(ValueError,match='insufficient complete file batches'):
+        BatchReader(snapshot,4,2,17,max_batches=3)
+    with pytest.raises(ValueError,match='nonnegative'):
+        BatchReader(snapshot,4,2,17,max_batches=-1)
+
+
 def test_complete_file_prefixes_no_repeat_exhaustion_resume_and_prefetch(tmp_path):
     counts=[0,1,3,4,5,9,17];snapshot=id_snapshot(tmp_path,counts)
     expected=[[i*100+j for j in range(start,start+4)] for i,n in enumerate(counts) for start in range(0,n//4*4,4)]
