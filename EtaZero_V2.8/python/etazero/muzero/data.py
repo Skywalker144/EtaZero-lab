@@ -147,9 +147,13 @@ def prepare_batch(batch, mean_weight, rng):
     batch['step_weights'] = batch['step_weights'].copy()
     batch['step_weights'][:, 1:] = np.where(batch['absorbing'][:, 1:], 1., batch['step_weights'][:, 1:] / mean_weight)
     batch['actions'] = batch['actions'].copy()
-    for row in range(len(batch['actions'])):
+    absorbing = batch['absorbing'][:, :-1]
+    for row in np.flatnonzero(absorbing.any(axis=1)):
         actions = np.flatnonzero(batch['obs'][row, 0].reshape(-1))
-        for step in np.flatnonzero(batch['absorbing'][row, :-1]):
+        for step in np.flatnonzero(absorbing[row]):
             batch['actions'][row, step] = actions[rng.randrange(len(actions))]
     del batch['absorbing']
+    # The mask is known on CPU; avoid CUDA nonzero and its host synchronization
+    # inside forward. Keep the original row order and exclude side rows from BN.
+    batch['recurrent_indices'] = np.flatnonzero(batch.pop('sequence_mask')[:, 1]).astype(np.int64)
     return batch

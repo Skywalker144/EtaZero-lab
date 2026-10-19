@@ -22,20 +22,17 @@ def assert_diagnostics(root, config):
     from etazero.plotting import run_history, training_figure
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
     updates=[e for e in events if e['event']=='update']
-    budgets={e['iteration']:e['train_steps'] for e in events if e['event']=='training_budget'}
     assert updates
     for row in updates:
         assert len(row['step_losses']) == config['unroll']['steps']+1
         assert sum(row['step_losses']) == pytest.approx(row['loss'],rel=2e-6)
-        # These fixtures log each batch. Overflow losses are retained, but
-        # skipped gradients never contribute to the diagnostic averages.
-        measured = (row['step']==1 or row['step']%config['optimizer']['norm_interval']==0 or row['step']==budgets[row['iteration']]) and not row['amp_skipped']
-        assert ('grad_norms' in row)==measured
-        if measured:
-            assert set(row['grad_norms']) == {'representation','dynamics','prediction'}
-            assert np.linalg.norm(list(row['grad_norms'].values())) == pytest.approx(row['grad_norm'],rel=2e-6)
+        assert 'grad_norms' not in row
+        if row['gradient_steps']:
+            assert np.isfinite(row['grad_norm']) and row['grad_norm']>=0
+        else:
+            assert np.isnan(row['grad_norm'])
     figure=training_figure(run_history(root))
-    assert len(figure.axes)==8 and len(figure.axes[6].lines)==2 and len(figure.axes[7].lines)==3
+    assert len(figure.axes)==8 and len(figure.axes[6].lines)==2 and not figure.axes[7].lines
     figure.clear()
 
 
@@ -170,7 +167,7 @@ def test_unroll_gradient_boundaries_and_side_mask():
     model = Model(); forward = Forward(model, small_config())
     targets = [torch.ones(2, 4)] * 8
     inputs = [torch.ones(2, 1), torch.ones(2, 1), *targets,
-              torch.zeros(2, 3), torch.ones(2, 4), torch.ones(2, 4)]
+              torch.zeros(2, 3), torch.ones(2, 4), torch.arange(2)]
     (value,), step_losses = forward(*inputs); value.backward()
     assert step_losses.tolist() == [10,30,90,270]
     assert not step_losses.requires_grad
@@ -178,12 +175,12 @@ def test_unroll_gradient_boundaries_and_side_mask():
     assert model.p.grad.item() == pytest.approx(28.75)
     assert model.d.grad.item() == pytest.approx(70+5/6)
     assert model.q.grad.item() == pytest.approx(28)
-    model.zero_grad(); inputs[-1][1, 1:] = 0
+    model.zero_grad(); inputs[-1] = torch.tensor([0])
     (value,), step_losses = forward(*inputs); value.backward()
     assert step_losses.tolist() == [10,15,45,135]
     assert value.item() == 205
     assert model.p.grad.item() == pytest.approx(5+(28.75-5)/2)
-    model.zero_grad(); inputs[-1][:, 1:] = 0
+    model.zero_grad(); inputs[-1] = torch.empty(0, dtype=torch.int64)
     (value,), step_losses = forward(*inputs); value.backward()
     assert value.item() == 10 and step_losses.tolist() == [10,0,0,0]
     assert model.p.grad.item() == 5 and model.d.grad is None

@@ -42,7 +42,7 @@ def forward_batch(forward, tensors):
     keys = ('obs', 'globals', 'policy', 'opponent_policy', 'opponent_policy_weight',
             'value', 'td_value', 'full_game_weight', 'q_values', 'q_visits')
     if 'actions' in tensors:
-        keys += ('actions', 'step_weights', 'sequence_mask')
+        keys += ('actions', 'step_weights', 'recurrent_indices')
         return forward(*(tensors.get(key) for key in keys))
     return forward(*(tensors.get(key) for key in keys)), None
 
@@ -224,7 +224,7 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
             while True:
                 try:batch=reader.next()
                 except StopIteration:break
-                tensors={k:torch.from_numpy(a).to(device=device,dtype=torch.int64 if k=='actions' else torch.float32)
+                tensors={k:torch.from_numpy(a).to(device=device,dtype=torch.int64 if k in ('actions','recurrent_indices') else torch.float32)
                          for k,a in batch.items()}
                 symmetry=symmetries.randrange(8);draws[symmetry]+=1
                 tensors=augment_training_batch(tensors,symmetry) # Always on for validation.
@@ -288,10 +288,12 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
     scaler.load_state_dict(checkpoint["scaler"])
     restore_rng(checkpoint["rng"])
-    reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
-                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None)
     step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
+    reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
+                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,
+                         max_batches=plan['train_steps']-step)
     round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
+    del checkpoint
     if round_metrics.state['steps'] != step:
         raise ValueError('Metric counters differ from the learner cursor')
     window_metrics = TrainingMetrics()
@@ -315,17 +317,11 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     amp = config["training"]["amp"]
     if device.type != "cuda" and amp != "off":
         raise ValueError("AMP training requires a CUDA device")
-    remaining=sum(reader.files[i]['rows']//plan['batch_size'] for i in reader.order[reader.index:])-reader.offset//plan['batch_size']
-    if remaining<plan['train_steps']-step:
-        reader.close()
-        raise ValueError('Single-pass snapshot has insufficient complete file batches for the actual round budget')
     unsaved = False
     consumed_state = reader.state()
     prepared=BatchPrefetcher(reader,config['training']['prefetch_depth'])
     prefetch = None
     parameters=list(model.parameters())
-    module_parameters={name:list(getattr(model,name).parameters())
-                       for name in ('representation','dynamics','prediction')} if config['agent']['algorithm']=='muzero' else {}
     try:
         if device.type=='cuda' and config['training']['cuda_prefetch']:
             prefetch=CudaBatchPrefetcher(prepared,device)
@@ -340,7 +336,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             else:
                 batch,consumed_state = prepared.next();tensors = {}
                 for key,array in batch.items():
-                    tensor = torch.from_numpy(array).to(dtype=torch.int64 if key=='actions' else torch.float32)
+                    tensor = torch.from_numpy(array).to(dtype=torch.int64 if key in ('actions','recurrent_indices') else torch.float32)
                     if device.type == "cuda":
                         tensor = tensor.pin_memory()
                     tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
@@ -362,11 +358,6 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             if hasattr(model, 'scale_repvgg_gradients'):
                 model.scale_repvgg_gradients()
             grad_norm = torch.nn.utils.get_total_norm([p.grad for p in parameters if p.grad is not None])
-            module_norms={}
-            detailed = step == 0 or (step+1) % config['optimizer']['norm_interval'] == 0 or step+1 == plan['train_steps']
-            for name,params in module_parameters.items() if detailed else ():
-                gradients=[p.grad for p in params if p.grad is not None]
-                module_norms[name]=(torch.nn.utils.get_total_norm(gradients) if gradients else grad_norm.new_zeros(())) / optimization.backward_scale
             # Losses, norms and unroll diagnostics share one device-to-host
             # transfer. Reuse these values for both checks and journal metrics.
             diagnostics_tensors = [] if step_losses is None else list(step_losses.unbind())
@@ -377,14 +368,14 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                           if scaler.is_enabled() else [])
             packed = torch.stack([x.detach() for x in components] +
                                  [grad_norm / optimization.backward_scale] +
-                                 list(module_norms.values()) + diagnostics_tensors + amp_status)
+                                 diagnostics_tensors + amp_status)
             cap = optimization.gradient_cap(config['training']['gradient_clip'])
             try:
                 values, skipped = finish_optimizer_step(parameters, optimizer, scaler, grad_norm,
                                                          cap, packed, len(components))
                 diagnostic_end = len(values)-len(amp_status)
                 # Unroll losses must be finite even when GradScaler skips gradients.
-                start = len(components)+1+len(module_norms)
+                start = len(components)+1
                 if not all(math.isfinite(v) for v in values[start:diagnostic_end]):
                     raise FloatingPointError('Nonfinite unroll loss')
             except FloatingPointError as error:
@@ -405,9 +396,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             diagnostics={}
             if step_losses is not None:
                 start=len(components)+1
-                diagnostics={'step_losses':values[start+len(module_norms):start+len(module_norms)+len(diagnostics_tensors)]}
-                if module_norms:
-                    diagnostics['grad_norms']=dict(zip(module_norms,values[start:start+len(module_norms)]))
+                diagnostics={'step_losses':values[start:start+len(diagnostics_tensors)]}
             loss_names=LOSS_NAMES
             if model.predict_q_values:loss_names+=('q_winloss_loss',)
             measured_losses = dict(zip(loss_names, values))
@@ -450,7 +439,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                 prefetch.close()
         finally:
             prepared.close();reader.close()
-        del optimization,forward,model,optimizer,scaler,checkpoint
+        del optimization,forward,model,optimizer,scaler
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()

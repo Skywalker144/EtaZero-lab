@@ -3,7 +3,6 @@ import torch
 from torch import nn
 
 from ..network import losses, row_mean
-from ..symmetry import apply_symmetry
 from .network import scale_gradient
 
 
@@ -42,7 +41,7 @@ class TrainingForward(nn.Module):
 
     def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight,
                 target, td_target, full_game_weight, q_values, q_visits,
-                actions, step_weights, sequence_mask):
+                actions, step_weights, recurrent_indices):
         targets = (policy, opponent_policy, opponent_policy_weight, target, td_target,
                    full_game_weight, q_values, q_visits)
         hidden = self.model.representation(obs, globals)
@@ -52,7 +51,7 @@ class TrainingForward(nn.Module):
         step_losses = [total[0].detach()]
         # Side searches have no continuation. Exclude them from recurrent BN,
         # instead of running fictitious transitions with merely zero loss.
-        indices = torch.nonzero(sequence_mask[:, 1], as_tuple=True)[0]
+        indices = recurrent_indices
         hidden = hidden[indices]
         if hidden.shape[0] == 0:
             return total, torch.stack(step_losses + [step_losses[0].new_zeros(())] * self.steps)

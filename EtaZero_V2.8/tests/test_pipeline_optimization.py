@@ -146,7 +146,7 @@ def test_inactive_targets_preserve_rows_actions_losses_and_gradients(algorithm):
         view['obs']=unpack_observations(view['obs'],c['network']['canvas'])
         if algorithm!='alphazero':
             view=prepare_batch(view,1.,random.Random(37))
-        tensors={k:torch.from_numpy(v).to(dtype=torch.int64 if k=='actions' else torch.float32)
+        tensors={k:torch.from_numpy(v).to(dtype=torch.int64 if k in ('actions','recurrent_indices') else torch.float32)
                  for k,v in view.items()}
         tensors=augment_training_batch(tensors,3)
         components,steps=forward_batch(training_forward(model,c),tensors)
