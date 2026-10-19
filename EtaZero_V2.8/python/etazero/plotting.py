@@ -28,8 +28,6 @@ VALUE_LOSSES = (
     ('td_value_mid_loss', 'TD mid', '#7fbf7f'), ('td_value_short_loss', 'TD short', '#e5c07b'),
     ('shortterm_value_error_loss', 'Value error', GREY))
 Q_LOSS = ('q_winloss_loss', 'W-L Q', '#c678dd')
-MODULE_GRADIENTS = (('representation', 'Representation h', BLUE),
-                    ('dynamics', 'Dynamics g', GREEN), ('prediction', 'Prediction f', ORANGE))
 
 
 def journal_events(path, offset=0):
@@ -180,7 +178,7 @@ def training_figure(history, algorithm=None):
     import numpy as np
     from matplotlib.ticker import FuncFormatter, PercentFormatter
     if algorithm is None:
-        algorithm='muzero' if any('step_losses' in r or 'grad_norms' in r for r in history) else 'alphazero'
+        algorithm='muzero' if any('step_losses' in r for r in history) else 'alphazero'
     muzero=algorithm=='muzero'
     titles=['Self-play outcomes', 'Self-play game length', 'Policy losses', 'Value losses',
             'Gradient norm', 'NN cache hit rate']
@@ -192,9 +190,8 @@ def training_figure(history, algorithm=None):
     if muzero:
         titles[5]='Root NN invalid policy mass'
         labels[5]=('Cumulative effective self-play rows', 'Mean probability mass on occupied points')
-        titles+=['Loss by unroll step', 'Gradient norms by module']
-        labels+=[('Unroll step k (0 = representation)', 'Mean weighted loss per step'),
-                 ('Cumulative training samples', 'Mean L2 grad norm (before clipping)')]
+        titles+=['Loss by unroll step']
+        labels+=[('Unroll step k (0 = representation)', 'Mean weighted loss per step')]
     with mpl.rc_context(THEME):
         figure, axes = _figure(
             titles, labels, f'EtaZero {"MuZero" if muzero else "AlphaZero"} training progress',
@@ -245,13 +242,6 @@ def training_figure(history, algorithm=None):
                     series.append(('Latest iteration', BLUE, steps, trained[-1]['step_losses']))
                 axes[6].set_xticks(steps if len(steps)<=9 else np.arange(0,len(steps),max(1,(len(steps)-1)//8)))
             _series(axes[6],series,logarithmic=True)
-            _series(axes[7],[(label,color,x,[r.get('grad_norms',{}).get(key,float('nan')) for r in trained])
-                              for key,label,color in MODULE_GRADIENTS],logarithmic=True)
-            axes[7].set_xlim(0,max(1,max(x,default=0)*1.025))
-            axes[7].xaxis.set_major_formatter(FuncFormatter(_compact_number))
-            _elapsed_axis(axes[7], history, 'total_samples')
-            if axes[7].child_axes:
-                axes[6].set_title(axes[6].get_title(), pad=52)
             for axis in axes:
                 for line in axis.lines:
                     line.set_marker('None')
