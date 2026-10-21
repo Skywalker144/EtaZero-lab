@@ -35,7 +35,7 @@ WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、�
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
-[MuZero 后端](../cpp/src/muzero/torch_backend.cpp) 为各服务建立独立 CUDA stream，复用 pinned observation、global 和 action 输入缓冲区。同一 worker 的服务共享一次模型加载、精度转换和 JIT 准备，各自持有 CUDA Graph；轮间把共享模型移回 CPU，换代时复用执行结构并更新权重与归一化统计。节点 latent 使用独立分配与 foreach 批量复制，避免单个存活节点保留整批 latent。一次预测回传完成该 stream 上此前的节点复制，结果交给搜索线程后可安全读取和复用父节点。模型加载时核对算法、画布与输入契约；运行时保留输入边界和输出形状检查，不额外归约 latent 有限性、回传 mask 或校验 heads 的实际精度。数值与 mask 正确性由独立开发测试验证。上述执行路径独立于 AlphaZero 的后端、组批队列和搜索实现。
+[MuZero 后端](../cpp/src/muzero/torch_backend.cpp) 为各服务建立独立 CUDA stream，复用 pinned observation、global 和 action 输入缓冲区。同一 worker 的服务共享一次模型加载、精度转换和 JIT 准备，各自持有 CUDA Graph；轮间把共享模型移回 CPU，换代时复用执行结构并更新权重与归一化统计。节点 latent 使用独立分配与 foreach 批量复制，避免单个存活节点保留整批 latent。一次预测回传完成该 stream 上此前的节点复制，结果交给搜索线程后可安全读取和复用父节点。模型加载时核对算法、画布与 latent 宽度；运行时保留输入边界和输出形状检查，不额外归约 latent 有限性、回传 mask 或校验 heads 的实际精度。数值与 mask 正确性由独立开发测试验证。上述执行路径独立于 AlphaZero 的后端、组批队列和搜索实现。
 
 CUDA 服务在加载时为 initial 与 recurrent 准备 batch 为 1、2、4 等二次幂及 `max_batch` 的独立 CUDA Graph，运行时选择能容纳请求的最小 bucket。NBT 的推理归一化使用固定统计，ResNet 按样本归一化；不足 bucket 的部分重复一个有效输入，丢弃额外输出，不增加搜索节点或训练目标。recurrent 通过 foreach 将父 latent 直接组装到 graph 输入，避免中间拼接分配。各 graph 保留自己的输入、输出和内存池；节点复制完成后才允许下一次重放，父节点不会引用可被覆盖的 graph 输出。准备和模型加载的耗时进入实际轮次墙钟；固定模型短测通过预热排除这一启动成本。
 
@@ -63,6 +63,8 @@ Forced playout 仅作用于根上已完成 recurrent 评估的子节点。尚无
 ## 连续数据与展开训练
 
 [writer](../cpp/src/selfplay/record.cpp) 保留完整真实对局，新增所有可训练位置的 policy/Q/visits，包括重复次数为零的 cheap 位置。开局前缀不产生监督。原始文件标识 `algorithm=muzero` 和展开长度，不能将 AlphaZero 分片作为 MuZero 数据。
+
+`unroll.steps` 为正整数，按实际 K 动态分配，不设固定 32 步上限；内存和计算量随 K 增长。
 
 [数据视图](../python/etazero/muzero/data.py) 的一行是一个真实起点，包含一份起点输入、K 个动作和 K+1 份完整 targets。真实棋盘只用于生成监督与校验记录，learner 从不使用未来观测代替 dynamics。分片可以切开重复起点，但完整轨迹保证未来目标、TD 和终局不被分片截断。
 
