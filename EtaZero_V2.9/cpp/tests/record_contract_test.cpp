@@ -58,5 +58,12 @@ int main(int argc,char** argv) {
     int games=shards && argc>5?std::stoi(argv[5]):1;
     for(int g=0;g<games;++g) {record.id=g;record.seed=7+13*g;writer.enqueue(record);}
     writer.finish();
-    if(argc==1)std::filesystem::remove_all(path);
+    if(argc==1) {
+        // Storage has no board-area bound; legality belongs to the game implementation.
+        while(record.steps.size()<=static_cast<size_t>(record.canvas*record.canvas))
+            record.steps.push_back(record.steps.front());
+        RecordWriter longer(path/"long",{"test","long","model","config","source",1,0},1000,1,1,123);
+        longer.enqueue(record);longer.finish();
+        std::filesystem::remove_all(path);
+    }
 }
