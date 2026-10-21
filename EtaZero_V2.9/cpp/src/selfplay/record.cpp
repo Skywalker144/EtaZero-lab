@@ -276,7 +276,6 @@ struct RecordWriter::Buffers {
         size_t base=observations.size();observations.resize(base+INPUT_PLANES*packed_area,0);
         for(int c=0;c<INPUT_PLANES;++c) for(int i=0;i<actions_count;++i) {
             float value=obs[c*actions_count+i];
-            if(value!=0 && value!=1)throw std::runtime_error("Nonbinary writer observation");
             if(value)observations[base+c*packed_area+i/8]|=1<<(7-i%8);
         }
         globals.insert(globals.end(), obs.end()-GLOBAL_FEATURES, obs.end());
@@ -284,7 +283,7 @@ struct RecordWriter::Buffers {
     }
 };
 void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
-    if(g.canvas<5 || g.canvas>25 || g.steps.empty() || g.steps.size()>static_cast<size_t>(g.canvas*g.canvas))
+    if(g.canvas<5 || g.canvas>25 || g.steps.empty())
         throw std::runtime_error("Invalid finished game");
     if(!buffers_)buffers_=std::make_unique<Buffers>(g.canvas,max_rows_);
     auto& b=*buffers_;
@@ -378,7 +377,6 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
         size_t base=b.side_observations.size();b.side_observations.resize(base+INPUT_PLANES*b.packed_area,0);
         for(int c=0;c<INPUT_PLANES;++c)for(int i=0;i<b.actions_count;++i) {
             float value=side.observation[c*b.actions_count+i];
-            if(value!=0 && value!=1)throw std::runtime_error("Nonbinary side observation");
             if(value)b.side_observations[base+c*b.packed_area+i/8]|=1<<(7-i%8);
         }
         b.side_globals.insert(b.side_globals.end(),side.observation.end()-GLOBAL_FEATURES,side.observation.end());
@@ -443,7 +441,7 @@ void RecordWriter::publish() {
     std::string shard=filename.str();
     auto created = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     std::ostringstream meta;
-    meta << "{\"contract\":" << quote(CONTRACT_ID) << ",\"canvas\":" << canvas << ",\"rows\":" << b.rows << ",\"row_begin\":" << b.row_begin << ",\"plies\":" << t << ",\"games\":" << n
+    meta << "{\"canvas\":" << canvas << ",\"rows\":" << b.rows << ",\"row_begin\":" << b.row_begin << ",\"plies\":" << t << ",\"games\":" << n
          << ",\"run_id\":" << quote(source_.run) << ",\"attempt_id\":" << quote(source_.attempt)
          << ",\"iteration_id\":" << source_.iteration << ",\"worker_id\":" << source_.worker << ",\"model_id\":" << quote(source_.model)
          << ",\"config_id\":" << quote(source_.config) << ",\"source_id\":" << quote(source_.source)
