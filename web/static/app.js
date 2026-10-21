@@ -1,19 +1,31 @@
 const $ = id => document.getElementById(id);
 const columns = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
-const rules = {freestyle: 'Freestyle', standard: 'Standard', renju: 'Renju', hex: 'Hex'};
-const notes = {hex: 'Hex · 黑棋连接上下两边，白棋连接左右两边；按六邻接实际连通判胜。', freestyle: 'Freestyle · 五子或长连获胜。', standard: 'Standard · 恰好五子获胜，长连不计胜。', renju: 'Renju · 黑棋三三、四四、长连判负，恰好五子优先；白棋五子或长连获胜。'};
+const rules = {freestyle: 'Freestyle', standard: 'Standard', renju: 'Renju', hex: 'Hex', go: '围棋', xiangqi: '中国象棋'};
+const notes = {go: '围棋 · 提子、劫争与终局计分按所选规则；连续停一手结束当前阶段。', xiangqi: '中国象棋 · 先选棋子，再选落点；无合法着法判负，重复局面按长将长捉规则裁定。', hex: 'Hex · 黑棋连接上下两边，白棋连接左右两边；按六邻接实际连通判胜。', freestyle: 'Freestyle · 五子或长连获胜。', standard: 'Standard · 恰好五子获胜，长连不计胜。', renju: 'Renju · 黑棋三三、四四、长连判负，恰好五子优先；白棋五子或长连获胜。'};
 let state = null, catalog = null, pending = false, online = false, notice = '';
 let formKey = '', viewTurn = null, highlight = null, catalogRevision = -1;
 let sortField = 'selection_weight', sortDirection = -1;
 let analysisKey = null;
 let networkKey = null, boardMarkup = '';
 let historyKey = '';
+let selectedFrom = null;
 const networkHeads = [
   ['普通策略', 'policy'], ['对手策略', 'opponent_policy'],
   ['长期 optimistic', 'long_optimistic_policy'], ['短期 optimistic', 'short_optimistic_policy'],
 ];
+function sideName(player, rule = state?.rule) {
+  return rule === 'xiangqi' ? (player === 1 ? '红' : '黑') : (player === 1 ? '黑' : '白');
+}
+function sideClass(player, rule = state?.rule) {
+  return rule === 'xiangqi' ? (player === 1 ? 'red' : 'black') : (player === 1 ? 'black' : 'white');
+}
 
-function coordinate(action, size) { return columns[action % size] + (size - Math.floor(action / size)); }
+function coordinate(action, size) {
+  if (state?.rule === 'xiangqi' && catalog?.xiangqi_moves?.[action]) {
+    const [x,y,u,v] = catalog.xiangqi_moves[action]; return `${'abcdefghi'[x]}${y}–${'abcdefghi'[u]}${v}`;
+  }
+  return action === size*size ? '停一手' : columns[action % size] + (size - Math.floor(action / size));
+}
 function percent(value, digits = 1) { return Number.isFinite(value) ? (value * 100).toFixed(digits) : '—'; }
 function samePosition(game, analysis) {
   return game && analysis && game.board_size === analysis.board_size && game.turn === analysis.turn && game.player === analysis.player && game.rule === analysis.rule &&
@@ -42,6 +54,7 @@ function accept(next) {
       JSON.stringify(next.game?.moves) !== JSON.stringify(state.game?.moves)) {
     viewTurn = null;
     highlight = null;
+    selectedFrom = null;
   }
   if (next.analysis_progress) next = {...next, analysis: next.analysis_progress};
   state = next;
@@ -62,7 +75,8 @@ function displayedGame() {
   const game = state?.game;
   if (!game || viewTurn === null) return game;
   const moves = game.moves.slice(0, viewTurn);
-  const board = Array(game.board_size ** 2).fill(0);
+  if (game.boards?.length) return {...game, board: game.boards[viewTurn], moves, turn: viewTurn, player: game.players[viewTurn]};
+  const board = Array(game.board_stride * game.board_height).fill(0);
   moves.forEach((action, i) => { board[action] = i % 2 === 0 ? 1 : -1; });
   return {...game, board, moves, turn: viewTurn, player: viewTurn % 2 === 0 ? 1 : -1};
 }
@@ -91,7 +105,52 @@ function compactVisits(visits) {
   if (visits >= 1000) return (visits / 1000).toFixed(1) + 'k';
   return String(visits);
 }
+function renderXiangqiBoard(game, disabled) {
+  $('board').classList.remove('hex-board'); $('board').classList.add('xiangqi-board');
+  $('board').style.aspectRatio='10 / 11'; $('board').setAttribute('aria-label','中国象棋棋盘，红方在下');
+  const stride=game?.board_stride || 10;
+  const point=(x,y)=>[10+x*10,100-y*10];
+  let html='<svg viewBox="0 0 100 110" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".18" fill="none">';
+  for(let y=0;y<10;y++) html+=`<path d="M10,${10+y*10}H90"/>`;
+  for(let x=0;x<9;x++) html+= x===0||x===8 ? `<path d="M${10+x*10},10V100"/>` : `<path d="M${10+x*10},10V50 M${10+x*10},60V100"/>`;
+  html+='<path d="M40,10L60,30 M60,10L40,30 M40,80L60,100 M60,80L40,100"/></g><g font-size="4" text-anchor="middle" fill="var(--board-label)"><text x="30" y="56.5">楚 河</text><text x="70" y="56.5">漢 界</text></g>';
+  const analysis=state.analysis;
+  if(samePosition(game,analysis)) {
+    const actions=new Set($('overlay').value==='none'?[]:boardCandidates(analysis).map(c=>c.action));
+    // Explicit selection remains visible even outside the candidate filters.
+    if(highlight!==null){actions.delete(highlight);actions.add(highlight);}
+    for(const action of actions) {
+      const [x,y,u,v]=catalog.xiangqi_moves[action], [ax,ay]=point(x,y), [bx,by]=point(u,v);
+      html+=`<g data-candidate="${action}" stroke="${action===highlight?'#d76025':'#347f94'}" fill="none" opacity=".75"><path d="M${ax},${ay}L${bx},${by}" stroke-width=".6"/><circle cx="${bx}" cy="${by}" r="3.9"/></g>`;
+    }
+  }
+  html+='</svg>';
+  const targets=new Set((game?.legal_actions||[]).filter(a=>{const m=catalog.xiangqi_moves[a];return m[1]*stride+m[0]===selectedFrom;}).map(a=>{const m=catalog.xiangqi_moves[a];return m[3]*stride+m[2];}));
+  const names={1:['','車','仕','炮','兵','馬','相','帥'], '-1':['','車','士','砲','卒','馬','象','將']};
+  for(let y=0;y<10;y++) for(let x=0;x<9;x++) {
+    const a=y*stride+x, pc=game?.board[a]||0, [px,py]=point(x,y), name=pc?names[Math.sign(pc)][Math.abs(pc)]:'';
+    html+=`<button class="board-point ${a===selectedFrom?'selected-piece':''} ${targets.has(a)?'legal-destination':''}" data-square="${a}" aria-label="${'abcdefghi'[x]}${y} ${name||'空位'}" style="left:${px}%;top:${py/110*100}%;width:9%;height:${9/110*100}%" ${disabled?'disabled':''}>${pc?`<span class="xiangqi-piece ${pc>0?'red-piece':'black-piece'}">${name}</span>`:''}</button>`;
+  }
+  if(boardMarkup!==html){$('board').innerHTML=html;boardMarkup=html;}
+}
+function renderXiangqiNetwork(analysis, planes) {
+  const stride = analysis.board_stride;
+  const kind = $('network-kind').value, probabilities = kind === 'probabilities';
+  $('network-position').textContent=`第 ${analysis.turn+1} 手前 · ${analysis.player===1?'红':'黑'}方 · ${planes.precision}`;
+  $('network-detail').textContent='2086 个走法按起点筛选；概率在完整动作空间归一化，含当前非法走法。';
+  const chooser=document.createElement('select'); chooser.setAttribute('aria-label','策略走法起点');
+  for(let y=0;y<10;y++)for(let x=0;x<9;x++)chooser.add(new Option(`${'abcdefghi'[x]}${y}`,y*stride+x));
+  chooser.value=selectedFrom ?? 0; $('network-maps').append(chooser);
+  const content=document.createElement('div');content.className='xiangqi-policy-heads';$('network-maps').append(content);
+  const draw=()=>{content.replaceChildren();for(const head of planes.heads){
+    const section=document.createElement('section'), source=Number(chooser.value);
+    const moves=catalog.xiangqi_moves.map((m,a)=>({m,a})).filter(({m})=>m[1]*stride+m[0]===source).sort((a,b)=>head.probabilities[b.a]-head.probabilities[a.a]);
+    section.innerHTML=`<h3>${networkHeads.find(([,name])=>name===head.name)?.[0]||head.name}</h3><div class="xiangqi-policy-list">`+moves.map(({a})=>`<button data-action="${a}" title="logit ${head.logits[a].toFixed(5)} · 概率 ${percent(head.probabilities[a],3)}%">${coordinate(a,10)} · ${probabilities ? percent(head.probabilities[a],3)+'%' : head.logits[a].toFixed(5)}</button>`).join('')+'</div>';content.append(section);
+  }};chooser.addEventListener('change',draw);draw();
+}
 function renderBoard(game, disabled) {
+  if ((game ? state.rule : $('rule').value) === 'xiangqi') { renderXiangqiBoard(game, disabled); return; }
+  $('board').classList.remove('xiangqi-board');
   const size = game?.board_size || Number($('size').value) || catalog.default_size;
   const hex = game ? state.rule === 'hex' : $('rule').value === 'hex';
   // Keep SVG units isotropic; HTML hit targets use the same geometry.
@@ -106,7 +165,7 @@ function renderBoard(game, disabled) {
   $('board').style.aspectRatio = `100 / ${height}`;
   $('board').style.setProperty('--hex-unit', `${step}cqw`);
   $('board').style.setProperty('--candidate-unit', `${step}cqw`);
-  $('board').setAttribute('aria-label', hex ? 'Hex 棋盘，黑棋连接上下边，白棋连接左右边' : '五子棋棋盘');
+  $('board').setAttribute('aria-label', hex ? 'Hex 棋盘，黑棋连接上下边，白棋连接左右边' : (game ? state.rule : $('rule').value) === 'go' ? '围棋棋盘' : '五子棋棋盘');
   let drawing = `<svg viewBox="0 0 100 ${height}" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".12">`;
   if (hex) {
     const vertex = (x, y, i) => {
@@ -227,6 +286,12 @@ function renderBoard(game, disabled) {
 }
 
 function renderHeatmap(id, field, maximumId, analysis) {
+  if (analysis.rule === 5) {
+    const sorted = [...analysis.candidates].sort((a,b)=>(b[field]||0)-(a[field]||0));
+    $(id).style.gridTemplateColumns = 'repeat(3, minmax(0,1fr))'; $(id).style.gridTemplateRows = 'none';
+    $(id).innerHTML = sorted.map(c=>`<button data-action="${c.action}" title="${candidateDetail(c,analysis)}">${coordinate(c.action,10)} ${percent(c[field])}%</button>`).join('');
+    $(maximumId).textContent = `${percent(sorted[0]?.[field])}%`; return;
+  }
   const size = analysis.board_size;
   const candidates = new Map(analysis.candidates.map(candidate => [candidate.action, candidate]));
   const maximum = Math.max(0, ...analysis.candidates.map(candidate => candidate[field]));
@@ -248,6 +313,10 @@ function renderHeatmap(id, field, maximumId, analysis) {
     }
   }
   const map = $(id);
+  if (analysis.rule === 4) {
+    const pass = candidates.get(size*size);
+    html += `<button data-action="${size*size}" style="grid-column:1 / -1">停一手 · ${percent(pass?.[field])}%</button>`;
+  }
   map.style.gridTemplateColumns = `16px repeat(${size}, minmax(0, 1fr))`;
   map.style.gridTemplateRows = `16px repeat(${size}, minmax(0, 1fr))`;
   map.classList.toggle('dense', size > 15);
@@ -266,7 +335,7 @@ function renderHeatmaps() {
     $('search-map').replaceChildren();
     return;
   }
-  $('heatmap-position').textContent = `第 ${analysis.turn + 1} 手落子前 · ${analysis.player === 1 ? '黑' : '白'}方视角`;
+  $('heatmap-position').textContent = `第 ${analysis.turn + 1} 手落子前 · ${sideName(analysis.player)}方视角`;
   $('heatmap-detail').textContent = '悬停 / 聚焦查看数值；描边为搜索建议点。';
   renderHeatmap('prior-map', 'network_prior', 'prior-max', analysis);
   renderHeatmap('search-map', $('search-map-kind').value, 'search-max', analysis);
@@ -280,7 +349,9 @@ function renderNetworkMaps() {
   if (networkKey === key) return;
   networkKey = key;
   $('network-maps').replaceChildren();
+  $('network-maps').classList.toggle('xiangqi-network', analysis?.rule === 5);
   if (!planes) return;
+  if (analysis.rule === 5) { renderXiangqiNetwork(analysis, planes); return; }
   const size = analysis.board_size;
   const kind = $('network-kind').value;
   const probabilities = kind === 'probabilities';
@@ -321,6 +392,7 @@ function renderNetworkMaps() {
       `<div class="heat-grid ${size > 15 ? 'dense' : ''} ${size >= 11 ? 'compact' : ''}" role="group" aria-label="${label}热力图" style="grid-template-columns:16px repeat(${size},minmax(0,1fr));grid-template-rows:16px repeat(${size},minmax(0,1fr))">${html}</div>` +
       `<div class="heat-legend"><span>${format(low)}</span><i></i><span>${format(high)}</span></div>` +
       `<p class="network-summary">最高 ${coordinate(best, size)} ${(head.probabilities[best] * 100).toFixed(2)}%<br>熵 ${entropy.toFixed(2)} nats · 已落子质量 ${(occupied * 100).toFixed(2)}%</p>`;
+    if (analysis.rule === 4) { const pass=document.createElement('p'); pass.textContent=`停一手：${format(values[size*size])}`; section.append(pass); }
     $('network-maps').append(section);
   });
 }
@@ -364,7 +436,7 @@ function renderAnalysis() {
   const a = state.analysis;
   $('analysis-empty').hidden = Boolean(a);
   $('analysis-data').hidden = !a;
-  $('analysis-move').textContent = a ? `第 ${a.turn + 1} 手前 · ${a.player === 1 ? '黑' : '白'}方` : '—';
+  $('analysis-move').textContent = a ? `第 ${a.turn + 1} 手前 · ${sideName(a.player)}方` : '—';
   if (!a) {
     analysisKey = null;
     $('candidate-detail').textContent = '悬停候选点查看 W/D/L、LCB 和主变化。';
@@ -381,7 +453,7 @@ function renderAnalysis() {
     $('seconds').textContent = `${a.seconds.toFixed(3)}s`;
     $('completed').textContent = a.completed_visits.toLocaleString();
     $('throughput').textContent = a.seconds > 0 ? Math.round(a.completed_visits / a.seconds).toLocaleString() : '—';
-    $('value-label').textContent = `${a.player === 1 ? '黑' : '白'}方视角 · 搜索 W−L`;
+    $('value-label').textContent = `${sideName(a.player)}方视角 · 搜索 W−L`;
     $('value').textContent = `${a.root_value >= 0 ? '+' : ''}${a.root_value.toFixed(4)}`;
     renderWdl('wdl', '搜索', a.wdl);
     renderWdl('network-wdl', '网络', a.network_wdl);
@@ -405,6 +477,7 @@ function render() {
       populateModels(state.model);
       $('size').value = game.board_size;
       $('rule').value = state.rule;
+      if (state.rule === 'go') setGoOptions(game);
       $('visits').value = state.visits;
       $('mode').value = state.mode;
       $('opening').value = state.opening_kind || 'empty';
@@ -421,9 +494,13 @@ function render() {
   const rule = game ? state.rule : $('rule').value;
   $('rule-badge').textContent = rules[rule] || '—';
   $('rule-note').textContent = notes[rule] || '';
+  $('pass').hidden = rule !== 'go';
+  $('pass').disabled = busy || !game || game.finished || viewTurn !== null || (state.mode==='play' && game.player!==state.human);
+  $('go-options').hidden = $('rule').value !== 'go';
+  $('xiangqi-options').hidden = $('rule').value !== 'xiangqi';
   $('move-count').textContent = `第 ${game?.turn || 0} 手`;
   $('new-game').textContent = game ? '按配置重开棋局' : '创建棋局';
-  $('session-mode').textContent = game ? (state.mode === 'manual' ? '手动双方' : `人类执${state.human === 1 ? '黑' : '白'}`) : '未创建';
+  $('session-mode').textContent = game ? (state.mode === 'manual' ? '手动双方' : `人类执${sideName(state.human)}`) : '未创建';
   const activeModel = catalog.models.find(m => m.id === state.model);
   $('session-info').textContent = game ? `${activeModel?.label || state.model} · AI 落子 ${state.visits}v · 分析${state.analysis_enabled ? '开启' : '暂停'}` : '模型常驻 · 分析可随时开启或暂停';
   $('session-info').title = game ? state.model : '';
@@ -432,7 +509,7 @@ function render() {
   $('opening-info').textContent = opening ? `平衡开局 ${opening.moves.length} 手 · 尝试 ${opening.attempts} 次 · ${opening.value_player === 1 ? '黑' : '白'}方网络 W−L ${opening.value >= 0 ? '+' : ''}${opening.value.toFixed(4)} · ${opening.seconds.toFixed(2)}s` : '';
   $('opening-info').title = opening ? `开局种子：${opening.seed}` : '';
   $('state-version').textContent = `单会话 · 状态 v${state.version} · ${state.analysis_config?.device || selectedRun()?.analysis_config.device || catalog.device}`;
-  $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => i >= (opening?.moves.length || 0) && (i % 2 === 0 ? 1 : -1) === state.human));
+  $('undo').disabled = busy || viewTurn !== null || !game?.moves.length || (state.mode === 'play' && !game.moves.some((_, i) => i >= (opening?.moves.length || 0) && (game.players?.[i] ?? (i % 2 === 0 ? 1 : -1)) === state.human));
   $('stop').hidden = !state.busy || !['thinking', 'stopping'].includes(state.phase);
   $('stop').disabled = pending || state.stop_requested || !online;
   $('analyze').innerHTML = `${state.analysis_enabled ? '暂停分析' : '开启分析'} <kbd>A</kbd>`;
@@ -458,7 +535,7 @@ function render() {
     item.classList.toggle('active', i + 1 === (viewTurn ?? game.turn));
     item.dataset.turn = i + 1;
     item.title = `查看第 ${i + 1} 手后的局面${i < (opening?.moves.length || 0) ? ' · 开局生成' : ''}`;
-    item.innerHTML = `<small>${i + 1}</small><i class="tiny-stone ${i % 2 === 0 ? 'black' : 'white'}"></i>${coordinate(action, game.board_size)}`;
+    item.innerHTML = `<small>${i + 1}</small><i class="tiny-stone ${sideClass(game.players?.[i] ?? (i % 2 === 0 ? 1 : -1))}"></i>${coordinate(action, game.board_size)}`;
     history.append(item);
   });
   history.scrollTop = scrollTop;
@@ -484,6 +561,7 @@ function render() {
   const analysis_config = {...(state.analysis_config || selectedRun()?.analysis_config || catalog.analysis_config), visits: Number($('visits').value), reuse_tree: false};
   if (game) analysis_config.visits = state.visits;
   if (game) { analysis_config.board_size = game.board_size; analysis_config.rule = state.rule; }
+  if (game && state.rule === 'go') { analysis_config.go_rules = game.go_rules; analysis_config.komi = game.komi; }
   if (analysis_config.inference_precision === 'auto') analysis_config.inference_precision = analysis_config.device.startsWith('cuda:') ? 'float16' : 'float32';
   $('engine-config').textContent = JSON.stringify(analysis_config, null, 2);
   $('opening-config').textContent = JSON.stringify({parameters: state.opening_config || ((game ? state.rule : $('rule').value)==='hex' ? selectedRun()?.hex_opening : selectedRun()?.opening),
@@ -510,10 +588,10 @@ function renderStatus() {
     const elapsed = state.started_at ? Math.max(0, Date.now() / 1000 - state.started_at).toFixed(1) : '0.0';
     text = `${state.phase === 'loading' ? '加载中' : state.phase === 'opening' ? '生成平衡开局' : '处理中'} · ${elapsed}s`;
   } else if (state.error) text = '操作失败 · 查看错误信息后重试';
-  else if (game?.finished) text = game.winner === 0 ? '本局和棋' : `${game.winner === 1 ? '黑棋' : '白棋'}获胜`;
-  else if (state.phase === 'analyzing') text = `${game.player === 1 ? '黑' : '白'}方持续分析 · ${(state.analysis_progress?.completed_visits || 0).toLocaleString()} 访问 · 可落子 / 悔棋`;
-  else if (game) text = state.mode === 'manual' ? `${game.player === 1 ? '黑' : '白'}方落子 · 分析已暂停` : game.player === state.human ? '轮到你落子' : '等待 AI 落子';
-  if (game?.finished && game.reason === 2) text += ' · 黑棋禁手';
+  else if (game?.finished) text = catalog.reasons[game.reason]==='no_result' ? '本局无结果' : game.winner === 0 ? '本局和棋' : `${state.rule==='xiangqi' ? (game.winner===1?'红方':'黑方') : (game.winner===1?'黑棋':'白棋')}获胜`;
+  else if (state.phase === 'analyzing') text = `${sideName(game.player)}方持续分析 · ${(state.analysis_progress?.completed_visits || 0).toLocaleString()} 访问 · 可落子 / 悔棋`;
+  else if (game) text = state.mode === 'manual' ? `${sideName(game.player)}方落子 · 分析已暂停` : game.player === state.human ? '轮到你落子' : '等待 AI 落子';
+  if (game?.finished && catalog.reasons[game.reason] === 'forbidden') text += ' · 黑棋禁手';
   $('status').textContent = text;
   $('status').parentElement.classList.toggle('thinking', state.busy || pending || state.phase === 'analyzing');
 }
@@ -538,7 +616,22 @@ function populateModels(selected = $('model').value) {
 }
 function updateSizes() {
   const model = catalog.models.find(m => m.id === $('model').value);
-  for (const option of $('size').options) option.disabled = !model || Number(option.value) > model.canvas;
+  const family = model?.manifest.game || 'gomoku';
+  for (const option of $('rule').options) option.disabled = ['go','xiangqi'].includes(family) ? option.value!==family : ['go','xiangqi'].includes(option.value);
+  if ($('rule').selectedOptions[0]?.disabled) $('rule').value = ['go','xiangqi'].includes(family) ? family : 'freestyle';
+  document.querySelectorAll('input[name="human"]').forEach(input => {
+    const player = Number(input.value), rule = $('rule').value;
+    input.nextElementSibling.innerHTML = `<i class="tiny-stone ${sideClass(player, rule)}"></i> ${sideName(player, rule)}棋`;
+  });
+  for (const option of $('size').options) {
+    option.disabled = !model || Number(option.value) > model.canvas || (family==='xiangqi' && Number(option.value)!==10);
+    option.textContent = family==='xiangqi' && Number(option.value)===10 ? '9 × 10' : `${option.value} × ${option.value}`;
+  }
+  $('opening').querySelector('option[value="empty"]').textContent = family==='xiangqi' ? '标准开局' : '空盘';
+  if (family==='xiangqi') $('size').value=10;
+  const balanced=$('opening').querySelector('option[value="balanced"]');
+  if (balanced) balanced.disabled=['go','xiangqi'].includes(family);
+  if (balanced?.disabled) $('opening').value='empty';
   if (model && Number($('size').value) > model.canvas) $('size').value = model.canvas;
   $('new-game').disabled = !model || !online || pending || Boolean(state?.busy);
   const summary = $('model-summary');
@@ -582,11 +675,20 @@ function updateEngineInfo() {
   const c = state?.analysis_config || selectedRun()?.analysis_config || catalog.analysis_config;
   $('engine-info').textContent = `${c.device} · ${c.search_threads} search threads · VL ${c.virtual_loss}`;
 }
+function setGoOptions(config) {
+  $('komi').value = config.komi;
+  const select = $('go-rules');
+  if (![...select.options].some(option => option.value === config.go_rules)) {
+    select.add(new Option(config.go_rules, config.go_rules));
+  }
+  select.value = config.go_rules;
+}
 function applyRunDefaults() {
   const c = selectedRun()?.analysis_config || catalog.analysis_config;
   $('size').value = c.board_size;
   $('rule').value = c.rule;
   $('visits').value = c.visits;
+  if (c.rule === 'go') setGoOptions(c);
   updateSizes();
 }
 function sessionSettings() {
@@ -594,14 +696,23 @@ function sessionSettings() {
 }
 $('settings').addEventListener('submit', event => {
   event.preventDefault();
-  command('new', {model: $('model').value, size: Number($('size').value), rule: $('rule').value, opening: $('opening').value, ...sessionSettings()});
+  command('new', {model: $('model').value, size: Number($('size').value), rule: $('rule').value, opening: $('opening').value, ...($('rule').value==='go'?{komi:Number($('komi').value),go_rules:$('go-rules').value}:{}), ...($('rule').value==='xiangqi'?{fen:$('fen').value}:{}), ...sessionSettings()});
 });
 $('settings').addEventListener('input', renderSettingsNote);
 $('apply-settings').addEventListener('click', () => {
   if (!$('visits').reportValidity()) return;
   command('configure', sessionSettings());
 });
+$('pass').addEventListener('click', () => command('play', {action:state.game.board_size**2}));
 $('board').addEventListener('click', event => {
+  const square=event.target.closest('button[data-square]');
+  if (square && !square.disabled) {
+    const point=Number(square.dataset.square), game=state.game;
+    const action=(game.legal_actions||[]).find(a=>{const [x,y,u,v]=catalog.xiangqi_moves[a];return y*game.board_stride+x===selectedFrom && v*game.board_stride+u===point;});
+    if (action!==undefined) { selectedFrom=null; command('play',{action}); }
+    else { selectedFrom=game.board[point]*game.player>0?point:null; render(); }
+    return;
+  }
   const button = event.target.closest('button[data-action]');
   if (button && !button.disabled) command('play', {action: Number(button.dataset.action)});
 });
@@ -638,18 +749,22 @@ function selectCandidate(action) {
 for (const id of ['candidate-top', 'candidate-min', 'board-candidates-only']) $(id).addEventListener('input', () => render());
 $('candidates').addEventListener('click', event => { const button = event.target.closest('[data-candidate]'); if (button) selectCandidate(Number(button.dataset.candidate)); });
 function clearPointPreview() {
-  $('board').querySelector('.preview-point')?.classList.remove('preview-point');
+  $('board').querySelectorAll('.preview-point').forEach(point => point.classList.remove('preview-point'));
   $('board-coordinate').textContent = '—';
 }
 for (const id of ['candidates', 'heatmap-data', 'network-data']) {
   const container = $(id);
   for (const eventName of ['mouseover', 'focusin']) container.addEventListener(eventName, event => {
-    const point = event.target.closest('[data-action]');
+    const point = event.target.closest('[data-action], [data-candidate]');
     clearPointPreview();
     // A previous search can refer to a different board; preview only matching positions.
     if (!point || !samePosition(displayedGame(), state?.analysis)) return;
-    const action = Number(point.dataset.action);
-    $('board').querySelector(`[data-action="${action}"]`)?.classList.add('preview-point');
+    const action = Number(point.dataset.action ?? point.dataset.candidate);
+    if (state.rule === 'xiangqi') {
+      const [x,y,u,v] = catalog.xiangqi_moves[action], stride = state.analysis.board_stride;
+      for (const square of [y*stride+x, v*stride+u])
+        $('board').querySelector(`[data-square="${square}"]`)?.classList.add('preview-point');
+    } else $('board').querySelector(`[data-action="${action}"]`)?.classList.add('preview-point');
     $('board-coordinate').textContent = coordinate(action, state.analysis.board_size);
     const candidate = state.analysis.candidates.find(c => c.action === action);
     if (candidate) $('candidate-detail').textContent = candidateDetail(candidate, state.analysis);
@@ -660,9 +775,9 @@ for (const id of ['candidates', 'heatmap-data', 'network-data']) {
 }
 for (const eventName of ['mouseover', 'focusin']) {
   $('board').addEventListener(eventName, event => {
-    const point = event.target.closest('[data-action]');
+    const point = event.target.closest('[data-action], [data-candidate]');
     if (point) {
-      const action = Number(point.dataset.action);
+      const action = Number(point.dataset.action ?? point.dataset.candidate);
       $('board-coordinate').textContent = coordinate(action, displayedGame()?.board_size || Number($('size').value));
       const c = state?.analysis?.candidates.find(c => c.action === action);
       if (c && samePosition(displayedGame(), state.analysis)) $('candidate-detail').textContent = candidateDetail(c, state.analysis);
