@@ -200,11 +200,13 @@ def test_sequence_d4_actions_match_all_spatial_targets(symmetry):
     assert torch.equal(result['obs'], apply_symmetry(obs, symmetry))
 
 
-def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
+@pytest.mark.parametrize('unroll_steps', [3, 40])
+def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path, unroll_steps):
     from etazero.config import write_native
     from etazero.shuffle import build_snapshot
     from etazero.reader import BatchReader
     c = small_config(); c['training']['batch_size'] = 4
+    c['unroll']['steps'] = unroll_steps; validate(c)
     c['writer'].update(shard_rows=8, first_file_min_random_proportion=.15)
     c['parallelism'].update(game_threads=1, search_threads=1)
     c['inference']['muzero_queue_capacity'] = 1
@@ -237,7 +239,7 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path):
                 assert (v['policy'][row,1:].sum(-1)>0).all()
                 continue
             lo, hi=a['game_offsets'][g:g+2]; ol=a['observation_offsets'][g]
-            for step in range(1, 4):
+            for step in range(1, unroll_steps+1):
                 index=start+step
                 if index < hi:
                     np.testing.assert_array_equal(v['policy'][row,step], a['trajectory_policy'][index])
