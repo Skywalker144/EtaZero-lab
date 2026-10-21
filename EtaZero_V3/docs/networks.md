@@ -2,6 +2,8 @@
 
 AlphaZero 的 `network.architecture` 可直接填写固定 KataGo 来源的网络名称。名称与架构来自 [手写预设](../python/etazero/_vendor/katago/modelconfigs.py)；[解析器](../python/etazero/katago_configs.py) 按来源相同的阶段和约束解析后缀，不在启动时展开整张派生配置表。来源版本及文件校验值见 [reference_sources.json](../reference_sources.json)。
 
+输入／输出适配取决于 `environment.rules`：Go 保留来源 22／19 输入和 pass head；象棋采用 113／8 输入及 50 位移通道 gather 2086 动作；其余棋类保留原有布局。主干结构不因棋类更换。六项 policy、纯 WDL、TD 和误差目标共用；Go 的分数／所有权 head 不进入目标。native 读取导出的 `game_name()`，依据共享的 [棋类定义](../python/etazero/games.py) 分配输入和动作缓冲。
+
 ## 选择网络
 
 例如，配置目录的 `net.cfg` 可以直接写为：
@@ -40,7 +42,7 @@ PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b
 
 ## 架构与棋类适配
 
-[适配器](../python/etazero/katago_network.py) 保留来源全部主干、归一化、初始化、共享 GAB/TAB 模块及输出头。输入投影改为 EtaZero 的五个空间平面和八个全局特征；padding 在投影前按有效棋盘 mask 清零。来源的 W/L/no-result 输出映射为 EtaZero 的 W/D/L；策略只选棋盘动作，移除 pass 动作。训练选取六项 policy、主 WDL、三个 TD WDL 和短期价值误差；v17 的 `predict_q_values=true` 额外监督逐动作纯 W−L Q。来源的 pass、score、ownership、seki 等 Go 输出仍在训练模型中保留，EtaZero 不为它们构造监督。导出图只保留搜索所需输出。
+[适配器](../python/etazero/katago_network.py) 保留来源全部主干、归一化、初始化、共享 GAB/TAB 模块及输出头。输入投影按棋类采用 5／8、22／19 或 113／8 的空间／全局特征；padding 在投影前按有效棋盘 mask 清零。来源三分类 head 从头按 EtaZero 的 W/D/L 语义训练，并调整通道顺序；这不是原生 KataGo no-result 标签或预训练权重的语义转换。Go 保留 pass，Gomoku／Hex 去除 pass，象棋替换为固定走法 head。训练选取六项 policy、主 WDL、三个 TD WDL 和短期价值误差；v17 的 `predict_q_values=true` 额外监督逐动作纯 W−L Q。来源的 score、ownership、seki 等输出仍在训练模型中保留，EtaZero 不为它们构造监督；Go pass 则参与所有对应策略损失。导出图只保留搜索所需输出。
 
 `ih` 的两组头使用来源缺省的 0.5/0.5 loss 权重；`bnh` 使用主头 0.2、BN 头 0.8，推理读取主头。各头均参与其对应 loss，checkpoint 与 SWA 保存完整参数和统计。
 
@@ -73,6 +75,8 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_inference.py \
 ```
 
 也可以用 `--config-dir` 加入现有 AlphaZero 配置目录的网络，与 `--architectures` 的命名预设一起比较。它通过训练使用的 `make_network` 构造实际网络，可测原有 `nbt` 入口；`--canvas` 须与配置中的 canvas 相同。测速不修改配置或读取训练 checkpoint。
+
+`--game gomoku|hex|go|xiangqi` 指定命名预设的棋类；未提供时取配置中的棋类，无配置时使用 Gomoku。与配置同时使用须一致，象棋要求 `--canvas 10`。输入由该棋类的规则状态生成固定两手合法前缀，生成过程在计时外；不同棋类的输入和动作维度不同，比较时应固定棋类。
 
 每组先预热，再按 `--repeats` 重复计时，交替模型顺序与 batch 遍历方向。耗时包含 CPU 输入打包、H2D、CUDA Graph 重放、同步 D2H 和结果构造；加载、图捕获与预热单列，不计入吞吐。结果不包含组批排队、缓存和搜索，也不直接等于自对弈速度。非图桶大小的 batch 会补到下一个桶，原始记录和汇总均记录 `graph_batch`。
 
