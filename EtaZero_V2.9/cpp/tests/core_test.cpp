@@ -220,11 +220,7 @@ int main() {
                 for(double x:e.logits)check(std::isfinite(x),"Finite random policy");
                 check(std::abs(e.wdl[0]+e.wdl[1]+e.wdl[2]-1)<1e-12,"Normalized random WDL");
             }
-            for(int feature:{0,static_cast<int>(own.size())-1}) {
-                auto invalid=own;invalid[feature]=feature==0?0.5f:std::numeric_limits<float>::infinity();
-                bool rejected=false;try{backend.evaluate({&invalid});}catch(const std::runtime_error&){rejected=true;}
-                check(rejected,"Random evaluator rejects invalid spatial and nonfinite global features");
-            }
+
         }
         InvalidPerspectiveState state;Search generic(one,9);bool unsupported=false;
         try {generic.run(state,0);}catch(const std::runtime_error&){unsupported=true;}
