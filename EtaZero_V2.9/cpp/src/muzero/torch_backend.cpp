@@ -43,10 +43,9 @@ TorchBackend::TorchBackend(const std::string& path,const std::string& device,int
     model_=shared_model_->prepare(path,device_,precision_);
     auto meta=model_.get_method("metadata")({}).toTuple();
     const auto& fields=meta->elements();
-    if(fields.size()!=4 || fields[0].toInt()!=canvas || fields[1].toStringRef()!=CONTRACT_ID ||
-       fields[2].toStringRef()!="muzero" || fields[3].toInt()<1)
-        throw std::runtime_error("MuZero model algorithm/contract/canvas mismatch");
-    latent_channels_=fields[3].toInt();
+    if(fields.size()!=3 || fields[0].toInt()!=canvas || fields[1].toStringRef()!="muzero" || fields[2].toInt()<1)
+        throw std::runtime_error("MuZero model algorithm/canvas/latent width mismatch");
+    latent_channels_=fields[2].toInt();
     has_auxiliary_=model_.attr("has_auxiliary").toBool();
     if(device_.is_cuda()) {
         // Model loading completes on the constructor's stream before services
@@ -139,11 +138,7 @@ std::vector<TorchBackend::Output> TorchBackend::initial(const InferenceInputs& i
             throw std::runtime_error("MuZero observation shape mismatch");
         const auto& input=*inputs[i];
         auto mask=std::make_shared<std::vector<uint8_t>>(area);int count=0;
-        for(int64_t j=0;j<spatial+GLOBAL_FEATURES;++j) {
-            if(!std::isfinite(input[j]) || (j<spatial && input[j]!=0 && input[j]!=1))
-                throw std::runtime_error("MuZero requires binary spatial and finite global features");
-            if(j<area){(*mask)[j]=input[j];count+=(*mask)[j];}
-        }
+        for(int64_t j=0;j<area;++j){(*mask)[j]=input[j];count+=(*mask)[j];}
         if(!count)throw std::runtime_error("MuZero requires a nonempty board mask");
         masks.push_back(mask);
         std::memcpy(obs.data_ptr<float>()+i*spatial,input.data(),spatial*sizeof(float));

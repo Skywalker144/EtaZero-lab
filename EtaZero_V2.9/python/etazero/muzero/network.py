@@ -18,7 +18,7 @@ from torch.nn import functional as F
 from ..config import network_widths
 from ..network import (NestedBottleneckBlock, MaskedBatchNorm, PolicyHead,
                        ValueHead, InferenceNormalization, init_weights)
-from ..schema import CONTRACT_ID, PLANES, GLOBALS
+from ..schema import PLANES, GLOBALS
 from .resnet import IdentityStem, ResidualTrunk, StemNormAct
 
 
@@ -200,12 +200,11 @@ class InferenceMuZeroNet(nn.Module):
     def __init__(self, model: MuZeroNet):
         super().__init__()
         self.model = model
-        self.contract = CONTRACT_ID
         self.has_auxiliary = model.auxiliary_losses
 
     @torch.jit.export
-    def metadata(self) -> tuple[int, str, str, int]:
-        return self.model.canvas, self.contract, 'muzero', self.model.latent_channels
+    def metadata(self) -> tuple[int, str, int]:
+        return self.model.canvas, 'muzero', self.model.latent_channels
 
     @torch.jit.export
     def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

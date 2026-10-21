@@ -132,7 +132,7 @@ def test_scripted_initial_and_recurrent_roundtrip(tmp_path, dimensions, q, archi
     scripted = torch.jit.script(inference)
     path = tmp_path / 'model.pt'; scripted.save(str(path))
     restored = torch.jit.load(str(path))
-    assert restored.metadata()[2:] == ('muzero', 16)
+    assert restored.metadata()[1:] == ('muzero', 16)
     assert restored.has_auxiliary == auxiliary
     obs, globals = inputs()
     with torch.no_grad():

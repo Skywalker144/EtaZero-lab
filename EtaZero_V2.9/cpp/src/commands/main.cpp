@@ -131,8 +131,8 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         detected_model->eval();
         if(device.is_cuda())c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
         auto metadata=detected_model->get_method("metadata")({}).toTuple();
-        if(metadata->elements().size()==4)algorithm=metadata->elements()[2].toStringRef();
-        else if(metadata->elements().size()==2)algorithm="alphazero";
+        if(metadata->elements().size()==3 || metadata->elements().size()==2)
+            algorithm=metadata->elements()[1].toStringRef();
         else throw std::runtime_error("Unknown model metadata");
         if(web_model)*web_model=*detected_model; // Share immutable weights with Web-only diagnostics.
     }
@@ -445,13 +445,15 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
     // Canonical orientation, temperature 1, without search optimism/noise/ensemble.
     logits=logits[0].narrow(0,0,6).reshape({6,canvas,canvas}).narrow(1,0,size).narrow(2,0,size)
         .to(torch::kFloat32).contiguous().reshape({6,size*size});
-    if(!torch::isfinite(logits).all().item<bool>())throw std::runtime_error("Nonfinite Web policy logits");
     auto probabilities=torch::softmax(logits,1).to(torch::kCPU).contiguous();
     auto value=output.toTuple()->elements()[1].toTensor().to(torch::kFloat32);
-    if(value.dim()!=2 || value.size(0)!=1 || value.size(1)!=3 || !torch::isfinite(value).all().item<bool>())
+    if(value.dim()!=2 || value.size(0)!=1 || value.size(1)!=3)
         throw std::runtime_error("Invalid raw NN value output");
     auto wdl=torch::softmax(value,1).to(torch::kCPU).contiguous();
-    return {logits.to(torch::kCPU).contiguous(),probabilities,value.to(torch::kCPU).contiguous(),wdl,precision};
+    logits=logits.to(torch::kCPU).contiguous();value=value.to(torch::kCPU).contiguous();
+    for(const auto& tensor:{logits,value})for(int64_t i=0;i<tensor.numel();++i)
+        if(!std::isfinite(tensor.data_ptr<float>()[i]))throw std::runtime_error("Nonfinite raw NN output");
+    return {logits,probabilities,value,wdl,precision};
 }
 int analysis_session(const Args& a,const Config& c,const std::string& protocol) {
     torch::jit::Module model;
