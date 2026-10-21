@@ -54,7 +54,7 @@ def check():
     with tempfile.TemporaryDirectory() as directory:
         reference=commit_checkpoint(directory,config,model,optimizer,scaler,1,1,1,cursor,optimization,metrics)
         saved=load_checkpoint(directory,reference,config)
-        expected={'id','contract','resume_config','network_config','model','optimizer','optimization','scaler','rng','reader',
+        expected={'id','resume_config','network_config','model','optimizer','optimization','scaler','rng','reader',
                   'iteration','step','total_steps','total_samples','optimizer_steps','source_id','training_metrics'}
         assert set(saved)==expected and saved['reader']==cursor and saved['optimizer_steps']==0 and saved['total_samples']==8
         assert saved['training_metrics']==metrics.state
