@@ -141,7 +141,7 @@ def test_evaluation_errors_are_rejected_before_creating_work(tmp_path, failure):
     assert not (tmp_path/'work').exists()
 
 
-def test_shared_weights_group_by_network_seed_and_verify_payload(tmp_path):
+def test_shared_weights_group_by_network_seed_and_reuse_atomic_payload(tmp_path):
     config = load_config(CONFIGS / 'smoke_test')
     alternate = copy.deepcopy(config); alternate['optimizer']['lr_scale'] *= 2
     different_seed = copy.deepcopy(config); different_seed['run']['seed'] += 1
@@ -152,9 +152,8 @@ def test_shared_weights_group_by_network_seed_and_verify_payload(tmp_path):
     assert origins['a'] == origins['b'] and origins['a'] != origins['c']
     assert initialization_key(config) == initialization_key(alternate)
     assert prepare_initializations(tmp_path, arms) == origins
-    path = Path(origins['a']['path']); path.write_bytes(path.read_bytes()+b'changed')
-    with pytest.raises(ValueError, match='checksum'):
-        prepare_initializations(tmp_path, arms)
+    assert not list((tmp_path/'.internal/initializations').glob('*.json'))
+    assert all(set(origin) == {'key', 'path'} for origin in origins.values())
 
 
 def test_experiment_initializes_and_schedules_all_arms(tmp_path, monkeypatch):
@@ -330,7 +329,7 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
         # Exercise scheduling and budgets without training; runs own their origin.
         started.append(arm['name'])
         origin = scheduler.initializations.get(arm['name'])
-        origin = {k: origin[k] for k in ('path', 'sha256')} if origin else None
+        origin = {k: origin[k] for k in ('path',)} if origin else None
         root = Path(arm['run_dir'])
         if not (root/'.internal/run.json').exists():
             save_json(root/'.internal/run.json', {'config': arm['config'],
@@ -439,7 +438,7 @@ def test_experiment_restarts_archived_arm_with_new_architecture(tmp_path, monkey
         root = Path(arm['run_dir'])
         origin = scheduler.initializations[arm['name']]
         save_json(root/'.internal/run.json', {'config': arm['config'],
-                  'weights_initialization': {k: origin[k] for k in ('path', 'sha256')}}, immutable=True)
+                  'weights_initialization': {k: origin[k] for k in ('path',)}}, immutable=True)
         save_json(root/'.internal/state.json', {'iteration': 3, 'elapsed_seconds': 10})
         scheduler.states[arm['name']] = {'status': 'complete'}
 
