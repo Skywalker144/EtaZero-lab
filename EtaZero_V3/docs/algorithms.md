@@ -26,11 +26,11 @@
 
 采用 AlphaZero 的策略价值网络、真实规则图搜索和自对弈监督闭环；网络预测落子概率与当前玩家的期望终局结果，训练结合策略交叉熵、价值误差与正则化。模型持续更新并供自对弈使用，固定模型评估独立运行，不默认加入“胜过旧模型才发布”的门控。[AlphaZero 原文，算法描述及式 1](https://arxiv.org/pdf/1712.01815)
 
-本项目将其适配到三种五子棋规则、Hex 和可配置硬件规模。Hex 的连接规则、输入方向、两种对称与独立平衡开局见 [Hex](hex.md)。以下明确的是 EtaZero 的实现约定，不声称复现原论文的棋类任务、网络规模或实验预算。搜索接入 KataGo 的 FPU、shaped Dirichlet noise、playout cap randomization、forced playout / policy target pruning、加权价值统计、LCB、根多对称与分层温度；对局采样使用 policy/value surprise weighting，学习接入六项 policy、终局/TD WDL 和短期价值误差监督。五子棋无 score utility、pass、提子和 no-result，WDL 的 D 表示真实和棋。v17支持可选逐动作纯W−L Q监督；hint/hintFork 和 early/game fork 贯通独立启动前缀与预算；真实规则搜索支持图转置。
+本项目将其适配到三种五子棋规则、Hex、围棋、中国象棋和可配置硬件规模。Hex 的连接规则、输入方向、两种对称与独立平衡开局见 [Hex](hex.md)。以下明确的是 EtaZero 的实现约定，不声称复现原论文的棋类任务、网络规模或实验预算。搜索接入 KataGo 的 FPU、shaped Dirichlet noise、playout cap randomization、forced playout / policy target pruning、加权价值统计、LCB、根多对称与分层温度；对局采样使用 policy/value surprise weighting，学习接入六项 policy、终局/TD WDL 和短期价值误差监督。五子棋无 score utility、pass、提子和 no-result，WDL 的 D 表示真实和棋。v17支持可选逐动作纯W−L Q监督；hint/hintFork 和 early/game fork 贯通独立启动前缀与预算；真实规则搜索支持图转置。
 
 ### 游戏状态与棋规
 
-真实状态包括棋盘、当前行棋方、规则、棋盘尺寸和终局状态。无提子、无 pass；坐标落在有效棋盘内的空点才可提交，终局后拒绝继续走子。完整对局从空棋盘开始；网络阶段可先执行下述开局前缀，正常搜索监督从前缀后开始。自对弈可从下述hint/fork的可重放前缀开始，不引入比赛交换开局；独立比赛采用成对平衡开局，见 [评估协议](elo.md)。
+真实状态包括棋盘、当前行棋方、规则、棋盘尺寸、必要的对局历史和终局状态。以下空点规则仅适用于五子棋与 Hex：无提子、无 pass；坐标落在有效棋盘内的空点才可提交，终局后拒绝继续走子。完整对局从空棋盘开始；网络阶段可先执行下述开局前缀，正常搜索监督从前缀后开始。自对弈可从下述hint/fork的可重放前缀开始，不引入比赛交换开局；独立比赛采用成对平衡开局，见 [评估协议](elo.md)。
 
 | 规则 | 胜负语义 |
 |---|---|
@@ -42,9 +42,33 @@
 
 Renju 沿用现有 MuZero / SkyZero 的棋盘局部规则，不扩展为完整比赛开局协议。参考中的禁手点允许实际落子，落下后判黑负，不在动作 mask 中提前删除；恰好五子与其他方向形状同时出现时按来源中的优先级判定。以固定版本 [KataGomo 禁手检测器](/home/sky/RL/SkyZero/KataGomo/cpp/forbiddenPoint/ForbiddenPointFinder.cpp) 和 [真实终局](/home/sky/RL/SkyZero/KataGomo/cpp/game/gamelogic.cpp) 核对具体规则；本地递归实现最初来自 MuZero / SkyZero。
 
-棋规对照入口为 [check_katagomo_rules.py](../tests/reference/check_katagomo_rules.py)，直接编译固定commit的KataGomo `CForbiddenPointFinder` 与本地 `RenjuAnalyzer`，覆盖五种目标尺寸的邻域穷举、交叉方向、边界、同方向双四、恰五优先和假三递归检查。有限局面语料不能证明所有递归状态等价。当前范围为方形Freestyle/Standard/Renju、无pass；VCN、矩形和对应额外终局语义不支持，配置或尺寸解析明确拒绝。
+棋规对照入口为 [check_katagomo_rules.py](../tests/reference/check_katagomo_rules.py)，直接编译固定commit的KataGomo `CForbiddenPointFinder` 与本地 `RenjuAnalyzer`，覆盖五种目标尺寸的邻域穷举、交叉方向、边界、同方向双四、恰五优先和假三递归检查。有限局面语料不能证明所有递归状态等价。五子棋范围为方形Freestyle/Standard/Renju、无pass；VCN、矩形和对应额外终局语义不支持，配置或尺寸解析明确拒绝。
 
 移植棋规要覆盖递归活三、边界与多方向交叉等情况，不能用局部字符串或简单形状计数代替来源语义。动作可提交性、落子后禁手判负和给网络的输入特征分别定义，不能混为一个“合法性”开关。
+
+### 围棋与中国象棋
+
+四种棋类分别在 [gomoku.cpp](../cpp/src/game/gomoku.cpp)、[hex.cpp](../cpp/src/game/hex.cpp)、[go.cpp](../cpp/src/game/go.cpp)、[xiangqi.cpp](../cpp/src/game/xiangqi.cpp) 实现 [RuleState](../cpp/include/etazero/rule_state.h)，提供复制／重置、合法动作、落子、终局、棋盘、观测和历史身份。[Game](../cpp/include/etazero/game.h) 管理状态所有权、公共手数和 PDA 条件；[公共工厂](../cpp/src/game/game.cpp) 按棋类构造状态，同规则、同尺寸的搜索重置复用已有存储。AlphaZero 的 PUCT／Gumbel 调用公共接口，MuZero 只在真实环境转移时使用规则状态，latent 搜索保持独立。
+
+规则状态不能缩减成当前棋盘：Go 的劫争、超级劫和日本规则阶段，象棋的长将、长捉及无进展计数均由完整历史决定。复制与重置保留完整历史，象棋的历史链指针重新绑定到副本。围棋的图共享按 KataGo 有界历史规则进行，落子仍按完整历史复核，见 [图搜索与局面共享](#图搜索与局面共享)；象棋的图身份保留完整历史与规则参数。
+
+| 棋类 | 空间输入／全局输入 | 动作 | 坐标和增强 |
+|---|---|---|---|
+| Gomoku／Hex | 5／8 | `canvas²` | 保持原有 D4／Hex 两对称与白方转置 |
+| Go | 22／19 | `canvas²+1`，末动作 pass | D4，pass 不变 |
+| Xiangqi | 113／8 | 固定 2086 | 9×10 放进 10×10 画布；红方本位、黑方旋转 180°，随机左右镜像 |
+
+输入／动作布局、棋盘形状、对称组、SVB 支持状态和象棋动作顺序由 [games.py](../python/etazero/games.py) 的 GameSpec 定义，并生成 C++ 表；C++ [GameSpec](../cpp/include/etazero/game_spec.h) 提供动作数量和物理／画布坐标映射。单模型可混合相同布局的 Gomoku／Hex，不混合 Go、Xiangqi 与其他输入布局。复用的是网络结构与训练实现，各棋类默认使用独立参数。
+
+**Go** 使用固定 KataGo 来源的 `Board`、`BoardHistory`、`Rules` 和 `NNInputs::fillRowV7`，没有另写简化围棋判定器。输入保留来源的历史、气、劫、规则、贴目及阶段特征。训练 `env.cfg` 的可选 `[go] rules/komi` 控制规则，缺省 Chinese、7.5；分析／比赛使用对应节的 `go_rules/komi`，Web 重开棋局可覆盖。支持 5–25 的方形棋盘，规则模块编译上限为 25。日本规则按来源进入收官阶段，不能把任意两次 pass 都硬判终局。来源的所有权和分数辅助 head 不加入训练，搜索仍是纯 W−L。
+
+**Xiangqi** 使用固定 Pikafish 的局面、合法走法生成与 `rule_judge`，包含将军、将帅照面、蹩马腿、塞象眼、炮架、九宫、河界，以及实际重复历史的长将／长捉裁定和来源的 60 回合规则。无合法走法判负，普通重复与责任方循环区分处理。棋盘为 9 路 10 行，配置 `sizes=10, canvas=10`；第十列恒为 padding。输入为 mask 加最近八帧、每帧双方七种棋子共 112 平面；缺失历史为零。全局量依次为红方视角、无进展计数／120、既往重复次数／2、PDA 启用、带符号半倍增优势、可用帧数／8、被将军、总半回合数／200。Web／JSON 支持标准开局或合法 FEN；FEN 之前的循环历史不可从 FEN 恢复，规则历史从载入点开始。
+
+2086 动作为所有直线走法、马步、双方九宫内士步及合法象位间象步的固定集合，棋子阻挡和当前合法性由规则引擎筛选。Policy head 输出 50 个位移通道，按起点和位移 gather 为 2086 logits；六项 policy 与可选 Q 使用同一动作顺序。不能使用独立起点／终点 softmax 相乘代替联合走法概率。
+
+两种新棋类从标准初始局面开始，支持共用的 policy init、hint 前缀、fork、side position 与 reanalysis；不套用五子棋随机骨架或 Hex 首手平衡。比赛使用同一初始前缀执色互换，允许空前缀；这是成对评估，不宣称初始局面已通过网络平衡。
+
+所有训练 W/D/L 的 D 都表示普通和棋。Go `no_result` 在搜索中赋零效用、零普通和棋概率（W/L 各半作为中性回传）；它另存 reason，其主轨迹训练次数归零，不把它当成普通和棋标签；独立 side 位置仍可使用自己的搜索监督。评估保留无结果记录并从 Elo 样本中排除。取消中的半局不写成和棋，也不按棋盘面积截断长局。
 
 ### 平衡开局与 policy init
 
@@ -104,7 +128,7 @@ PolicyHead 将主干分别投影到局部和全局特征。全局特征经过 bi
 
 搜索时将已占用点和画布外位置 mask 掉，每个网络评估先将 logits 除以 `nn_policy_temperature`，再对可提交动作归一化先验；这个全树 policy 温度同时作用于根和所有非根。六项训练策略 softmax 的域均为有效棋盘上的全部落点：硬 policy 的已占用点目标为零，soft policy 经 epsilon 处理后占用点也有正目标；画布外点不参与归一化。这个搜索与训练的区别需要固定样例验证，不能由不同调用方各自选择。
 
-`training.d4_augmentation` 控制训练随机增强，baseline 开启。Hex 的行只使用 identity/180，并始终执行白方转置；五子棋使用下述 D4。沿用 SkyZero_V8.1 的 batch 级均匀八对称，按整个画布变换全部空间通道（包括有效棋盘和禁手 mask）与 policy / opponent policy 目标；小棋盘的有效区域可以随变换移动到其他角。全局特征和 WDL 目标不变，原始轨迹不重写。变换发生在 learner 消费 batch 后、联合编译前，结果保持 contiguous；随机流纳入 Torch CPU RNG checkpoint，AMP overflow 消费当前 batch 后继续下一 batch，不重试该变换或前向图。实现见 [symmetry.py](../python/etazero/symmetry.py)。
+`training.d4_augmentation` 控制训练随机增强，baseline 开启。Hex 的行只使用 identity/180，并始终执行白方转置；围棋使用 D4 并保留 pass；象棋仅左右镜像并按根行棋方固定朝向。五子棋使用下述 D4。沿用 SkyZero_V8.1 的 batch 级均匀八对称，按整个画布变换全部空间通道（包括有效棋盘和禁手 mask）与 policy / opponent policy 目标；小棋盘的有效区域可以随变换移动到其他角。全局特征和 WDL 目标不变，原始轨迹不重写。变换发生在 learner 消费 batch 后、联合编译前，结果保持 contiguous；随机流纳入 Torch CPU RNG checkpoint，AMP overflow 消费当前 batch 后继续下一 batch，不重试该变换或前向图。实现见 [symmetry.py](../python/etazero/symmetry.py)。
 
 搜索根由 `root_num_symmetries_to_sample` 控制有效对称集成，五子棋取值 1–8、Hex 取值 1–2；大于 1 时，五子棋从八种、Hex 从两种有效对称中无放回均匀抽样，并绕过 NN cache 的读取和写入。变换覆盖整个画布的全部空间输入，全局输入不变，输出 policy 还原到原始动作坐标。每个对称先独立混合 ordinary/短期 optimistic logits，再执行全树温度及合法域 softmax，随后算术平均 policy 概率和 WDL 概率；不平均 logits，多个评估仍只构成一个根初始访问。根从非根子树推进而来时，多对称或 root/leaf optimism 不同时重新评估根，访问数不增加；新增预算为零的复用根也刷新条件。
 
@@ -166,7 +190,11 @@ LCB 使用完成样本的搜索效用加权均值、二阶矩和 `ESS = weight_s
 
 AlphaZero 的 PUCT、图搜索及两种 Gumbel 搜索共用 [偏差表](../cpp/src/search/subtree_value_bias.cpp) 与 [回传](../cpp/src/search/search_math.cpp)。来源为固定 KataGo 的 `subtreevaluebiastable.cpp`、`localpattern.cpp`、`searchupdatehelpers.cpp` 和 `search.cpp`；来源校验值见 [reference_sources.json](../reference_sources.json)。这是按局部落子模式共享的网络效用误差估计，不是 `value_weight_exponent` 的另一种名称。
 
-非根节点首次创建时，用落子前的 5×5 棋盘局部模式、前一手和当前手的绝对棋盘位置、落子后的行棋方关联表项。开局第一手缺少前一手，不关联表项；已有开局前缀和跨手复用保留最近实际动作。模式不做对称或颜色归一化，画布 padding 不参与位置编号。图转置保留首次创建路径的表项，之后的父边不重复关联或累计同一个节点。真实终局不施加偏差。
+非根节点首次创建时，由 `Game → RuleState` 决定是否共享并生成 key；通用搜索只管理偏差表及数学更新。Gomoku／Hex 用落子前的 5×5 棋盘局部模式、前一手和当前手的绝对棋盘位置、当前落子方关联表项。Go 还编码局部每颗子的打吃状态（按完整棋块的气数判断）以及整个棋盘的简单劫禁点。开局第一手缺少前一手，不关联表项；Go 当前选择 pass 时不关联，前一手为 pass 时允许关联。已有开局前缀和跨手复用保留最近实际动作。模式不做对称或颜色归一化，画布 padding 不参与位置编号。图转置保留首次创建路径的表项，之后的父边不重复关联或累计同一个节点。真实终局不施加偏差。
+
+象棋在 [XiangqiState](../cpp/src/game/xiangqi.cpp) 中使用走子前的模式：上一手和候选手的完整动作 ID、绝对行棋方、起点与终点各 3×3 棋形，以及两端沿左右上下四条射线的前两枚阻挡棋子的颜色、类型和距离；空射线补零。局部棋形区分空点、双方七种棋子和棋盘外边界，覆盖起终点变化、马腿和象眼；射线补充车炮的长程信息。键还包含 Pikafish 的 `rule60`、双方 `check10` 计数和当前是否被将军。所有特征按固定次序使用两组固定盐的 SplitMix64 混合，生成 128 位模式哈希，存在极小的哈希碰撞概率；不将其作为规则状态或图搜索身份。
+
+象棋在走子前的当前无吃子历史段中一旦出现同局面重复，就停止关联 SVB；离开该棋盘仍保留限制，下一次吃子开始新的历史段。每次走子统一计算当前局面的重复次数和该历史段的限制，观测直接复用重复次数，复制／重置同步这两个值；不在每次构键时重新扫描整段历史。FEN 本身不含此前行动历史，首次动作仍不关联。该限制依据走子前已知的重复，不对候选手后的重复作额外推演；`rule60`／`check10` 也不代替完整长将长捉历史。所有合法性和终局裁决仍由 Pikafish 完整历史处理，搜索不向真实终局施加偏差。这是象棋的局部残差共享启发式，不是 KataGo 原生象棋算法，也不表示棋力收益已验证。
 
 令 `u_nn` 为节点的原始 W−L，`u_children` 为经过 noise pruning、chosen subtract/prune 和 value weighting 后、加入节点自身 NN 样本前的子效用均值。令 `T_original` 为 pruning 前的完成子权重，`p` 为配置指数。该节点对共享表贡献：
 
@@ -184,7 +212,7 @@ u_self = u_nn + factor * table.delta / table.weight
 
 训练配置使用 `selfplay.cfg` 的 `[subtree_value_bias]`，analysis/match 使用 `[engine]` 中同名字段；实际设置以 [基础自对弈配置](../configs/baseline/selfplay.cfg) 和 [基础引擎配置](../configs/baseline/engine.cfg) 为准。factor 为零关闭并不分配表。`subtree_value_bias_table_num_shards` 控制分片锁和 map 的固定开销，不限制表项容量；动态表项由存活节点引用及上述清理决定。每个搜索实例独立拥有表，多对局内存需要乘并行实例数。
 
-棋类适配省略不适用的 Go atari、ko、pass 和 anti-mirror 条件。原始 Zobrist Hash128 改为无碰撞的两字精确模式编码，entry 自旋锁改用 C++ mutex；模式分组和加权公式保持对应语义，哈希位值、锁调度和性能不声称等价。MuZero latent 节点没有真实棋盘模式，所有 MuZero 搜索显式要求 factor 为零，见 [适用边界](muzero.md#katago-工程机制的适用边界)。数值来源对照入口为 [check_katago_subtree_value_bias.py](../tests/reference/check_katago_subtree_value_bias.py)，节点共享、回收、升根、终局和原始 WDL/Q 分离由原生测试覆盖。
+Go 的共享条件对应固定 KataGo 源码在未启用 anti-mirror 模式时的行为；EtaZero 没有 anti-mirror 搜索模式，也不引入 Go score utility。Go 的原始 Zobrist Hash128 改为两字精确模式编码，entry 自旋锁改用 C++ mutex；哈希位值、锁调度和性能不声称等价。MuZero latent 节点没有真实棋盘模式，所有 MuZero 搜索显式要求 factor 为零，见 [适用边界](muzero.md#katago-工程机制的适用边界)。数值来源对照入口为 [check_katago_subtree_value_bias.py](../tests/reference/check_katago_subtree_value_bias.py)；[check_katago_go_bias.py](../tests/reference/check_katago_go_bias.py) 将 Go 的精确 key 转换到来源 Zobrist 基底，与原始 KataGo 表项逐个比较，覆盖多规则、边界、padding、打吃、劫和 pass。原生测试覆盖象棋局部／远程模式的共享与分离、规则计数和重复限制，以及各棋类的节点共享、回收、升根、终局和原始 WDL/Q 分离。
 
 ### 误差加权、optimistic policy 与 noise pruning
 
@@ -202,7 +230,11 @@ noise pruning 按 child 激活顺序处理，不排序。以前缀已剪权重�
 
 [Search](../cpp/src/search/search.cpp) 以分段加锁的局面表拥有节点，根和父边借用节点指针；多个父边可以指向同一个子节点。SP 的 `[graph_search]` 及 Eval/Match 自身字段 `use_graph_search` 默认开启，`graph_search_catch_up_leak_prob` 默认零、允许 [0,1]。关闭图共享时，每条分支仍创建独立节点，NN cache 可另外开关。
 
-[AlphaZeroState.graph_key](../cpp/include/etazero/algorithm.h) 比较完整局面字节而非仅比较哈希：包含实际尺寸、画布、执子、手数、棋规、终局标志、胜者、终局原因和棋子；哈希只决定表分段。搜索固定模型和参数，换模型会清图。NOVC 五子棋每手只增加棋子，没有 pass、提子、ko 或历史判重；不适用来源 Go 的 recent-history 折叠及 `graphSearchRepBound`，不提供不起作用的配置。当前搜索始终提供完整禁手特征，其输入由局面与棋规确定。未来增加影响 continuation 或 NN 输入的条件时须同步扩充 key；不支持身份契约的状态适配器会明确拒绝图搜索。
+[AlphaZeroState.graph_key](../cpp/include/etazero/algorithm.h) 对五子棋、Hex 和象棋保留精确身份：实际尺寸、画布、执子、手数、棋规、终局信息、棋子及规则状态身份，表哈希只决定分段。围棋使用固定 KataGo 的 [GraphHash](../cpp/external/katago/game/graphhash.cpp)：状态哈希包含棋盘、行棋方、规则、贴目、劫禁及 pass／终局阶段；在最近一手满足来源的简单重复下界时重置为当前状态哈希，否则混入前一历史哈希。`graph_search_rep_bound` 对应 `graphSearchRepBound`，缺省和范围由 [配置解析器](../python/etazero/config.py) 维护，SP、Analysis 和 Match 均可设置。根从完整历史重放生成哈希，搜索中逐手增量更新；尺寸、画布和 PDA 条件另外隔离。搜索固定模型和参数，换模型会清图。
+
+围棋不把完整落子序列、手数或最近 NN 输入平面追加到共享键，否则不同落子顺序无法汇合。完整规则历史仍保存在每条搜索路径中，NN 输入仍从该路径生成；共享节点可以复用另一条历史的 NN 输出，这是来源有意采用的近似，并非完整历史等价判定。128 位 GraphHash 也有哈希碰撞的理论可能。后端 NN cache 仍使用完整输入的精确键，和搜索节点共享是两个独立层次。
+
+共享的 NN 评估连同合法性 mask 作为不可变快照原子发布。每次下降前，围棋用当前路径的完整历史重新检查所选动作；若已不合法，则跳过 NN cache 重新评估该节点并结束本次下降，沿途父边照常计次，该节点不新增叶访问或叶价值。这与来源对超级劫及历史差异的处理位置一致。根节点独立持有自己的统计；复用时刷新变化的合法性 mask、删除非法根边，按保留边访问之和加一次初始评估重建根访问数，再重新聚合和回收不可达节点。
 
 节点访问数与父边访问数独立。令 `r=edgeVisits/max(childVisits,1)`，父边完成权重为 `child.weight*r`；选择/LCB 的二阶权重为 `child.weight_sq*r`，父节点聚合则以 `r²` 缩放原始子节点二阶权重，再应用价值重加权的比例平方。这两个分支直接对应固定来源 `searchnode.h` 与 `recomputeNodeStats`，不能相互替代。访问追赶在下降前读取子节点访问：若边落后且未命中泄漏概率，用 CAS 将边访问加一，更新父节点而不新增子节点访问；命中泄漏则继续下降。每次只加一，未启用来源已注释的追赶比例分支。
 
@@ -210,7 +242,7 @@ virtual loss 使用共享子节点的全部在途预约；完成策略及价值�
 
 根始终是独立节点，推进时复制命中子节点的统计、先验和父边，保留其共享后继；终局或未完成展开的节点不作为可复用根。所有搜索线程静止后从新根标记可达节点，删除每个未标记节点一次，大图使用常驻线程分摊删除；循环和多父不会递归析构或重复释放。不兼容局面、reset、完整清树及模型切换会清除旧图。只读 `inspect_graph()` 在同步调用返回后提供节点/父边统计和稳定ID，用于检查共享与回收。
 
-独立检查入口为 [check_katago_graph.py](../tests/reference/check_katago_graph.py)：执行固定来源的 child 权重、追赶函数和聚合循环，与逐步 diamond 统计对照。C++ 图测试另覆盖实际五子棋不同落子顺序、关闭共享、泄漏率、多线程、循环、终局、故障和大图推进/回收。真实 CUDA 的图共享验收关闭 NN cache，因而不会将 NN 输出复用误记为节点共享；这些检查不证明训练效果或吞吐改善。
+独立检查入口为 [check_katago_graph.py](../tests/reference/check_katago_graph.py)：执行固定来源的 child 权重、追赶函数和聚合循环，与逐步 diamond 统计对照。[围棋 GraphHash 对照](../tests/reference/check_katago_go_graph.py) 另编译固定来源的完整规则和哈希代码，核对多种规则、重复下界、贴目、棋盘尺寸、劫争及日本规则阶段下的增量、重放与复制结果。[围棋图测试](../cpp/tests/go_graph_test.cpp) 覆盖实际转置、多线程共享、根推进、历史差异引起的非法着重评估、根边清理及异常恢复。C++ 通用图测试还覆盖关闭共享、泄漏率、循环、终局和大图回收。真实 CUDA 的图共享验收关闭 NN cache，因而不会将 NN 输出复用误记为节点共享；这些检查不证明训练效果或吞吐改善。
 
 ### 学习与数据使用
 
