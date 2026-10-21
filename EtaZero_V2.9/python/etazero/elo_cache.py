@@ -13,8 +13,7 @@ def pair_identity(manifest, pair):
     config['match'].pop('games', None)
     # Published model paths are immutable. No weight-file hashing is needed.
     return {'models': [players[p]['model'] for p in pair['players']],
-            'config': config, 'binary_sha256': manifest['binary_sha256'],
-            'execution': manifest.get('execution', {}), 'seed': pair_seed(manifest, pair)}
+            'config': config, 'seed': pair_seed(manifest, pair)}
 
 
 def merge_pair(source, source_total, destination, destination_total, seed):
@@ -100,9 +99,6 @@ def prepare_pairs(base, output, manifest):
         if session.is_symlink() or session == output or not (session/'manifest.json').is_file():
             continue
         old = load_json(session/'manifest.json')
-        # These trials used content-derived inference seeds, not match.seed.
-        if any('sha256' in player for player in old['players']):
-            continue
         for pair in old['pairs']:
             key = identity(pair_identity(old, pair))
             if key not in needed:
