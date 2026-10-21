@@ -1,12 +1,12 @@
 # EtaZero V3
 
-EtaZero 面向 Freestyle、Standard、Renju 五子棋及 Hex。支持 AlphaZero / MuZero 的 PUCT 与 Gumbel 搜索。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 根配 PUCT 或论文非根选点，详见 [Gumbel](docs/gumbel.md)。
+EtaZero 面向 Freestyle、Standard、Renju 五子棋、Hex、围棋和中国象棋。支持 AlphaZero / MuZero 的 PUCT 与 Gumbel 搜索。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 根配 PUCT 或论文非根选点，详见 [Gumbel](docs/gumbel.md)。
 
 训练按完整轮次执行自对弈 → shuffle → learner → 模型发布。各阶段内部支持并行对局、GPU 组批与 CUDA Graph 推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
 
 ## 构建与小规模验证
 
-以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖 C++17、CMake、zlib 和该环境的 LibTorch。
+以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖支持 C++20 的编译器（象棋规则模块）、CMake、zlib 和该环境的 LibTorch。
 
 ```bash
 bash scripts/build.sh
@@ -14,7 +14,7 @@ bash scripts/run.sh check-config --config-dir configs/checks/smoke_test
 CONFIG_DIR=configs/checks/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 2
 ```
 
-`baseline` 集中维护公共起始设置，`az_g` 与 `az_h` 提供 AlphaZero 两种棋类的配置（参见 [Hex](docs/hex.md)），`checks/smoke_test` 用于快速工程验收；测试本身使用独立的 `tests/fixtures/configs/`，不依赖用户运行配置的取值。设备由配置指定，不自动回退到 CPU。隐藏 GPU 的托管沙箱须在可访问宿主 CUDA 的执行环境运行 CUDA 检查。
+`baseline` 集中维护公共起始设置，`az_g`、`az_h`、`az_go`、`az_xiangqi` 提供四种棋类的 AlphaZero 配置，`mz_g`、`mz_h`、`mz_go`、`mz_xiangqi` 提供对应 MuZero 配置（参见 [Hex](docs/hex.md)），`checks/smoke_test` 用于快速工程验收；测试本身使用独立的 `tests/fixtures/configs/`，不依赖用户运行配置的取值。设备由配置指定，不自动回退到 CPU。隐藏 GPU 的托管沙箱须在可访问宿主 CUDA 的执行环境运行 CUDA 检查。
 
 ## 配置与训练
 
@@ -25,6 +25,8 @@ CONFIG_DIR=configs/az_g bash scripts/run.sh
 `CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`analysis`、`gtp`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
 
 bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照单遍限制；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
+
+围棋和象棋的规则、输入／动作编码、棋盘尺寸和价值语义见 [棋类边界](docs/algorithms.md#围棋与中国象棋)。例如 `CONFIG_DIR=configs/az_go bash scripts/run.sh` 或 `CONFIG_DIR=configs/mz_xiangqi bash scripts/run.sh`；续训仍使用同一目录与原有恢复流程。四种棋类共用 backbone 实现，每种输入／动作布局独立训练；不把旧五子棋权重直接当作新棋类权重加载。
 
 MuZero 的网络、展开训练与搜索约束见 [MuZero](docs/muzero.md)。
 
@@ -43,7 +45,7 @@ bash scripts/run.sh match --config-dir configs/checks/smoke_test --run-dir data/
 bash scripts/run.sh plot --run-dir data/my_check
 ```
 
-评估显式选择已发布模型；动作使用实际棋盘的零起始行优先编号。比赛按成对开局交换模型执色，支持逐局续测。配置、预算与 Elo 统计见 [评估与 Elo](docs/elo.md)。
+评估显式选择已发布模型；五子棋、Hex 和围棋落点使用实际棋盘的零起始行优先编号，围棋的 `size²` 表示停一手，象棋使用固定 2086 项动作表。比赛按成对开局交换模型执色，支持逐局续测。配置、预算与 Elo 统计见 [评估与 Elo](docs/elo.md)。
 
 ## 训练图与自动实验
 
