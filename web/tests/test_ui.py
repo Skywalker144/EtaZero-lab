@@ -15,7 +15,7 @@ def position(moves):
     board = [0] * 225
     for index, action in enumerate(moves):
         board[action] = 1 if index % 2 == 0 else -1
-    return dict(board_size=15, rule='freestyle', board=board, moves=moves, turn=len(moves),
+    return dict(board_size=15, board_width=15, board_height=15, board_stride=15, rule='freestyle', board=board, moves=moves, turn=len(moves),
                 player=1 if len(moves) % 2 == 0 else -1, finished=False, winner=0)
 
 
@@ -31,7 +31,7 @@ def analysis(game):
     probabilities = [0.0] * 225
     for candidate in candidates:
         probabilities[candidate['action']] = candidate['network_prior']
-    return dict(board_size=15, rule=game['rule'], board=game['board'], turn=game['turn'], player=game['player'],
+    return dict(board_size=15, board_width=15, board_height=15, board_stride=15, rule=game['rule'], board=game['board'], turn=game['turn'], player=game['player'],
                 action=actions[0], candidates=candidates, seconds=.125,
                 completed_visits=100, root_value=.12, wdl=[.5, .12, .38],
                 network_wdl=[.45, .2, .35], requests=100, batches=25, root_search_algo='puct', final=True,
@@ -128,6 +128,66 @@ class AnalysisUpdateTests(unittest.TestCase):
     def submit(self, operation, **values):
         state = self.app.snapshot()
         return self.app.submit(operation, dict(version=state['version'], game_id=state['game_id'], **values))
+
+    def test_balanced_opening_rejected_for_go_and_xiangqi_before_engine_work(self):
+        for rule in ('go', 'xiangqi'):
+            with self.subTest(rule=rule):
+                self.app.metadata['fixture']['game'] = rule
+                with self.assertRaisesRegex(ValueError, '不支持平衡开局'):
+                    self.submit('new', model='fixture', size=10, rule=rule, visits=2,
+                                human=1, mode='manual', opening='balanced')
+                self.assertFalse(self.app.snapshot()['busy'])
+                self.assertIs(self.app.engine, self.engine)
+
+    def test_browser_xiangqi_network_selection_and_hover_outside_top_candidates(self):
+        from etazero.games import XIANGQI_MOVES
+        from playwright.sync_api import sync_playwright
+
+        game = dict(board_size=10, board_width=9, board_height=10, board_stride=10,
+                    rule=5, board=[0]*100, moves=[], turn=0, player=1, finished=False,
+                    winner=0, legal_actions=[])
+        report = analysis(position([]))
+        report.update(game)
+        report['candidates'] = report['candidates'][:2]
+        for i, candidate in enumerate(report['candidates']):
+            candidate.update(action=i, visits=20-15*i, visit_policy=.8-.6*i)
+        for head in report['network_planes']['heads']:
+            head.update(probabilities=[1/2086]*2086, logits=[0.0]*2086)
+        self.app.metadata['fixture'].update(game='xiangqi', canvas=10)
+        self.app.config['analysis'].update(rule='xiangqi', board_size=10)
+        for run in self.app.runs.values():
+            run['analysis_config'].update(rule='xiangqi', board_size=10)
+        self.app.publish(game=game, rule='xiangqi', mode='manual', analysis=report)
+        server = make_server(self.app, '127.0.0.1', 0)
+        Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(f'http://127.0.0.1:{server.server_port}')
+            page.wait_for_selector('#board.xiangqi-board')
+            page.locator('#candidate-top').fill('1')
+            self.assertEqual(page.locator('#board g[data-candidate="1"]').count(), 0)
+            page.locator('#tab-network').click()
+            choice = page.locator('#network-maps button[data-action="1"]').first
+            choice.hover()
+            x,y,u,v = XIANGQI_MOVES[1]
+            for square in (y*10+x, v*10+u):
+                self.assertIn('preview-point', page.locator(f'#board [data-square="{square}"]').get_attribute('class'))
+            choice.click()
+            arrow = page.locator('#board g[data-candidate="1"]')
+            self.assertEqual(arrow.get_attribute('stroke'), '#d76025')
+            page.locator('#candidate-top').focus()
+            page.locator('#candidate-top').hover()
+            self.assertEqual(page.locator('#board .preview-point').count(), 0)
+            page.select_option('#overlay', 'none')
+            self.assertEqual(arrow.get_attribute('stroke'), '#d76025')
+            self.assertEqual(page.locator('#board g[data-candidate]').count(), 1)
+            self.assertEqual(errors, [])
+            browser.close()
 
     def test_continuous_analysis_follows_moves_and_undo_and_stays_paused(self):
         self.app.publish(mode='manual', visits=2, analysis=None)
