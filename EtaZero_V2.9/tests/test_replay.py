@@ -11,7 +11,7 @@ import torch
 from etazero.config import ROOT,load_config,validate
 from etazero.data import Catalog,training_view
 from etazero.reader import BatchReader,BatchPrefetcher
-from etazero.schema import CONTRACT_ID
+
 from etazero.shuffle import build_snapshot,desired_window,window_sources,_groups,resource_plan,prune_derived,restore_snapshot
 from etazero.storage import save_npz,save_json,sha256
 from etazero.network import make_network,TrainingForward
@@ -85,7 +85,7 @@ def id_snapshot(root,counts,validation=False):
         info={'path':filename,'rows':n,'sha256':sha256(directory/filename)};files.append(info)
         if validation:
             save_npz(directory/'validation'/filename,arrays);val_files.append(info.copy())
-    save_json(snapshot/'manifest.json',{'id':'ids','contract':CONTRACT_ID,'canvas':6,'rows':sum(counts),'files':files,
+    save_json(snapshot/'manifest.json',{'id':'ids','canvas':6,'rows':sum(counts),'files':files,
                                       'validation_rows':sum(counts) if validation else 0,'validation_files':val_files})
     return snapshot
 
