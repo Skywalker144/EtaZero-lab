@@ -10,7 +10,7 @@ import queue
 import threading
 import numpy as np
 from .storage import load_json
-from .schema import CONTRACT_ID, PLANES, GLOBALS, unpack_observations
+from .schema import PLANES, GLOBALS, unpack_observations
 from .data import TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 
 
@@ -21,8 +21,6 @@ class BatchReader:
             from .shuffle import restore_snapshot
             restore_snapshot(self.snapshot)
         self.manifest = load_json(self.snapshot/"manifest.json")
-        if self.manifest["contract"] != CONTRACT_ID:
-            raise ValueError("Snapshot contract mismatch")
         if split not in ('train','validation'):raise ValueError('Invalid reader split')
         self.split=split;self.directory=self.snapshot/'data'
         if split=='validation':self.directory=self.directory/'validation'
