@@ -5,13 +5,13 @@ import math
 from pathlib import Path
 import random
 import uuid
+import warnings
 import numpy as np
 import torch
 from .config import resume_config
 from .network import make_network, TrainingForward
 from .optimization import optimization_for, optimizer_for
 from .reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
-from .schema import CONTRACT_ID
 from .storage import atomic_write, load_json, save_json, sync_directory
 from .symmetry import augment_batch
 from .training_metrics import TrainingMetrics
@@ -63,24 +63,23 @@ def device_check(device):
     return d
 
 
-def rng_state():
+def rng_state(device):
+    device = torch.device(device)
     return {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+            "cuda": torch.cuda.get_rng_state(device) if device.type == 'cuda' else None}
 
 
-def restore_rng(state):
+def restore_rng(state, device):
     random.setstate(state["python"]); np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"].cpu())
-    if state["cuda"]:
-        if len(state["cuda"]) != torch.cuda.device_count():
-            raise ValueError("CUDA RNG device topology differs from the checkpoint")
-        torch.cuda.set_rng_state_all([x.cpu() for x in state["cuda"]])
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state(state["cuda"].cpu(), device)
 
 
 def load_checkpoint(run_dir, reference, config, device="cpu"):
     path = Path(run_dir)/reference["path"]
     value = torch.load(path, map_location=device, weights_only=False)
-    if (value["contract"] != CONTRACT_ID or value["resume_config"] != resume_config(config) or
+    if (value["resume_config"] != resume_config(config) or
             value["id"] != reference["id"] or value["network_config"] != config["network"]):
         raise ValueError("Checkpoint identity/configuration mismatch")
     check_model_identity(value, config)
@@ -91,14 +90,14 @@ def commit_checkpoint(run_dir, config, model, optimizer, scaler, iteration, step
                       reader_state, optimization, training_metrics=None):
     identity = f"iteration_{iteration:06d}_step_{step:08d}_{uuid.uuid4().hex}"
     path = Path("checkpoints")/(identity+".pt")
-    value = {"id": identity, "contract": CONTRACT_ID, "resume_config": resume_config(config),
+    value = {"id": identity, "resume_config": resume_config(config),
              **model_identity(config), "model": model.state_dict(), "optimizer": optimizer.state_dict(),
-             "optimization": optimization.state_dict(), "scaler": scaler.state_dict(), "rng": rng_state(), "reader": reader_state,
+             "optimization": optimization.state_dict(), "scaler": scaler.state_dict(), "rng": rng_state(next(model.parameters()).device), "reader": reader_state,
              "iteration": iteration, "step": step, "total_steps": total_steps,
              "training_metrics": TrainingMetrics().state if training_metrics is None else training_metrics.state,
              "total_samples": optimization.consumed_samples, "optimizer_steps": optimization.optimizer_steps,
              "source_id":load_json(Path(run_dir)/".internal/session.json")["source_id"] if (Path(run_dir)/".internal/session.json").exists() else None}
-    atomic_write(Path(run_dir)/path, lambda p: torch.save(value,p), immutable=True)
+    atomic_write(Path(run_dir)/path, lambda p: torch.save(value,p), immutable=True, durable=True)
     reference = {"id": identity, "path": str(path), "iteration": iteration, "step": step, "total_steps": total_steps, "total_samples": value["total_samples"], "optimizer_steps": value["optimizer_steps"]}
     index_path = Path(run_dir)/'.internal/checkpoints.json'
     index = load_json(index_path) if index_path.exists() else []
@@ -153,8 +152,8 @@ def initialize(run_dir, config, weights=None):
     model = make_network(config).to(device)
     if weights:
         source = torch.load(weights, map_location=device, weights_only=False)
-        if source["contract"] != CONTRACT_ID or source["network_config"] != config["network"]:
-            raise ValueError("Imported weights do not match the configured model contract")
+        if source["network_config"] != config["network"]:
+            raise ValueError("Imported weights do not match the network configuration")
         check_model_identity(source, config)
         model.load_state_dict(source["model"], strict=True)
     optimizer = optimizer_for(model,config)
@@ -287,7 +286,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     optimization = optimization_for(model, config, optimizer, checkpoint['optimization'], round_steps=plan['train_steps'])
     scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
     scaler.load_state_dict(checkpoint["scaler"])
-    restore_rng(checkpoint["rng"])
+    restore_rng(checkpoint["rng"], device)
     step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
     reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
                          config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,
@@ -295,7 +294,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
     del checkpoint
     if round_metrics.state['steps'] != step:
-        raise ValueError('Metric counters differ from the learner cursor')
+        warnings.warn('Metric counters differ from the learner cursor; round metrics are incomplete', RuntimeWarning)
+        round_metrics.state['incomplete'] = True
     window_metrics = TrainingMetrics()
     last_fields = {}
 
