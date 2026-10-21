@@ -25,6 +25,8 @@ def checkpoint_run(tmp_path):
             parent = reference
     save_json(tmp_path/'.internal/checkpoints.json',list(references.values()))
     for iteration in range(4):
+        save_json(tmp_path/'.internal/iterations'/f'{iteration:06d}'/'status.json',
+                  {'commit': {'iteration': iteration, 'steps': 4 if iteration else 0}})
         save_json(tmp_path/'logs/iterations'/f'{iteration:06d}.json',{'iteration':iteration,'steps':4 if iteration else 0})
     save_json(tmp_path/'.internal/state.json', {'iteration': 4, 'checkpoint': parent})
     # These files are outside the committed lineage and must never be pruned.
