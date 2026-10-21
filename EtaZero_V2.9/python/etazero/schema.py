@@ -1,5 +1,4 @@
 """The single source of truth for the Python/C++ model and trajectory contract."""
-import hashlib
 import json
 
 PLANES = ("on_board", "own", "opponent", "black_forbidden_black_to_move", "black_forbidden_white_to_move")
@@ -51,21 +50,6 @@ CONTRACT = {"planes": PLANES, "globals": GLOBALS,
             "reanalysis": "postgame cheap-only full searches replace policy/search/NN and target weights, preserving actual moves/outcome; reanalyzed rows without outcome targets suppress opponent/error/default optimistic supervision via full_game_weight=0; main value/TD and Q remain enabled; disabled optimistic branch retains fixed 0.5 weights",
             "pda": "nonzero doubling advantage activates flag; signed at each side-to-move, retained by main rows; side rows zero both PDA globals",
             "sampling": "KataGo surprise weights stochastically rounded once per game; repeat rows in training view"}
-# Only machine-relevant layout and semantic identifiers define compatibility.
-# The prose in CONTRACT is documentation and can be edited independently.
-CONTRACT_LAYOUT = {
-    'planes': PLANES, 'globals': GLOBALS, 'rules': RULES, 'reasons': REASONS,
-    'raw_dtypes': RAW_DTYPES, 'observation_bitorder': 'big',
-    'policy_heads': POLICY_HEADS, 'optional_q_head': Q_POLICY_HEAD,
-    'inference_outputs': ('policy_logits', 'wdl_logits', 'optimistic_logits', 'value_stdev'),
-    'action_order': 'canvas_row_major', 'value_order': ('win','draw','loss'),
-    'value_perspective': 'side_to_move', 'policy_quantization_max': 30000, 'q_scale': 32000,
-    'td_area_factors': (.176,.056,.016), 'row_order': ('main','side'),
-    'raw_storage': 'complete_trajectory_with_repeated_row_span',
-    'hex_geometry': 'black_top_bottom_white_left_right_six_neighbors_no_swap_no_virtual_bridges',
-    'network_coordinates': 'actual_for_gomoku; transpose_for_hex_white; fixed_root_orientation_for_muzero_unroll',
-}
-CONTRACT_ID = hashlib.sha256(json.dumps(CONTRACT_LAYOUT, sort_keys=True).encode()).hexdigest()
 
 
 def pack_observations(observations):
@@ -90,7 +74,6 @@ def generate_header(path):
         '#pragma once\nnamespace etazero {\n'
         f'inline constexpr int INPUT_PLANES = {len(PLANES)};\n'
         f'inline constexpr int GLOBAL_FEATURES = {len(GLOBALS)};\n'
-        f'inline constexpr char CONTRACT_ID[] = "{CONTRACT_ID}";\n'
         f'inline constexpr int HEX_GLOBAL = {HEX_GLOBAL};\n'
         f'inline constexpr int HEX_WHITE_GLOBAL = {HEX_WHITE_GLOBAL};\n'
         'enum class Rule { FREESTYLE, STANDARD, RENJU, HEX };\n'
