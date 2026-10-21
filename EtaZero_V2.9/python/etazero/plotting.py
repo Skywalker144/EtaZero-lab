@@ -1,6 +1,7 @@
-"""Rebuild figures from durable journal values and committed per-round summaries."""
+"""Rebuild figures from committed progress and optional observational metrics."""
 import json
 import os
+import warnings
 from pathlib import Path
 from .storage import atomic_write, load_json
 
@@ -46,8 +47,16 @@ def journal_events(path, offset=0):
 def run_history(run_dir, state=None):
     root = Path(run_dir)
     state = load_json(root/'.internal/state.json') if state is None else state
-    return [load_json(root/'logs/iterations'/f'{iteration:06d}.json')
-            for iteration in range(state['iteration'])]
+    history = []
+    for iteration in range(state['iteration']):
+        commit = load_json(root/'.internal/iterations'/f'{iteration:06d}'/'status.json')['commit']
+        try:
+            metrics = load_json(root/'logs/iterations'/f'{iteration:06d}.json')
+        except (OSError, ValueError) as error:
+            warnings.warn(f'Round {iteration} metrics unavailable: {error}', RuntimeWarning)
+            metrics = {'metrics_error': str(error)}
+        history.append({'phases': {}, **metrics, **commit})
+    return history
 
 
 def round_history(run_dir, iteration, final_step, offset):
@@ -90,12 +99,11 @@ def round_history(run_dir, iteration, final_step, offset):
         if row['iteration'] in completed and row['iteration'] in validation:
             row['validation'] = validation[row['iteration']]
         counters = [e for (iteration, _, _), e in inference.items() if iteration == row['iteration']]
-        row['requests'] = sum(e['requests'] for e in counters)
-        row['batches'] = sum(e['batches'] for e in counters)
-        if counters and all('queue_wait_us' in e for e in counters):
-            row['queue_wait_us'] = sum(e['queue_wait_us'] for e in counters)
-        row['submitted'] = sum(e['submitted'] for e in counters)
-        row['cache_hits'] = sum(e['cache_hits'] for e in counters)
+        if counters:
+            for key in ('requests', 'batches', 'submitted', 'cache_hits'):
+                row[key] = sum(e[key] for e in counters)
+            if all('queue_wait_us' in e for e in counters):
+                row['queue_wait_us'] = sum(e['queue_wait_us'] for e in counters)
     return history[iteration]
 
 
@@ -159,7 +167,7 @@ def _elapsed_axis(axis, history, sample_key):
     """
     import numpy as np
     points = {r[sample_key]: r['elapsed_seconds'] / 3600 for r in history
-              if sample_key in r and 'elapsed_seconds' in r}
+              if sample_key in r and 'elapsed_seconds' in r and r.get('timing_valid', True)}
     if not points:
         return
     samples = np.asarray(list(points), dtype=float)
@@ -196,13 +204,13 @@ def training_figure(history, algorithm=None):
         figure, axes = _figure(
             titles, labels, f'EtaZero {"MuZero" if muzero else "AlphaZero"} training progress',
             figsize=(15, 16.5) if muzero else (15, 12.5))
-        selfplay = [r for r in history if r.get('games', 0) > 0]
+        selfplay = [r for r in history if 'total_rows' in r]
         x = [r['total_rows'] for r in selfplay]
-        _series(axes[0], [(label, color, x, [r[key]/r['games'] for r in selfplay])
+        _series(axes[0], [(label, color, x, [r[key]/r['games'] if r.get('games', 0) > 0 else np.nan for r in selfplay])
                          for key, label, color in (('black_wins', 'Black win', BLUE),
                                                    ('white_wins', 'White win', RED), ('draws', 'Draw', GREY))])
         axes[0].set_ylim(0, 1.025); axes[0].yaxis.set_major_formatter(PercentFormatter(1))
-        _series(axes[1], [('Mean (including opening)', ORANGE, x, [r['avg_game_length'] for r in selfplay])])
+        _series(axes[1], [('Mean (including opening)', ORANGE, x, [r.get('avg_game_length', np.nan) for r in selfplay])])
         samples = selfplay[-1]['total_rows'] if selfplay else 0
         for axis in (axes[0], axes[1], axes[5]):
             axis.set_xlim(0, max(1, samples*1.025))
@@ -210,14 +218,14 @@ def training_figure(history, algorithm=None):
             _elapsed_axis(axis, history, 'total_rows')
         trained = [r for r in history if r['steps'] > 0]
         x = [r['total_samples'] for r in trained]
-        _series(axes[2], [(label, color, x, [r[key] for r in trained])
+        _series(axes[2], [(label, color, x, [r.get(key, np.nan) for r in trained])
                           for key, label, color in POLICY_LOSSES], logarithmic=True, legend_columns=2)
-        _series(axes[3], [(label, color, x, [r[key] for r in trained])
+        _series(axes[3], [(label, color, x, [r.get(key, np.nan) for r in trained])
                           for key, label, color in VALUE_LOSSES]+
-                ([('W-L Q', '#c678dd', x, [r['q_winloss_loss'] for r in trained])]
-                 if trained and all('q_winloss_loss' in r for r in trained) else []),
+                ([('W-L Q', '#c678dd', x, [r.get('q_winloss_loss', np.nan) for r in trained])]
+                 if any('q_winloss_loss' in r for r in trained) else []),
                 logarithmic=True, legend_columns=2)
-        _series(axes[4], [('Network', ORANGE, x, [r['grad_norm'] for r in trained])], True)
+        _series(axes[4], [('Network', ORANGE, x, [r.get('grad_norm', np.nan) for r in trained])], True)
         for axis in (axes[2], axes[3], axes[4]):
             axis.set_xlim(0, max(1, max(x, default=0)*1.025))
             axis.xaxis.set_major_formatter(FuncFormatter(_compact_number))
@@ -227,9 +235,10 @@ def training_figure(history, algorithm=None):
             _series(axes[5], [('Mean over roots', BLUE, [r['total_rows'] for r in measured],
                               [r.get('root_policy_invalid_mass', np.nan) for r in measured])], show_markers=[False])
         else:
-            cached = [r for r in history if 'total_rows' in r and r.get('submitted', 0) > 0]
+            cached = [r for r in history if 'total_rows' in r]
             _series(axes[5], [('Cache hits', BLUE, [r['total_rows'] for r in cached],
-                              [r['cache_hits']/r['submitted'] for r in cached])])
+                              [r['cache_hits']/r['submitted'] if r.get('submitted', 0) > 0
+                               else np.nan for r in cached])])
         axes[5].set_ylim(0, min(1.025, axes[5].get_ylim()[1]) if muzero else 1.025)
         axes[5].yaxis.set_major_formatter(PercentFormatter(1))
         if muzero:
@@ -245,12 +254,12 @@ def training_figure(history, algorithm=None):
             for axis in axes:
                 for line in axis.lines:
                     line.set_marker('None')
-        games = sum(r['games'] for r in selfplay)
+        games = sum(r.get('games', 0) for r in selfplay)
         figure.supxlabel(f'{len([r for r in trained if "total_rows" in r])} completed training iterations · '
-                         f'{games:,} self-play games · {samples:,} effective rows · '
+                         f'{games:,} recorded self-play games · {samples:,} effective rows · '
                          f'{max(x, default=0):,} training samples\n'
                          'Loss and gradients: arithmetic means of committed updates, unsmoothed; '
-                         'elapsed time excludes compile, plot and pauses', fontsize=10, color='#8a93a3')
+                         'missing metrics are gaps; elapsed time excludes compile, plot and pauses', fontsize=10, color='#8a93a3')
     return figure
 
 
@@ -286,13 +295,14 @@ def loss_figure(history):
             axis.xaxis.set_major_formatter(FuncFormatter(_compact_number))
         figure.supxlabel(
             'Train: round mean over committed consumed batches; validation: raw model at round end.\n'
-            'Weighted sample-mean losses, unsmoothed; missing validation is not replaced with zero.',
+            'Weighted sample-mean losses, unsmoothed; missing metrics are gaps, never zero.',
             fontsize=10, color='#8a93a3')
     return figure
 
 
 def performance_figure(history, batch_size):
     import matplotlib as mpl
+    import numpy as np
     with mpl.rc_context(THEME):
         figure, axes = _figure(
             ('Phase wall time', 'Self-play throughput', 'Learner throughput',
@@ -301,20 +311,21 @@ def performance_figure(history, batch_size):
              ('Iteration', 'Committed training samples / second'), ('Iteration', 'Rows / batch'),
              ('Iteration', 'Microseconds / NN request'), ('Iteration', 'Share of submitted requests')],
             'EtaZero execution measurements')
-        _series(axes[0], [(phase, color, [r['iteration'] for r in history if phase in r['phases']],
-                          [r['phases'][phase] for r in history if phase in r['phases']])
+        _series(axes[0], [(phase, color, [r['iteration'] for r in history],
+                          [r['phases'].get(phase, np.nan) for r in history])
                          for phase, color in zip(('selfplay', 'shuffle', 'train', 'export'), (BLUE, GREEN, ORANGE, RED))])
         for axis, phase, count, label in ((axes[1], 'selfplay', 'rows', 'Self-play'),
                                           (axes[2], 'train', 'steps', 'Learner')):
-            rows = [r for r in history if 'total_rows' in r and count in r and r['phases'].get(phase, 0) > 0]
             multiplier = batch_size if phase == 'train' else 1
-            _series(axis, [(label, ORANGE, [r['iteration'] for r in rows],
-                            [r[count]*multiplier/r['phases'][phase] for r in rows])])
+            _series(axis, [(label, ORANGE, [r['iteration'] for r in history],
+                            [r[count]*multiplier/r['phases'][phase]
+                             if count in r and r['phases'].get(phase, 0) > 0 else np.nan for r in history])])
         for axis, numerator, denominator, label in ((axes[3], 'requests', 'batches', 'Mean batch'),
                                                     (axes[4], 'queue_wait_us', 'requests', 'Queue wait'),
                                                     (axes[5], 'cache_hits', 'submitted', 'Cache hits')):
-            rows = [r for r in history if numerator in r and r.get(denominator, 0) > 0]
-            _series(axis, [(label, BLUE, [r['iteration'] for r in rows], [r[numerator]/r[denominator] for r in rows])])
+            _series(axis, [(label, BLUE, [r['iteration'] for r in history],
+                            [r[numerator]/r[denominator] if numerator in r and r.get(denominator, 0) > 0
+                             else np.nan for r in history])])
         figure.supxlabel('Stage wall time includes setup, checkpoint and export costs. '
                          'Incomplete phase attempts have no duration and are excluded.', fontsize=10, color='#8a93a3')
     return figure
