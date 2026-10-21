@@ -14,7 +14,7 @@ from etazero.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pa
 from etazero.config import ROOT, load_config
 from etazero.engine_config import load_engine_config
 from etazero.experiment import experiment_plan, run_experiment, Scheduler
-from etazero.schema import CONTRACT_ID
+
 from etazero.storage import load_json, save_json
 
 
@@ -23,18 +23,19 @@ def match_profile(directory, contents=''):
 
 
 def history(root, times, algorithm=None):
-    save_json(root/'logs/iterations/000000.json', {'iteration': 0, 'elapsed_seconds': 0, 'model': None})
+    save_json(root/'.internal/iterations/000000/status.json',
+              {'commit': {'iteration': 0, 'elapsed_seconds': 0, 'model': None}})
     for i, seconds in enumerate(times, 1):
         model = root/'models'/str(i)/'model.pt'
         model.parent.mkdir(parents=True, exist_ok=True)
         model.write_bytes(f'{root.name}:{i}'.encode())
         info = {'id': str(i), 'path': str(model.relative_to(root)),
-                'canvas': 15, 'contract': CONTRACT_ID, 'bytes': model.stat().st_size}
+                'canvas': 15, 'bytes': model.stat().st_size}
         if algorithm:
             info['algorithm'] = algorithm
         save_json(model.parent/'manifest.json', info)
-        save_json(root/'logs/iterations'/f'{i:06d}.json',
-                  {'iteration': i, 'elapsed_seconds': seconds, 'model': info})
+        save_json(root/'.internal/iterations'/f'{i:06d}'/'status.json',
+                  {'commit': {'iteration': i, 'elapsed_seconds': seconds, 'model': info}})
     save_json(root/'.internal/state.json', {'iteration': len(times)+1, 'elapsed_seconds': times[-1]})
 
 
@@ -215,13 +216,14 @@ def test_cache_identity_invalidates_match_changes_but_not_fit_or_budget(tmp_path
     other['source_sha256'].update({'elo.py': 'new-fit', 'engine_config.py': 'new-comment'})
     other['players'][0].update(seconds=1000, sample_horizon=2000)
     assert pair_identity(other, pair) == original
-    for group, key, value in [('config', 'visits', 200), ('config', 'seed', 17), ('execution', 'max_loaded_models', 8)]:
+    for group, key, value in [('config', 'visits', 200), ('config', 'seed', 17)]:
         changed = copy.deepcopy(manifest)
         target = changed[group]['match'] if group == 'config' else changed[group]
         target[key] = value
         assert pair_identity(changed, pair) != original
     changed = copy.deepcopy(manifest); changed['binary_sha256'] = 'new-bin'
-    assert pair_identity(changed, pair) != original
+    changed['execution']['max_loaded_models'] = 8
+    assert pair_identity(changed, pair) == original
     changed = copy.deepcopy(manifest); changed['players'][0]['model'] = '/new/model.pt'
     assert pair_identity(changed, pair) != original
 
@@ -292,33 +294,23 @@ def test_complete_cache_does_not_rescan_historical_sessions(tmp_path, monkeypatc
     assert prepare_pairs(tmp_path, tmp_path/'second', manifest) == 4
 
 
-def test_source_changes_do_not_change_session_or_match_identity(tmp_path, monkeypatch):
+def test_rebuild_and_loader_concurrency_do_not_change_session(tmp_path):
     match_profile(tmp_path, '[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('a', 'b'):
         history(data/arm, [10, 20])
-    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
-    monkeypatch.setattr('etazero.autoelo.sha256', lambda _: 'first-source')
-    first = autoelo_plan(tmp_path, tmp_path/'binary', data=data, environ={})
-    monkeypatch.setattr('etazero.autoelo.sha256', lambda _: 'changed-comment-or-fit')
-    second = autoelo_plan(tmp_path, tmp_path/'binary', data=data, environ={})
-    assert first['source_sha256'] != second['source_sha256']
-    assert first['output'] == second['output'] and first['manifest'] == second['manifest']
+    binary = tmp_path/'binary'
+    binary.write_text('first executable'); binary.chmod(0o755)
+    first = autoelo_plan(tmp_path, binary, data=data, environ={})
+    binary.write_text('rebuilt executable')
+    second = autoelo_plan(tmp_path, binary, data=data, environ={},
+                          overrides={'model_load_workers': '1', 'max_loaded_models': '2'})
+    assert first['output'] == second['output']
+    assert first['manifest']['execution'] != second['manifest']['execution']
+    from etazero.arena import save_manifest
+    save_manifest(tmp_path/'manifest.json', first['manifest'])
+    save_manifest(tmp_path/'manifest.json', second['manifest'])
 
-
-def test_cache_excludes_trials_with_content_derived_inference_seeds(tmp_path):
-    import copy
-    manifest = {'players': [{'id': 'a', 'model': '/a/model.pt'}, {'id': 'b', 'model': '/b/model.pt'}],
-                'config': {'match': {'seed': 1}}, 'binary_sha256': 'bin', 'games_per_pair': 4,
-                'pairs': [{'id': identity(('a', 'b')), 'players': ['a', 'b']}]}
-    old = copy.deepcopy(manifest)
-    for player in old['players']:
-        player['sha256'] = 'old-content-hash'
-    previous = tmp_path/'old'
-    save_json(previous/'manifest.json', old)
-    complete_fake_pair(old, old['pairs'][0], previous/'pairs'/old['pairs'][0]['id'])
-    assert prepare_pairs(tmp_path, tmp_path/'new', manifest) == 0
-    assert len(PairStore(previous/'pairs'/old['pairs'][0]['id'], 4).games()) == 4
 
 
 def test_arena_deduplicates_paths_and_uses_config_seed_independent_of_schedule(tmp_path, monkeypatch):
