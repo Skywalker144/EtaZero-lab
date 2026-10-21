@@ -1,3 +1,4 @@
+from etazero.games import spec_for_rule
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
@@ -7,8 +8,8 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from etazero.schema import RULES
-from etazero.config import validate_hex_symmetry
+from etazero.schema import RULES, REASONS
+from etazero.config import validate_game_symmetry
 from etazero.storage import load_json
 from .engine import Engine
 
@@ -26,7 +27,7 @@ def integer(payload: dict, name: str, minimum: int, maximum: int) -> int:
 
 def human_turns(game: dict, human: int):
     prefix = len((game.get('opening') or {}).get('moves', []))
-    return [i for i in range(prefix, len(game['moves'])) if (1 if i % 2 == 0 else -1) == human]
+    return [i for i in range(prefix, len(game['moves'])) if ((game.get("players") or [])[i] if game.get("players") else (1 if i % 2 == 0 else -1)) == human]
 
 
 class App:
@@ -77,8 +78,12 @@ class App:
             default_run = next((run['id'] for run in available if run.get('selected_model')),
                                next((run['id'] for run in available if run['label'] == 'checks/minimal_test'),
                                     available[0]['id'] if available else runs[0]['id'] if runs else None))
-        return dict(models=models, runs=runs, default_run=default_run, version=self.binary.parent.parent.name,
-                    rules=RULES, default_rule=c['rule'],
+        extra = {}
+        if "xiangqi" in RULES:
+            from etazero.games import XIANGQI_MOVES
+            extra["xiangqi_moves"] = XIANGQI_MOVES
+        return dict(**extra, models=models, runs=runs, default_run=default_run, version=self.binary.parent.parent.name,
+                    rules=RULES, reasons=REASONS, default_rule=c['rule'],
                     default_size=self.default_size, default_visits=c['visits'],
                     search_threads=c['search_threads'], virtual_loss=c['virtual_loss'], device=c['device'],
                     analysis_config=deepcopy(c))
@@ -133,13 +138,24 @@ class App:
                 integer(payload, 'size', 5, self.metadata[payload['model']]['canvas'])
                 if payload.get('rule') not in RULES:
                     raise ValueError('未知棋规')
+                family = self.metadata[payload['model']].get('game','gomoku')
+                wanted = payload['rule'] if payload['rule'] in ('go','xiangqi') else 'gomoku'
+                if (family if family in ('go','xiangqi') else 'gomoku') != wanted:
+                    raise ValueError('所选模型的棋类与棋规不匹配')
+                if wanted == 'xiangqi' and payload['size'] != 10:
+                    raise ValueError('中国象棋使用九路十行棋盘，请选择 10')
                 if payload.get('opening', 'empty') not in ('empty', 'balanced'):
                     raise ValueError('未知开局类型')
+                if wanted in ('go', 'xiangqi') and payload.get('opening', 'empty') == 'balanced':
+                    raise ValueError('围棋和中国象棋不支持平衡开局，请选择初始局面')
             elif operation == 'play':
                 if not game or game['finished'] or (self.state['mode'] == 'play' and game['player'] != self.state['human']):
                     raise Conflict('当前不能落子')
-                action = integer(payload, 'action', 0, game['board_size'] ** 2 - 1)
-                if game['board'][action]:
+                count = 2086 if self.state['rule']=='xiangqi' else game['board_size']**2 + (self.state['rule']=='go')
+                action = integer(payload, 'action', 0, count-1)
+                if self.state['rule'] in ('go','xiangqi'):
+                    if action not in game['legal_actions']: raise ValueError('此走法不合法')
+                elif game['board'][action]:
                     raise ValueError('此处已有棋子')
             elif operation == 'undo':
                 if not game or not game['moves'] or (self.state['mode'] == 'play' and not human_turns(game, self.state['human'])):
@@ -179,7 +195,9 @@ class App:
                     config['opening'] = deepcopy(run['opening'])
                 if run.get('hex_opening') is not None:
                     config['hex_opening'] = deepcopy(run['hex_opening'])
-                if payload['rule']=='hex': validate_hex_symmetry(config['analysis'])
+                if payload['rule'] in ('go','xiangqi'):
+                    config['analysis'].update(rule=payload['rule'],board_size=payload['size'])
+                validate_game_symmetry(config['analysis'], spec_for_rule(payload['rule']))
                 if opening_kind=='balanced' and payload['rule']=='hex' and 'hex_opening' not in config:
                     raise ValueError('所选配置缺少 match.cfg Hex 平衡开局参数')
                 if opening_kind == 'balanced' and 'opening' not in config:
@@ -198,6 +216,9 @@ class App:
                         # Let native cancellation finish before the transport's hard timeout.
                         timeout_ms = max(1, min(120000, int((engine.timeout - 5) * 1000)))
                         command += f' balanced {randbits(64)} {timeout_ms}'
+                    if payload['rule'] in ('go','xiangqi'):
+                        command = dict(command='new',size=payload['size'],rule=payload['rule'],opening=opening_kind,
+                                       **{key:payload[key] for key in ('fen','komi','go_rules') if key in payload})
                     reply = engine.command(command)
                 except BaseException:
                     if replacement:
