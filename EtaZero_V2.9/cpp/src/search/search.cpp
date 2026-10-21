@@ -199,7 +199,6 @@ Search::~Search() {
     work_changed_.notify_all();for(auto& t:workers_)t.join();
 }
 void Search::collect_nodes(Node* keep) {
-    if(pending()!=0)throw std::runtime_error("Cannot collect nodes with pending visits");
     std::unordered_set<Node*> marked;std::vector<Node*> queue;
     if(keep){marked.insert(keep);queue.push_back(keep);}
     for(size_t i=0;i<queue.size();++i) {
@@ -370,7 +369,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
     auto& scratch=thread_states_[worker];auto& rng=random_[worker];
     if(!scratch.state || !scratch.state->reset_from(*position_))scratch.state=position_->clone();
     auto& state=*scratch.state;Node* node=root_;auto& path=scratch.path;path.clear();scratch.graph_path.clear();
-    auto release=[&]{for(auto& p:path){--p.edge->pending;--p.edge->child.load()->pending;--pending_count_;}path.clear();};
+    auto release=[&]{for(auto& p:path){--p.edge->pending;--p.edge->child.load()->pending;}path.clear();};
     try {
         double value,draw;
         for(;;) {
@@ -459,7 +458,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
                 if(edge->child.compare_exchange_strong(expected,candidate,std::memory_order_release,std::memory_order_acquire))child=candidate;
                 else child=expected; // Unused racing candidates are collected with the table.
             }
-            path.push_back({node,edge,perspective,true});++edge->pending;++child->pending;++pending_count_;
+            path.push_back({node,edge,perspective,true});++edge->pending;++child->pending;
             int expected=0;
             edge->perspective.compare_exchange_strong(expected,perspective);
             if(expected!=0 && expected!=perspective)throw std::runtime_error("Inconsistent edge perspective");
@@ -476,7 +475,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             if(!std::isfinite(value))throw std::runtime_error("Nonfinite search backup");
             if(p.increment_edge)++p.edge->n;
             ++p.parent->visits;recompute(*p.parent,1);
-            --p.edge->pending;--p.edge->child.load()->pending;--pending_count_;path.pop_back();
+            --p.edge->pending;--p.edge->child.load()->pending;path.pop_back();
         }
         ++completed_;
     } catch(...){release();throw;}
@@ -601,7 +600,6 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     }):std::function<void()>{};
     work_changed_.notify_all();simulate_many(0);
     {std::unique_lock<std::mutex> lock(work_mutex_);work_changed_.wait(lock,[&]{return workers_done_==static_cast<int>(workers_.size());});}
-    if(pending()!=0)throw std::runtime_error("Search leaked pending visits");
     if(error_)std::rethrow_exception(error_);
     report_={};
     if(options.collect_analysis)result.analysis=analysis_snapshot(state.actions()).analysis;
@@ -685,7 +683,6 @@ void Search::advance(int action) {
     for(size_t i=0;i<root_->move_count;++i)root_->moves[i].search_prior=root_->moves[i].prior;
 }
 std::vector<SearchNodeSnapshot> Search::inspect_graph() {
-    if(pending()!=0)throw std::runtime_error("Cannot inspect graph with pending visits");
     std::vector<SearchNodeSnapshot> result;
     for(auto& shard:node_table_)for(auto& item:shard.nodes) {
         Node& node=*item.second;
@@ -698,5 +695,14 @@ std::vector<SearchNodeSnapshot> Search::inspect_graph() {
     }
     return result;
 }
-int Search::pending() const {return pending_count_.load();}
+// Diagnostic only: callers must wait for search workers to finish.
+int Search::pending() const {
+    int total=0;
+    for(const auto& shard:node_table_)for(const auto& item:shard.nodes) {
+        const Node& node=*item.second;
+        total+=node.pending.load();
+        for(int i=0;i<node.child_count.load();++i)total+=node.edge(i).pending.load();
+    }
+    return total;
+}
 }
