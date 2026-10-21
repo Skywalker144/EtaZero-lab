@@ -8,6 +8,18 @@
 
 当前采用逐轮编排：按基准训练量与 replay ratio 规划 selfplay，实际训练量受新增数据额度和快照单遍限制。KataGo 的同步脚本同样顺序执行阶段，learner 使用额度桶、no-repeat-files 和 epoch/subepoch；本地额度在整轮提交时结转，阶段恢复沿用保存的实际预算，没有常驻异步阶段推进或局内换网。V0 的历史来源对照及验收证据见 [E01—E26 核查记录](../../EtaZero.md#engineering-audit) 与 [实施记录](../../plan.md)，不作为 V1 当前实现或新增能力的验收结论。Go 专有监督的映射和辅助 heads 见算法文档，不能由执行架构推定支持范围。共享架构不表示已有相同的吞吐、后端优化或训练效果。
 
+## 多棋类数据布局
+
+[games.py](../python/etazero/games.py) 是棋类输入与动作维度的代码定义。原始 NPZ 和 shuffle manifest 记录 `game/input_planes/global_features/action_count`，writer 以空间面积打包二值输入，以动作数保存 policy、visits、Q 和 MuZero 的逐步目标。Go pass 与象棋动作不能按 `canvas²` reshape。`GameSpec` 明确区分实际宽高／面积、棋盘存储 stride、网络 canvas 与动作数；象棋棋盘为 9×10，存储 stride 为 10。`Board` 显式携带 width/height/stride，会话与分析输出相同几何字段。原始 metadata 的逐局 `rule_options` 保留围棋规则、贴目及初始 FEN；完整动作与观测仍按局保存，分片边界不截断历史。
+
+`read_raw(deep=True)` 对 Go／Xiangqi 调用同版本 `build/rules_replay` 重放真实规则并检查观测、合法目标及终局；可用 `ETAZERO_RULES_REPLAY` 指定该工具路径。正常训练读取仍只做所消费字段的边界校验。 `outcomes.py` 定义终局原因并生成原生枚举；`Outcome` 统一绝对胜者、当前玩家价值和 WDL。Go 无结果对应搜索 WDL=(0.5,0,0.5)，不产生结果监督主行、不计入 Elo；普通和棋对应 (0,1,0)。象棋重复、60 回合限制和子力不足分别保留真实裁定原因。规则层只接收 `RuleOptions`，配置入口通过 `game_config.h` 显式选择 selfplay/analysis/match，后两者只覆盖各自参数。Renju feature dropout 仅处理 Renju 行，不触碰新棋类的同编号通道。
+
+模型 manifest 和 checkpoint 记录棋类布局。保存／恢复沿用现有模型、优化器、调度、scaler、reader、RNG 和回放池路径；不增加第二套 checkpoint 格式或重建假的棋盘状态。编译训练和 CUDA Graph 推理均使用该模型固定的输入与动作维度。
+
+导出模型通过 `game_name()` 声明棋类，原生 backend 据此选取生成的 GameSpec；输入长度仅用于验证形状。训练增强、动作 mask 和 MuZero 吸收态动作准备同样显式传递布局。Gomoku／Hex 共用输入布局时，保留全局 Hex 标识按行选择对称变换；该标识不承担其他棋类的识别。状态复制、历史隔离和搜索重置的内存复用由 [game_state_test.cpp](../cpp/tests/game_state_test.cpp) 验证。
+
+Go 的 `BoardHistory` 保留超级劫、pass、计分阶段及网络历史输入；象棋保留重复裁定所需的 `StateInfo` 链和近期棋盘，复制／重置时重绑所属指针。AlphaZero 图身份包含完整规则历史，不能只按当前棋盘合并。SVB key 是误差共享模式，不替代图身份或规则历史。reanalysis 仅在启用且比例大于零时逐手保存额外 `Game` 快照，快照包含完整历史；关闭时仍保留当前对局的历史和训练轨迹。MuZero 只在根使用真实历史观测及合法动作，latent 节点保留完整静态动作域，并按动作数一次预分配边数组。
+
 ## 执行架构
 
 ```mermaid
@@ -49,7 +61,7 @@ SP 的 `inference.inference_precision` 明确选择 FP32 或 FP16 autocast，bas
 
 NN 缓存采用有界直接映射表与分段锁，保存不可变原始主/短期 optimistic logits、WDL 概率及误差标准差。键比较变换前五个二进制空间平面的全部位、六个全局浮点特征的原始字节、NN policy 温度及有效 optimism，朝向不入键，包含棋盘尺寸、Renju 执色、棋规和禁手特征开关；哈希只用于选槽，碰撞不会返回其他输入的结果。模型与精度由 evaluator 生命周期隔离。`inference.cache_entries = 0` 显式关闭缓存，空间输入必须为二进制，全局特征允许 Renju 黑方的 -1。缓存不合并同时在途的相同请求，也不缓存根噪声或搜索策略。optimism 使用精确 double 字节分键，无辅助能力时归零；根/叶条件刷新及标准差到统计权重的转换见 [搜索修正](algorithms.md#误差加权optimistic-policy-与-noise-pruning)。Backend 声明的辅助能力须与实际输出一致，多服务必须使用同一能力契约。原生 analysis 同时输出 network_sample_weight、network_value_stdev、search_weight 和 search_weight_sq，用于区分访问数和加权统计。
 
-公共搜索遍历通过 [SearchState](../cpp/include/etazero/algorithm.h) 获得状态复制、动作域、叶评估、终局 WDL 值和转移后的视角符号（同方 +1、换方 -1）。该接口用于终局结果棋类搜索，不包含中间奖励和折扣。叶评估选项统一通过 `SearchEvaluation` 传递。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用五子棋规则。支持图共享的状态还须提供包含 continuation 与 NN 输入条件的完整 `graph_key`；不支持时明确拒绝。MuZero 使用独立 latent 搜索实现，按实际语义复用数学函数，见 [MuZero](muzero.md#网络与推理)。
+公共搜索遍历通过 [SearchState](../cpp/include/etazero/algorithm.h) 获得状态复制、动作域、叶评估、终局 WDL 值和转移后的视角符号（同方 +1、换方 -1）。该接口用于终局结果棋类搜索，不包含中间奖励和折扣。叶评估选项统一通过 `SearchEvaluation` 传递。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用某一棋类的规则。图共享默认要求 `graph_key` 包含 continuation 与 NN 输入条件；围棋显式声明 `graph_approximates_history()`，按 KataGo GraphHash 共享，并保留逐路径完整规则状态、下降前合法性复核和跳过 cache 的重评估。该能力由状态适配器提供，公共搜索不按棋类名称分支；没有共享身份实现的适配器明确拒绝图搜索。MuZero 使用独立 latent 搜索实现，按实际语义复用数学函数，见 [MuZero](muzero.md#网络与推理)。
 
 ### 轮次与设备
 
@@ -276,6 +288,7 @@ learner 装载各组件后释放临时 checkpoint 容器，避免模型、Lookah
 | [网络](../tests/reference/check_katago_network.py) | plain、NBT、Transformer 的参数映射、初始化、输出与梯度 |
 | [完整网络预设](../tests/reference/check_katago_architectures.py) | 全部手写架构的初始化、参数形状/角色、前向与梯度；可选遍历来源全部派生配置名称 |
 | [图搜索](../tests/reference/check_katago_graph.py)、[搜索修正](../tests/reference/check_katago_search_corrections.py) | 子节点权重、边访问追赶、聚合及 uncertainty / noise / optimistic 混合 |
+| [围棋图身份](../tests/reference/check_katago_go_graph.py) | 固定 KataGo 完整规则与 GraphHash 的独立编译对照；多规则、重复下界、劫争、pass 与阶段转移 |
 | [采样](../tests/reference/check_katago_sampling.py)、[权重](../tests/reference/check_katago_sampling_weights.py)、[分支预算](../tests/reference/check_katago_forks.py) | PDA、value surprise、权重重分配及 hint / PCR / reduced 预算分支 |
 | [回放](../tests/reference/check_katago_replay.py) | 窗口、分组、文件顺序与整 batch 读取 |
 | [训练时钟](../tests/reference/check_katago_clocks.py)、[保存状态](../tests/reference/check_katago_persistence.py) | LR / Lookahead / SWA 时机及 checkpoint 字段范围 |
