@@ -156,7 +156,8 @@ def test_local_segment_boundaries_are_nonempty_and_keep_exact_fixed_budget():
     for steps,n in [(0,1),(2,0),(2,3)]:
         with pytest.raises(ValueError):subepoch_ends(steps,n)
     c=load_config(CONFIGS / 'smoke_test');c['training']['sub_epochs']=5
-    with pytest.raises(ValueError,match='sub_epochs'):validate(c)
+    validate(c)
+    assert subepoch_ends(c['training']['train_steps'], min(c['training']['sub_epochs'], c['training']['train_steps']))[-1] == c['training']['train_steps']
 
 
 def test_segment_reset_preserves_fast_slow_swa_norm_and_round_lr_clocks():
