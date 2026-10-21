@@ -340,8 +340,8 @@ def validate(c):
             raise ValueError('MuZero latent search requires subtree_value_bias_factor=0')
         from .muzero.network import network_config
         network_config(c)
-        if not 1 <= c['unroll']['steps'] <= 32 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
-            raise ValueError('MuZero unroll.steps must be in [1,32], hidden_gradient_scale in [0,1]')
+        if c['unroll']['steps'] < 1 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
+            raise ValueError('MuZero unroll.steps must be positive, hidden_gradient_scale in [0,1]')
         if not c.get('muzero_training', {}).get('auxiliary_losses', True) and c['network']['predict_q_values']:
             raise ValueError('MuZero without auxiliary losses requires predict_q_values=false')
         if c['graph_search']['use_graph_search'] or c['search']['reuse_tree'] or c['symmetry']['root_num_symmetries_to_sample'] != 1:
@@ -370,8 +370,6 @@ def validate(c):
                 if value == 'all': continue
                 if value < 0 or (not allow_zero and value == 0):
                     raise ValueError(f'{section}.{key} must be {"nonnegative" if allow_zero else "positive"}')
-    if c['training']['sub_epochs']>c['training']['train_steps']:
-        raise ValueError('training.sub_epochs cannot exceed the baseline round batch budget')
     env, net = c["environment"], c["network"]
     # MuZero ResNet keeps the NBT head width rules; the AZ presets are unchanged.
     from .katago_configs import is_preset, resolve, validate_dimensions
