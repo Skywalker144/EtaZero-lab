@@ -18,7 +18,7 @@ from etazero.analysis import model_info
 from web.engine import Engine
 from web.app import App, Conflict
 from web.server import discover_catalog, discover_models, make_server
-from etazero.schema import CONTRACT_ID, POLICY_HEADS
+from etazero.schema import POLICY_HEADS
 
 
 MODEL = os.environ.get('ETAZERO_WEB_TEST_MODEL')
@@ -49,7 +49,7 @@ class CatalogTests(unittest.TestCase):
         model = root / relative
         model.parent.mkdir(parents=True)
         model.touch()
-        info = dict(id=model.parent.name, contract=CONTRACT_ID, canvas=11, algorithm=algorithm,
+        info = dict(id=model.parent.name, canvas=11, algorithm=algorithm, bytes=model.stat().st_size,
                     checkpoint=dict(iteration=iteration, step=500))
         (model.parent / 'manifest.json').write_text(json.dumps(info))
         if current:
@@ -135,9 +135,9 @@ class CatalogTests(unittest.TestCase):
         model = self.publish('bad', 1)
         path = model.parent / 'manifest.json'
         info = json.loads(path.read_text())
-        info['contract'] = 'wrong-contract'
+        info['canvas'] = 0
         path.write_text(json.dumps(info))
-        with self.assertRaisesRegex(ValueError, '契约'):
+        with self.assertRaisesRegex(ValueError, '尺寸'):
             discover_models(self.data)
 
 

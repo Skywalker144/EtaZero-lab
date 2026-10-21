@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from etazero.config import ROOT
 from etazero.engine_config import load_engine_config, load_match_opening_config, load_match_hex_opening_config
 from etazero.build import verify_build
-from etazero.schema import CONTRACT_ID
+from etazero.analysis import model_info
 from etazero.storage import load_json
 from .app import App, Conflict
 
@@ -96,8 +96,8 @@ def discover_models(models_dir: Path, model: Path | None = None) -> dict[str, Pa
         key = next((key for key, path in models.items() if path == selected), str(selected))
         models = {key: selected, **{key: path for key, path in models.items() if path != selected}}
     for path in models.values():
-        info = load_json(path.parent / 'manifest.json')
-        if info['contract'] != CONTRACT_ID or type(info['canvas']) is not int or not 5 <= info['canvas'] <= 25:
+        _, info = model_info(path)
+        if type(info['canvas']) is not int or not 5 <= info['canvas'] <= 25:
             raise ValueError(f'模型输入契约或棋盘尺寸不匹配：{path}')
         if info.get('algorithm', 'alphazero') not in ('alphazero', 'muzero'):
             raise ValueError(f'不支持的模型算法：{path}')
@@ -150,7 +150,7 @@ def main(argv=None):
     if not args.binary.is_file():
         parser.error('缺少 etazero，请先运行 web/webui.sh 构建')
     try:
-        verify_build(args.binary, record_identity=False)
+        verify_build(args.binary)
         models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
         config = load_engine_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
         config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
