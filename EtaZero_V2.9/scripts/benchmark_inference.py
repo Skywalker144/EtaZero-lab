@@ -24,7 +24,7 @@ from etazero.config import load_config
 from etazero.katago_configs import resolve
 from etazero.network import make_network, inference_network
 from etazero.runtime import provenance, source_snapshot
-from etazero.storage import save_json, sha256
+from etazero.storage import save_json
 
 
 def main():
@@ -80,7 +80,7 @@ def main():
     manifest = dict(
         arguments={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         timing_scope=__doc__, source_id=source_snapshot(output),
-        binary_sha256=sha256(binary), environment=provenance(), models=[],
+        binary=str(binary.resolve()), environment=provenance(), models=[],
         cpu=subprocess.check_output(['lscpu'], text=True),
         nvidia_smi=subprocess.check_output(['nvidia-smi'], text=True),
         cmake_cache=(ROOT / 'build/CMakeCache.txt').read_text(),
@@ -98,7 +98,7 @@ def main():
         manifest['models'].append(dict(
             architecture=architecture, parameters=sum(p.numel() for p in model.parameters()),
             config=getattr(model, 'source_config', config['network']),
-            file=path.name, sha256=sha256(path),
+            file=path.name,
             export_seconds=time.perf_counter()-started,
         ))
         save_json(output / 'manifest.json', manifest)
