@@ -38,9 +38,11 @@ def identity(value) -> str:
 def save_manifest(path: Path, manifest: dict) -> None:
     if path.exists():
         previous = json.loads(path.read_text())
+        comparable = {k: v for k, v in manifest.items() if k != 'execution'}
+        previous.pop('execution', None)
         if previous['games_per_pair'] > manifest['games_per_pair'] or (
-                previous | {'games_per_pair': manifest['games_per_pair']}) != manifest:
-            raise ValueError('Models, evaluator, binary or schedule changed; use a separate output directory')
+                previous | {'games_per_pair': manifest['games_per_pair']}) != comparable:
+            raise ValueError('Models, evaluator or schedule changed; use a separate output directory')
     write_json(path, manifest)
 
 
@@ -79,11 +81,13 @@ def discover_players(root: Path, stride: int = 1, *,
         if not state_path.is_file():
             raise ValueError(f'Arm has no committed state: {arm}')
         state = json.loads(state_path.read_text())
+        if not state.get('timing_valid', True):
+            raise ValueError(f'Run has invalid compiler timing and cannot be compared by training time: {arm}')
         previous = 0
         rows = []
         for iteration in range(state['iteration']):
-            path = arm/'logs/iterations'/f'{iteration:06d}.json'
-            row = json.loads(path.read_text())
+            path = arm/'.internal/iterations'/f'{iteration:06d}'/'status.json'
+            row = json.loads(path.read_text())['commit']
             seconds = row['elapsed_seconds']
             if row['iteration'] != iteration or not math.isfinite(seconds) or seconds < previous:
                 raise ValueError(f'Invalid committed iteration timing: {path}')
@@ -202,7 +206,7 @@ class PairStore:
         if type(index) is not int or index < 0:
             raise ValueError('Invalid event ID')
         moves = event['moves']
-        if not isinstance(moves, list) or not moves or any(type(m) is not int or m < 0 for m in moves) or len(set(moves)) != len(moves):
+        if not isinstance(moves, list) or not moves or any(type(m) is not int or m < 0 for m in moves):
             raise ValueError('Invalid move history')
         if kind == 'opening':
             if index >= self.total // 2 or event['generator'] != index % 2 or not math.isfinite(event['value']):
@@ -273,6 +277,7 @@ class PairStore:
 def _run_native(command, log_path, accept, cancel, environ):
     """Persist events while running and draining an interrupted native match process."""
     with log_path.open('a') as log:
+        log.write(json.dumps({'command': command})+'\n'); log.flush()
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True,
                                    start_new_session=True, env=environ)
         done = Event()
@@ -503,8 +508,9 @@ def single_match(config, binary, model_a, model_b, output, games=None):
     count = config['match']['games'] if games is None else games
     PairStore(Path(output),count)
     pair = {'id': identity(('a','b')), 'players': ['a','b']}
+    verify_build(binary)
     manifest = {'version': 1, 'players': [asdict(p) for p in players], 'config': config,
-                'binary_sha256': verify_build(binary), 'games_per_pair': count, 'anchor': 'a', 'pairs': [pair]}
+                'games_per_pair': count, 'anchor': 'a', 'pairs': [pair]}
     output = Path(output).resolve()
     with run_lock(output/'arena.lock'):
         save_manifest(output/'manifest.json', manifest)
@@ -556,8 +562,9 @@ def main():
     if anchor not in {p.id for p in players}:
         raise ValueError(f'Unknown anchor: {anchor}')
     PairStore(output, args.games)
+    verify_build(binary)
     manifest = {'version': 1, 'players': [asdict(p) for p in players], 'config': config,
-                'binary_sha256': verify_build(binary), 'games_per_pair': args.games, 'anchor': anchor,
+                'games_per_pair': args.games, 'anchor': anchor,
                 'pairs': [{'id': identity(pair), 'players': list(pair)} for pair in schedule],
                 'execution': {'max_loaded_models': args.max_loaded_models,
                               'model_load_workers': args.model_load_workers}}
