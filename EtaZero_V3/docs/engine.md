@@ -19,9 +19,9 @@ bash scripts/run.sh analysis --json-stream --config-dir configs/az_g --run-dir d
 
 ## GTP
 
-支持命令以 `list_commands` 为准。基础命令包括 `protocol_version`、`name`、`version`、`known_command`、`boardsize`、`clear_board`、`play`、`undo`、`genmove` 和 `quit`；保留可选数字编号、`=` / `?` 响应以及空行结束符。坐标跳过 I 列，A1 在左下角，范围为实际棋盘。执子必须符合当前行棋方；这些棋类没有 pass，不接受 pass、resign、Go 的 komi、计目或 ownership 参数。
+支持命令以 `list_commands` 为准。基础命令包括 `protocol_version`、`name`、`version`、`known_command`、`boardsize`、`clear_board`、`play`、`undo`、`genmove` 和 `quit`；保留可选数字编号、`=` / `?` 响应以及空行结束符。坐标跳过 I 列，A1 在左下角，范围为实际棋盘。执子必须符合当前行棋方；Go 支持 `pass` 与 `komi`；象棋使用 `a0b0` 形式的起终点坐标（红方底线为 0）。不提供 resign、分数估计或 ownership 输出。
 
-`etazero-rule freestyle|standard|renju|hex` 切换棋规并清空棋局；`showboard` 返回当前状态 JSON。
+`etazero-rule freestyle|standard|renju|hex|go|xiangqi` 切换棋规并清空棋局；`showboard` 返回当前状态 JSON。
 
 ```text
 1 boardsize 15
@@ -53,7 +53,7 @@ bash scripts/run.sh analysis --json-stream --config-dir configs/az_g --run-dir d
 {"id":"cancel","command":"stop","target_id":"search"}
 ```
 
-公共动作编号为实际棋盘的零起始行优先索引，不使用网络画布步长。`new` 接受 `size`、`rule` 和可选 `moves`；平衡开局用 `opening: balanced`、字符串 uint64 `seed` 与 `timeout_ms`，复用比赛开局配置，不能与 moves 同时使用。`undo` 的 `count` 默认为 1，`state` 返回状态，`raw_nn` 返回网络诊断，`genmove` 搜索后落子。
+Gomoku／Hex／Go 公共动作编号为实际棋盘的零起始行优先索引，不使用网络画布步长；Go pass 为 `size²`。象棋编号为 [固定动作表](../python/etazero/games.py) 的索引。`new` 接受 `size`、`rule` 和可选 `moves`，Go 还可传 `komi/go_rules`，象棋可传 `fen`；平衡开局用 `opening: balanced`、字符串 uint64 `seed` 与 `timeout_ms`，复用比赛开局配置，不能与 moves 同时使用。`undo` 的 `count` 默认为 1，`state` 返回状态，`raw_nn` 返回网络诊断，`genmove` 搜索后落子。
 
 `analyze` 不落子。`analyze` / `genmove` 接受 visits、report_interval_ms 和 fresh；默认从新根开始，`fresh: false` 在算法允许且配置开启时保留树。`continuous: true` 仅适用于 analyze，覆盖访问、playout 和时间上限，直到停止。
 
