@@ -1,4 +1,4 @@
-"""Durable atomic publication; immutable payloads and small mutable pointers."""
+"""Atomic publication; immutable payloads and small mutable pointers."""
 import hashlib
 import json
 import os
@@ -14,7 +14,7 @@ def sync_directory(path):
         os.close(fd)
 
 
-def atomic_write(path, writer, immutable=False, *, durable=True):
+def atomic_write(path, writer, immutable=False, *, durable=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp." + uuid.uuid4().hex)
@@ -82,10 +82,7 @@ def atomic_path(path):
     temporary = path.with_name(path.name+'.tmp.'+uuid.uuid4().hex)
     try:
         yield temporary
-        with temporary.open('rb') as stream:
-            os.fsync(stream.fileno())
         os.replace(temporary, path)
-        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
