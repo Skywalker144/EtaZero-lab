@@ -117,7 +117,6 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
         const size_t spatial = obs.size() - GLOBAL_FEATURES;
         request->cache_key.assign((spatial+7)/8, '\0');
         for (size_t i=0;i<spatial;++i) {
-            if (obs[i]!=0 && obs[i]!=1) throw std::runtime_error("Cache requires binary input features");
             if (obs[i]) request->cache_key[i/8] |= static_cast<char>(1 << (7-i%8));
         }
         request->cache_key.append(reinterpret_cast<const char*>(obs.data()+spatial), GLOBAL_FEATURES*sizeof(float));
