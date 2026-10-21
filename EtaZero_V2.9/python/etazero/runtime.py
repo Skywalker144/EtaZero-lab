@@ -10,17 +10,16 @@ import platform
 import signal
 import subprocess
 import tarfile
-import threading
 import time
 import uuid
 import warnings
 from .config import ROOT, csv, fingerprint, resume_config, write_native
-from .compiler import WorkTimer, compilation_enabled
+from .compiler import WorkTimer, compilation_enabled, add_timing
 from .data import Catalog
 from .native import NativeWorker
 from .export import export_model, verify_export
 from .shuffle import build_snapshot, desired_window, prune_derived, view_key, shuffle_pool
-from .storage import atomic_write, load_json, save_json, sha256, sync_directory
+from .storage import atomic_write, load_json, save_json, sync_directory
 from .training import initialize, train_iteration, prune_checkpoints
 from .build import verify_build
 
@@ -37,87 +36,54 @@ def iteration_progress(iteration, elapsed_seconds, selfplay_rows, window_rows, t
 
 
 class Journal:
+    """Append observational events; a logging failure does not abort training."""
     def __init__(self, root):
         self.path = Path(root)/"logs/events.jsonl"
-        self.path.parent.mkdir(parents=True,exist_ok=True)
-        if self.path.exists():
-            with self.path.open("rb+") as file:
-                valid_end = 0
-                while line := file.readline():
-                    try:
-                        json.loads(line)
-                    except json.JSONDecodeError:
-                        if file.read(1):
-                            raise ValueError("Corrupt journal before its trailing partial record")
-                        file.truncate(valid_end)
-                        break
-                    valid_end = file.tell()
-        self.changed = threading.Condition()
-        self.queue = deque()
-        self.issued = self.written = self.durable = self.barrier = 0
-        self.closing = False;self.failure=None
-        self.thread = threading.Thread(target=self._write_loop,daemon=True);self.thread.start()
+        self.failure = None
+        self.file = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Separate an interrupted trailing record without scanning old logs.
+            if self.path.exists() and self.path.stat().st_size:
+                with self.path.open('rb+') as file:
+                    file.seek(-1, os.SEEK_END)
+                    if file.read(1) != b'\n':
+                        file.write(b'\n')
+            self.file = self.path.open('a', buffering=1)
+        except OSError as error:
+            self._failed(error)
 
-    def __call__(self,event,**fields):
-        payload={"event":event,"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),**fields}
-        line = json.dumps(payload,sort_keys=True)+'\n'
-        with self.changed:
-            self.changed.wait_for(lambda:len(self.queue)<1024 or self.failure or self.closing)
-            self._check()
-            if self.closing:
-                raise RuntimeError('Run journal is closing')
-            self.issued += 1
-            self.queue.append((self.issued,line))
-            self.changed.notify_all()
+    def _failed(self, error):
+        if self.failure is None:
+            warnings.warn(f'Run journal unavailable; training continues: {error}', RuntimeWarning)
+        self.failure = error
 
-    def _check(self):
-        if self.failure:
-            raise RuntimeError('Run journal writer failed') from self.failure
+    def __call__(self, event, **fields):
+        if self.failure is not None:
+            return
+        try:
+            payload = {"event": event, "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), **fields}
+            self.file.write(json.dumps(payload, sort_keys=True)+'\n')
+        except (OSError, ValueError, TypeError) as error:
+            self._failed(error)
 
     def flush(self):
-        """Durable barrier for every preceding event, especially checkpoint metrics."""
-        with self.changed:
-            self._check();target=self.issued;self.barrier=max(self.barrier,target)
-            self.changed.notify_all()
-            self.changed.wait_for(lambda:self.durable>=target or self.failure)
-            self._check()
-
-    def _write_loop(self):
-        try:
-            last_sync = time.monotonic()
-            with self.path.open('a') as file:
-                while True:
-                    with self.changed:
-                        dirty = self.written > self.durable
-                        self.changed.wait_for(lambda:self.queue or self.closing or self.barrier>self.durable,
-                                              timeout=max(0,1-(time.monotonic()-last_sync)) if dirty else None)
-                        items=list(self.queue);self.queue.clear();self.changed.notify_all()
-                        closing=self.closing
-                    if items:
-                        file.write(''.join(line for _,line in items));file.flush()
-                        self.written=items[-1][0]
-                    now=time.monotonic()
-                    if self.written>self.durable and (now-last_sync>=1 or closing or self.barrier>self.durable):
-                        file.flush();os.fsync(file.fileno());last_sync=time.monotonic()
-                        with self.changed:
-                            self.durable=self.written;self.changed.notify_all()
-                    if closing:
-                        return
-        except BaseException as error:
-            with self.changed:
-                self.failure=error;self.changed.notify_all()
+        if self.file is not None and self.failure is None:
+            try:
+                self.file.flush()
+            except OSError as error:
+                self._failed(error)
 
     def close(self):
-        if self.closing:
-            self.thread.join();self._check();return
-        self('session_end')
-        with self.changed:
-            self.closing=True;self.changed.notify_all()
-        self.thread.join();self._check()
+        if self.file is not None and not self.file.closed:
+            self('session_end')
+            try:
+                self.file.close()
+            except OSError as error:
+                self._failed(error)
 
 
 def source_snapshot(root):
-    import io
     paths=[]
     for directory,names,files in os.walk(ROOT):
         parent=Path(directory)
@@ -126,21 +92,14 @@ def source_snapshot(root):
                   and not (parent==ROOT and name=="data")
                   and not (parent/name).is_relative_to(Path(root))]
         paths.extend(parent/name for name in files if (parent/name).is_file())
-    # Include repository-level rules, but never unrelated reference working trees.
     paths += [ROOT.parent/"AGENTS.md",ROOT.parent/"RULES.md"]
-    import hashlib
-    contents={str(p.relative_to(ROOT.parent)):p.read_bytes() for p in sorted(paths)}
-    manifest={name:hashlib.sha256(data).hexdigest() for name,data in contents.items()}
-    identity=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()
+    identity=uuid.uuid4().hex
     destination=Path(root)/".internal/source"/(identity+".tar.gz")
-    if not destination.exists():
-        def write(path):
-            with tarfile.open(path,"w:gz") as archive:
-                for name,data in contents.items():
-                    entry=tarfile.TarInfo(name);entry.size=len(data)
-                    archive.addfile(entry,io.BytesIO(data))
-        atomic_write(destination,write,immutable=True)
-        save_json(destination.with_suffix(".json"),{"id":identity,"files":manifest},immutable=True)
+    def write(path):
+        with tarfile.open(path,"w:gz") as archive:
+            for source in sorted(paths):
+                archive.add(source,arcname=str(source.relative_to(ROOT.parent)))
+    atomic_write(destination,write,immutable=True)
     return identity
 
 
@@ -183,9 +142,8 @@ def training_budget(plan, manifest, rows):
 
 
 class Controller:
-    def __init__(self,root,config,binary,binary_hash,max_iteration=None,max_seconds=None):
+    def __init__(self,root,config,binary,max_iteration=None,max_seconds=None):
         self.root,self.config,self.binary=Path(root),config,Path(binary)
-        self.binary_hash=binary_hash
         self.config_id=fingerprint(config);self.children=[];self.stop=False
         self.max_iteration=config["run"]["max_iteration"] if max_iteration is None else max_iteration
         self.limit=config["run"]["max_seconds"] if max_seconds is None else max_seconds
@@ -211,8 +169,6 @@ class Controller:
                 pass # The owned child completed between poll and signal.
 
     def stopping(self):
-        if self.journal.failure:
-            raise RuntimeError("Run journal writer failed") from self.journal.failure
         return self.stop
 
     def close(self):
@@ -234,7 +190,6 @@ class Controller:
             raise errors[0]
 
     def state(self,state):
-        self.journal.flush()
         save_json(self.root/".internal/state.json",state)
 
     def run(self,resume=False,weights=None):
@@ -244,7 +199,7 @@ class Controller:
         source=source_snapshot(root)
         self.source_id=source
         save_json(root/".internal/session.json",{"source_id":source,"started_utc":datetime.datetime.now(datetime.timezone.utc).isoformat()})
-        self.journal("session_start",source_id=source,binary_sha256=self.binary_hash,
+        self.journal("session_start",source_id=source,binary=str(self.binary.resolve()),
                      iteration_limit=self.max_iteration,elapsed_seconds_limit=self.limit,
                      timing_basis='committed_wall_excluding_compile_and_plot',
                      compiler_cache={key:os.environ[key] for key in ('TORCHINDUCTOR_CACHE_DIR','TRITON_CACHE_DIR')},
@@ -264,7 +219,7 @@ class Controller:
                 raise ValueError("Run already exists; use --resume or a new directory")
             info={"id":uuid.uuid4().hex,"config_id":self.config_id,"config":c,"source_id":source,
                   "seed":c["run"]["seed"],"weights_initialization":{
-                      "path":str(Path(weights).resolve()),"sha256":sha256(weights)} if weights else None}
+                      "path":str(Path(weights).resolve())} if weights else None}
             save_json(root/".internal/run.json",info,immutable=True)
 
             state={"run_id":info["id"],"iteration":0,"target_rows":0.0,"replay_origin_rows":None,"replay_rows":0,"train_credit":0.0,"checkpoint":None,"model":None,"elapsed_seconds":0.0}
@@ -294,8 +249,6 @@ class Controller:
             (root/name).mkdir(parents=True,exist_ok=True)
         if state["checkpoint"] is None:
             origin=info["weights_initialization"]
-            if resume and origin and sha256(origin["path"])!=origin["sha256"]:
-                raise ValueError("Weights initialization source changed")
             state["checkpoint"]=initialize(root,c,origin["path"] if origin else None);self.state(state)
         self.prune_checkpoints()
         self.catalog=Catalog(root,info["id"],self.config_id)
@@ -315,7 +268,7 @@ class Controller:
                 else:
                     plan=iteration_plan(state,c)
                     self.journal.flush()
-                    save_json(directory/'journal.json', {'offset': self.journal.path.stat().st_size})
+                    save_json(directory/'journal.json', {'offset': self.journal.path.stat().st_size if self.journal.path.exists() else 0})
                     save_json(plan_path,plan,immutable=True);self.journal("plan",**plan)
                 status=load_json(status_path) if status_path.exists() else {"phase":"selfplay"}
                 self.scan(plan)
@@ -363,7 +316,10 @@ class Controller:
                        "target_rows":rows if iteration == 1 else plan["target_rows"], "replay_origin_rows":origin,
                        "replay_rows":rows,"train_credit":credit,
                        "checkpoint":status["checkpoint"],"model":status["model"],"elapsed_seconds":state["elapsed_seconds"]}
-                self.journal("selfplay_statistics",iteration=iteration,**self.catalog.statistics(iteration))
+                try:
+                    self.journal("selfplay_statistics",iteration=iteration,**self.catalog.statistics(iteration))
+                except (OSError, ValueError) as error:
+                    warnings.warn(f'Selfplay statistics unavailable: {error}', RuntimeWarning)
                 self.journal("iteration_complete",iteration=iteration,unique_rows=rows,games=games,target_rows=next_state["target_rows"],
                              replay_origin_rows=origin,total_samples=next_state["checkpoint"]["total_samples"],
                              train_steps=status['train_steps'] if iteration else 0,train_credit=credit,
@@ -383,24 +339,34 @@ class Controller:
                         self.journal('snapshots_evicted',snapshots=evicted)
                 self.journal.flush()
                 metrics_path = root/'logs/iterations'/f'{iteration:06d}.json'
-                if metrics_path.exists():
-                    # A crash between summary publication and state commit can
-                    # finish that same commit without regenerating metrics/time.
-                    metrics = load_json(metrics_path)
-                    if metrics['model'] != next_state['model']:
-                        raise ValueError('Pending round metrics model mismatch')
-                else:
+                metrics = None
+                if not metrics_path.exists():
                     from .plotting import round_history
-                    metrics = round_history(root, iteration,
-                                            status['train_steps'] if iteration else 0,
-                                            load_json(directory/'journal.json')['offset'])
-                    measured = timer.finish()
-                    timing = {key: previous_timing[key]+measured[key] for key in measured}
-                    metrics.update(elapsed_seconds=state['elapsed_seconds']+timing['seconds'],
-                                   model=next_state['model'], **timing,
-                                   timing_basis='committed_wall_excluding_compile_and_plot')
-                    save_json(metrics_path,metrics,immutable=True)
-                next_state['elapsed_seconds'] = metrics['elapsed_seconds']
+                    try:
+                        metrics = round_history(root, iteration,
+                                                status['train_steps'] if iteration else 0,
+                                                load_json(directory/'journal.json')['offset'])
+                    except (OSError, ValueError, KeyError) as error:
+                        warnings.warn(f'Round {iteration} metrics unavailable: {error}', RuntimeWarning)
+                        metrics = dict(iteration=iteration, metrics_error=str(error))
+                if 'commit' not in status:
+                    timing = add_timing(previous_timing, timer.finish())
+                    timing['timing_valid'] &= state.get('timing_valid', True)
+                    status['commit'] = dict(iteration=iteration, model=next_state['model'],
+                                            elapsed_seconds=state['elapsed_seconds']+timing['seconds'],
+                                            total_rows=rows, total_samples=next_state['checkpoint']['total_samples'],
+                                            steps=status['train_steps'] if iteration else 0, **timing,
+                                            timing_basis='committed_wall_excluding_compile_and_plot')
+                    # Persist the evaluation record before advancing the state pointer.
+                    # A retry reuses this time even if the optional summary was lost.
+                    save_json(status_path, status)
+                if metrics is not None:
+                    try:
+                        save_json(metrics_path, metrics, immutable=True)
+                    except OSError as error:
+                        warnings.warn(f'Round {iteration} summary could not be saved: {error}', RuntimeWarning)
+                next_state['elapsed_seconds'] = status['commit']['elapsed_seconds']
+                next_state['timing_valid'] = status['commit']['timing_valid']
                 self.state(next_state)
                 state=next_state
                 if state['model']:
@@ -413,7 +379,7 @@ class Controller:
             finally:
                 if state['iteration'] == iteration:
                     measured = timer.finish()
-                    save_json(timing_path, {key: previous_timing[key]+measured[key] for key in measured})
+                    save_json(timing_path, add_timing(previous_timing, measured))
         if not plotted:
             self.plot()
         self.journal("run_stopped" if self.stop else "run_complete",completed_iterations=state["iteration"]-1)
@@ -604,20 +570,23 @@ class Controller:
                 stdout=self.root/"logs"/f'{attempt}_{worker["id"]}.jsonl'
                 if not stdout.exists():
                     continue
-                lines=stdout.read_text().splitlines()
-                for i,line in enumerate(lines):
-                    try:
-                        record=json.loads(line)
-                    except json.JSONDecodeError:
-                        if i==len(lines)-1 and any(code!=0 for code in codes):
-                            self.journal("partial_worker_log",file=str(stdout));continue
-                        raise
-                    if record['event']=='worker_prepared':
-                        self.journal('inference_setup',iteration=iteration,worker_id=worker['id'],attempt=attempt,
-                                     **{k:v for k,v in record.items() if k!='event'})
-                    elif record["event"]=="inference":
-                        self.journal("inference",iteration=iteration,worker_id=worker["id"],attempt=attempt,evaluator=kind,
-                                     **{k:v for k,v in record.items() if k!="event"})
+                try:
+                    lines=stdout.read_text().splitlines()
+                    for i,line in enumerate(lines):
+                        try:
+                            record=json.loads(line)
+                        except json.JSONDecodeError:
+                            if i==len(lines)-1 and any(code!=0 for code in codes):
+                                self.journal("partial_worker_log",file=str(stdout));continue
+                            raise
+                        if record['event']=='worker_prepared':
+                            self.journal('inference_setup',iteration=iteration,worker_id=worker['id'],attempt=attempt,
+                                         **{k:v for k,v in record.items() if k!='event'})
+                        elif record["event"]=="inference":
+                            self.journal("inference",iteration=iteration,worker_id=worker["id"],attempt=attempt,evaluator=kind,
+                                         **{k:v for k,v in record.items() if k!="event"})
+                except (OSError, ValueError, KeyError) as error:
+                    warnings.warn(f'Native metrics unavailable from {stdout}: {error}', RuntimeWarning)
             if any(code!=0 for code in codes) and not self.stop:
                 raise RuntimeError(f"Selfplay worker failed (codes={codes}); inspect {self.root/'logs'}")
         finally:
@@ -671,8 +640,8 @@ def run_training(root,config,binary,resume=None,weights=None,max_iteration=None,
             raise ValueError("Weights initialization and resume are separate operations")
         if not Path(binary).is_file():
             raise FileNotFoundError("Native executable is missing; run scripts/build.sh first")
-        binary_hash=verify_build(binary)
-        controller=Controller(root,config,binary,binary_hash,max_iteration,max_seconds)
+        verify_build(binary)
+        controller=Controller(root,config,binary,max_iteration,max_seconds)
         try:
             state=controller.run(resume,weights)
         except BaseException as error:
