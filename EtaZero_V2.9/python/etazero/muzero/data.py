@@ -17,7 +17,7 @@ EXTRA = ('actions', 'step_weights', 'sequence_mask', 'absorbing')
 
 def validate_trajectory(a):
     m = metadata(a); t, area = m['plies'], m['canvas'] ** 2
-    if type(m.get('unroll_steps')) is not int or not 1 <= m['unroll_steps'] <= 32:
+    if type(m.get('unroll_steps')) is not int or not m['unroll_steps'] >= 1:
         raise ValueError('Invalid MuZero unroll length')
     for name in ('trajectory_policy', 'trajectory_q_values', 'trajectory_q_visits'):
         if a[name].shape != (t, area) or a[name].dtype != np.int16:
