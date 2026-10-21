@@ -33,6 +33,8 @@ class TrainingMetrics:
 
     def summary(self):
         s = self.state
+        if s.get('incomplete'):
+            return {'steps': s['steps'], 'metrics_error': 'Incomplete learner metrics'}
         result = {k: s[k] for k in ('steps', 'amp_skipped_steps', 'clipped_steps')}
         result.update({k: v/s['counts'][k] for k,v in s['sums'].items()})
         result.update(gradient_steps=s['counts'].get('grad_norm', 0),
