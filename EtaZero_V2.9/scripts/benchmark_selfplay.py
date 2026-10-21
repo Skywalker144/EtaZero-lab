@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT / 'python'))
 from etazero.config import fingerprint, load_config, validate, write_native
 from etazero.native import NativeWorker
 from etazero.runtime import provenance, source_snapshot, verify_build
-from etazero.storage import sha256
 
 
 def candidate(text):
@@ -136,14 +135,14 @@ def main():
     binary = ROOT / 'build/etazero'
     verify_build(binary)
     model = args.model.resolve() if args.model is not None else ''
-    model_id = sha256(model) if args.evaluator == 'network' else f'random:{args.seed}'
+    model_id = model.parent.name if args.evaluator == 'network' else f'random:{args.seed}'
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source_id = source_snapshot(output)
     manifest = dict(arguments={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-                    model=str(model), model_sha256=model_id if args.evaluator == 'network' else None,
+                    model=str(model), model_id=model_id,
                     source_id=source_id,
-                    binary_sha256=sha256(binary), environment=provenance(), base_config=config,
+                    binary=str(binary.resolve()), environment=provenance(), base_config=config,
                     cpu=subprocess.check_output(['lscpu'], text=True),
                     memory=Path('/proc/meminfo').read_text())
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
