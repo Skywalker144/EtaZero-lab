@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from .network import make_network, inference_network
 from .optimization import inference_weights
-from .schema import CONTRACT_ID
 from .storage import load_json, save_json, sync_directory
 from .training import load_checkpoint, device_check
 
@@ -30,10 +29,9 @@ def example_inputs(canvas, size, rule, moves=()):
 def verify_export(run_dir, info, canvas):
     """Verify the immutable artifact before restoring or publishing its pointer."""
     relative = Path('models')/info['id']/'model.pt'
-    if (Path(info['path']) != relative or info['contract'] != CONTRACT_ID or
-            info['canvas'] != canvas or info['checkpoint']['id'] != info['id'] or
+    if (Path(info['path']) != relative or info['canvas'] != canvas or info['checkpoint']['id'] != info['id'] or
             info['weights'] not in ('model','swa')):
-        raise ValueError('Exported model identity/contract mismatch')
+        raise ValueError('Exported model identity/canvas mismatch')
     path = Path(run_dir)/relative
     if load_json(path.parent/'manifest.json') != info or path.stat().st_size != info['bytes']:
         raise ValueError('Exported model manifest/size mismatch')
@@ -62,7 +60,7 @@ def export_model(run_dir, config, checkpoint):
     canvas = config["network"]["canvas"]
     swa = saved['optimization']['swa']
     averaged = 0 if swa is None else int(swa['n_averaged'].item())
-    info = {"id":checkpoint["id"],"checkpoint":checkpoint,"contract":CONTRACT_ID,"canvas":canvas,
+    info = {"id":checkpoint["id"],"checkpoint":checkpoint,"canvas":canvas,
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
             "path":str(Path("models")/checkpoint["id"]/"model.pt"),
             "bytes":(stage/"model.pt").stat().st_size,
