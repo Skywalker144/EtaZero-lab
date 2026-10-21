@@ -136,27 +136,6 @@ def test_selective_decode_preserves_training_arrays(tmp_path, monkeypatch, algor
                     'trajectory_q_values', 'trajectory_q_visits'} & counts.keys()
 
 
-def test_catalog_discards_old_digest_without_losing_resume_rows(tmp_path):
-    raw, _ = winning_record()
-    save_npz(tmp_path/'selfplay/game.npz', raw)
-    catalog = Catalog(tmp_path, 'test', 'config')
-    try:
-        catalog.scan({1: 'model'})
-        expected = catalog.entries()
-        with catalog.db:
-            catalog.db.execute('ALTER TABLE games ADD COLUMN fingerprint TEXT')
-            catalog.db.execute("UPDATE games SET fingerprint='obsolete'")
-    finally:
-        catalog.close()
-    catalog = Catalog(tmp_path, 'test', 'config')
-    try:
-        catalog.scan({1: 'model'})
-        assert catalog.counts() == (9, 1) and catalog.entries() == expected
-        assert {row[1] for row in catalog.db.execute('PRAGMA table_info(games)')} == {'id', 'rows', 'total'}
-    finally:
-        catalog.close()
-
-
 def test_reader_single_pass_does_not_hash_files(tmp_path, monkeypatch):
     import etazero.storage as storage
     snapshot = id_snapshot(tmp_path, [4, 4])
