@@ -104,6 +104,16 @@ def discover_models(models_dir: Path, model: Path | None = None) -> dict[str, Pa
     return models
 
 
+def load_web_config(source: Path):
+    config = load_engine_config(source)
+    # Go and Xiangqi start from their native initial state and do not use the
+    # placement games' balanced openings or require their match profile.
+    if config['analysis']['rule'] not in ('go', 'xiangqi'):
+        config['opening'] = load_match_opening_config(source)
+        config['hex_opening'] = load_match_hex_opening_config(source)
+    return config
+
+
 def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Path | None = None):
     models = discover_models(models_dir, model)
     # A run may have saved its configuration but not yet published its first model.
@@ -124,14 +134,16 @@ def discover_catalog(models_dir: Path, model: Path | None = None, config_dir: Pa
         info = load_json(paths[0].parent / 'manifest.json') if paths else {}
         effective = load_json(saved) if saved.is_file() else {}
         algorithm = info.get('algorithm', effective.get('agent', {}).get('algorithm', 'alphazero'))
-        source = config_dir or (mapped if mapped and (mapped / 'analysis.cfg').is_file() else
-                                ROOT / 'configs' / ('mz_g' if algorithm == 'muzero' else 'baseline'))
-        config = load_engine_config(source)
+        family = info.get('game', effective.get('environment', {}).get('rules', '').split(',')[0])
+        fallback = (('mz_' if algorithm=='muzero' else 'az_')+family if family in ('go','xiangqi')
+                    else 'mz_g' if algorithm=='muzero' else 'baseline')
+        source = config_dir or (mapped if mapped and (mapped / 'analysis.cfg').is_file() else ROOT / 'configs' / fallback)
+        config = load_web_config(source)
         if not config_dir and source != mapped:
             config['analysis']['board_size'] = info.get('canvas', effective.get('network', {}).get('canvas', 15))
         runs[str(root)] = dict(id=str(root), label=label, path=str(root), algorithm=algorithm,
                                config_dir=str(source.resolve()), analysis_config=config['analysis'],
-                               opening=load_match_opening_config(source),hex_opening=load_match_hex_opening_config(source))
+                               opening=config.get('opening'), hex_opening=config.get('hex_opening'))
         if model and model.resolve().parent.parent.parent == root:
             runs[str(root)]['selected_model'] = next(key for key, path in models.items() if path == model.resolve())
     return models, runs
@@ -152,9 +164,7 @@ def main(argv=None):
     try:
         verify_build(args.binary)
         models, runs = discover_catalog(args.models_dir, args.model, args.config_dir)
-        config = load_engine_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
-        config['opening'] = load_match_opening_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
-        config['hex_opening'] = load_match_hex_opening_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
+        config = load_web_config(args.config_dir or ROOT / 'configs/checks/minimal_test')
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
     app = App(args.binary, models, config, config['analysis']['board_size'],
