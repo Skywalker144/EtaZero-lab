@@ -18,9 +18,6 @@ target_sources(etazero_core PRIVATE src/search/analysis.cpp)
 add_library(etazero_muzero src/muzero/batcher.cpp src/muzero/search.cpp src/muzero/gumbel_search.cpp)
 target_link_libraries(etazero_muzero PUBLIC etazero_core)
 option(ETAZERO_WITH_TORCH "Build native model inference and commands" ON)
-# Runtime records source snapshots and binary identity; this is only capability metadata.
-file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/build_manifest.json"
-    CONTENT "{\"with_torch\": $<IF:$<BOOL:${ETAZERO_WITH_TORCH}>,true,false>}\n")
 if(ETAZERO_WITH_TORCH)
     find_package(Torch REQUIRED)
     separate_arguments(TORCH_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
