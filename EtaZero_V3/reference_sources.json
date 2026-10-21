@@ -221,5 +221,10 @@
       "scripts/python/katago_web_backend.py": "76bccd1c63851d3cad06884415a0cb34d9f753927ca1e389d9cbb49681de4db7",
       "katago/cpp/external/nlohmann_json/json.hpp": "be7bbfbc7c62c35aa6f27dfbdd950384f247dd9f2281b5930bdaa3a6ab95eef7"
     }
+  },
+  "Pikafish": {
+    "repository": "https://github.com/official-pikafish/Pikafish",
+    "commit": "545c4e3b251afbb94f493c6c5f32549f900e76fd",
+    "scope": "Position, legal move generation and rule adjudication; no search or evaluation network"
   }
 }
