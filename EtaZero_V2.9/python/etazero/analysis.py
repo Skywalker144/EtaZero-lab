@@ -4,15 +4,15 @@ from pathlib import Path
 import subprocess
 import uuid
 from .config import fingerprint, write_native
-from .schema import CONTRACT_ID
 from .storage import load_json, save_json
+from .build import verify_build
 
 
 def model_info(path,canvas=None):
     path=Path(path).resolve()
     info=load_json(path.parent/"manifest.json")
-    if info["contract"]!=CONTRACT_ID or (canvas is not None and info["canvas"]!=canvas):
-        raise ValueError(f"Inference model contract/canvas mismatch: {path}")
+    if (canvas is not None and info["canvas"]!=canvas):
+        raise ValueError(f"Inference model canvas mismatch: {path}")
     if path.stat().st_size != info["bytes"]:
         raise ValueError(f"Inference model size mismatch: {path}")
     return path,info
@@ -24,8 +24,7 @@ def select_model(run_dir, model=None):
 
 
 def analyze(config,binary,run_dir,model=None,size=None,rule=None,moves="",output=None):
-    from .runtime import verify_build
-    binary_hash=verify_build(binary)
+    verify_build(binary)
     root=Path(run_dir).resolve()
     model,a=model_info(select_model(root, model))
     from .engine_config import validate_engine_config
@@ -56,7 +55,7 @@ def analyze(config,binary,run_dir,model=None,size=None,rule=None,moves="",output
             result[key]=[result[key][y*a['canvas']+x] for y in range(size) for x in range(size)]
     payload={'mode':'analysis','config_id':fingerprint(config),'config':config,'model_a':a,
              'board_size':size,'rule':rule,'opening_actions':actions,'seed':c['seed'],
-             'command':command,'binary_sha256':binary_hash,'result':result}
+             'command':command,'binary':str(Path(binary).resolve()),'result':result}
     path=Path(output).resolve() if output else directory/'result.json'
     save_json(path,payload,immutable=True)
     return path,payload
@@ -65,9 +64,8 @@ def analyze(config,binary,run_dir,model=None,size=None,rule=None,moves="",output
 def stream_analysis(config, binary, run_dir, model=None, protocol='text'):
     """Run the same native session used by Web, retaining weights across queries."""
     import tempfile
-    from .runtime import verify_build
     from .engine_config import validate_engine_config
-    verify_build(binary, record_identity=False)
+    verify_build(binary)
     validate_engine_config(config)
     model,info=model_info(select_model(run_dir,model))
     c=config['analysis']
