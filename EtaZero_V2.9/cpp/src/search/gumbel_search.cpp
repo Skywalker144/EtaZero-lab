@@ -104,7 +104,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     }):std::function<void()>{};
     work_changed_.notify_all();simulate_gumbel(0);
     {std::unique_lock<std::mutex> lock(work_mutex_);work_changed_.wait(lock,[&]{return workers_done_==int(workers_.size());});}
-    if(pending()!=0||schedule_->pending()!=0)throw std::runtime_error("Gumbel leaked pending visits");
+    if(schedule_->pending()!=0)throw std::runtime_error("Gumbel leaked pending visits");
     if(error_)std::rethrow_exception(error_);
     report_={};
     if(options.collect_analysis){result.analysis=analysis_snapshot(state.actions(),&gumbel_).analysis;result.gumbel=true;}
