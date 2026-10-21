@@ -16,7 +16,7 @@ from etazero.data import read_raw, training_view, validate_raw, Catalog
 from etazero.export import example_inputs
 from etazero.network import MaskedBatchNorm, make_network, base_losses as losses, inference_network
 from etazero.reader import BatchReader
-from etazero.schema import CONTRACT_ID, RAW_DTYPES, pack_observations, unpack_observations
+from etazero.schema import RAW_DTYPES, pack_observations, unpack_observations
 from etazero.shuffle import view_key, build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
 from etazero.storage import save_npz, save_json, sha256
 
@@ -67,7 +67,7 @@ def winning_record(rule=0):
     for key in ("opening_moves","balanced_moves","policy_moves","opening_attempts","opening_status","start_values","initial_position_moves","initial_position_kind"):
         a[key]=np.zeros(1,dtype=RAW_DTYPES[key])
     a["hint_actions"]=np.array([-1],dtype=RAW_DTYPES["hint_actions"])
-    m={"contract":CONTRACT_ID,"canvas":canvas,"rows":t,"row_begin":0,"plies":t,"games":1,"opening_failures":[""],"run_id":"test","attempt_id":str(rule),
+    m={"canvas":canvas,"rows":t,"row_begin":0,"plies":t,"games":1,"opening_failures":[""],"run_id":"test","attempt_id":str(rule),
        "worker_id":0,"iteration_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
     a["metadata"]=np.frombuffer(json.dumps(m).encode(),np.uint8)
     for key, shape in {'side_observations': (0,5,5), 'side_globals': (0,len(GLOBALS)),
@@ -149,13 +149,16 @@ def test_source_identity_excludes_sibling_run_data(tmp_path,monkeypatch):
     output=source/"data"/"current_run";output.mkdir()
     artifact=sibling/"checkpoint.pt";artifact.write_bytes(b"old checkpoint")
     monkeypatch.setattr(runtime,"ROOT",source)
+    import tarfile
     identity=runtime.source_snapshot(output)
     artifact.write_bytes(b"new checkpoint")
-    assert runtime.source_snapshot(output)==identity
-    manifest=json.loads((output/".internal/source"/(identity+".tar.json")).read_text())
-    assert set(manifest["files"])=={"version/code.py","AGENTS.md","RULES.md"}
-    (source/"code.py").write_text('print("changed source")\n')
-    assert runtime.source_snapshot(output)!=identity
+    second=runtime.source_snapshot(output)
+    assert second != identity
+    for snapshot in (identity, second):
+        with tarfile.open(output/".internal/source"/(snapshot+".tar.gz")) as archive:
+            assert set(archive.getnames())=={"version/code.py","AGENTS.md","RULES.md"}
+            assert archive.extractfile("version/code.py").read() == b'print("source")\n'
+    assert not list((output/".internal/source").glob('*.json'))
 
 
 @pytest.mark.parametrize("algorithm,root,nonroot,message",[
@@ -516,40 +519,31 @@ def test_journal_barrier_and_failure(tmp_path,monkeypatch):
         file.write(b'{"truncated":')
     recovered=Journal(tmp_path);recovered('after_recovery');recovered.close()
     assert json.loads((tmp_path/'logs/events.jsonl').read_text().splitlines()[-2])['event']=='after_recovery'
-    broken_dir=tmp_path/'broken';broken_dir.mkdir()
-    broken=Journal(broken_dir)
-    with monkeypatch.context() as patch:
-        patch.setattr('etazero.runtime.os.fsync',lambda *a:(_ for _ in ()).throw(OSError('disk failure')))
+    class BrokenFile:
+        closed = False
+        def write(self, _):
+            raise OSError('disk failure')
+        def close(self):
+            self.closed = True
+    broken=Journal(tmp_path/'broken')
+    broken.file.close()
+    broken.file=BrokenFile()
+    with pytest.warns(RuntimeWarning, match='training continues'):
         broken('update')
-        with pytest.raises(RuntimeError,match='writer failed'):
-            broken.flush()
-        with pytest.raises(RuntimeError,match='writer failed'):
-            broken.close()
+    broken.flush()
+    broken.close()
+    assert isinstance(broken.failure, OSError)
 
 
-def test_journal_idle_has_no_periodic_writes(tmp_path, monkeypatch):
+def test_journal_has_no_fsync_barriers(tmp_path, monkeypatch):
     from etazero.runtime import Journal
-    import threading
-    synced = threading.Event()
-    sync = os.fsync
-    def tracked_sync(fd):
-        sync(fd)
-        synced.set()
-    monkeypatch.setattr('etazero.runtime.os.fsync', tracked_sync)
+    monkeypatch.setattr('etazero.runtime.os.fsync', lambda _: pytest.fail('Observational log must not fsync'))
     journal = Journal(tmp_path)
-    try:
-        journal('update', step=1)
-        assert synced.wait(3), 'Queued events must become durable without an explicit barrier'
-        journal.flush()
-        path = tmp_path/'logs/events.jsonl'
-        before = path.read_bytes()
-        synced.clear()
-        assert not synced.wait(1.1), 'An idle journal must not write or sync periodic records'
-        assert path.read_bytes() == before
-        assert 'active_seconds' not in json.loads(before)
-    finally:
-        journal.close()
-    assert json.loads(path.read_text().splitlines()[-1])['event'] == 'session_end'
+    journal('update', step=1)
+    journal.flush()
+    journal.close()
+    records = [json.loads(line) for line in journal.path.read_text().splitlines()]
+    assert records[0]['step'] == 1 and records[-1]['event'] == 'session_end'
 
 
 def test_inference_normalization_keeps_mask_and_model_state(config):
