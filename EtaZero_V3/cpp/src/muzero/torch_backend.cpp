@@ -53,9 +53,11 @@ TorchBackend::TorchBackend(const std::string& path,const std::string& device,int
         c10::cuda::getCurrentCUDAStream(device_.index()).synchronize();
         stream_=std::make_unique<c10::cuda::CUDAStream>(c10::cuda::getStreamFromPool(false,device_.index()));
     }
+    spec_=game_spec(std::string(model_.get_method("game_name")({}).toStringRef()));
+    input_planes_=spec_.planes;global_features_=spec_.globals;action_count_=spec_.actions(canvas_);
     auto host=torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(device_.is_cuda());
-    observation_host_=torch::empty({max_batch_,INPUT_PLANES,canvas_,canvas_},host);
-    globals_host_=torch::empty({max_batch_,GLOBAL_FEATURES},host);
+    observation_host_=torch::empty({max_batch_,input_planes_,canvas_,canvas_},host);
+    globals_host_=torch::empty({max_batch_,global_features_},host);
     actions_host_=torch::empty({max_batch_},host.dtype(torch::kInt64));
     if(stream_) {
         auto started=std::chrono::steady_clock::now();capture_graphs();
@@ -71,11 +73,11 @@ void TorchBackend::capture_graphs() {
     for(int batch=1;;batch=std::min(max_batch_,batch*2)) {
         for(bool initial:{true,false}) {
             auto captured=std::make_unique<Graph>();
-            captured->input0=torch::zeros({batch,initial?INPUT_PLANES:latent_channels_+1,canvas_,canvas_},
+            captured->input0=torch::zeros({batch,initial?input_planes_:latent_channels_+1,canvas_,canvas_},
                 torch::TensorOptions().device(device_).dtype(torch::kFloat32));
             captured->input0.select(1,initial?0:latent_channels_).fill_(1);
             for(int i=0;i<batch;++i)captured->rows.push_back(captured->input0.narrow(0,i,1));
-            captured->input1=initial?torch::zeros({batch,GLOBAL_FEATURES},captured->input0.options()):
+            captured->input1=initial?torch::zeros({batch,global_features_},captured->input0.options()):
                 torch::zeros({batch},captured->input0.options().dtype(torch::kInt64));
             auto method=model_.get_method(initial?"initial":"recurrent");
             for(int warmup=0;warmup<3;++warmup)method({captured->input0,captured->input1});
@@ -129,12 +131,12 @@ std::vector<TorchBackend::Output> TorchBackend::initial(const InferenceInputs& i
     c10::cuda::OptionalCUDAStreamGuard stream_guard;
     if(stream_)stream_guard.reset_stream(*stream_);
     AutocastGuard autocast(precision_=="float16");
-    const int64_t n=inputs.size(),area=canvas_*canvas_,spatial=INPUT_PLANES*area;
+    const int64_t n=inputs.size(),area=canvas_*canvas_,spatial=input_planes_*area;
     auto obs=observation_host_.narrow(0,0,n);
     auto globals=globals_host_.narrow(0,0,n);
     std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
     for(int64_t i=0;i<n;++i) {
-        if(!inputs[i] || inputs[i]->size()!=static_cast<size_t>(spatial+GLOBAL_FEATURES))
+        if(!inputs[i] || inputs[i]->size()!=static_cast<size_t>(spatial+global_features_))
             throw std::runtime_error("MuZero observation shape mismatch");
         const auto& input=*inputs[i];
         auto mask=std::make_shared<std::vector<uint8_t>>(area);int count=0;
@@ -142,7 +144,7 @@ std::vector<TorchBackend::Output> TorchBackend::initial(const InferenceInputs& i
         if(!count)throw std::runtime_error("MuZero requires a nonempty board mask");
         masks.push_back(mask);
         std::memcpy(obs.data_ptr<float>()+i*spatial,input.data(),spatial*sizeof(float));
-        std::memcpy(globals.data_ptr<float>()+i*GLOBAL_FEATURES,input.data()+spatial,GLOBAL_FEATURES*sizeof(float));
+        std::memcpy(globals.data_ptr<float>()+i*global_features_,input.data()+spatial,global_features_*sizeof(float));
     }
     auto result=stream_?replay(initial_graphs_,obs,globals):model_.get_method("initial")({obs,globals});
     return unpack(result,masks);
@@ -160,7 +162,7 @@ std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Acti
         auto latent=std::dynamic_pointer_cast<const Latent>(input.latent);
         if(!latent || latent->owner_!=owner_)
             throw std::runtime_error("MuZero latent belongs to another backend/model/device");
-        if(input.action<0 || input.action>=canvas_*canvas_ || !(*latent->mask_)[input.action])
+        if(input.action<0 || input.action>=action_count_ || (input.action<canvas_*canvas_ && spec_.action_layout!=ActionLayout::MOVES && !(*latent->mask_)[input.action]))
             throw std::runtime_error("MuZero recurrent action outside board mask");
         latents.push_back(latent->tensor_);masks.push_back(latent->mask_);
         actions.data_ptr<int64_t>()[i]=input.action;
@@ -185,7 +187,7 @@ std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result
     if(fields.size()!=5)throw std::runtime_error("MuZero requires latent/policy/WDL/optimistic/error outputs");
     auto hidden=fields[0].toTensor(),policy=fields[1].toTensor(),value=fields[2].toTensor();
     auto optimistic=fields[3].toTensor(),error=fields[4].toTensor();
-    const int64_t n=masks.size(),area=canvas_*canvas_;
+    const int64_t n=masks.size(),area=action_count_;
     if(hidden.sizes()!=torch::IntArrayRef({n,latent_channels_+1,canvas_,canvas_}) ||
        hidden.scalar_type()!=torch::kFloat32 || hidden.device()!=policy.device() ||
        policy.sizes()!=torch::IntArrayRef({n,area}) || optimistic.sizes()!=policy.sizes() ||

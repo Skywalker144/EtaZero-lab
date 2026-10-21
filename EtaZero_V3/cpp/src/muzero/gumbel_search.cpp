@@ -19,20 +19,20 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double
     advance(0);auto start=std::chrono::steady_clock::now();SearchResult result;result.gumbel=true;int area=game.actions();
     result.policy.resize(area);result.move_policy.resize(area);result.network_policy.resize(area);result.search_policy.resize(area);
     result.visits.resize(area);result.q_values.resize(area);result.q_visits.resize(area);
-    if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl={(v+std::abs(v))/2,1-std::abs(v),(std::abs(v)-v)/2};return result;}
+    if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl=wdl_from_value(v,game.terminal_draw_probability());return result;}
     int max_playouts=options.max_playouts<0?settings_.max_playouts:options.max_playouts;
     if(!max_playouts||(options.should_stop&&options.should_stop())){result.stopped_early=max_playouts!=0;return result;}
     auto obs=game.observation();
-    int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,game.rule()==Rule::HEX?1:7)(random_):settings_.nn_symmetry;
-    mapping_=symmetry_mapping(game.canvas(),input_symmetry(obs,symmetry));board_actions_.clear();std::vector<int> root_actions;
-    for(int a=0;a<area;++a){if(obs[a])board_actions_.push_back(a);if(game.legal(a))root_actions.push_back(a);}
+    int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,game.spec().symmetries-1)(random_):settings_.nn_symmetry;
+    auto spatial=symmetry_mapping(game.canvas(),input_symmetry(obs,game.spec(),symmetry));mapping_=policy_mapping(spatial,game.spec());board_actions_.clear();std::vector<int> root_actions;
+    board_actions_=game.static_actions();for(int a:board_actions_)if(game.legal(a))root_actions.push_back(a);
     root_=node();remove_noise_=options.remove_root_noise;hint_=options.hint_action;
-    auto initial=evaluator_.initial(transform_observation(obs,game.canvas(),mapping_));
+    auto initial=evaluator_.initial(transform_observation(obs,game.canvas(),spatial,game.spec()));
     if(options.collect_root_policy_invalid_mass) {
         const auto& logits=initial.evaluation.logits;double maximum=-std::numeric_limits<double>::infinity();
         for(int a:board_actions_)maximum=std::max(maximum,logits.at(mapping_[a]));
         double mass=0,invalid=0;
-        for(int a:board_actions_){double p=std::exp(logits.at(mapping_[a])-maximum);mass+=p;if(obs[area+a]||obs[2*area+a])invalid+=p;}
+        for(int a:board_actions_){double p=std::exp(logits.at(mapping_[a])-maximum);mass+=p;if(!game.legal(a))invalid+=p;}
         if(!std::isfinite(mass)||mass<=0||!std::isfinite(invalid))throw std::runtime_error("Invalid Gumbel root policy diagnostic");
         result.root_policy_invalid_mass=invalid/mass;
     }

@@ -25,6 +25,7 @@ from etazero.katago_configs import resolve
 from etazero.network import make_network, inference_network
 from etazero.runtime import provenance, source_snapshot
 from etazero.storage import save_json
+from etazero.games import SPECS, spec_for_config
 
 
 def main():
@@ -35,6 +36,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--precision', choices=('float16', 'float32'), default='float16')
+    parser.add_argument('--game', choices=tuple(SPECS), help='Game for named presets; otherwise use the config game or Gomoku')
     parser.add_argument('--canvas', type=int, default=15)
     parser.add_argument('--batches', nargs='+', type=int, default=[1, 2, 4, 8, 16, 32, 64])
     parser.add_argument('--repeats', type=int, default=5)
@@ -61,9 +63,15 @@ def main():
             parser.error('--canvas must match the configured network canvas')
         label = f"configured:{network['architecture']}:c{network['channels']}:b{network['blocks']}"
         specs.append((label, configured))
+    game = args.game or (spec_for_config(configured).name if configured else 'gomoku')
+    if configured and game != spec_for_config(configured).name:
+        parser.error('--game must match --config-dir')
+    if SPECS[game].board_height and args.canvas != SPECS[game].board_height:
+        parser.error('Xiangqi requires canvas=10')
     for architecture in args.architectures:
         resolve(architecture)
         specs.append((architecture, dict(agent=dict(algorithm='alphazero'),
+                                        environment=dict(rules='freestyle' if game=='gomoku' else game),
                                         network=dict(architecture=architecture, canvas=args.canvas))))
     if not specs:
         parser.error('Choose --architectures and/or --config-dir')

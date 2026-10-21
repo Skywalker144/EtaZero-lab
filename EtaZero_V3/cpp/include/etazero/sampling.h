@@ -39,6 +39,8 @@ struct ReanalysisConfig {
 };
 ReanalysisConfig reanalysis_config(const Config& config);
 std::vector<size_t> select_reanalysis_turns(const FinishedGame& record,const ReanalysisConfig& config,std::mt19937_64& rng);
+// Snapshots include the full rule/observation history. They may be omitted when
+// reanalysis is disabled or has zero probability; surprise targets still refresh.
 void reanalyze_positions(FinishedGame& record,const std::vector<Game>& positions,const std::vector<double>& history,
                         const SelfplaySearchConfig& search_config,PlayoutAdvantage advantage,const ReanalysisConfig& config,
                         GameSearch& search,const std::function<double(const Game&)>& temperature,std::mt19937_64& rng,

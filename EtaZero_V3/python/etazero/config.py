@@ -26,7 +26,7 @@ GUMBEL_DEFAULTS = dict(max_num_considered_actions=16, c_visit=50., c_scale=.1,
 
 
 def validate_gumbel(c):
-    if (type(c['max_num_considered_actions']) is not int or not 1 <= c['max_num_considered_actions'] <= 625
+    if (type(c['max_num_considered_actions']) is not int or not 1 <= c['max_num_considered_actions'] <= 2086
             or not math.isfinite(c['c_visit']) or c['c_visit'] < 0
             or not math.isfinite(c['c_scale']) or c['c_scale'] <= 0
             or not math.isfinite(c['noise_scale']) or c['noise_scale'] < 0
@@ -43,7 +43,7 @@ def validate_search_combination(root, nonroot):
 
 # Each section belongs to exactly one file; baseline supplies every required key.
 # run_dir is optional and belongs only to the selected configuration directory.
-SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncertainty_exponent=float, uncertainty_max_weight=float, policy_optimism=float, root_policy_optimism=float, use_noise_pruning=boolean, noise_prune_utility_scale=float, noise_pruning_cap=float, use_graph_search=boolean, graph_search_catch_up_leak_prob=float, max_playouts=int, max_time=float, nn_randomize=boolean, nn_symmetry=int,
+SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncertainty_exponent=float, uncertainty_max_weight=float, policy_optimism=float, root_policy_optimism=float, use_noise_pruning=boolean, noise_prune_utility_scale=float, noise_pruning_cap=float, use_graph_search=boolean, graph_search_catch_up_leak_prob=float, graph_search_rep_bound=int, max_playouts=int, max_time=float, nn_randomize=boolean, nn_symmetry=int,
                          subtree_value_bias_factor=float, subtree_value_bias_free_prop=float,
                          subtree_value_bias_weight_exponent=float, subtree_value_bias_table_num_shards=int,
                          fpu_parent_weight_by_visited_policy=boolean, fpu_parent_weight=float, value_weight_exponent=float, chosen_move_subtract=float, chosen_move_prune=float,
@@ -65,6 +65,8 @@ def validate_search_parameters(c):
             raise ValueError(f'Invalid search correction: {key}')
     if type(c['subtree_value_bias_table_num_shards']) is not int or not 1<=c['subtree_value_bias_table_num_shards']<=2**31-1:
         raise ValueError('subtree_value_bias_table_num_shards must be a positive int32')
+    if type(c['graph_search_rep_bound']) is not int or not 3 <= c['graph_search_rep_bound'] <= 50:
+        raise ValueError('graph_search_rep_bound must be an integer in [3,50]')
     if not 0 <= c['nn_symmetry'] < 8 or not 0 <= c['max_playouts'] <= 2**31-1:
         raise ValueError('Invalid NN symmetry or playout cap')
     if not 1 <= c['root_num_symmetries_to_sample'] <= 8:
@@ -81,6 +83,7 @@ FIELDS = {
     "agent": ("run", {"algorithm": str, "root_search_algo": str, "nonroot_search_algo": str}),
     "gumbel": ("selfplay", GUMBEL_FIELDS),
     "devices": ("run", {"train": str, "selfplay": str}),
+    "go": ("env", {"rules": str, "komi": float}),
     "environment": ("env", {"sizes": str, "size_weights": str, "rules": str, "rule_weights": str,
                               "forbidden_feature_dropout_prob": float}),
     "network": ("net", {"architecture": str, "canvas": int, "channels": int, "blocks": int, "predict_q_values":boolean}),
@@ -110,7 +113,7 @@ FIELDS = {
     'search': ("selfplay", {'full_search_visits': int, 'cheap_search_visits': int,
                             'cheap_search_probs': float, 'cheap_search_target_weight': float,
                             'reuse_tree': boolean, 'clear_before_search': boolean, 'max_playouts': int, 'max_time': float}),
-    'graph_search': ("selfplay", {'use_graph_search': boolean, 'graph_search_catch_up_leak_prob': float}),
+    'graph_search': ("selfplay", {'use_graph_search': boolean, 'graph_search_catch_up_leak_prob': float, 'graph_search_rep_bound': int}),
     'uncertainty': ("selfplay", dict(use_uncertainty=boolean,uncertainty_coeff=float,uncertainty_exponent=float,uncertainty_max_weight=float)),
     'optimistic_policy': ("selfplay", dict(policy_optimism=float,root_policy_optimism=float)),
     'noise_pruning': ("selfplay", dict(use_noise_pruning=boolean,noise_prune_utility_scale=float,noise_pruning_cap=float)),
@@ -200,6 +203,8 @@ def load_config(directory, run_dir=None):
     values.update(_read(directory, local=True))
     config = {}
     for section, (_, fields) in FIELDS.items():
+        if section == 'go' and not any(s == section for s, _ in values):
+            continue
         if section == 'gumbel' and values.get(('agent', 'root_search_algo')) != 'gumbel':
             continue
         if section == 'muzero_training' and not any(s == section for s, _ in values):
@@ -230,7 +235,7 @@ def load_config(directory, run_dir=None):
                 if section == 'gumbel':
                     config[section][key] = GUMBEL_DEFAULTS[key]
                     continue
-                defaults = {("run", "run_dir"): "", ("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
+                defaults = {("graph_search", "graph_search_rep_bound"): "11", ("run", "run_dir"): "", ("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
                             ("policy_init", "policy_after"): "true", ("policy_init", "policy_on_failure"): "true"}
                 if (section,key) not in defaults:
                     raise ValueError(f"Missing required key: {section}.{key}")
@@ -272,9 +277,9 @@ def validate_hex_opening(o, *, match=False):
         raise ValueError('Hex matches require both balanced opening probabilities to be one')
 
 
-def validate_hex_symmetry(c):
-    if not 1<=c['root_num_symmetries_to_sample']<=2 or not 0<=c['nn_symmetry']<2:
-        raise ValueError('Hex supports two symmetries: identity=0, rotation180=1')
+def validate_game_symmetry(c, spec):
+    if not 1<=c['root_num_symmetries_to_sample']<=spec.symmetries or not 0<=c['nn_symmetry']<spec.symmetries:
+        raise ValueError(f'{spec.name} supports {spec.symmetries} symmetries; nn_symmetry must be in [0,{spec.symmetries-1}]')
 
 
 # Lower bounds belong to the module that consumes each field.
@@ -402,13 +407,23 @@ def validate(c):
         raise ValueError("Sizes must be unique, in [5, canvas], with canvas <= 25")
     if not rules or len(set(rules)) != len(rules) or any(x not in RULES for x in rules):
         raise ValueError("Invalid rule distribution")
+    from .games import spec_for_config, spec_for_rule
+    spec = spec_for_config(c)
+    if not spec.subtree_value_bias and c['subtree_value_bias']['subtree_value_bias_factor'] != 0:
+        raise ValueError(f'{spec.name} does not support subtree value bias; requires subtree_value_bias_factor=0')
+    if 'xiangqi' in rules:
+        if sizes != [10] or net['canvas'] != 10:
+            raise ValueError('Xiangqi requires sizes=10 and canvas=10 (9 files, 10 ranks)')
+    if 'go' in c:
+        from .games import validate_go_komi
+        validate_go_komi(c['go']['komi'])
     for label, entries in (("size", sizes), ("rule", rules)):
         weights = csv(env[label + "_weights"], float)
         if len(weights) != len(entries) or any(not math.isfinite(x) or x < 0 for x in weights) or not any(x > 0 for x in weights):
             raise ValueError(f"Invalid {label} weights")
     validate_hex_opening(c['hex_opening'])
-    if 'hex' in rules and csv(env['rule_weights'],float)[rules.index('hex')]>0:
-        validate_hex_symmetry(c['symmetry'])
+    for rule, weight in zip(rules, csv(env['rule_weights'],float)):
+        if weight>0:validate_game_symmetry(c['symmetry'],spec_for_rule(rule))
     if c['dirichlet_noise']['noise_fraction'] > 1 or c['environment']['forbidden_feature_dropout_prob'] > 1:
         raise ValueError("Noise fraction and feature dropout must be <= 1")
     if c['writer']['first_file_min_random_proportion'] > 1:

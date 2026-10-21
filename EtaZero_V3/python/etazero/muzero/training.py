@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 
-from ..network import losses, row_mean
+from ..network import losses, row_mean, action_mask
 from .network import scale_gradient
 
 
@@ -14,6 +14,8 @@ class TrainingForward(nn.Module):
     def __init__(self, model, config):
         super().__init__()
         self.model = model
+        from ..games import spec_for_config
+        self.action_layout = spec_for_config(config).action_layout
         self.steps = config['unroll']['steps']
         self.hidden_scale = config['unroll']['hidden_gradient_scale']
         self.soft_scale = config['training']['soft_policy_weight_scale']
@@ -27,7 +29,7 @@ class TrainingForward(nn.Module):
                 # Only main policy and terminal WDL, with unit coefficients.
                 # Keep the diagnostic tuple layout; inactive losses are exact
                 # zeros disconnected from auxiliary predictions and targets.
-                mask = obs[:, 0].flatten(1).bool()
+                mask = action_mask(obs, logits.shape[-1], self.action_layout).bool()
                 logp = torch.log_softmax(logits[:, 0].float().masked_fill(~mask, -1e9), dim=1)
                 policy = targets[0][:, step]
                 policy = policy / policy.sum(1, keepdim=True)
@@ -37,7 +39,7 @@ class TrainingForward(nn.Module):
                 return (pl + vl, pl, zero, zero, zero, vl, *([zero] * 6))
             return losses(logits, value, td, error, obs,
                           *(t[:, step] for t in targets[:6]), self.soft_scale,
-                          self.disable_optimistic, *(t[:, step] if t is not None else None for t in targets[6:]), row_weight=weight)
+                          self.disable_optimistic, *(t[:, step] if t is not None else None for t in targets[6:]), row_weight=weight, action_layout=self.action_layout)
 
     def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight,
                 target, td_target, full_game_weight, q_values, q_visits,

@@ -1,30 +1,21 @@
 #pragma once
 #include "etazero/schema.h"
+#include "geometry.h"
 #include <algorithm>
 #include <array>
-#include <map>
 #include <string>
 #include <stdexcept>
 #include <vector>
 
 namespace etazero {
-struct Board {
-    int size;
+struct Board : BoardGeometry {
     std::vector<int> cells;
-    explicit Board(int edge) : size(edge) {
-        if (edge < 5 || edge > 25) throw std::runtime_error("Invalid board size");
-        cells.assign(edge * edge, 0);
+    explicit Board(int edge) : Board(edge,edge,edge) {}
+    Board(int width,int height,int stride) : BoardGeometry{width,height,stride} {
+        if(width<5 || height<5 || width>25 || height>25 || stride<width || stride>25)
+            throw std::runtime_error("Invalid board geometry");
+        cells.assign(storage_size(),0);
     }
-    int offset(int origin, int direction, int distance) const;
-    std::array<int, 4> lengths(int action, int player) const;
-    bool hex_connected(int player) const;
-};
-enum class Forbidden { NONE, OVERLINE, DOUBLE_FOUR, DOUBLE_THREE };
-class RenjuAnalyzer {
-    std::map<std::pair<std::vector<int>, int>, Forbidden> cache_;
-public:
-    Forbidden analyze(const Board& board, int action);
-    bool forbidden(const Board& board, int action) { return analyze(board, action) != Forbidden::NONE; }
 };
 Rule parse_rule(const std::string& name);
 }

@@ -40,6 +40,7 @@ private:
     struct Graph;
     std::vector<std::unique_ptr<Graph>> initial_graphs_, recurrent_graphs_;
     std::string precision_;
+    int input_planes_=5, global_features_=8, action_count_=0;
     int canvas_, max_batch_, latent_channels_;
     bool has_auxiliary_;
     std::shared_ptr<const int> owner_ = std::make_shared<const int>(0);

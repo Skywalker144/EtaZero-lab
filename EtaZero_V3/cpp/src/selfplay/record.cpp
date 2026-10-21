@@ -51,11 +51,11 @@ void compute_value_surprises(FinishedGame& game,bool direct) {
             if(first+1<game.steps.size()) {
                 const auto& next=game.steps[first+1];
                 for(int j=0;j<3;++j)step.search_wdl[j]=next.search_wdl[step.player==next.player?j:2-j];
-            } else step.search_wdl={double(game.winner==step.player),double(game.winner==0),double(game.winner==-step.player)};
+            } else step.search_wdl=game.outcome().wdl(step.player);
         }
     }
-    WDL future{double(game.winner==1),double(game.winner==0),double(game.winner==-1)};
-    double now=1/(1+game.size*game.size*0.016);
+    WDL future=game.outcome().wdl(1);
+    double now=1/(1+game_spec(game.rule).area(game.size)*0.016);
     for(size_t i=game.steps.size();i-->0;) {
         auto& step=game.steps[i];if(!step.trainable){step.target_weight=0;step.row_repeats=0;continue;}
         double kl=0;
@@ -209,7 +209,9 @@ void RecordWriter::enqueue(FinishedGame game) {
     queue_.push_back(std::move(game)); lock.unlock(); changed_.notify_all();
 }
 struct RecordWriter::Buffers {
-    int canvas, actions_count, packed_area;
+    int canvas, actions_count, packed_area, planes, global_count, spatial_area;
+    Rule layout_rule;
+    std::vector<RuleOptions> options;
     size_t row_capacity;
     size_t row_begin=0,rows=0;
     std::vector<uint8_t> observations,side_observations,side_forbidden_input;
@@ -239,11 +241,12 @@ struct RecordWriter::Buffers {
     std::vector<int16_t> policies,opponent_policies;
     std::vector<int16_t> trajectory_policy,trajectory_q_values,trajectory_q_visits;
     std::vector<float> opponent_policy_weights,temperatures,rewards;
-    Buffers(int c,size_t rows) : canvas(c),actions_count(c*c),packed_area((c*c+7)/8),row_capacity(rows+c*c) {
+    Buffers(int c,Rule rule,size_t rows) : canvas(c),actions_count(game_spec(rule).actions(c)),packed_area((c*c+7)/8),
+        planes(game_spec(rule).planes),global_count(game_spec(rule).globals),spatial_area(c*c),layout_rule(rule),row_capacity(rows+c*c) {
         // Training rows cap the shard, not trajectory plies. Sparse sampling may
         // require more trajectory storage; vectors grow and are reused on flush.
-        observations.reserve(2*row_capacity*INPUT_PLANES*packed_area);players.reserve(2*row_capacity);
-        globals.reserve(2*row_capacity*GLOBAL_FEATURES);
+        observations.reserve(2*row_capacity*planes*packed_area);players.reserve(2*row_capacity);
+        globals.reserve(2*row_capacity*global_count);
         visits.reserve(row_capacity*actions_count);policies.reserve(row_capacity*actions_count);
         opponent_policies.reserve(row_capacity*actions_count);opponent_policy_weights.reserve(row_capacity);
         actions.reserve(row_capacity);simulations.reserve(row_capacity);temperatures.reserve(row_capacity);rewards.reserve(row_capacity);
@@ -253,7 +256,7 @@ struct RecordWriter::Buffers {
     }
     void reset() {
         trajectory_policy.clear();trajectory_q_values.clear();trajectory_q_visits.clear();
-        row_begin=rows=0;
+        row_begin=rows=0;options.clear();
         side_observations.clear();side_globals.clear();side_wdl.clear();side_target_weights.clear();
         side_players.clear();side_game_indices.clear();side_row_repeats.clear();side_policies.clear();
         side_visits.clear();side_forbidden_input.clear();
@@ -272,22 +275,22 @@ struct RecordWriter::Buffers {
         game_offsets.clear();obs_offsets.clear();game_offsets.push_back(0);obs_offsets.push_back(0);
     }
     void observation(const std::vector<float>& obs,int player) {
-        if(obs.size()!=static_cast<size_t>(INPUT_PLANES*actions_count + GLOBAL_FEATURES))throw std::runtime_error("Writer observation shape mismatch");
-        size_t base=observations.size();observations.resize(base+INPUT_PLANES*packed_area,0);
-        for(int c=0;c<INPUT_PLANES;++c) for(int i=0;i<actions_count;++i) {
-            float value=obs[c*actions_count+i];
+        if(obs.size()!=static_cast<size_t>(planes*spatial_area + global_count))throw std::runtime_error("Writer observation shape mismatch");
+        size_t base=observations.size();observations.resize(base+planes*packed_area,0);
+        for(int c=0;c<planes;++c) for(int i=0;i<spatial_area;++i) {
+            float value=obs[c*spatial_area+i];
             if(value)observations[base+c*packed_area+i/8]|=1<<(7-i%8);
         }
-        globals.insert(globals.end(), obs.end()-GLOBAL_FEATURES, obs.end());
+        globals.insert(globals.end(), obs.end()-global_count, obs.end());
         players.push_back(player);
     }
 };
 void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
     if(g.canvas<5 || g.canvas>25 || g.steps.empty())
         throw std::runtime_error("Invalid finished game");
-    if(!buffers_)buffers_=std::make_unique<Buffers>(g.canvas,max_rows_);
+    if(!buffers_)buffers_=std::make_unique<Buffers>(g.canvas,g.rule,max_rows_);
     auto& b=*buffers_;
-    if(g.canvas!=b.canvas)throw std::runtime_error("Writer canvas mismatch");
+    if(g.canvas!=b.canvas || !same_layout(game_spec(g.rule),game_spec(b.layout_rule)))throw std::runtime_error("Writer canvas mismatch");
     if(!std::isfinite(g.root_policy_invalid_mass_sum) || g.root_policy_invalid_mass_sum<0 ||
        g.root_policy_invalid_mass_sum>g.root_policy_invalid_mass_count ||
        (g.root_policy_invalid_mass_count && g.root_policy_invalid_mass_count!=g.steps.size()-g.opening.actions.size()))
@@ -295,10 +298,10 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
     if(b.ids.empty())b.row_begin=row_begin;
     else if(row_begin!=0)throw std::runtime_error("Only the first trajectory may start at a partial training row");
     b.rows+=rows;
-    b.ids.push_back(g.id);b.seeds.push_back(g.seed);b.sizes.push_back(g.size);
+    b.options.push_back(g.options);b.ids.push_back(g.id);b.seeds.push_back(g.seed);b.sizes.push_back(g.size);
     b.root_policy_invalid_mass_sum.push_back(g.root_policy_invalid_mass_sum);
     b.root_policy_invalid_mass_count.push_back(g.root_policy_invalid_mass_count);
-    b.rules.push_back(static_cast<int8_t>(g.rule));b.winners.push_back(g.winner);b.reasons.push_back(g.reason);
+    b.rules.push_back(static_cast<int8_t>(g.rule));b.winners.push_back(g.winner);b.reasons.push_back(static_cast<int8_t>(g.reason));
     b.initial_position_moves.push_back(g.opening.initial_position_moves);b.initial_position_kind.push_back(g.opening.initial_position_kind);b.hint_actions.push_back(g.opening.hint_action);
     b.opening_moves.push_back(g.opening.actions.size());b.balanced_moves.push_back(g.opening.balanced_moves);
     b.policy_moves.push_back(g.opening.policy_moves);b.opening_attempts.push_back(g.opening.attempts);
@@ -366,20 +369,24 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
     }
     std::mt19937_64 side_feature_rng(g.seed ^ 0x94D049BB133111EBULL);
     std::mt19937_64 side_q_rng(g.seed ^ 0xBBE0563303A4615FULL);
+    const auto kind=game_spec(b.layout_rule).kind;
+    const int pda_global=kind==GameKind::GO?15:kind==GameKind::XIANGQI?3:4;
     for(const auto& side:g.side_positions) {
-        if(side.observation.size()!=static_cast<size_t>(INPUT_PLANES*b.actions_count+GLOBAL_FEATURES) ||
+        if(side.observation.size()!=static_cast<size_t>(b.planes*b.spatial_area+b.global_count) ||
            side.policy_target.size()!=static_cast<size_t>(b.actions_count) || side.visits.size()!=side.policy_target.size() ||
            (side.player!=1 && side.player!=-1) || side.row_repeats<0 || !std::isfinite(side.target_weight) || side.target_weight<0 ||
            std::abs(side.row_repeats-side.target_weight)>1.00001)
             throw std::runtime_error("Invalid side position");
-        if(side.observation[INPUT_PLANES*b.actions_count+4]!=0 || side.observation[INPUT_PLANES*b.actions_count+5]!=0)
+        if(!std::all_of(side.observation.end()-b.global_count,side.observation.end(),[](float v){return std::isfinite(v);}))
+            throw std::runtime_error("Nonfinite side globals");
+        if(side.observation[b.planes*b.spatial_area+pda_global]!=0 || side.observation[b.planes*b.spatial_area+pda_global+1]!=0)
             throw std::runtime_error("Side rows must clear PDA conditioning");
-        size_t base=b.side_observations.size();b.side_observations.resize(base+INPUT_PLANES*b.packed_area,0);
-        for(int c=0;c<INPUT_PLANES;++c)for(int i=0;i<b.actions_count;++i) {
-            float value=side.observation[c*b.actions_count+i];
+        size_t base=b.side_observations.size();b.side_observations.resize(base+b.planes*b.packed_area,0);
+        for(int c=0;c<b.planes;++c)for(int i=0;i<b.spatial_area;++i) {
+            float value=side.observation[c*b.spatial_area+i];
             if(value)b.side_observations[base+c*b.packed_area+i/8]|=1<<(7-i%8);
         }
-        b.side_globals.insert(b.side_globals.end(),side.observation.end()-GLOBAL_FEATURES,side.observation.end());
+        b.side_globals.insert(b.side_globals.end(),side.observation.end()-b.global_count,side.observation.end());
         b.side_players.push_back(side.player);b.side_game_indices.push_back(b.ids.size()-1);
         b.side_policies.insert(b.side_policies.end(),side.policy_target.begin(),side.policy_target.end());
         b.side_visits.insert(b.side_visits.end(),side.visits.begin(),side.visits.end());
@@ -448,6 +455,11 @@ void RecordWriter::publish() {
          << ",\"shard_id\":" << quote(source_.attempt+":"+std::to_string(source_.worker)+":"+shard)
          << ",\"created_ns\":" << created << ",\"opening_failures\":[";
     for(size_t i=0;i<n;++i){if(i)meta<<',';meta<<quote(b.opening_failures[i]);}meta<<"]";
+    meta<<",\"game\":"<<quote(game_spec(b.layout_rule).name)
+        <<",\"input_planes\":"<<b.planes<<",\"global_features\":"<<b.global_count<<",\"action_count\":"<<b.actions_count
+        <<",\"rule_options\":[";
+    for(size_t i=0;i<n;++i){if(i)meta<<',';const auto& o=b.options[i];
+        meta<<"{\"go_rules\":"<<quote(o.go_rules)<<",\"komi\":"<<o.komi<<",\"fen\":"<<quote(o.fen)<<'}';}meta<<']';
     if(source_.gumbel)meta<<",\"root_search_algo\":\"gumbel\",\"nonroot_search_algo\":"<<quote(source_.full_gumbel?"gumbel":"puct");
     if(source_.unroll_steps>0) {
         meta<<",\"algorithm\":\"muzero\",\"unroll_steps\":"<<source_.unroll_steps
@@ -467,8 +479,8 @@ void RecordWriter::publish() {
         zip.array("trajectory_q_values",b.trajectory_q_values,"<i2",{t,static_cast<size_t>(actions_count)});
         zip.array("trajectory_q_visits",b.trajectory_q_visits,"<i2",{t,static_cast<size_t>(actions_count)});
     }
-    zip.array("observations", b.observations, "|u1", {o, INPUT_PLANES, static_cast<size_t>(b.packed_area)});
-    zip.array("globals", b.globals, "<f4", {o, GLOBAL_FEATURES});
+    zip.array("observations", b.observations, "|u1", {o, static_cast<size_t>(b.planes), static_cast<size_t>(b.packed_area)});
+    zip.array("globals", b.globals, "<f4", {o, static_cast<size_t>(b.global_count)});
     zip.array("players", b.players, "|i1", {o}); zip.array("actions", b.actions, "<i4", {t});
     zip.array("sample_indices",b.sample_indices,"<i8",{s});
     zip.array("policies", b.policies, "<i2", {s, static_cast<size_t>(actions_count)});
@@ -496,8 +508,8 @@ void RecordWriter::publish() {
     zip.array("forbidden_input", b.forbidden_input, "|u1", {b.forbidden_input.size()});
     zip.array("opening_status", b.opening_status, "|i1", {n});zip.array("start_values", b.start_values, "<f4", {n});
     size_t d=b.side_players.size();
-    zip.array("side_observations",b.side_observations,"|u1",{d,INPUT_PLANES,static_cast<size_t>(b.packed_area)});
-    zip.array("side_globals",b.side_globals,"<f4",{d,GLOBAL_FEATURES});
+    zip.array("side_observations",b.side_observations,"|u1",{d,static_cast<size_t>(b.planes),static_cast<size_t>(b.packed_area)});
+    zip.array("side_globals",b.side_globals,"<f4",{d,static_cast<size_t>(b.global_count)});
     zip.array("side_players",b.side_players,"|i1",{d});zip.array("side_game_indices",b.side_game_indices,"<i4",{d});
     zip.array("side_policies",b.side_policies,"<i2",{d,static_cast<size_t>(actions_count)});
     zip.array("side_visits",b.side_visits,"<i8",{d,static_cast<size_t>(actions_count)});

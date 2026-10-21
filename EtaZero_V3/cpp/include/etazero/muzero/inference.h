@@ -10,9 +10,13 @@ struct Latent {
 struct InferenceOutput { std::shared_ptr<const Latent> latent; Evaluation evaluation; };
 struct InferenceAction { std::shared_ptr<const Latent> latent; int action; };
 class Backend {
+protected:
+    GameSpec spec_;
 public:
+    explicit Backend(GameSpec spec=game_spec(GameKind::GOMOKU)):spec_(spec) {}
+    GameSpec spec() const { return spec_; }
     virtual ~Backend() = default;
-    virtual void initialize() {}
+    virtual void initialize() {} // Called serially, before any service threads start.
     virtual std::vector<InferenceOutput> initial(const InferenceInputs&) = 0;
     virtual std::vector<InferenceOutput> recurrent(const std::vector<InferenceAction>&) = 0;
 };
@@ -69,12 +73,12 @@ class RandomBackend final : public Backend {
     int canvas_;uint64_t seed_;
     InferenceOutput output(std::shared_ptr<State>);
 public:
-    RandomBackend(int canvas,uint64_t seed):canvas_(canvas),seed_(seed){}
+    RandomBackend(int canvas,uint64_t seed,GameSpec spec=game_spec(GameKind::GOMOKU)):Backend(spec),canvas_(canvas),seed_(seed){}
     std::vector<InferenceOutput> initial(const InferenceInputs&) override;
     std::vector<InferenceOutput> recurrent(const std::vector<InferenceAction>&) override;
 };
 // Canonical -> fixed tree orientation. No latent rotation is performed.
 std::vector<int> symmetry_mapping(int canvas,int symmetry);
-std::vector<float> transform_observation(const std::vector<float>&,int canvas,const std::vector<int>&);
+std::vector<float> transform_observation(const std::vector<float>&,int canvas,const std::vector<int>&,GameSpec);
 void restore_evaluation(Evaluation&,const std::vector<int>&);
 }

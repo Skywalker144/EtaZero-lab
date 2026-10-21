@@ -20,6 +20,7 @@ void Search::expand(Node& node,InferenceOutput output,const std::vector<int>& ac
     if(!output.latent||actions.empty())throw std::runtime_error("MuZero expansion requires latent and board actions");
     double optimism=root?settings_.root_policy_optimism:settings_.policy_optimism;
     std::vector<double> logits;double maximum=-std::numeric_limits<double>::infinity();
+    logits.reserve(actions.size());node.edges.reserve(actions.size());
     for(int a:actions){double p=e.has_auxiliary?mixed_policy_logit(e.logits.at(a),e.optimistic_logits.at(a),optimism):e.logits.at(a);logits.push_back(p);maximum=std::max(maximum,p);}
     double mass=0;for(auto& p:logits){p=std::exp((p-maximum)/settings_.nn_policy_temperature);mass+=p;}
     if(!std::isfinite(mass)||mass<=0)throw std::runtime_error("Invalid MuZero policy mass");
@@ -83,15 +84,15 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     if(options.hint_action<-1||(options.hint_action>=0&&!game.legal(options.hint_action)))throw std::runtime_error("Illegal MuZero root hint");
     advance(0);auto start=std::chrono::steady_clock::now();SearchResult result;int area=game.actions();
     result.policy.resize(area);result.move_policy.resize(area);result.network_policy.resize(area);result.search_policy.resize(area);result.visits.resize(area);result.q_values.resize(area);result.q_visits.resize(area);
-    if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl={(v+std::abs(v))/2,1-std::abs(v),(std::abs(v)-v)/2};return result;}
+    if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl=wdl_from_value(v,game.terminal_draw_probability());return result;}
     int max_playouts=options.max_playouts<0?settings_.max_playouts:options.max_playouts;
     if(!max_playouts||(options.should_stop&&options.should_stop())){result.stopped_early=bool(options.should_stop)&&options.should_stop();return result;}
     auto obs=game.observation();
-    int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,game.rule()==Rule::HEX?1:7)(random_):settings_.nn_symmetry;
-    mapping_=symmetry_mapping(game.canvas(),input_symmetry(obs,symmetry));board_actions_.clear();std::vector<int> root_actions;
-    for(int a=0;a<area;++a){if(obs[a])board_actions_.push_back(a);if(game.legal(a))root_actions.push_back(a);}
+    int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,game.spec().symmetries-1)(random_):settings_.nn_symmetry;
+    auto spatial=symmetry_mapping(game.canvas(),input_symmetry(obs,game.spec(),symmetry));mapping_=policy_mapping(spatial,game.spec());board_actions_.clear();std::vector<int> root_actions;
+    board_actions_=game.static_actions();for(int a:board_actions_)if(game.legal(a))root_actions.push_back(a);
     root_=node();remove_noise_=options.remove_root_noise;hint_=options.hint_action;
-    auto initial=evaluator_.initial(transform_observation(obs,game.canvas(),mapping_));
+    auto initial=evaluator_.initial(transform_observation(obs,game.canvas(),spatial,game.spec()));
     if(options.collect_root_policy_invalid_mass) {
         const auto& logits=initial.evaluation.logits;
         double maximum=-std::numeric_limits<double>::infinity();
@@ -100,7 +101,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
         for(int a:board_actions_) {
             double mass=std::exp(logits.at(mapping_[a])-maximum);
             total+=mass;
-            if(obs[area+a] || obs[2*area+a])invalid+=mass;
+            if(!game.legal(a))invalid+=mass;
         }
         if(!std::isfinite(total)||total<=0||!std::isfinite(invalid))
             throw std::runtime_error("Invalid root policy diagnostic mass");
@@ -108,7 +109,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     }
     expand(*root_,std::move(initial),root_actions,true);
     std::vector<double> policy;for(const auto& e:root_->edges)policy.push_back(e.prior);
-    double root_temp=remove_noise_?1:temperature_at_turn(settings_.root_policy_temperature_early,settings_.root_policy_temperature,settings_.temperature_halflife,game.turn(),game.size()*game.size());
+    double root_temp=remove_noise_?1:temperature_at_turn(settings_.root_policy_temperature_early,settings_.root_policy_temperature,settings_.temperature_halflife,game.turn(),game.area());
     if(root_temp!=1)policy=policy_temperature_distribution(policy,root_temp);
     double fraction=remove_noise_?0:settings_.noise_fraction;
     std::vector<double> noise(policy.size());double mass=1;

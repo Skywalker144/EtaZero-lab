@@ -1,3 +1,4 @@
+#include "etazero/game.h"
 // Time the production inference path, including packing, transfers and outputs.
 #include "etazero/torch_backend.h"
 #include "etazero/schema.h"
@@ -68,25 +69,32 @@ int main(int argc, char** argv) {
                      <<",\"graph_seconds\":"<<shared->timing.graph_seconds<<"}"<<std::endl;
             backends.push_back(std::move(backend));
         }
-        const int actions=canvas*canvas;
-        std::vector<std::vector<float>> observations(max_batch,
-            std::vector<float>(INPUT_PLANES*actions+GLOBAL_FEATURES,0));
-        for(int i=0;i<max_batch;++i) {
-            std::fill_n(observations[i].begin(),actions,1);
-            // Fixed nonempty freestyle positions, shared by every model/repeat.
-            observations[i][actions+i%actions]=1;
-            observations[i][2*actions+(i+actions/2)%actions]=1;
+        std::vector<std::vector<std::vector<float>>> observations(backends.size());
+        for(size_t model=0;model<backends.size();++model) {
+            auto spec=backends[model]->spec();
+            Rule rule=parse_rule(spec.kind==GameKind::GOMOKU?"freestyle":spec.name);
+            for(int i=0;i<max_batch;++i) {
+                Game game(canvas,canvas,rule);
+                // Fixed legal prefixes, outside the measured interval.
+                for(int ply=0;ply<2 && !game.finished();++ply) {
+                    std::vector<int> legal;
+                    for(int a:game.static_actions())if(game.legal(a))legal.push_back(a);
+                    game.play(legal[(i+ply*(canvas*canvas/2))%legal.size()]);
+                }
+                observations[model].push_back(game.observation());
+            }
         }
         // Reverse both sweep and model order between repeats to balance drift.
         for(int repeat=0;repeat<repeats;++repeat) {
             for(size_t step=0;step<batches.size();++step) {
                 int batch=batches[repeat%2?batches.size()-1-step:step];
                 int bucket=1;while(bucket<batch)bucket=std::min(max_batch,bucket*2);
-                InferenceInputs inputs;
-                for(int i=0;i<batch;++i)inputs.push_back(&observations[i]);
                 for(size_t turn=0;turn<backends.size();++turn) {
                     size_t index=repeat%2?backends.size()-1-turn:turn;
                     auto& backend=*backends[index];
+                    int actions=backend.spec().actions(canvas);
+                    InferenceInputs inputs;
+                    for(int i=0;i<batch;++i)inputs.push_back(&observations[index][i]);
                     auto warmed=Clock::now();int warmups=0;
                     do {
                         validate(backend.evaluate(inputs),batch,actions);

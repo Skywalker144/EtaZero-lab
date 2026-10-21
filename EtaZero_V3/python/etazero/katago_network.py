@@ -11,10 +11,27 @@ from torch import nn
 from .katago_configs import resolve, validate_dimensions
 from .schema import PLANES, GLOBALS
 from ._vendor.katago import model_pytorch as source
+from .games import SPECS, policy_indices, XIANGQI_DELTAS
+
+
+class XiangqiPolicyHead(source.PolicyHead):
+    def __init__(self, model, canvas):
+        super().__init__(model.c_trunk, model.c_p1, model.c_g1, model.config, model.activation)
+        self.conv2p = nn.Conv2d(model.c_p1, self.num_policy_outputs*len(XIANGQI_DELTAS), 1, bias=False)
+        self.register_buffer('action_indices', torch.tensor(policy_indices(canvas)), persistent=False)
+
+    def forward(self, x, mask, mask_sum_hw, mask_sum, extra_outputs, block_shared_data=None):
+        p = self.conv1p(x)
+        g = self.actg(self.biasg(self.conv1g(x), mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum))
+        g = self.gpool(g, mask=mask, mask_sum_hw=mask_sum_hw).flatten(1)
+        p = p + self.linear_g(g).unsqueeze(-1).unsqueeze(-1)
+        p = self.act2(self.bias2(p, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum))
+        p = self.conv2p(p).reshape(x.shape[0], self.num_policy_outputs, -1)
+        return p.index_select(2, self.action_indices)
 
 
 class KataGoNet(nn.Module):
-    def __init__(self, architecture, canvas, predict_q_values=False, channels=None, blocks=None):
+    def __init__(self, architecture, canvas, predict_q_values=False, channels=None, blocks=None, game='gomoku'):
         super().__init__()
         config = resolve(architecture)
         validate_dimensions(config)
@@ -26,6 +43,8 @@ class KataGoNet(nn.Module):
             raise ValueError('predict_q_values requires a KataGo v17 preset')
         config['predict_q_values'] = bool(predict_q_values)
         self.architecture, self.canvas = architecture, canvas
+        self.game = game
+        self.input_planes, self.global_features = SPECS[game].planes, SPECS[game].globals
         self.norm_kind, self.model_version = config['norm_kind'], config['version']
         self.predict_q_values = bool(predict_q_values)
         self.fp32_heads = True
@@ -34,11 +53,15 @@ class KataGoNet(nn.Module):
                                   else (0.5, 0.5)) if config.get('has_intermediate_head', False) else (1.0,)
         self.network = source.Model(config, canvas)
         kernel = 1 if config['initial_conv_1x1'] else 3
-        self.network.conv_spatial = nn.Conv2d(len(PLANES), config['trunk_num_channels'],
+        self.network.conv_spatial = nn.Conv2d(self.input_planes, config['trunk_num_channels'],
                                              kernel, padding=kernel//2, bias=False)
-        self.network.linear_global = nn.Linear(len(GLOBALS), config['trunk_num_channels'], bias=False)
-        self.network.bin_input_shape = [len(PLANES), canvas, canvas]
-        self.network.global_input_shape = [len(GLOBALS)]
+        self.network.linear_global = nn.Linear(self.global_features, config['trunk_num_channels'], bias=False)
+        self.network.bin_input_shape = [self.input_planes, canvas, canvas]
+        self.network.global_input_shape = [self.global_features]
+        if game == 'xiangqi':
+            self.network.policy_head = XiangqiPolicyHead(self.network, canvas)
+            if self.network.has_intermediate_head:
+                self.network.intermediate_policy_head = XiangqiPolicyHead(self.network, canvas)
         # Select the source's public NCHW/SDPA execution path, shared by eager,
         # compiled training and LibTorch export. Keep architecture and masks.
         self.network.transformer_seq_layout = False
@@ -70,7 +93,8 @@ class KataGoNet(nn.Module):
         policy, value, misc, more = outputs[:4]
         count = 7 if self.predict_q_values else 6
         # Scalar selects avoid CPU index-tensor constants in traced CUDA Graphs.
-        return (policy[:, :count, :-1] * mask.flatten(2),
+        selected = policy[:, :count] if self.game in ('go', 'xiangqi') else policy[:, :count, :-1] * mask.flatten(2)
+        return (selected,
                 torch.stack((value[:, 0], value[:, 2], value[:, 1]), 1),
                 torch.stack((torch.stack((misc[:, 4], misc[:, 6], misc[:, 5]), 1),
                              torch.stack((misc[:, 7], misc[:, 9], misc[:, 8]), 1),
@@ -131,9 +155,14 @@ class SearchOutputs(nn.Module):
 
 
 class SerializedSearch(nn.Module):
-    def __init__(self, graph, canvas):
+    def __init__(self, graph, canvas, game):
         super().__init__()
         self.graph, self.canvas = graph, canvas
+        self.game = game
+
+    @torch.jit.export
+    def game_name(self) -> str:
+        return self.game
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:
@@ -198,9 +227,9 @@ def inference_network(model):
                 module.conv.weight[:, :, height//2:height//2+1, width//2:width//2+1].add_(module.conv1x1.weight)
             module.conv1x1 = None
     device = next(result.parameters()).device
-    obs = torch.zeros(2, len(PLANES), result.canvas, result.canvas, device=device)
+    obs = torch.zeros(2, result.input_planes, result.canvas, result.canvas, device=device)
     obs[:, 0] = 1
-    globals = torch.zeros(2, len(GLOBALS), device=device)
+    globals = torch.zeros(2, result.global_features, device=device)
     # Source uses Python shared-data objects for registers and GAB/TAB. Trace
     # their tensor operations at fixed canvas; batch dimensions remain dynamic.
     with torch.no_grad():
@@ -220,4 +249,4 @@ def inference_network(model):
                 node.output().replaceAllUsesWith(device_node.output())
                 node.destroy()
         torch._C._jit_pass_lint(forward_graph)
-    return SerializedSearch(graph, result.canvas).eval()
+    return SerializedSearch(graph, result.canvas, result.game).eval()

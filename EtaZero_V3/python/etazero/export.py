@@ -5,6 +5,7 @@ import uuid
 import numpy as np
 import torch
 from .network import make_network, inference_network
+from .games import layout_metadata
 from .optimization import inference_weights
 from .storage import load_json, save_json, sync_directory
 from .training import load_checkpoint, device_check
@@ -60,7 +61,7 @@ def export_model(run_dir, config, checkpoint):
     canvas = config["network"]["canvas"]
     swa = saved['optimization']['swa']
     averaged = 0 if swa is None else int(swa['n_averaged'].item())
-    info = {"id":checkpoint["id"],"checkpoint":checkpoint,"canvas":canvas,
+    info = {**layout_metadata(config), "id":checkpoint["id"],"checkpoint":checkpoint,"canvas":canvas,
             'weights': 'swa' if averaged else 'model', 'swa_samples': averaged,
             "path":str(Path("models")/checkpoint["id"]/"model.pt"),
             "bytes":(stage/"model.pt").stat().st_size,

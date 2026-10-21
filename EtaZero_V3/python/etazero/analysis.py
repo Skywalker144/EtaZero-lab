@@ -6,6 +6,7 @@ import uuid
 from .config import fingerprint, write_native
 from .storage import load_json, save_json
 from .build import verify_build
+from .games import spec_for_rule
 
 
 def model_info(path,canvas=None):
@@ -35,13 +36,16 @@ def analyze(config,binary,run_dir,model=None,size=None,rule=None,moves="",output
     if rule is not None: c['rule']=rule
     validate_engine_config(config)
     size,rule=c['board_size'],c['rule']
+    if spec_for_rule(a.get('game','gomoku')).layout != spec_for_rule(rule).layout:
+        raise ValueError('Analysis rule and model game layout differ')
     if not 5<=size<=a['canvas']:
         raise ValueError('Analysis board size must be in [5, canvas]')
     # Public action indices use the actual board width; native uses its canvas.
     actions=[int(v) for v in moves.split(',')] if moves else []
-    if any(v<0 or v>=size*size for v in actions):
+    count=spec_for_rule(rule).actions(size)
+    if any(v<0 or v>=count for v in actions):
         raise ValueError('Analysis moves must be board-row-major indices')
-    encoded=','.join(str(v//size*a['canvas']+v%size) for v in actions)
+    encoded=','.join(str(v if rule=='xiangqi' else a['canvas']**2 if v==size*size else v//size*a['canvas']+v%size) for v in actions)
     directory=root/'analysis'/uuid.uuid4().hex;directory.mkdir(parents=True)
     write_native({**config,'network':{'canvas':a['canvas']}},directory/'effective.cfg')
     command=[str(binary),'analysis','--config',str(directory/'effective.cfg'),'--model',str(model),
@@ -49,10 +53,10 @@ def analyze(config,binary,run_dir,model=None,size=None,rule=None,moves="",output
              '--moves',encoded,'--seed',str(c['seed'])]
     result=json.loads(subprocess.run(command,text=True,capture_output=True,check=True).stdout)
     if 'action' in result:
-        if result['action'] >= 0:
-            result['action']=result['action']//a['canvas']*size+result['action']%a['canvas']
+        if result['action'] >= 0 and rule!='xiangqi':
+            result['action']=size*size if result['action']==a['canvas']**2 else result['action']//a['canvas']*size+result['action']%a['canvas']
         for key in ('raw_logits','policy','visits','network_policy','search_policy'):
-            result[key]=[result[key][y*a['canvas']+x] for y in range(size) for x in range(size)]
+            if rule!='xiangqi': result[key]=[result[key][y*a['canvas']+x] for y in range(size) for x in range(size)]+([result[key][-1]] if rule=='go' else [])
     payload={'mode':'analysis','config_id':fingerprint(config),'config':config,'model_a':a,
              'board_size':size,'rule':rule,'opening_actions':actions,'seed':c['seed'],
              'command':command,'binary':str(Path(binary).resolve()),'result':result}
@@ -69,6 +73,8 @@ def stream_analysis(config, binary, run_dir, model=None, protocol='text'):
     validate_engine_config(config)
     model,info=model_info(select_model(run_dir,model))
     c=config['analysis']
+    if spec_for_rule(info.get('game','gomoku')).layout != spec_for_rule(c['rule']).layout:
+        raise ValueError('Analysis rule and model game layout differ')
     with tempfile.TemporaryDirectory(prefix='etazero-analysis-') as temporary:
         path=Path(temporary)/'effective.cfg'
         write_native({**config,'network':{'canvas':info['canvas']}},path)

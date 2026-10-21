@@ -1,3 +1,4 @@
+#include "etazero/game_config.h"
 #include "etazero/match.h"
 #include "etazero/record.h"
 #include <algorithm>
@@ -26,9 +27,10 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
     const auto started=Clock::now();const int canvas=c.integer("network.canvas");
     const int threads=c.integer("match.game_threads");
     if(threads<1 || max_models<2 || model_load_workers<1)throw std::runtime_error("Invalid arena concurrency/model limit");
+    const auto options=rule_options(c,GameConfigMode::MATCH);
     OpeningConfig opening(c);
-    if(rule==Rule::HEX ? (opening.hex_probability!=1 || opening.hex_make_fair_probability!=1 || opening.hex_min_accept_rate<=0)
-                      : (opening.probability!=1 || opening.rejection_probability_fallback>=1))
+    if(rule!=Rule::GO && rule!=Rule::XIANGQI && (rule==Rule::HEX ? (opening.hex_probability!=1 || opening.hex_make_fair_probability!=1 || opening.hex_min_accept_rate<=0)
+                      : (opening.probability!=1 || opening.rejection_probability_fallback>=1)))
         throw std::runtime_error("Matches require balanced openings and a rejection fallback below one");
     std::set<std::pair<std::string,int>> identities;
     std::map<std::string,std::pair<size_t,size_t>> pairs;
@@ -37,13 +39,13 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
            !identities.emplace(t.pair,t.id).second)throw std::runtime_error("Invalid arena task identity");
         auto inserted=pairs.emplace(t.pair,std::make_pair(t.a,t.b));
         if(!inserted.second && inserted.first->second!=std::make_pair(t.a,t.b))throw std::runtime_error("Conflicting arena pair");
-        Game game(size,canvas,rule);for(int move:t.moves)game.play(move);
+        Game game(size,canvas,rule,options);for(int move:t.moves)game.play(move);
         if(game.finished() || (!t.generated && !t.moves.empty()))throw std::runtime_error("Invalid arena opening");
     }
     std::mutex output_mutex;
     auto emit=[&](const std::string& row){std::lock_guard<std::mutex> lock(output_mutex);output<<row<<std::endl;};
     auto moves=[&](std::ostream& out,const std::vector<int>& actions) {
-        std::vector<int> local;for(int a:actions)local.push_back(a/canvas*size+a%canvas);array(out,local);
+        std::vector<int> local;for(int a:actions)local.push_back(game_spec(rule).local_action(a,size,canvas));array(out,local);
     };
     std::map<size_t,std::unique_ptr<InferenceService>> resident;
     std::map<size_t,std::string> pair_stats;
@@ -137,10 +139,10 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             std::mt19937_64 random(t.seed);
             for(int retry=0;retry<100;++retry) {
                 if(stop())return;
-                Game game(size,canvas,rule);
+                Game game(size,canvas,rule,options);
                 auto result=initialize_opening(game,opening,t.generator==0?ea:eb,t.generator==0?eb:ea,random,stop);
                 if(result.status==OpeningStatus::Interrupted)return;
-                if(result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced match opening failed: "+result.failure);
+                if(rule!=Rule::GO && rule!=Rule::XIANGQI && result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced match opening failed: "+result.failure);
                 if(game.finished())continue;
                 t.moves=result.actions;t.generated=true;
                 std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"opening\"";
@@ -157,7 +159,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             throw std::runtime_error("100 consecutive terminal openings");
         };
         auto play=[&](const MatchTask& t,int color,InferenceService& ea,InferenceService& eb) {
-            Game game(size,canvas,rule);for(int a:t.moves)game.play(a);
+            Game game(size,canvas,rule,options);for(int a:t.moves)game.play(a);
             game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
             auto start=Clock::now();uint64_t seed=t.seed^(0xd1b54a32d192ed03ULL*(color+1));
             bool same=models[t.a].id==models[t.b].id;auto sa=search(ea,mix(seed));
@@ -176,7 +178,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"game\"";
             if(!single_pair)row<<",\"pair\":"<<quote(t.pair);
             row<<",\"id\":"<<2*t.id+color<<",\"opening_id\":"<<t.id<<",\"black_a\":"<<(color==0?"true":"false")
-                <<",\"winner\":"<<game.winner()<<",\"seconds\":"<<elapsed(start)<<",\"root_visits\":";
+                <<",\"reason\":"<<int(game.reason())<<",\"winner\":"<<game.winner()<<",\"seconds\":"<<elapsed(start)<<",\"root_visits\":";
             array(row,visits);row<<",\"initial_visits\":";array(row,initial);row<<",\"new_playouts\":";array(row,new_playouts);
             row<<",\"same_bot\":"<<(same?"true":"false")<<",\"inference_precision\":"<<quote(precision)<<",\"moves\":";
             moves(row,actions);row<<'}';emit(row.str());

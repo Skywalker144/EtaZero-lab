@@ -197,7 +197,7 @@ def training_figure(history, algorithm=None):
             ('Cumulative effective self-play rows', 'Share of submitted requests')]
     if muzero:
         titles[5]='Root NN invalid policy mass'
-        labels[5]=('Cumulative effective self-play rows', 'Mean probability mass on occupied points')
+        labels[5]=('Cumulative effective self-play rows', 'Mean probability mass on illegal actions')
         titles+=['Loss by unroll step']
         labels+=[('Unroll step k (0 = representation)', 'Mean weighted loss per step')]
     with mpl.rc_context(THEME):

@@ -1,27 +1,16 @@
 #pragma once
-#include <cstdint>
+#include "subtree_value_bias_key.h"
 #include <map>
 #include <memory>
 #include <mutex>
 
 namespace etazero {
-class Game;
-// Exact encoding of KataGo's 5x5 local pattern and two absolute move locations.
-// NOVC Gomoku/Hex have neither atari nor ko. No symmetry or color folding.
-struct SubtreeValueBiasKey {
-    uint64_t pattern=0, moves=0;
-    bool operator<(const SubtreeValueBiasKey& other) const {
-        return pattern<other.pattern || (pattern==other.pattern && moves<other.moves);
-    }
-    bool operator==(const SubtreeValueBiasKey& other) const { return pattern==other.pattern && moves==other.moves; }
-};
-SubtreeValueBiasKey subtree_value_bias_key(const Game& before,int action);
 struct SubtreeValueBiasEntry {
     std::mutex mutex;
     double delta_sum=0, weight_sum=0;
 };
 // Node-local contribution is replaced on backup, never added once per visit.
-// Entries include the side to move, so node-perspective W-L is equivalent to
+// Entries separate player perspectives, so node-perspective W-L is equivalent to
 // KataGo's fixed White perspective after converting both delta and utility.
 struct SubtreeValueBias {
     std::shared_ptr<SubtreeValueBiasEntry> entry;

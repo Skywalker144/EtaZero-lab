@@ -73,9 +73,11 @@ def experiment_plan(directory, environ=None, work_dir=None):
     if settings['autoelo']:
         from .autoelo import load_elo_profile
         from .arena import validate_match_models
+        from .games import spec_for_config
         plan['elo'] = load_elo_profile(directory, environ=env, gpu=slots[0])
         validate_match_models(plan['elo']['config'],
                               [{'canvas': arm['config']['network']['canvas'],
+                                'game': spec_for_config(arm['config']).name,
                                 'algorithm': arm['config']['agent']['algorithm']} for arm in arms])
     return plan
 
@@ -101,6 +103,8 @@ def load_experiment_arms(directory):
 
 def initialization_key(config):
     identity = [config['network'], config['run']['seed']]
+    from .games import spec_for_config, layout_metadata
+    if spec_for_config(config).name in ('go','xiangqi'): identity.append(layout_metadata(config))
     if config['agent']['algorithm'] == 'muzero':
         identity.append({'algorithm': 'muzero', 'muzero_config': config['muzero']})
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()

@@ -14,6 +14,7 @@ private:
     std::string path_, precision_;
     std::shared_ptr<LoadedModel> shared_model_;
     std::unique_ptr<c10::cuda::CUDAStream> stream_;
+    int input_planes_=5, global_features_=8, action_count_=0;
     int canvas_;
     bool precision_checked_=false;
     torch::Tensor host_, global_host_, input_, global_input_;

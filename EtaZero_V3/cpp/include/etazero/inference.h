@@ -1,4 +1,5 @@
 #pragma once
+#include "game_spec.h"
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -23,7 +24,10 @@ struct Evaluation {
 };
 using InferenceInputs = std::vector<const std::vector<float>*>;
 class Evaluator {
+protected:
+    GameSpec spec_=game_spec(GameKind::GOMOKU);
 public:
+    GameSpec spec() const { return spec_; }
     virtual ~Evaluator() = default;
     virtual Evaluation evaluate(const std::vector<float>& observation) = 0;
     // Input and output use canonical board coordinates; symmetry is an NN request option.
@@ -31,7 +35,11 @@ public:
                                          bool skip_cache=false, double policy_temperature=1, bool randomize=false, double policy_optimism=0);
 };
 class Backend {
+protected:
+    GameSpec spec_;
 public:
+    explicit Backend(GameSpec spec=game_spec(GameKind::GOMOKU)):spec_(spec) {}
+    GameSpec spec() const { return spec_; }
     virtual ~Backend() = default;
     virtual bool supports_auxiliary() const { return false; }
     virtual void initialize() {} // Called serially, before any service threads start.
@@ -71,14 +79,14 @@ class BatchEvaluator final : public InferenceService {
     struct CacheEntry { std::string key; std::shared_ptr<const Evaluation> output; };
     std::vector<CacheEntry> cache_;
     std::array<std::mutex, 64> cache_locks_;
-    std::array<std::vector<int>, 8> mappings_;
+    std::array<std::vector<int>, 12> mappings_;
     std::string model_;
     bool randomize_;
     int symmetry_;
     std::mt19937_64 random_;
     std::mutex random_mutex_;
     size_t max_batch_, input_size_;
-    int wait_us_;
+    int wait_us_,canvas_;
     std::mutex mutex_;
     std::condition_variable changed_;
     std::deque<Request*> queue_;

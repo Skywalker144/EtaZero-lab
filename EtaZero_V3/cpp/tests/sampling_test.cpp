@@ -167,6 +167,12 @@ int main(int argc,char** argv) {
     ReanalysisConfig zero;zero.enabled=true;std::mt19937_64 zero_rng(9),control_rng(9);
     check(select_reanalysis_turns(trajectory,zero,zero_rng).empty() && zero_rng()==control_rng(),"Zero reanalysis probability preserves RNG");
     ReanalysisConfig disabled;check(select_reanalysis_turns(trajectory,disabled,rng).empty(),"Default no reanalysis");
+    for(auto config:{disabled,zero}) {
+        auto without_snapshots=trajectory;
+        reanalyze_positions(without_snapshots,{},history,small,{1,1},config,search,
+            [](const Game&)->double{throw std::runtime_error("Disabled reanalysis called search");},rng,[]{return false;});
+        check(without_snapshots.steps.size()==trajectory.steps.size(),"Disabled reanalysis needs no position snapshots");
+    }
     SelfplaySearchContext hint{12,2,2,true,false,false};c.max_playouts=600;
     auto hinted=selfplay_search_limits(c,{1,1,1},true,{3,1},1,hint);
     check(!hinted.cheap_search && hinted.search.hint_action==12 && hinted.search.max_visits==2844 && hinted.search.max_playouts==4267 && hinted.target_weight==1 && !hinted.search.remove_root_noise,"Exact hint fourfold full before PDA; no PCR/reduce");

@@ -1,3 +1,4 @@
+#include "etazero/game_config.h"
 #include "etazero/session.h"
 #include <algorithm>
 #include <charconv>
@@ -20,10 +21,20 @@ int integer(const Json& object,const char* key,int fallback,int minimum,int maxi
 }
 int number(const std::string& s) {return parse_integer(s,"command");}
 const std::string columns="ABCDEFGHJKLMNOPQRSTUVWXYZ";
-std::string vertex(int action,int size) {return std::string(1,columns.at(action%size))+std::to_string(size-action/size);}
-int action(const std::string& v,int size) {
-    if(v.size()<2)throw std::runtime_error("Expected board coordinate; pass/resign are unsupported");
-    auto x=columns.find(std::toupper(static_cast<unsigned char>(v[0])));int y=number(v.substr(1));
+std::string vertex(int a,const Game& g) {
+    if(g.rule()==Rule::XIANGQI){auto m=XIANGQI_MOVES[a];return std::string(1,char('a'+m[0]))+std::to_string(m[1])+char('a'+m[2])+std::to_string(m[3]);}
+    if(a==g.size()*g.size())return "pass";
+    return std::string(1,columns.at(a%g.size()))+std::to_string(g.size()-a/g.size());
+}
+int action(const std::string& v,const Game& g) {
+    if(g.rule()==Rule::GO && (v=="pass"||v=="PASS"))return g.size()*g.size();
+    if(g.rule()==Rule::XIANGQI){
+        if(v.size()!=4)throw std::runtime_error("Expected Xiangqi move such as h2e2");
+        int a=xiangqi_action(v[0]-'a',v[1]-'0',v[2]-'a',v[3]-'0');
+        if(a<0)throw std::runtime_error("Unknown Xiangqi move");return a;
+    }
+    if(v.size()<2)throw std::runtime_error("Expected board coordinate");
+    int size=g.size();auto x=columns.find(std::toupper(static_cast<unsigned char>(v[0])));int y=number(v.substr(1));
     if(x>=size_t(size)||y<1||y>size)throw std::runtime_error("Move outside board");
     return (size-y)*size+int(x);
 }
@@ -46,10 +57,11 @@ struct Request {
 };
 const std::vector<std::string> commands={"protocol_version","name","version","list_commands","known_command",
     "boardsize","clear_board","play","undo","genmove","quit","kata-analyze","kata-genmove_analyze",
-    "stop","kata-raw-nn","etazero-rule","showboard"};
+    "stop","kata-raw-nn","etazero-rule","komi","showboard"};
 class Session {
     GameSearch& search_;InferenceService& evaluator_;const Config& config_;uint64_t seed_;
     std::string protocol_;int canvas_;std::optional<Game> game_;std::vector<int> history_;Json opening_=nullptr;
+    std::vector<std::vector<int>> boards_;std::vector<int> players_;
     std::function<Json(const Game&)> raw_;std::function<double(const Game&)> temperature_;std::function<bool()> interrupted_;
     std::mutex mutex_,output_mutex_;std::condition_variable changed_;std::deque<Request> queue_;std::optional<Request> active_;bool eof_=false;
     std::set<std::string> pending_ids_;
@@ -68,7 +80,7 @@ class Session {
         }
         return false;
     }
-    int native(int local) const {return local/game_->size()*canvas_+local%game_->size();}
+    int native(int local) const {return game_->native_action(local);}
     void emit(const Json& value) {std::lock_guard<std::mutex> lock(output_mutex_);std::cout<<value.dump()<<'\n'<<std::flush;}
     void output(const std::string& value) {std::lock_guard<std::mutex> lock(output_mutex_);std::cout<<value<<std::flush;}
     void reply(const Request& r,Json result,bool final=true) {
@@ -80,27 +92,32 @@ class Session {
     }
     Json state() const {
         if(!game_)return nullptr;const auto& g=*game_;
-        return {{"board_size",g.size()},{"canvas_size",canvas_},{"rule",int(g.rule())},{"player",g.player()},
-            {"turn",g.turn()},{"finished",g.finished()},{"winner",g.winner()},{"reason",g.reason()},
-            {"board",g.board().cells},{"moves",history_},{"opening",opening_}};
+        std::vector<int> legal;for(int a=0;a<g.actions();++a)if(g.legal(a))legal.push_back(g.local_action(a));
+        return {{"board_width",g.width()},{"board_height",g.height()},{"board_stride",g.geometry().stride},{"legal_actions",legal},{"fen",g.fen()},{"komi",g.options().komi},{"go_rules",g.options().go_rules},{"board_size",g.size()},{"canvas_size",canvas_},{"rule",int(g.rule())},{"player",g.player()},
+            {"turn",g.turn()},{"finished",g.finished()},{"winner",g.winner()},{"reason",int(g.reason())},
+            {"board",g.board().cells},{"moves",history_},{"opening",opening_},{"boards",boards_},{"players",players_}};
     }
     void create(const Json& data,const Request& r) {
         int size=integer(data,"size",config_.integer("analysis.board_size"),5,canvas_);
-        Game replacement(size,canvas_,parse_rule(data.value("rule",config_.text("analysis.rule"))));
+        auto options=rule_options(config_,GameConfigMode::ANALYSIS);options.fen=data.value("fen",std::string());
+        options.komi=data.value("komi",options.komi);options.go_rules=data.value("go_rules",options.go_rules);
+        Game replacement(size,canvas_,parse_rule(data.value("rule",config_.text("analysis.rule"))),options);
+        if(!same_layout(replacement.spec(),evaluator_.spec()))
+            throw std::runtime_error("Requested game layout does not match the loaded model");
         std::vector<int> moves;Json opening=nullptr;
         if(data.value("opening",std::string("empty"))=="balanced") {
             OpeningConfig settings(config_);uint64_t seed=seed_;
             if(data.contains("seed")){auto s=data.at("seed").get<std::string>();size_t used=0;seed=std::stoull(s,&used);if(used!=s.size()||s.empty()||s[0]=='-')throw std::runtime_error("Invalid opening seed");}
             int timeout=integer(data,"timeout_ms",120000,1,120000);std::mt19937_64 random(seed);
-            if(replacement.rule()==Rule::HEX?(settings.hex_probability!=1||settings.hex_make_fair_probability!=1||settings.hex_min_accept_rate<=0):
-                (settings.probability!=1||settings.rejection_probability_fallback>=1))throw std::runtime_error("Balanced opening requires probability one and rejection fallback below one");
+            if(replacement.rule()!=Rule::GO && replacement.rule()!=Rule::XIANGQI && (replacement.rule()==Rule::HEX?(settings.hex_probability!=1||settings.hex_make_fair_probability!=1||settings.hex_min_accept_rate<=0):
+                (settings.probability!=1||settings.rejection_probability_fallback>=1)))throw std::runtime_error("Balanced opening requires probability one and rejection fallback below one");
             auto start=std::chrono::steady_clock::now();auto cancelled=[&]{return r.cancelled->load()||interrupted_()||std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(timeout);};
             for(int retry=0;retry<100;++retry) {
-                replacement=Game(size,canvas_,replacement.rule());auto result=initialize_opening(replacement,settings,evaluator_,random,cancelled);
+                replacement=Game(size,canvas_,replacement.rule(),options);auto result=initialize_opening(replacement,settings,evaluator_,random,cancelled);
                 if(cancelled()||result.status==OpeningStatus::Interrupted)throw std::runtime_error("平衡开局生成已取消或超时，请重新创建棋局");
-                if(result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced opening failed: "+result.failure);
+                if(replacement.rule()!=Rule::GO && replacement.rule()!=Rule::XIANGQI && result.status!=OpeningStatus::Success)throw std::runtime_error("Balanced opening failed: "+result.failure);
                 if(replacement.finished())continue;
-                for(int a:result.actions)moves.push_back(a/canvas_*size+a%canvas_);
+                for(int a:result.actions)moves.push_back(replacement.local_action(a));
                 opening={{"seed",std::to_string(seed)},{"attempts",result.attempts},{"balanced_moves",result.balanced_moves},
                     {"policy_moves",result.policy_moves},{"value",result.start_value},{"value_player",result.balanced_moves%2==0?1:-1},
                     {"seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()},{"moves",moves}};break;
@@ -112,31 +129,37 @@ class Session {
             if(!data.at("moves").is_array())throw std::runtime_error("moves must be an array");
             for(const auto& move:data.at("moves")) {
                 if(!move.is_number_integer())throw std::runtime_error("moves must contain integer board actions");
-                int64_t a=move.get<int64_t>();if(a<0||a>=size*size)throw std::runtime_error("Move outside board");
-                replacement.play(int(a)/size*canvas_+int(a)%size);moves.push_back(int(a));
+                int64_t a=move.get<int64_t>();if(a<0||a>=replacement.local_actions())throw std::runtime_error("Move outside board");
+                replacement.play(replacement.native_action(int(a)));moves.push_back(int(a));
             }
         }
         game_=std::move(replacement);history_=std::move(moves);opening_=std::move(opening);search_.reset(seed_);
+        boards_.clear();players_.clear();
+        if(game_->rule()==Rule::GO||game_->rule()==Rule::XIANGQI){Game replay(size,canvas_,game_->rule(),options);
+            boards_.push_back(replay.board().cells);players_.push_back(replay.player());
+            for(int a:history_){replay.play(replay.native_action(a));boards_.push_back(replay.board().cells);players_.push_back(replay.player());}}
     }
-    void play(int local) {if(local<0||local>=game_->size()*game_->size())throw std::runtime_error("Move outside board");int a=native(local);game_->play(a);history_.push_back(local);search_.advance(a);}
+    void play(int local) {if(local<0||local>=game_->local_actions())throw std::runtime_error("Move outside board");int a=native(local);game_->play(a);history_.push_back(local);search_.advance(a);
+        if(!boards_.empty()){boards_.push_back(game_->board().cells);players_.push_back(game_->player());}}
     void undo(int count) {
         if(count<1||count>int(history_.size()))throw std::runtime_error("Invalid undo count");
-        Game replacement(game_->size(),canvas_,game_->rule());auto retained=history_;retained.resize(retained.size()-count);
-        for(int a:retained)replacement.play(a/replacement.size()*canvas_+a%replacement.size());
+        Game replacement(game_->size(),canvas_,game_->rule(),game_->options());auto retained=history_;retained.resize(retained.size()-count);
+        for(int a:retained)replacement.play(replacement.native_action(a));
         game_=std::move(replacement);history_=std::move(retained);search_.reset(seed_);
+        if(!boards_.empty()){boards_.resize(history_.size()+1);players_.resize(history_.size()+1);}
         if(!opening_.is_null()&&history_.size()<opening_.at("moves").size())opening_=nullptr;
     }
     std::string infos(const Json& analysis,const Request& r) {
         int maxmoves=integer(r.data,"maxmoves",100000,1,100000),count=0;std::ostringstream out;out.precision(17);
         for(const auto& c:analysis.at("candidates")) {
             if(c.at("visits").get<int64_t>()<=0||count>=maxmoves)continue;if(count++)out<<' ';
-            out<<"info move "<<vertex(c.at("action"),game_->size())<<" visits "<<c.at("visits")
+            out<<"info move "<<vertex(c.at("action"),*game_)<<" visits "<<c.at("visits")
                <<" utility "<<c.at("utility")<<" winrate "<<c.at("winrate")<<" drawRate "<<c.at("draw_rate")
                <<" prior "<<c.at("network_prior")<<" weight "<<c.at("sample_weight")<<" order "<<count-1;
             if(!c.at("lcb").is_null())out<<" utilityLcb "<<c.at("lcb")<<" lcb "<<(1+c.at("lcb").get<double>())*.5<<" radius "<<c.at("radius");
             if(!c.at("raw_selection_weight").is_null())out<<" selectionWeight "<<c.at("raw_selection_weight");
             out<<" policy "<<c.at("improved_policy")<<" pv";
-            for(const auto& a:c.at("pv"))out<<' '<<vertex(a,game_->size());
+            for(const auto& a:c.at("pv"))out<<' '<<vertex(a,*game_);
         }
         return out.str()+"\n";
     }
@@ -169,14 +192,14 @@ class Session {
             // Cancellation and committing a generated move have one ordering point.
             std::lock_guard<std::mutex> lock(mutex_);
             moved=generate&&result.action>=0&&!r.cancelled->load()&&!interrupted_();
-            if(moved)play(result.action/canvas_*before.size()+result.action%canvas_);
+            if(moved)play(before.local_action(result.action));
             active_.reset();
         }
         if(protocol_=="gtp") {
             if(gtp_stream) {
-                output((generate?(moved?"play "+vertex(report.at("action"),before.size()):"error search cancelled"):"")+"\n");
+                output((generate?(moved?"play "+vertex(report.at("action"),before):"error search cancelled"):"")+"\n");
                 r.streaming=false;
-            } else if(moved)output("="+r.gtp_id+" "+vertex(report.at("action"),before.size())+"\n\n");
+            } else if(moved)output("="+r.gtp_id+" "+vertex(report.at("action"),before)+"\n\n");
             else output("?"+r.gtp_id+" search cancelled\n\n");
         }
         return {{"state",state()},{"analysis",report},{"cancelled",r.cancelled->load()||interrupted_()},{"played",moved}};
@@ -186,15 +209,20 @@ class Session {
         const auto& cmd=r.command;bool gtp=protocol_=="gtp";std::string value;bool search_reply=false;
         if(gtp) {
             if(std::find(commands.begin(),commands.end(),cmd)==commands.end())throw std::runtime_error("Unknown command");
-            size_t expected=(cmd=="known_command"||cmd=="boardsize"||cmd=="etazero-rule"||cmd=="genmove")?1:cmd=="play"?2:0;
+            size_t expected=(cmd=="known_command"||cmd=="boardsize"||cmd=="etazero-rule"||cmd=="komi"||cmd=="genmove")?1:cmd=="play"?2:0;
             if(cmd!="kata-analyze"&&cmd!="kata-genmove_analyze"&&cmd!="kata-raw-nn"&&r.args.size()!=expected)throw std::runtime_error("Unexpected command arguments");
-            if(cmd=="protocol_version")value="2";else if(cmd=="name")value="EtaZero";else if(cmd=="version")value="2.7";
+            if(cmd=="protocol_version")value="2";else if(cmd=="name")value="EtaZero";else if(cmd=="version")value="2.9";
             else if(cmd=="known_command")value=std::find(commands.begin(),commands.end(),r.args[0])!=commands.end()?"true":"false";
             else if(cmd=="list_commands"){for(const auto& c:commands){if(!value.empty())value+='\n';value+=c;}}
             else if(cmd=="boardsize"||cmd=="clear_board"||cmd=="etazero-rule") {
                 Json data={{"size",cmd=="boardsize"?number(r.args[0]):game_->size()},
-                    {"rule",cmd=="etazero-rule"?r.args[0]:rule_name()}};create(data,r);
-            } else if(cmd=="play") {if(color(r.args[0])!=game_->player())throw std::runtime_error("Color is not side to move");play(action(r.args[1],game_->size()));}
+                    {"rule",cmd=="etazero-rule"?r.args[0]:rule_name()},{"komi",game_->options().komi},{"go_rules",game_->options().go_rules}};create(data,r);
+            } else if(cmd=="komi") {
+                if(game_->rule()!=Rule::GO)throw std::runtime_error("komi requires Go");
+                size_t used=0;double komi=std::stod(r.args[0],&used);
+                if(used!=r.args[0].size()||!std::isfinite(komi))throw std::runtime_error("Invalid komi");
+                create({{"size",game_->size()},{"rule","go"},{"komi",komi},{"go_rules",game_->options().go_rules},{"moves",history_}},r);
+            } else if(cmd=="play") {if(color(r.args[0])!=game_->player())throw std::runtime_error("Color is not side to move");play(action(r.args[1],*game_));}
             else if(cmd=="undo")undo(1);
             else if(cmd=="genmove"||cmd=="kata-analyze"||cmd=="kata-genmove_analyze") {
                 size_t i=0;bool needs_color=cmd!="kata-analyze";
@@ -223,8 +251,8 @@ class Session {
         if(cmd=="new")create(r.data,r);
         else if(cmd=="quit"||cmd=="stop"){if(protocol_=="json")reply(r,{{"state",state()}});return;}
         else if(!game_&&!(r.data.contains("moves")&&(cmd=="analyze"||cmd=="genmove")))throw std::runtime_error("Start a new game first");
-        else if(cmd=="play")play(integer(r.data,"action",-1,0,game_->size()*game_->size()-1));
-        else if(cmd=="undo")undo(integer(r.data,"count",1,1,625));
+        else if(cmd=="play")play(integer(r.data,"action",-1,0,game_->local_actions()-1));
+        else if(cmd=="undo")undo(integer(r.data,"count",1,1,int(history_.size())));
         else if(cmd=="analyze"||cmd=="genmove") {
             if(r.data.contains("moves"))create(r.data,r);
             auto result=analyze(r);reply(r,result);search_reply=true;
@@ -233,7 +261,7 @@ class Session {
         if(!search_reply)reply(r,{{"state",state()}});
     }
     std::string rule_name() const {
-        for(const auto& name:{"freestyle","standard","renju","hex"})if(parse_rule(name)==game_->rule())return name;
+        for(const auto& name:{"freestyle","standard","renju","hex","go","xiangqi"})if(parse_rule(name)==game_->rule())return name;
         throw std::runtime_error("Unknown rule");
     }
     void work() {
@@ -267,7 +295,7 @@ public:
                     r.data=Json::parse(line);if(!r.data.is_object())throw std::runtime_error("Request must be an object");
                     r.id=r.data.at("id");if(!r.id.is_string()&&!r.id.is_number_integer())throw std::runtime_error("id must be a string or integer");
                     r.command=r.data.at("command").get<std::string>();
-                    const std::set<std::string> allowed={"id","command","size","rule","moves","action","count","visits","report_interval_ms","fresh","opening","seed","timeout_ms","target_id","continuous"};
+                    const std::set<std::string> allowed={"id","command","size","rule","moves","action","count","visits","report_interval_ms","fresh","opening","seed","timeout_ms","target_id","continuous","fen","komi","go_rules"};
                     for(auto it=r.data.begin();it!=r.data.end();++it)if(!allowed.count(it.key()))throw std::runtime_error("Unsupported request field: "+it.key());
                     r.continuous=r.data.value("continuous",false);
                     if(r.continuous&&r.command!="analyze")throw std::runtime_error("continuous requires analyze");
@@ -288,7 +316,7 @@ public:
                 bool quitting=r.command=="quit";
                 {std::lock_guard<std::mutex> lock(mutex_);
                     if(protocol_=="json"&&!pending_ids_.insert(r.id.dump()).second)throw std::runtime_error("Duplicate pending request id");
-                    bool mutation=r.command=="new"||r.command=="play"||r.command=="undo"||r.command=="boardsize"||r.command=="clear_board"||r.command=="etazero-rule";
+                    bool mutation=r.command=="new"||r.command=="play"||r.command=="undo"||r.command=="boardsize"||r.command=="clear_board"||r.command=="etazero-rule"||r.command=="komi";
                     if(r.command=="stop"||mutation||(protocol_=="gtp"&&active_&&active_->continuous)) {
                         auto cancel=[&](Request& job){if(!r.data.contains("target_id")||job.id==r.data["target_id"])job.cancelled->store(true);};
                         if(active_)cancel(*active_);for(auto& job:queue_)if(r.command=="stop"||job.continuous)cancel(job);
@@ -308,8 +336,8 @@ public:
 };
 }
 Json analysis_json(const SearchResult& result,const Game& game,uint64_t requests,uint64_t batches,bool final) {
-    auto local=[&](int a){return a<0?-1:a/game.canvas()*game.size()+a%game.canvas();};
-    Json out={{"action",local(result.action)},{"board_size",game.size()},{"canvas_size",game.canvas()},
+    auto local=[&](int a){return game.local_action(a);};
+    Json out={{"action",local(result.action)},{"board_width",game.width()},{"board_height",game.height()},{"board_stride",game.geometry().stride},{"board_size",game.size()},{"canvas_size",game.canvas()},
         {"turn",game.turn()},{"player",game.player()},{"rule",int(game.rule())},{"board",game.board().cells},
         {"root_value",result.value},{"wdl",result.search_wdl},{"network_wdl",result.network_wdl},
         {"completed_visits",result.root_visits},{"seconds",result.seconds},{"requests",requests},{"batches",batches},

@@ -38,6 +38,13 @@ def test_eval_profiles_are_independent(tmp_path,monkeypatch):
         with pytest.raises(ValueError):load_engine_config(CONFIGS / 'baseline',True,environ={'MATCH_'+field:value})
 
 
+def test_match_model_layout_is_required():
+    from etazero.arena import validate_match_models
+    config = load_engine_config(CONFIGS/'baseline', True, environ={})
+    with pytest.raises(ValueError, match='metadata is missing game'):
+        validate_match_models(config, [{'canvas': 15, 'algorithm': 'alphazero'}])
+
+
 def test_manifest_and_partial_pair_resume(tmp_path):
     manifest={'games_per_pair':4,'config':{'visits':100},'pairs':[]}
     save_manifest(tmp_path/'manifest.json',manifest)

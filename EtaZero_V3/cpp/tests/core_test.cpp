@@ -1,3 +1,4 @@
+#include "etazero/gomoku.h"
 #include "etazero/record.h"
 #include "etazero/random_evaluator.h"
 #include <iostream>
@@ -104,7 +105,7 @@ void compare_exhaustive_bandit(bool heterogeneous) {
     search.reset(42);check(search.run(state,0).visits==expected,"Search reset preserves independent game RNG");
 }
 void forbidden_case(std::initializer_list<std::pair<int,int>> points, int x,int y,bool expected) {
-    Board b(15);for(auto p:points)b.cells[p.second*15+p.first]=1;
+    GomokuBoard b(15);for(auto p:points)b.cells[p.second*15+p.first]=1;
     RenjuAnalyzer a;check(a.forbidden(b,y*15+x)==expected,"Renju reference case");
 }
 int main() {
@@ -178,7 +179,7 @@ int main() {
         check(losing.value==-0.375 && forbidden_eval.calls==1,"Forbidden terminal backs up negative value without NN");
         check(losing.q_visits[112]==1 && losing.q_values[112]==-1,"Forbidden terminal losing Q/current player");
         Game terminal=renju;terminal.play(112);
-        check(terminal.finished() && terminal.winner()==-1 && terminal.reason()==2 && terminal.terminal_value()==1,
+        check(terminal.finished() && terminal.winner()==-1 && terminal.reason()==Reason::FORBIDDEN && terminal.terminal_value()==1,
               "Forbidden terminal value uses next player's perspective");
         AlphaZeroState terminal_state(terminal,forbidden_eval);
         check(terminal_state.terminal_value()==1,"AlphaZero adapter terminal perspective");

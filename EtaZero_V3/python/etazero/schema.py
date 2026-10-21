@@ -1,12 +1,17 @@
-"""The single source of truth for the Python/C++ model and trajectory contract."""
+"""Shared trajectory fields and legacy Gomoku/Hex features; game layouts live in games.py."""
 import json
+try:
+    from .games import RULE_GAMES, SPECS
+    from .outcomes import REASONS, generate_cpp as outcome_cpp
+except ImportError:
+    from games import RULE_GAMES, SPECS
+    from outcomes import REASONS, generate_cpp as outcome_cpp
 
 PLANES = ("on_board", "own", "opponent", "black_forbidden_black_to_move", "black_forbidden_white_to_move")
 GLOBALS = ("standard", "renju", "renju_color", "forbidden_feature_enabled", "pda_enabled", "pda_half_doublings", "hex", "hex_white_to_move")
 HEX_GLOBAL = GLOBALS.index('hex')
 HEX_WHITE_GLOBAL = GLOBALS.index('hex_white_to_move')
-RULES = ("freestyle", "standard", "renju", "hex")
-REASONS = ("draw", "five", "forbidden", "connection")
+RULES = tuple(RULE_GAMES)
 POLICY_HEADS = ("policy", "opponent_policy", "soft_policy", "soft_opponent_policy", "long_optimistic_policy", "short_optimistic_policy")
 Q_POLICY_HEAD = "q_winloss_pretanh"
 RAW_DTYPES = {
@@ -38,11 +43,11 @@ CONTRACT = {"planes": PLANES, "globals": GLOBALS,
             "observations": "uint8[N,planes,ceil(canvas*canvas/8)], MSB first, zero tail bits",
             "raw_dtypes": RAW_DTYPES, "side": "independent searched positions associated with parent game; value=all TD=own search WDL, full-game/error/optimistic/opponent gate zero",
             "rows": "metadata.row_begin:row_begin+rows selects final repeated rows in game order (main then side per game); full trajectories retained across shard boundaries; train_mask marks searched suffix; plies counts represented actions",
-            "opening": "leading train_mask=0 prefix, zero budget, full packed trajectory retained; separate balanced/policy/initial prefix counts, initial kind ordinary/hint/earlyFork/gameFork/hintFork; hint actions canvas-indexed or -1", "actions": "canvas-row-major",
+            "opening": "leading train_mask=0 prefix, zero budget, full packed trajectory retained; separate balanced/policy/initial prefix counts, initial kind ordinary/hint/earlyFork/gameFork/hintFork; hint actions canvas-indexed or -1", "actions": "Gomoku/Hex: canvas-row-major; Go: canvas-row-major + pass at canvas²; Xiangqi: games.XIANGQI_MOVES indices",
             "search_storage": "policy and visits stored once for sample_indices=flatnonzero(row_repeats); packed trajectory and lightweight WDL/weight diagnostics retain all steps",
             "value": "side-to-move W/D/L terminal; three finite-trajectory TD targets at actual board area",
             "policy_quantization": "unnormalized final selection weights; max at least 10, capped 30000; round to int16 before learner normalization",
-            "model_outputs": ["logits[N,C*C]", "wdl_logits[N,3]", "short_optimistic_logits[N,C*C]", "shortterm_value_stdev[N]"],
+            "model_outputs": ["logits[N,A]", "wdl_logits[N,3]", "short_optimistic_logits[N,A]", "shortterm_value_stdev[N]"],
             "training_policy_heads": POLICY_HEADS,
             "optional_training_policy_head": Q_POLICY_HEAD,
             "q_targets": "pure current-player W-L; float32 stochastic rounding times 32000 on each final repeated row; int16 visits=min(child NODE visits,32000), stored once per sampled main/side position; no Go score Q; reanalysis replaces both",
@@ -54,20 +59,24 @@ CONTRACT = {"planes": PLANES, "globals": GLOBALS,
 
 def pack_observations(observations):
     import numpy as np
-    if observations.ndim != 4 or observations.shape[1] != len(PLANES) or not np.isin(observations, [0, 1]).all():
+    if observations.ndim != 4 or observations.shape[1] not in {spec.planes for spec in SPECS.values()} or not np.isin(observations, [0, 1]).all():
         raise ValueError("Expected binary NCHW observations")
-    return np.packbits(observations.reshape(len(observations), len(PLANES), -1), axis=2, bitorder="big")
+    return np.packbits(observations.reshape(len(observations), observations.shape[1], -1), axis=2, bitorder="big")
 
 
 def unpack_observations(packed, canvas):
     import numpy as np
-    if packed.dtype != np.uint8 or packed.shape[1:] != (len(PLANES), (canvas*canvas+7)//8):
+    if packed.dtype != np.uint8 or packed.ndim != 3 or packed.shape[1] not in {spec.planes for spec in SPECS.values()} or packed.shape[2] != (canvas*canvas+7)//8:
         raise ValueError("Packed observation shape/dtype mismatch")
-    return np.unpackbits(packed, axis=2, count=canvas*canvas, bitorder="big").reshape(-1, len(PLANES), canvas, canvas)
+    return np.unpackbits(packed, axis=2, count=canvas*canvas, bitorder="big").reshape(-1, packed.shape[1], canvas, canvas)
 
 
 def generate_header(path):
     from pathlib import Path
+    try:
+        from .games import generate_cpp
+    except ImportError:
+        from games import generate_cpp
     names = ", ".join(json.dumps(x) for x in RULES)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(
@@ -76,9 +85,9 @@ def generate_header(path):
         f'inline constexpr int GLOBAL_FEATURES = {len(GLOBALS)};\n'
         f'inline constexpr int HEX_GLOBAL = {HEX_GLOBAL};\n'
         f'inline constexpr int HEX_WHITE_GLOBAL = {HEX_WHITE_GLOBAL};\n'
-        'enum class Rule { FREESTYLE, STANDARD, RENJU, HEX };\n'
+        'enum class Rule { '+', '.join(rule.upper() for rule in RULES)+' };\n'
         f'inline constexpr const char* RULE_NAMES[] = {{{names}}};\n'
-        '}\n')
+        + generate_cpp() + outcome_cpp() + '}\n')
 
 
 if __name__ == "__main__":

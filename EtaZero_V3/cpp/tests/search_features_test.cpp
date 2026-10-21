@@ -52,6 +52,23 @@ struct SymmetryLineState : LineState {
         return {{0},{0.1+0.1*symmetry,0.1,0.8-0.1*symmetry}};
     }
 };
+struct SparseSymmetryState : SearchState {
+    int depth=0;
+    std::unique_ptr<SearchState> clone() const override{return std::make_unique<SparseSymmetryState>(*this);}
+    int actions() const override{return 6;}
+    bool legal(int a) const override{return depth<2 && (depth==0?(a==1 || a==4):(a==0 || a==3));}
+    bool terminal() const override{return depth==2;}
+    double terminal_value() const override{return 0;}
+    int symmetry_count() const override{return 2;}
+    Evaluation evaluate(SearchEvaluation options = {}) const override {
+        std::vector<double> logits(6,std::numeric_limits<double>::quiet_NaN());
+        int first=depth==0?1:0;
+        logits[first]=options.symmetry==0?std::log(4):0;
+        logits[first+3]=options.symmetry==0?0:std::log(4);
+        return {std::move(logits),{.2,.6,.2}};
+    }
+    int move(int a) override{check(legal(a),"Sparse state selected an illegal move");++depth;return -1;}
+};
 struct CoordinateEvaluator : Evaluator {
     std::vector<float> input;
     Evaluation evaluate(const std::vector<float>& obs) override {
@@ -183,6 +200,23 @@ int main(){
         seen.clear();auto sym_cheap=sym_search.run(sym_state,0,{2,true,true,true});
         check(seen==std::vector<int>({0}),"Cheap search disables multi-symmetry evaluation");
         near(sym_cheap.policy_surprise,-std::log(0.75),"Cheap search retains NN temperature but disables root temperature");
+        {
+            SparseSymmetryState sparse;SearchSettings sparse_settings{1,1,1.5,1,0,1,true};
+            sparse_settings.root_symmetries=2;Search sparse_search(sparse_settings,17);
+            SearchRun two;two.max_playouts=2;
+            auto first=sparse_search.run(sparse,0,two);
+            for(int a=0;a<6;++a)near(first.network_policy[a],(a==1 || a==4)?.5:0,
+                                   "Sparse symmetry average excludes invalid logits and padding");
+            SearchRun refresh;refresh.max_playouts=0;
+            auto repeated=sparse_search.run(sparse,0,refresh);
+            check(repeated.network_policy==first.network_policy && repeated.new_playouts==0,
+                  "Root reevaluation preserves the legal action coordinates and probability average");
+            sparse_search.advance(first.action);sparse.move(first.action);
+            auto promoted=sparse_search.run(sparse,0,refresh);
+            check(promoted.initial_visits>0 && promoted.new_playouts==0,"Sparse child was not reused on promotion");
+            for(int a=0;a<6;++a)near(promoted.network_policy[a],(a==0 || a==3)?.5:0,
+                                   "Promoted node retains its own legal moves across symmetry reevaluation");
+        }
         seen.clear();ensemble.root_symmetries=4;Search sampled(ensemble,17);sampled.run(sym_state,0,{2,true,true,false});
         sorted=seen;std::sort(sorted.begin(),sorted.end());check(sorted.size()==4 && std::adjacent_find(sorted.begin(),sorted.end())==sorted.end(),"Partial ensemble uses distinct symmetries");
         CoordinateEvaluator coordinates;Game padded(5,6,Rule::RENJU);padded.play(1);padded.play(6);

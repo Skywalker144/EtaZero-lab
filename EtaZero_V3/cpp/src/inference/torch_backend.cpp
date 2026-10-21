@@ -53,9 +53,11 @@ void TorchBackend::initialize() {
     auto meta = model_.get_method("metadata")({}).toTuple();
     if (meta->elements().size() != 2 || meta->elements()[0].toInt() != canvas_ || meta->elements()[1].toStringRef() != "alphazero")
         throw std::runtime_error("Model algorithm/canvas mismatch");
+    spec_=game_spec(std::string(model_.get_method("game_name")({}).toStringRef()));
+    input_planes_=spec_.planes;global_features_=spec_.globals;action_count_=spec_.actions(canvas_);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(device_.is_cuda());
-    host_ = torch::empty({max_batch_, INPUT_PLANES, canvas_, canvas_}, options);
-    global_host_ = torch::empty({max_batch_, GLOBAL_FEATURES}, options);
+    host_ = torch::empty({max_batch_, input_planes_, canvas_, canvas_}, options);
+    global_host_ = torch::empty({max_batch_, global_features_}, options);
     if(stream_) {
         auto started=std::chrono::steady_clock::now();capture_graphs();
         shared_model_->timing.graph_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
@@ -66,7 +68,7 @@ void TorchBackend::initialize() {
     }
 }
 torch::Tensor TorchBackend::forward(const torch::Tensor& input,const torch::Tensor& globals) {
-    const int64_t n=input.size(0),actions=canvas_*canvas_;
+    const int64_t n=input.size(0),actions=action_count_;
     auto out = model_.forward({input,globals}).toTuple();
     if (out->elements().size() != 4) throw std::runtime_error("Expected ordinary/WDL/optimistic/error outputs");
     auto logits = out->elements()[0].toTensor(), values = out->elements()[1].toTensor();
@@ -86,9 +88,9 @@ void TorchBackend::capture_graphs() {
     for(int batch=1;;batch=std::min(max_batch_,batch*2)) {
         auto captured=std::make_unique<Graph>();
         auto options=torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-        captured->input=torch::zeros({batch,INPUT_PLANES,canvas_,canvas_},options);
+        captured->input=torch::zeros({batch,input_planes_,canvas_,canvas_},options);
         captured->input.select(1,0).fill_(1); // A valid mask for normalization warmup.
-        captured->globals=torch::zeros({batch,GLOBAL_FEATURES},options);
+        captured->globals=torch::zeros({batch,global_features_},options);
         for(int warmup=0;warmup<3;++warmup)forward(captured->input,captured->globals);
         stream_->synchronize();
         captured->graph.capture_begin();
@@ -103,12 +105,12 @@ std::vector<Evaluation> TorchBackend::evaluate(const InferenceInputs& inputs) {
     c10::InferenceMode guard;
     c10::cuda::OptionalCUDAStreamGuard stream_guard;
     if(stream_)stream_guard.reset_stream(*stream_);
-    const int64_t n=inputs.size(),actions=canvas_*canvas_,stride=INPUT_PLANES*actions;
+    const int64_t n=inputs.size(),actions=action_count_,stride=input_planes_*canvas_*canvas_;
     if(n<1 || n>host_.size(0))throw std::runtime_error("Invalid native batch size");
     for(int64_t i=0;i<n;++i) {
-        if(inputs[i]->size()!=static_cast<size_t>(stride+GLOBAL_FEATURES))throw std::runtime_error("Native input shape mismatch");
+        if(inputs[i]->size()!=static_cast<size_t>(stride+global_features_))throw std::runtime_error("Native input shape mismatch");
         std::memcpy(host_.data_ptr<float>()+i*stride,inputs[i]->data(),stride*sizeof(float));
-        std::memcpy(global_host_.data_ptr<float>()+i*GLOBAL_FEATURES,inputs[i]->data()+stride,GLOBAL_FEATURES*sizeof(float));
+        std::memcpy(global_host_.data_ptr<float>()+i*global_features_,inputs[i]->data()+stride,global_features_*sizeof(float));
     }
     torch::Tensor output;
     if(stream_) {
@@ -120,7 +122,7 @@ std::vector<Evaluation> TorchBackend::evaluate(const InferenceInputs& inputs) {
         // a valid row fills the bucket; padding never becomes a search result.
         for(int64_t i=n;i<batch;++i) {
             std::memcpy(host_.data_ptr<float>()+i*stride,host_.data_ptr<float>(),stride*sizeof(float));
-            std::memcpy(global_host_.data_ptr<float>()+i*GLOBAL_FEATURES,global_host_.data_ptr<float>(),GLOBAL_FEATURES*sizeof(float));
+            std::memcpy(global_host_.data_ptr<float>()+i*global_features_,global_host_.data_ptr<float>(),global_features_*sizeof(float));
         }
         captured.input.copy_(host_.narrow(0,0,batch),true);
         captured.globals.copy_(global_host_.narrow(0,0,batch),true);

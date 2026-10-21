@@ -1,89 +1,74 @@
 #pragma once
-#include "rules.h"
+#include "rule_state.h"
 #include <cmath>
 namespace etazero {
+// Common state ownership and NN conditioning. Rules live in RuleState implementations.
 class Game {
-    Board board_;
-    int canvas_, player_ = 1, turn_ = 0, winner_ = 0, reason_ = 0, last_action_ = -1;
+    std::unique_ptr<RuleState> state_;
+    RuleOptions options_;
+    int size_,canvas_,turn_=0,last_action_=-1;
     Rule rule_;
-    bool finished_ = false;
-    double pda_doublings_ = 0; int pda_player_ = 0;
+    double pda_doublings_=0;
+    int pda_player_=0;
 public:
-    explicit Game(int size, int canvas, Rule rule) : board_(size), canvas_(canvas), rule_(rule) {
-        if (canvas < size || canvas > 25) throw std::runtime_error("Invalid canvas size");
-    }
+    explicit Game(int size,int canvas,Rule rule,const RuleOptions& options={});
+    Game(const Game& other);
+    Game& operator=(const Game& other);
+    Game(Game&&)=default;
+    Game& operator=(Game&&)=default;
+    GameSpec spec() const { return game_spec(rule_); }
+    const RuleOptions& options() const { return options_; }
+    std::string history_identity() const { return state_->identity(); }
+    std::string graph_identity(int rep_bound) const { return state_->graph_identity(rep_bound); }
+    std::string fen() const { return state_->fen(); }
+    int size() const { return size_; }
+    int width() const { return spec().width(size_); }
+    int height() const { return spec().height(size_); }
+    BoardGeometry geometry() const { return spec().geometry(size_); }
+    int area() const { return spec().area(size_); }
+    int canvas_area() const { return canvas_*canvas_; }
+    int canvas() const { return canvas_; }
+    int planes() const { return spec().planes; }
+    int globals() const { return spec().globals; }
+    int actions() const { return spec().actions(canvas_); }
+    int local_actions() const { return spec().actions(size_); }
+    int local_action(int a) const { return spec().local_action(a,size_,canvas_); }
+    int native_action(int a) const { return spec().native_action(a,size_,canvas_); }
+    std::vector<int> static_actions() const { return spec().static_actions(size_,canvas_); }
     double pda_doublings() const { return pda_doublings_; }
     int pda_player() const { return pda_player_; }
     void set_pda(double doublings,int player) {
         if(!std::isfinite(doublings) || doublings<0 || doublings>std::log2(100.0) ||
            (player!=1 && player!=-1 && player!=0) || (doublings!=0 && player==0))
             throw std::runtime_error("Invalid PDA conditioning");
-        pda_doublings_=doublings; pda_player_=doublings==0?0:player;
+        pda_doublings_=doublings;pda_player_=doublings==0?0:player;
     }
-    int size() const { return board_.size; }
-    int canvas() const { return canvas_; }
-    int actions() const { return canvas_ * canvas_; }
-    int player() const { return player_; }
+    Rule rule() const { return rule_; }
+    int player() const { return state_->player(); }
     int turn() const { return turn_; }
     int last_action() const { return last_action_; }
-    int winner() const { return winner_; }
-    int reason() const { return reason_; }
-    Rule rule() const { return rule_; }
-    bool finished() const { return finished_; }
-    const Board& board() const { return board_; }
-    bool legal(int a) const {
-        return !finished_ && a >= 0 && a < actions() && a / canvas_ < size() && a % canvas_ < size() &&
-               board_.cells[a / canvas_ * size() + a % canvas_] == 0;
+    Outcome outcome() const { return state_->outcome(); }
+    int winner() const { return outcome().winner; }
+    Reason reason() const { return outcome().reason; }
+    bool finished() const { return state_->finished(); }
+    const Board& board() const { return state_->board(); }
+    bool legal(int a) const { return state_->legal(a); }
+    bool subtree_bias_key(int action,SubtreeValueBiasKey& key) const {
+        return state_->subtree_bias_key(last_action_,action,key);
     }
-    std::vector<float> observation() const { return observation(player_); }
-    // Counterfactual side-to-move input used by balanced opening root rejection.
-    std::vector<float> observation(int perspective, bool forbidden_feature = true) const {
-        if (perspective != 1 && perspective != -1) throw std::runtime_error("Invalid observation perspective");
-        const int spatial = INPUT_PLANES * actions();
-        std::vector<float> out(spatial + GLOBAL_FEATURES, 0);
-        RenjuAnalyzer analyzer;
-        const bool enabled = rule_ == Rule::RENJU && forbidden_feature;
-        for (int y = 0; y < size(); ++y) for (int x = 0; x < size(); ++x) {
-            int a = y * canvas_ + x, local = y * size() + x, cell = board_.cells[local];
-            out[a] = 1;
-            out[actions() + a] = cell == perspective;
-            out[2 * actions() + a] = cell == -perspective;
-            if (enabled && !cell && analyzer.forbidden(board_, local))
-                out[(perspective == 1 ? 3 : 4) * actions() + a] = 1;
-        }
-        out[spatial] = rule_ == Rule::STANDARD;
-        out[spatial + 1] = rule_ == Rule::RENJU;
-        out[spatial + 2] = rule_ == Rule::RENJU ? -perspective : 0;
-        out[spatial + 3] = enabled;
-        out[spatial + HEX_GLOBAL] = rule_ == Rule::HEX;
-        out[spatial + HEX_WHITE_GLOBAL] = rule_ == Rule::HEX && perspective == -1;
-        if(pda_doublings_!=0) {
-            out[spatial+4]=1;out[spatial+5]=static_cast<float>(0.5*pda_doublings_*(perspective==pda_player_?1:-1));
-        }
-        return out;
+    std::vector<float> observation() const { return observation(player()); }
+    std::vector<float> observation(int perspective,bool forbidden_feature=true) const {
+        if(perspective!=1 && perspective!=-1)throw std::runtime_error("Invalid observation perspective");
+        return state_->observation(perspective,pda_doublings_==0?0.0:pda_doublings_*(perspective==pda_player_?1:-1),forbidden_feature);
     }
     double terminal_value() const {
-        if (!finished_) throw std::runtime_error("State is not terminal");
-        return winner_ * player_;
+        if(!finished())throw std::runtime_error("State is not terminal");
+        return outcome().value(player());
     }
+    double terminal_draw_probability() const { if(!finished())throw std::runtime_error("State is not terminal");return outcome().draw_probability(); }
     void play(int a) {
-        if (!legal(a)) throw std::runtime_error("Illegal move: " + std::to_string(a));
-        int local = a / canvas_ * size() + a % canvas_;
-        if (rule_ == Rule::RENJU && player_ == 1) {
-            RenjuAnalyzer analyzer;
-            if (analyzer.forbidden(board_, local)) { winner_ = -1; reason_ = 2; }
-        }
-        board_.cells[local] = player_;
-        last_action_ = a;
-        ++turn_;
-        if (rule_ == Rule::HEX && board_.hex_connected(player_)) { winner_ = player_; reason_ = 3; }
-        if (rule_ != Rule::HEX && !winner_) for (int n : board_.lengths(local, player_))
-            if (n == 5 || (n > 5 && (rule_ == Rule::FREESTYLE || (rule_ == Rule::RENJU && player_ == -1)))) {
-                winner_ = player_; reason_ = 1;
-            }
-        finished_ = winner_ || turn_ == size() * size();
-        if (rule_ == Rule::HEX && finished_ && !winner_) throw std::runtime_error("Full Hex board has no connection");
-        player_ = -player_;
+        if(!legal(a))throw std::runtime_error("Illegal move: "+std::to_string(a));
+        state_->play(a);last_action_=a;++turn_;
     }
 };
 }

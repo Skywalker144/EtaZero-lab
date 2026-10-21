@@ -141,6 +141,30 @@ def test_evaluation_errors_are_rejected_before_creating_work(tmp_path, failure):
     assert not (tmp_path/'work').exists()
 
 
+@pytest.mark.parametrize('rules,match_rule,compatible', [
+    (('go', 'xiangqi'), 'go', False), (('go', 'go'), 'xiangqi', False),
+    (('go', 'go'), 'go', True), (('xiangqi', 'xiangqi'), 'xiangqi', True),
+    (('freestyle', 'hex'), 'hex', True)])
+def test_evaluation_checks_planned_game_layouts(tmp_path, rules, match_rule, compatible):
+    directory = umbrella(tmp_path)
+    for name, rule in zip(('a', 'b'), rules):
+        c = load_config(CONFIGS/'smoke_test', run_dir=tmp_path/name)
+        c['environment'].update(sizes='10', size_weights='1', rules=rule, rule_weights='1')
+        c['network']['canvas'] = 10
+        c['symmetry'].update(nn_symmetry=0, root_num_symmetries_to_sample=1)
+        write_arm_config(c, directory/name)
+    (directory/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'
+                                      f'[match]\nboard_size=10\nrule={match_rule}\n'
+                                      'nn_symmetry=0\nroot_num_symmetries_to_sample=1\n')
+    work = tmp_path/'work'
+    if compatible:
+        assert len(experiment_plan(directory, environ={'AUTOELO': 'true'}, work_dir=work)['arms']) == 2
+    else:
+        with pytest.raises(ValueError, match='Match rule and model game layout differ'):
+            experiment_plan(directory, environ={'AUTOELO': 'true'}, work_dir=work)
+    assert not work.exists()
+
+
 def test_shared_weights_group_by_network_seed_and_reuse_atomic_payload(tmp_path):
     config = load_config(CONFIGS / 'smoke_test')
     alternate = copy.deepcopy(config); alternate['optimizer']['lr_scale'] *= 2

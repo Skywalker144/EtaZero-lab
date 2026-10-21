@@ -7,21 +7,13 @@
 
 namespace etazero::muzero {
 std::vector<int> symmetry_mapping(int n,int s) {
-    if(s<0 || s>7)throw std::runtime_error("Invalid MuZero symmetry");
-    std::vector<int> map(n*n);
-    for(int a=0;a<n*n;++a) {
-        int x=a%n,y=a/n,tx=x,ty=y;
-        switch(s){case 1:tx=y;ty=n-1-x;break;case 2:tx=n-1-x;ty=n-1-y;break;
-        case 3:tx=n-1-y;ty=x;break;case 4:tx=y;ty=x;break;case 5:tx=n-1-x;break;
-        case 6:tx=n-1-y;ty=n-1-x;break;case 7:ty=n-1-y;break;}
-        map[a]=ty*n+tx;
-    }
-    return map;
+    if(s<0 || s>11)throw std::runtime_error("Invalid MuZero symmetry");
+    return spatial_mapping(n,s);
 }
-std::vector<float> transform_observation(const std::vector<float>& obs,int n,const std::vector<int>& map) {
-    if(obs.size()!=static_cast<size_t>(INPUT_PLANES*n*n+GLOBAL_FEATURES))throw std::runtime_error("MuZero observation shape mismatch");
+std::vector<float> transform_observation(const std::vector<float>& obs,int n,const std::vector<int>& map,GameSpec spec) {
+    if(obs.size()!=static_cast<size_t>(spec.planes*n*n+spec.globals))throw std::runtime_error("MuZero observation shape mismatch");
     auto result=obs;
-    for(int p=0;p<INPUT_PLANES;++p)for(int a=0;a<n*n;++a)result[p*n*n+map[a]]=obs[p*n*n+a];
+    for(int p=0;p<spec.planes;++p)for(int a=0;a<n*n;++a)result[p*n*n+map[a]]=obs[p*n*n+a];
     return result;
 }
 void restore_evaluation(Evaluation& e,const std::vector<int>& map) {
@@ -40,6 +32,9 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends,in
     :backends_(std::move(backends)),recurrent_(backends_.size()),cache_(cache),batch_(batch),capacity_(capacity),wait_us_(wait),
      canvas_(canvas),symmetry_(symmetry),randomize_(randomize),random_(seed) {
     if(backends_.empty() || !batch || !capacity || wait<0)throw std::runtime_error("Invalid MuZero service configuration");
+    for(auto& backend:backends_)backend->initialize();
+    spec_=backends_[0]->spec();
+    for(const auto& backend:backends_)if(!same_layout(spec_,backend->spec()))throw std::runtime_error("MuZero server layout mismatch");
     rows_by_server.resize(backends_.size());
     try{for(size_t i=0;i<backends_.size();++i)threads_.emplace_back(&BatchEvaluator::serve,this,i);}
     catch(...){finish();throw;}
@@ -63,6 +58,9 @@ InferenceOutput BatchEvaluator::submit(Request& request,size_t server) {
     return output;
 }
 InferenceOutput BatchEvaluator::initial(const std::vector<float>& obs) {
+    auto spec=spec_;
+    if(obs.size()!=static_cast<size_t>(spec.planes*canvas_*canvas_+spec.globals))
+        throw std::runtime_error("MuZero observation shape mismatch");
     submitted.fetch_add(1,std::memory_order_relaxed);std::string key;size_t slot=0;
     if(!cache_.empty()) {
         // Input is already in the fixed tree orientation; exact globals retain PDA/rules.
@@ -87,12 +85,12 @@ Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
 Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int symmetry,bool skip,double temperature,bool randomize,double optimism) {
     if(!std::isfinite(temperature)||temperature<=0||!std::isfinite(optimism)||optimism<0||optimism>1)
         throw std::runtime_error("Invalid MuZero evaluation settings");
-    input_symmetry(obs,symmetry);
-    if(randomize){std::lock_guard<std::mutex> lock(random_mutex_);symmetry=std::uniform_int_distribution<int>(0,hex_input(obs)?1:7)(random_);}
-    auto map=symmetry_mapping(canvas_,input_symmetry(obs,symmetry));
-    auto input=transform_observation(obs,canvas_,map);InferenceOutput result;
+    input_symmetry(obs,spec_,symmetry);
+    if(randomize){std::lock_guard<std::mutex> lock(random_mutex_);symmetry=std::uniform_int_distribution<int>(0,symmetry_count(obs,spec_)-1)(random_);}
+    auto map=symmetry_mapping(canvas_,input_symmetry(obs,spec_,symmetry));
+    auto input=transform_observation(obs,canvas_,map,spec_);InferenceOutput result;
     if(skip){submitted.fetch_add(1,std::memory_order_relaxed);thread_local Request request;request.observation=&input;result=submit(request,0);}else result=initial(input);
-    restore_evaluation(result.evaluation,map);return result.evaluation;
+    restore_evaluation(result.evaluation,policy_mapping(map,spec_));return result.evaluation;
 }
 void BatchEvaluator::serve(size_t server) {
     auto complete=[](Request* r,InferenceOutput output,std::exception_ptr error) {
@@ -102,7 +100,6 @@ void BatchEvaluator::serve(size_t server) {
     InferenceInputs initial_inputs;std::vector<InferenceAction> recurrent_inputs;
     batch.reserve(batch_);initial_inputs.reserve(batch_);recurrent_inputs.reserve(batch_);
     try {
-        backends_[server]->initialize();
         for(;;) {
             bool initial;
             {std::unique_lock<std::mutex> lock(mutex_);
@@ -143,22 +140,24 @@ void BatchEvaluator::reset_stats(){drain();requests=0;batches=0;max_observed_bat
 
 namespace {uint64_t mix(uint64_t x){x+=0x9e3779b97f4a7c15ULL;x=(x^(x>>30))*0xbf58476d1ce4e5b9ULL;x=(x^(x>>27))*0x94d049bb133111ebULL;return x^(x>>31);}}
 InferenceOutput RandomBackend::output(std::shared_ptr<State> state) {
-    std::mt19937_64 rng(state->key);Evaluation e;e.logits.resize(canvas_*canvas_);
+    std::mt19937_64 rng(state->key);Evaluation e;e.logits.resize(state->mask.size());
     for(auto& p:e.logits)p=std::uniform_real_distribution<double>(-1,1)(rng);
     double win=std::uniform_real_distribution<double>(0,1)(rng);e.wdl={win,0,1-win};return {state,std::move(e)};
 }
 std::vector<InferenceOutput> RandomBackend::initial(const InferenceInputs& inputs) {
     std::vector<InferenceOutput> result;
-    for(auto input:inputs){if(!input||input->size()!=static_cast<size_t>(INPUT_PLANES*canvas_*canvas_+GLOBAL_FEATURES))throw std::runtime_error("Random MuZero input shape");
-        auto state=std::make_shared<State>();state->key=seed_;state->mask.resize(canvas_*canvas_);
-        for(size_t i=0;i<input->size();++i){uint32_t bits;std::memcpy(&bits,&(*input)[i],sizeof(bits));state->key=mix(state->key^bits);if(i<state->mask.size())state->mask[i]=(*input)[i]!=0;}
+    for(auto input:inputs){if(!input)throw std::runtime_error("Random MuZero null input");
+        auto spec=spec_;
+        if(input->size()!=static_cast<size_t>(spec.planes*canvas_*canvas_+spec.globals))throw std::runtime_error("Random MuZero observation shape");
+        auto state=std::make_shared<State>();state->key=seed_;state->mask.resize(spec.actions(canvas_),1);
+        for(size_t i=0;i<input->size();++i){uint32_t bits;std::memcpy(&bits,&(*input)[i],sizeof(bits));state->key=mix(state->key^bits);if(spec.kind!=GameKind::XIANGQI && i<static_cast<size_t>(canvas_*canvas_))state->mask[i]=(*input)[i]!=0;}
         result.push_back(output(state));}
     return result;
 }
 std::vector<InferenceOutput> RandomBackend::recurrent(const std::vector<InferenceAction>& inputs) {
     std::vector<InferenceOutput> result;
     for(const auto& input:inputs){auto parent=std::dynamic_pointer_cast<const State>(input.latent);
-        if(!parent||input.action<0||input.action>=canvas_*canvas_||!parent->mask[input.action])throw std::runtime_error("Invalid random MuZero transition");
+        if(!parent||input.action<0||input.action>=static_cast<int>(parent->mask.size())||!parent->mask[input.action])throw std::runtime_error("Invalid random MuZero transition");
         auto state=std::make_shared<State>(*parent);state->key=mix(parent->key^mix(input.action));result.push_back(output(state));}
     return result;
 }

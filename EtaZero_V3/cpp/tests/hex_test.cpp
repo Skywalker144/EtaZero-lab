@@ -1,3 +1,4 @@
+#include "etazero/hex.h"
 #include "etazero/game.h"
 #include "etazero/opening.h"
 #include "etazero/algorithm.h"
@@ -30,18 +31,18 @@ int main(){
     try {
         Board b(5);
         for(int y=0;y<5;++y)b.cells[y*5+4-y]=1;
-        check(b.hex_connected(1),"Anti-diagonal is a six-neighbor Black connection");
+        check(hex_connected(b,1),"Anti-diagonal is a six-neighbor Black connection");
         std::fill(b.cells.begin(),b.cells.end(),0);
         for(int y=0;y<5;++y)b.cells[y*5+y]=1;
-        check(!b.hex_connected(1),"Virtual bridges are not actual connections");
+        check(!hex_connected(b,1),"Virtual bridges are not actual connections");
         std::fill(b.cells.begin(),b.cells.end(),0);
         for(int x=0;x<5;++x)b.cells[10+x]=-1;
-        check(b.hex_connected(-1) && !b.hex_connected(1),"White connects left/right");
+        check(hex_connected(b,-1) && !hex_connected(b,1),"White connects left/right");
         std::mt19937_64 random(19);
-        for(int seed=0;seed<1000;++seed){for(auto& cell:b.cells)cell=(random()&1)?1:-1;check(b.hex_connected(1)!=b.hex_connected(-1),"Every full Hex coloring has exactly one winner");}
+        for(int seed=0;seed<1000;++seed){for(auto& cell:b.cells)cell=(random()&1)?1:-1;check(hex_connected(b,1)!=hex_connected(b,-1),"Every full Hex coloring has exactly one winner");}
         Game game(5,7,Rule::HEX);
         for(int a:{2,0,9,1,16,3,23,4,30})game.play(a);
-        check(game.finished() && game.winner()==1 && game.reason()==3 && game.terminal_value()==-1,"Black terminal perspective and reason");
+        check(game.finished() && game.winner()==1 && game.reason()==Reason::CONNECTION && game.terminal_value()==-1,"Black terminal perspective and reason");
         check(!game.legal(5),"No moves after connection");
         check(hex_opening_accept_rate(.5,20,.001)==1,"Fair first move always accepted");
         check(std::abs(hex_opening_accept_rate(.75,2,.001)-.5625)<1e-12,"Acceptance formula hand calculation");

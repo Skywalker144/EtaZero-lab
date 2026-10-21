@@ -2,6 +2,7 @@
 from functools import lru_cache
 import torch
 from .schema import HEX_GLOBAL, HEX_WHITE_GLOBAL
+from .games import XIANGQI_MOVES, XIANGQI_INDEX, SPECS
 
 
 def apply_symmetry(tensor, symmetry):
@@ -33,26 +34,51 @@ def coordinate_maps(canvas, device):
     return spatial.to(device), spatial.argsort(1).to(device)
 
 
-def augment_batch(batch, symmetry):
+@lru_cache(maxsize=16)
+def xiangqi_maps(canvas, device):
+    spatial, actions = [], []
+    for choice in range(4):
+        def xy(x,y):
+            if choice & 2: x,y = 8-x,9-y
+            if choice & 1: x = 8-x
+            return x,y
+        forward = list(range(canvas*canvas))
+        for y in range(10):
+            for x in range(9):
+                u,v = xy(x,y); forward[y*canvas+x] = v*canvas+u
+        spatial.append(torch.tensor(forward).argsort())
+        actions.append(torch.tensor([XIANGQI_INDEX[(*xy(x,y),*xy(u,v))] for x,y,u,v in XIANGQI_MOVES]))
+    return torch.stack(spatial).to(device), torch.stack(actions).to(device)
+
+
+def augment_batch(batch, symmetry, spec=SPECS['gomoku']):
     if symmetry not in range(8):
-        raise ValueError('D4 requires a symmetry in [0,7]')
-    canvas = batch['obs'].shape[-1]
-    globals = batch['globals']
-    # Hex's 180-degree rotation followed by White transpose is D4 6;
-    # the other Hex cases are D4 0, 2, 4. Select one map per row and reuse
-    # it for every target instead of materializing both games' transforms.
-    choices = torch.where(globals[:, HEX_GLOBAL] != 0,
-                          2*(symmetry%2) + 4*(globals[:, HEX_WHITE_GLOBAL] != 0).long(), symmetry)
-    spatial, actions = coordinate_maps(canvas, batch['obs'].device)
-    mapping = spatial[choices]
-    def transform(value):
+        raise ValueError('D4 requires a square tensor and a symmetry in [0,7]')
+    obs, globals = batch['obs'], batch['globals']
+    canvas = obs.shape[-1]
+    if spec.symmetry == 'xiangqi':
+        choices = (symmetry%2) + 2*(globals[:,0] == 0).long()
+        spatial, forward = xiangqi_maps(canvas, obs.device)
+        policy = forward.argsort(1)
+    else:
+        choices = (torch.where(globals[:, HEX_GLOBAL] != 0,
+                   2*(symmetry%2) + 4*(globals[:, HEX_WHITE_GLOBAL] != 0).long(), symmetry)
+                   if spec.name in ('gomoku', 'hex') else torch.full((len(obs),),symmetry,device=obs.device,dtype=torch.long))
+        spatial, forward = coordinate_maps(canvas, obs.device)
+        policy = spatial
+        if spec.action_layout == 'points_pass':
+            extra = torch.full((8,1),canvas*canvas,device=obs.device,dtype=torch.long)
+            policy, forward = torch.cat((policy,extra),1), torch.cat((forward,extra),1)
+    def transform(value, mapping):
         shape = value.shape
-        flat = value.reshape(len(value), -1, canvas*canvas)
+        flat = value.reshape(len(value), -1, mapping.shape[1])
         return flat.gather(2, mapping[:, None].expand(-1, flat.shape[1], -1)).reshape(shape)
-    result={**batch,'obs':transform(batch['obs'])}
+    spatial_mapping = spatial[choices]
+    policy_mapping = spatial_mapping if spec.action_layout == 'points' else policy[choices]
+    result={**batch,'obs':transform(obs,spatial_mapping)}
     for key in ('policy','opponent_policy','q_values','q_visits'):
         if key in batch:
-            result[key]=transform(batch[key])
+            result[key]=transform(batch[key],policy_mapping)
     if 'actions' in batch:
-        result['actions']=actions[choices].gather(1,batch['actions'].long())
+        result['actions']=forward[choices].gather(1,batch['actions'].long())
     return result

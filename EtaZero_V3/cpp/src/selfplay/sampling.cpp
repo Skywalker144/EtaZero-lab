@@ -1,3 +1,4 @@
+#include "etazero/game_config.h"
 #include "etazero/sampling.h"
 #include <cmath>
 #include <iterator>
@@ -28,21 +29,25 @@ std::vector<InitialPosition> load_hint_positions(const Config& c,int canvas) {
     std::vector<InitialPosition> positions;
     if(c.number("hint_positions.hint_positions_prob")==0)return positions;
     const auto path=c.text("hint_positions.positions_file");
-    std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot open Gomoku hint positions: "+path);
+    std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot open game hint positions: "+path);
     std::string contents{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
-    if(file.bad())throw std::runtime_error("Cannot read Gomoku hint positions: "+path);
+    if(file.bad())throw std::runtime_error("Cannot read game hint positions: "+path);
+    const auto options=rule_options(c,GameConfigMode::SELFPLAY);
     std::istringstream input(contents);
     for(std::string line;std::getline(input,line);) {
         line=trim(line);if(line.empty() || line[0]=='#')continue;
         std::istringstream row(line);int size,hint,count;std::string rule;double weight;
-        if(!(row>>size>>rule>>weight>>hint>>count) || !std::isfinite(weight)||weight<0||size>canvas||size<5||count<0||count>=size*size||hint<0||hint>=size*size)
-            throw std::runtime_error("Invalid Gomoku hint row: "+line);
-        Game game(size,canvas,parse_rule(rule));InitialPosition position{game,{},InitialKind::Hint,hint/size*canvas+hint%size,weight};
+        if(!(row>>size>>rule>>weight>>hint>>count) || !std::isfinite(weight)||weight<0||size>canvas||size<5||count<0||hint<0)
+            throw std::runtime_error("Invalid game hint row: "+line);
+        Game game(size,canvas,parse_rule(rule),options);
+        if(c.contains("environment.rules") && !same_layout(game_spec(parse_rule(c.list("environment.rules").front())),game.spec()))
+            throw std::runtime_error("Hint input layout differs from configured environment");
+        InitialPosition position{game,{},InitialKind::Hint,game.native_action(hint),weight};
         for(int i=0;i<count;++i) {
-            int local;if(!(row>>local)||local<0||local>=size*size)throw std::runtime_error("Invalid Gomoku hint prefix");
-            int action=local/size*canvas+local%size;position.game.play(action);position.actions.push_back(action);
+            int local;if(!(row>>local)||local<0||local>=game.local_actions())throw std::runtime_error("Invalid game hint prefix");
+            int action=game.native_action(local);position.game.play(action);position.actions.push_back(action);
         }
-        std::string extra;if(row>>extra)throw std::runtime_error("Trailing Gomoku hint fields");
+        std::string extra;if(row>>extra)throw std::runtime_error("Trailing game hint fields");
         if(position.game.finished()||!position.game.legal(position.hint_action))throw std::runtime_error("Terminal hint position or occupied hint move");
         positions.push_back(std::move(position));
     }
@@ -69,12 +74,12 @@ std::optional<InitialPosition> make_game_fork(const FinishedGame& record,const G
     bool early=c.early_probability>0 && std::bernoulli_distribution(c.early_probability)(rng);
     bool late=!early && c.late_probability>0 && std::bernoulli_distribution(c.late_probability)(rng);
     if(!early && !late)return {};
-    size_t move_index=early?static_cast<size_t>(std::floor(std::exponential_distribution<double>(1)(rng)*c.early_expected_move_proportion*record.size*record.size)):
+    size_t move_index=early?static_cast<size_t>(std::floor(std::exponential_distribution<double>(1)(rng)*c.early_expected_move_proportion*record.size*game_spec(record.rule).width(record.size))):
         (record.steps.empty()?0:std::uniform_int_distribution<size_t>(0,record.steps.size()-1)(rng));
     // Source replayGameUpToMove always stops before the final recorded move,
     // including the unbounded exponential tail of early forks.
     if(!record.steps.empty())move_index=std::min(move_index,record.steps.size()-1);
-    Game game(record.size,record.canvas,record.rule);std::vector<int> actions;
+    Game game(record.size,record.canvas,record.rule,record.options);std::vector<int> actions;
     for(size_t i=0;i<move_index && i<record.steps.size() && !game.finished();++i) {int a=record.steps[i].action;game.play(a);actions.push_back(a);}
     if(game.finished())return {};
     int choices=std::uniform_int_distribution<int>(c.minimum_choices,early?c.early_maximum_choices:c.late_maximum_choices)(rng);
@@ -99,7 +104,7 @@ std::optional<InitialPosition> make_game_fork(const FinishedGame& record,const G
 std::optional<InitialPosition> make_hint_fork(const FinishedGame& record) {
     size_t prefix=record.opening.actions.size();int hint=record.opening.hint_action;
     if(record.opening.initial_position_kind!=static_cast<int>(InitialKind::Hint) || hint<0 || prefix>=record.steps.size() || record.steps[prefix].action==hint)return {};
-    Game game(record.size,record.canvas,record.rule);std::vector<int> actions;
+    Game game(record.size,record.canvas,record.rule,record.options);std::vector<int> actions;
     for(size_t i=0;i<prefix;++i){int action=record.steps[i].action;game.play(action);actions.push_back(action);}
     if(game.finished()||!game.legal(hint))return {};
     game.play(hint);if(game.finished())return {};actions.push_back(hint);
@@ -205,6 +210,7 @@ void reanalyze_positions(FinishedGame& record,const std::vector<Game>& positions
                         const std::function<bool()>& should_stop) {
     compute_value_surprises(record,config.direct_value_surprise);
     auto selected=select_reanalysis_turns(record,config,rng);size_t prefix=record.opening.actions.size();
+    if(selected.empty())return;
     if(positions.size()+prefix!=record.steps.size())throw std::runtime_error("Reanalysis positions/trajectory mismatch");
     for(size_t turn:selected) {
         if(should_stop && should_stop())return;

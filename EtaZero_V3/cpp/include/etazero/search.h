@@ -26,6 +26,7 @@ struct SearchSettings {
     int nn_symmetry = 0, max_playouts = std::numeric_limits<int>::max();
     double fpu_parent_weight = 0, max_time = 1e20;
     bool graph_search = false;
+    int graph_rep_bound = 11;
     double graph_catch_up_leak_prob = 0;
     bool use_uncertainty=false, use_noise_pruning=false;
     double uncertainty_coeff=0.25, uncertainty_exponent=1, uncertainty_max_weight=8;
@@ -144,7 +145,15 @@ protected:
     struct Move {
         int action=-1;
         std::atomic<int> child_index{-1};
-        double prior=0, search_prior=0;
+    };
+    // Published as one immutable snapshot, including the history-specific mask.
+    // Go can replace it while other paths still read the previous evaluation.
+    struct NodeEvaluation {
+        double initial_value=0, initial_weight=1, initial_stdev=0;
+        bool has_auxiliary=false;
+        WDL initial_wdl{0,1,0};
+        std::vector<double> prior, search_prior; // Negative entries are illegal.
+        std::vector<int> prior_order; // Legal, unexpanded move candidates.
     };
     struct Node {
         enum Status { EMPTY, EXPANDING, READY, FAILED };
@@ -153,16 +162,15 @@ protected:
         std::string graph_identity;
         size_t lock_index;
         explicit Node(size_t index) : id(index), lock_index(index%64) {}
-        double initial_value = 0, initial_weight=1, initial_stdev=0;
-        bool has_auxiliary=false;
-        WDL initial_wdl{0,1,0};
+        std::shared_ptr<const NodeEvaluation> evaluation;
+        std::shared_ptr<const NodeEvaluation> evaluated() const { return std::atomic_load_explicit(&evaluation,std::memory_order_acquire); }
+        void publish(std::shared_ptr<const NodeEvaluation> value) { std::atomic_store_explicit(&evaluation,std::move(value),std::memory_order_release); }
         ValueStats stats;
         SubtreeValueBias subtree_bias;
         std::mutex stats_mutex, update_mutex;
         std::exception_ptr error;
         std::unique_ptr<Move[]> moves;
         size_t move_count=0;
-        std::vector<int> prior_order;
         std::array<std::unique_ptr<Edge[]>,3> storage;
         std::array<std::atomic<Edge*>,3> published{};
         std::atomic<int> child_count{0};
@@ -184,7 +192,9 @@ protected:
         std::unique_ptr<SearchState> state;
         std::vector<Visit> path;
         std::vector<int> candidates;
+        std::vector<int> legal_actions;
         std::unordered_set<Node*> graph_path;
+        std::unordered_set<size_t> illegal_graph_nodes;
     };
     std::vector<ThreadState> thread_states_;
     Evaluator* evaluator_ = nullptr;
@@ -220,9 +230,10 @@ protected:
     std::function<void()> report_; // Invoked only by coordinator worker 0.
     std::exception_ptr error_;
     bool expand(Node& node, const SearchState& state, int worker);
-    void evaluate_node(Node& node,const SearchState& state,int worker,int symmetries);
+    void evaluate_node(Node& node,const SearchState& state,int worker,int symmetries,bool skip_cache=false);
     ValueStats snapshot(Node& node);
-    std::vector<RootChildStats> child_stats(Node& node,bool aggregation=false);
+    std::vector<RootChildStats> child_stats(Node& node,const NodeEvaluation& eval,bool aggregation=false);
+    bool prune_root_children(const SearchState& state);
     void recompute(Node& node,int visits_to_add=0); // Serializes updates without holding parent stats during child reads.
     Node* new_node();
     Node* find_node(const SearchState& state,const SubtreeValueBiasKey* bias_key);

@@ -30,7 +30,7 @@ def history(root, times, algorithm=None):
         model.parent.mkdir(parents=True, exist_ok=True)
         model.write_bytes(f'{root.name}:{i}'.encode())
         info = {'id': str(i), 'path': str(model.relative_to(root)),
-                'canvas': 15, 'bytes': model.stat().st_size}
+                'canvas': 15, 'game': 'gomoku', 'bytes': model.stat().st_size}
         if algorithm:
             info['algorithm'] = algorithm
         save_json(model.parent/'manifest.json', info)

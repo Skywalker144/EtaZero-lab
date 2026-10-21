@@ -300,7 +300,7 @@ public:
                     throw std::runtime_error("Missing or invalid Hex opening gates");
                 hex_opening_accept_rate(0.5,config_.hex_balance_exponent,config_.hex_min_accept_rate);
                 if (config_.hex_probability>0 && random_.coin(config_.hex_probability)) hex_balanced(game);
-            } else if (!game.finished() && config_.probability > 0 && random_.coin(config_.probability)) balanced(game);
+            } else if (!game.finished() && game.rule()!=Rule::GO && game.rule()!=Rule::XIANGQI && config_.probability > 0 && random_.coin(config_.probability)) balanced(game);
             bool run_policy = result_.status == OpeningStatus::NotAttempted ||
                 (result_.status == OpeningStatus::Success ? config_.policy_after : config_.policy_on_failure);
             if (run_policy && config_.policy_init) policy(game);

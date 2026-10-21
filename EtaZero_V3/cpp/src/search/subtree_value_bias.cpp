@@ -1,26 +1,8 @@
 #include "etazero/subtree_value_bias.h"
-#include "etazero/game.h"
 #include <cmath>
+#include <stdexcept>
 
 namespace etazero {
-SubtreeValueBiasKey subtree_value_bias_key(const Game& before,int action) {
-    if(before.last_action()<0 || !before.legal(action))throw std::runtime_error("Subtree value bias needs two real legal moves");
-    int x=action%before.canvas(),y=action/before.canvas();
-    SubtreeValueBiasKey key;
-    for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx) {
-        int xx=x+dx,yy=y+dy,color=3;
-        if(xx>=0 && yy>=0 && xx<before.size() && yy<before.size()) {
-            int cell=before.board().cells[yy*before.size()+xx];color=cell==0?0:cell==1?1:2;
-        }
-        key.pattern=(key.pattern<<2)|static_cast<uint64_t>(color);
-    }
-    // Use board coordinates, independent of the NN canvas (KataGo Location).
-    auto location=[&](int a){return (a/before.canvas()+1)*(before.size()+1)+a%before.canvas()+1;};
-    key.moves=static_cast<uint64_t>(location(before.last_action())) |
-              (static_cast<uint64_t>(location(action))<<16) |
-              (static_cast<uint64_t>(before.player()==1?2:1)<<32);
-    return key;
-}
 double SubtreeValueBias::apply(double utility,double factor) const {
     if(!entry || factor==0)return utility;
     std::lock_guard<std::mutex> lock(entry->mutex);

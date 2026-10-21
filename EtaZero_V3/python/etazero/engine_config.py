@@ -6,12 +6,12 @@ is flattened once for native consumers and provenance; no training files are rea
 import math
 import os
 from pathlib import Path
-from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_hex_symmetry
+from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_game_symmetry
 from .schema import RULES
 from .config_files import read_config_file
 from .config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_search_combination
 
-ENGINE_FIELDS = dict(playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
+ENGINE_FIELDS = dict(go_rules=str, komi=float, playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
               temperature=float, temperature_early=float, max_batch=int, server_threads=int, cache_entries=int,
               inference_precision=str, batch_wait_us=int, muzero_queue_capacity=int,
@@ -96,7 +96,10 @@ def _load_profile(source, match, environ, *, groups=None, overrides=None):
                 else:
                     raw = defaults.get(key)
             if raw is None and group == section:
-                if key in ('root_search_algo', 'nonroot_search_algo'):
+                if key == 'graph_search_rep_bound': raw = '11'
+                elif key == 'go_rules': raw = 'chinese'
+                elif key == 'komi': raw = '7.5'
+                elif key in ('root_search_algo', 'nonroot_search_algo'):
                     raw = 'puct'
                 elif key.startswith('gumbel_'):
                     value = GUMBEL_DEFAULTS[key.removeprefix('gumbel_')]
@@ -121,12 +124,19 @@ def validate_engine_config(config, match=False):
     for group, values in config.items():
         for key, value in values.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if not math.isfinite(value) or value < 0:
+                if not math.isfinite(value) or (value < 0 and key != 'komi'):
                     raise ValueError(f'Invalid {group}.{key}')
     if not 0 <= c['seed'] < 2**64 or not 5 <= c['board_size'] <= 25:
         raise ValueError('Invalid engine seed or board size')
     if c['rule'] not in RULES:
         raise ValueError('Invalid engine rule')
+    from .games import spec_for_rule
+    spec = spec_for_rule(c['rule'])
+    if not spec.subtree_value_bias and c['subtree_value_bias_factor'] != 0:
+        raise ValueError(f'{spec.name} does not support subtree value bias; requires subtree_value_bias_factor=0')
+    if c['rule']=='go':
+        from .games import validate_go_komi
+        validate_go_komi(c['komi'])
     if not 1 <= c['visits'] <= 2**31-1 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','muzero_queue_capacity')) or c['c_puct'] <= 0:
         raise ValueError('Engine requires visits >= 1 and positive execution/search sizes')
     if c['lcb_stdevs'] <= 0 or c['fpu_parent_weight_by_visited_policy_pow'] < 0 or c['min_visit_prop_for_lcb'] > 1:
@@ -134,7 +144,8 @@ def validate_engine_config(config, match=False):
     if not 0<=c['playout_doubling_advantage']<=math.log2(100) or c['playout_doubling_advantage_player'] not in ('black','white'):
         raise ValueError('Invalid engine PDA condition')
     validate_search_parameters(c)
-    if c['rule']=='hex': validate_hex_symmetry(c)
+    validate_game_symmetry(c,spec)
+    if c['rule']=='xiangqi' and c['board_size']!=10: raise ValueError('Xiangqi requires board_size=10')
     if c['device'] != 'cpu' and not (c['device'].startswith('cuda:') and c['device'][5:].isdigit()):
         raise ValueError('Engine device must be cpu or cuda:<index>')
     if c['inference_precision'] not in ('auto', 'float32', 'float16') or (c['device'] == 'cpu' and c['inference_precision'] == 'float16'):
@@ -143,13 +154,13 @@ def validate_engine_config(config, match=False):
         if c['games'] < 4 or c['games'] % 4 or c['game_threads'] < 1:
             raise ValueError('Match games must be a positive multiple of four')
         if c['rule']=='hex': validate_hex_opening(config['hex_opening'],match=True)
-        else: validate_match_opening(config['opening'])
+        elif c['rule'] not in ('go','xiangqi'): validate_match_opening(config['opening'])
 
 
 def validate_match_opening(o):
     for key, value in o.items():
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if not math.isfinite(value) or value < 0:
+            if not math.isfinite(value) or (value < 0 and key != 'komi'):
                 raise ValueError(f'Invalid opening.{key}')
     if o['probability'] != 1 or not 0 <= o['rejection_probability'] <= 1 or not 0 <= o['rejection_probability_fallback'] < 1:
         raise ValueError('Matches require successful balanced openings and fallback rejection below one')

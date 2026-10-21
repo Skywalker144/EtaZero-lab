@@ -4,10 +4,10 @@
 namespace etazero {
 // Stateless per-observation outputs: reproducible across batch/thread scheduling.
 class RandomBackend final : public Backend {
-    int actions_;
+    int canvas_;
     uint64_t seed_;
 public:
-    RandomBackend(int canvas, uint64_t seed);
+    RandomBackend(int canvas,uint64_t seed,GameSpec spec=game_spec(GameKind::GOMOKU));
     std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override;
 };
 }

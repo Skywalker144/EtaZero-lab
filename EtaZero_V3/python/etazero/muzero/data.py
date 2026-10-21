@@ -5,18 +5,20 @@ real-row weights are normalized by the snapshot's mean main-row weight; roots
 already reflect writer multiplicity. Absorbing actions are drawn by the reader's
 checkpointed RNG, while absent side continuations are fully masked.
 """
+from ..outcomes import terminal_wdl
 import math
 import numpy as np
 
 from ..data import metadata, alphazero_training_view, full_trajectory_td, TRAIN_TARGETS, TRAIN_POLICY_TARGETS
-from ..schema import PLANES, GLOBALS
+from ..schema import PLANES, GLOBALS, RULES
+from ..games import spec_for_metadata, static_action_mask, SPECS
 
 TARGETS = TRAIN_TARGETS
 EXTRA = ('actions', 'step_weights', 'sequence_mask', 'absorbing')
 
 
 def validate_trajectory(a):
-    m = metadata(a); t, area = m['plies'], m['canvas'] ** 2
+    m = metadata(a); t, area = m['plies'], spec_for_metadata(m).actions(m['canvas'])
     if type(m.get('unroll_steps')) is not int or not m['unroll_steps'] >= 1:
         raise ValueError('Invalid MuZero unroll length')
     for name in ('trajectory_policy', 'trajectory_q_values', 'trajectory_q_visits'):
@@ -38,7 +40,7 @@ def validate_trajectory(a):
 def training_view(a, targets=TARGETS):
     td = full_trajectory_td(a) if 'td_value' in targets else None
     root = alphazero_training_view(a, targets, td=td)
-    m = metadata(a); k = m['unroll_steps']; n = len(root['value']); area = m['canvas'] ** 2
+    m = metadata(a); k = m['unroll_steps']; n = len(root['value']); area = spec_for_metadata(m).actions(m['canvas'])
     result = {key: root[key] for key in ('obs', 'globals')}
     for key in targets:
         result[key] = np.zeros((n, k+1, *root[key].shape[1:]),
@@ -60,11 +62,11 @@ def training_view(a, targets=TARGETS):
     starts = starts[m['row_begin']:m['row_begin'] + n]
     if len(starts) != n:
         raise ValueError('MuZero start-row ordering mismatch')
+    outcomes = terminal_wdl(a['winners'], a['reasons'])
     for row, (g, start) in enumerate(starts):
         # Normalizable masked targets also keep loss evaluation finite when a
         # side-only batch has no recurrent rows.
-        mask = np.zeros(area, np.int16); size = int(a['sizes'][g]); canvas = m['canvas']
-        mask.reshape(canvas, canvas)[:size, :size] = 1
+        mask = static_action_mask(RULES[a['rules'][g]], int(a['sizes'][g]), m['canvas'])
         # Unit integer weights normalize to the same on-board uniform policy.
         result['policy'][row, 1:] = mask
         if 'opponent_policy' in targets:
@@ -72,7 +74,7 @@ def training_view(a, targets=TARGETS):
         if start < 0:
             continue
         lo, hi = a['game_offsets'][g:g+2]; ol = a['observation_offsets'][g]
-        player = int(a['players'][ol + start-lo]); winner = int(a['winners'][g])
+        player = int(a['players'][ol + start-lo])
         result['sequence_mask'][row] = 1
         for step in range(k+1):
             current = start + step
@@ -80,8 +82,8 @@ def training_view(a, targets=TARGETS):
                 result['actions'][row, step] = a['actions'][current] if current < hi else -1
             if not step:
                 continue
-            outcome = winner * player * (-1 if step % 2 else 1)
-            terminal = np.array([outcome == 1, outcome == 0, outcome == -1], np.float32)
+            perspective = player * (-1 if step % 2 else 1)
+            terminal = outcomes[g, ::perspective]
             result['value'][row, step] = terminal
             if current >= hi:
                 result['absorbing'][row, step] = 1
@@ -124,12 +126,13 @@ def replay_weight_mean(root, sources):
     return total / count
 
 
-def validate_view(arrays, rows, canvas, steps, targets=TARGETS):
-    shapes = {'obs': (rows, len(PLANES), (canvas*canvas+7)//8), 'globals': (rows, len(GLOBALS)),
+def validate_view(arrays, rows, canvas, steps, targets=TARGETS, game_metadata=None):
+    spec = spec_for_metadata(game_metadata or {})
+    shapes = {'obs': (rows, spec.planes, (canvas*canvas+7)//8), 'globals': (rows, spec.globals),
               'actions': (rows, steps), 'step_weights': (rows, steps+1),
               'sequence_mask': (rows, steps+1), 'absorbing': (rows, steps+1)}
     for key in targets:
-        trailing = (canvas*canvas,) if key in ('policy', 'opponent_policy', 'q_values', 'q_visits') else (3,3) if key == 'td_value' else (3,) if key == 'value' else ()
+        trailing = (spec.actions(canvas),) if key in ('policy', 'opponent_policy', 'q_values', 'q_visits') else (3,3) if key == 'td_value' else (3,) if key == 'value' else ()
         shapes[key] = (rows, steps+1, *trailing)
     if set(arrays) != set(shapes):
         raise ValueError('MuZero training-view fields mismatch')
@@ -140,13 +143,15 @@ def validate_view(arrays, rows, canvas, steps, targets=TARGETS):
             raise ValueError(f'Invalid MuZero training {key}')
 
 
-def prepare_batch(batch, mean_weight, rng):
+def prepare_batch(batch, mean_weight, rng, spec=SPECS['gomoku']):
     batch['step_weights'] = batch['step_weights'].copy()
     batch['step_weights'][:, 1:] = np.where(batch['absorbing'][:, 1:], 1., batch['step_weights'][:, 1:] / mean_weight)
     batch['actions'] = batch['actions'].copy()
     absorbing = batch['absorbing'][:, :-1]
     for row in np.flatnonzero(absorbing.any(axis=1)):
-        actions = np.flatnonzero(batch['obs'][row, 0].reshape(-1))
+        actions = (np.arange(spec.fixed_actions) if spec.action_layout == 'moves' else
+                   np.flatnonzero(batch['obs'][row, 0].reshape(-1)))
+        if spec.action_layout == 'points_pass': actions = np.r_[actions, batch['obs'].shape[-1]**2]
         for step in np.flatnonzero(absorbing[row]):
             batch['actions'][row, step] = actions[rng.randrange(len(actions))]
     del batch['absorbing']

@@ -164,7 +164,7 @@ class NestedBottleneckBlock(nn.Module):
 
 
 class PolicyHead(nn.Module):
-    def __init__(self, channels, width, activation='mish', predict_q_values=False):
+    def __init__(self, channels, width, activation='mish', predict_q_values=False, game='gomoku', canvas=15):
         super().__init__()
         self.local = nn.Conv2d(channels, width, 1, bias=False)
         self.global_conv = nn.Conv2d(channels, width, 1, bias=False)
@@ -173,7 +173,12 @@ class PolicyHead(nn.Module):
         self.linear = nn.Linear(3 * width, width, bias=False)
         self.bias = BiasMask(width)
         self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
-        self.out = nn.Conv2d(width, len(POLICY_HEADS)+int(predict_q_values), 1, bias=False)
+        from .games import policy_indices, XIANGQI_DELTAS
+        self.game = game
+        self.head_count = len(POLICY_HEADS)+int(predict_q_values)
+        self.out = nn.Conv2d(width, self.head_count*(len(XIANGQI_DELTAS) if game=='xiangqi' else 1), 1, bias=False)
+        self.pass_out = nn.Linear(3*width, self.head_count, bias=False) if game=='go' else nn.Identity()
+        self.register_buffer('action_indices', torch.tensor(policy_indices(canvas) if game=='xiangqi' else [], dtype=torch.long), persistent=False)
         init_weights(self.local.weight, 0.8, activation=activation)
         init_weights(self.global_conv.weight, activation=activation)
         init_weights(self.linear.weight, 0.6, activation=activation)
@@ -181,11 +186,18 @@ class PolicyHead(nn.Module):
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         context = self.act(self.global_bias(self.global_conv(x), mask))
-        context = self.linear(self.pool(context, mask)).unsqueeze(-1).unsqueeze(-1)
+        pooled = self.pool(context, mask)
+        context = self.linear(pooled).unsqueeze(-1).unsqueeze(-1)
         # Global context must enter before the nonlinear activation; a constant
         # added to final spatial logits cancels in the policy softmax.
         local = self.act(self.bias(self.local(x) + context, mask))
-        return self.out(local).flatten(2)
+        result = self.out(local)
+        if self.game == 'xiangqi':
+            return result.reshape(result.shape[0], self.head_count, -1).index_select(2, self.action_indices)
+        result = result.flatten(2)
+        if self.game == 'go':
+            result = torch.cat((result, self.pass_out(pooled).unsqueeze(-1)), 2)
+        return result
 
 
 class ValueHead(nn.Module):
@@ -209,7 +221,7 @@ class ValueHead(nn.Module):
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, canvas, channels, blocks, architecture, predict_q_values=False):
+    def __init__(self, canvas, channels, blocks, architecture, predict_q_values=False, game='gomoku'):
         super().__init__()
         widths = network_widths(channels, architecture)
         self.architecture = architecture
@@ -224,9 +236,12 @@ class PolicyValueNet(nn.Module):
         self.norm_kind = 'fixup' if architecture == 'transformer' else 'fixscaleonenorm'
         self.model_version = 17 if architecture == 'transformer' else 15
         activation = 'relu' if architecture == 'transformer' else 'mish'
+        from .games import SPECS
+        spec = SPECS[game]
+        self.game, self.input_planes, self.global_features = game, spec.planes, spec.globals
         self.canvas = canvas
-        self.stem = nn.Conv2d(len(PLANES), channels, 3, padding=1, bias=False)
-        self.linear_global = nn.Linear(len(GLOBALS), channels, bias=False)
+        self.stem = nn.Conv2d(self.input_planes, channels, 3, padding=1, bias=False)
+        self.linear_global = nn.Linear(self.global_features, channels, bias=False)
         init_weights(self.stem.weight, 0.8, activation=activation)
         init_weights(self.linear_global.weight, 0.6, activation=activation)
         if architecture == 'plain':
@@ -247,8 +262,12 @@ class PolicyValueNet(nn.Module):
         self.trunk_norm = (BiasMask(channels) if architecture == 'transformer' else
                            MaskedBatchNorm(channels, 1.0 / math.sqrt(blocks + 1.0)))
         self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
-        self.policy_head = PolicyHead(channels, widths['policy'], activation, self.predict_q_values)
+        self.policy_head = PolicyHead(channels, widths['policy'], activation, self.predict_q_values, game, canvas)
         self.value_head = ValueHead(channels, widths['value'], widths['value_hidden'], activation)
+
+    @torch.jit.export
+    def game_name(self) -> str:
+        return self.game
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:
@@ -280,25 +299,36 @@ def make_network(config):
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.network import MuZeroNet, network_config
         return MuZeroNet(network_config(config), config.get('muzero_training', {}).get('auxiliary_losses', True))
+    from .games import spec_for_config
+    game = spec_for_config(config).name
     from .katago_configs import is_preset
     if is_preset(config['network']['architecture']):
         from .katago_network import KataGoNet
-        return KataGoNet(**config['network'])
-    return PolicyValueNet(**config["network"])
+        return KataGoNet(**config['network'], game=game)
+    return PolicyValueNet(**config["network"], game=game)
+
+
+def action_mask(obs: torch.Tensor, actions: int, layout: str = 'points') -> torch.Tensor:
+    mask = obs[:, 0].flatten(1)
+    if layout == 'moves':
+        return mask.new_ones((mask.size(0), actions))
+    if layout == 'points_pass':
+        return torch.cat((mask, mask.new_ones((mask.size(0),1))),1)
+    return mask
 
 
 def row_mean(value, weight=None):
     return value.mean(0) if weight is None else (value * weight.reshape((-1,) + (1,) * (value.ndim-1))).mean(0)
 
 
-def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight=None):
+def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight=None, action_layout='points'):
     """Float targets on the logits' device: policy/opponent [N,A], weight [N], WDL [N,3].
 
-    Training logits are [N,4,A], A=canvas². Reduce every weighted component
+    Training logits are [N,heads,A], with the game's fixed action count A. Reduce every weighted component
     over the full batch, including zero-weight terminal opponent rows.
     """
     # Occupied points remain in the training softmax; outside-canvas padding does not.
-    mask = obs[:, 0].flatten(1)
+    mask = action_mask(obs, logits.size(-1), action_layout)
     logp = torch.log_softmax(logits.float().masked_fill(~mask[:, None].bool(), -1e9), dim=2)
     # KataGo metrics_pytorch.py: soften over all on-board cells, including occupied ones.
     policies = torch.stack((policy, opponent_policy), dim=1)
@@ -336,7 +366,7 @@ def error_variance(raw):
 
 
 def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
-                     full_game_weight, disable_optimistic_policy, row_weight=None):
+                     full_game_weight, disable_optimistic_policy, row_weight=None, action_layout='points'):
     """Row multiplicity is already resolved; complete-game gate is independent of TD."""
     td_logp = torch.log_softmax(td_logits.float(), dim=2)
     entropy = -(td_target * torch.log(td_target + 1e-30)).sum(2)
@@ -356,7 +386,7 @@ def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_targe
     else:
         long_weight = (target[:, 0] + 0.5 * target[:, 1]).square() * full_game_weight
         short_weight = torch.sigmoid(3.0 * ((actual - predicted) / torch.sqrt(variance.detach() + 0.0001) - 1.5)) * full_game_weight
-    mask = obs[:, 0].flatten(1).bool()
+    mask = action_mask(obs, logits.size(-1), action_layout).bool()
     logp = torch.log_softmax(logits[:, 4:6].float().masked_fill(~mask[:, None], -1e9), dim=2)
     normalized = policy / policy.sum(1, keepdim=True)
     ce = -(normalized[:, None] * logp).sum(2)
@@ -380,10 +410,10 @@ def q_winloss_loss(prediction, target, visits, row_weight=None):
 
 def losses(logits, value, td_logits, raw_error, obs, policy, opponent_policy,
            opponent_policy_weight, target, td_target, full_game_weight,
-           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None, row_weight=None):
-    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight)
+           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None, row_weight=None, action_layout='points'):
+    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight, action_layout)
     auxiliary = auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
-                                 full_game_weight, disable_optimistic_policy, row_weight)
+                                 full_game_weight, disable_optimistic_policy, row_weight, action_layout)
     if logits.shape[1]==7:
         if q_values is None or q_visits is None:
             raise ValueError('Enabled Q head requires per-action Q value/node-visit targets')
@@ -397,6 +427,8 @@ class TrainingForward(nn.Module):
     def __init__(self, model, soft_policy_weight_scale, disable_optimistic_policy):
         super().__init__()
         self.model = model
+        from .games import SPECS
+        self.action_layout = SPECS[model.game].action_layout
         self.soft_policy_weight_scale = soft_policy_weight_scale
         self.disable_optimistic_policy = disable_optimistic_policy
 
@@ -407,7 +439,7 @@ class TrainingForward(nn.Module):
         with torch.autocast("cuda", enabled=False):
             components = [losses(*head, obs, policy, opponent_policy, opponent_policy_weight,
                                  target, td_target, full_game_weight, self.soft_policy_weight_scale,
-                                 self.disable_optimistic_policy, q_values, q_visits) for head in outputs]
+                                 self.disable_optimistic_policy, q_values, q_visits, action_layout=self.action_layout) for head in outputs]
             weights = getattr(self.model, 'head_loss_weights', (1.0,))
             return tuple(sum(weight * value for weight, value in zip(weights, values))
                          for values in zip(*components))
@@ -417,6 +449,11 @@ class InferencePolicyValueNet(nn.Module):
     """Only search outputs: ordinary/short optimistic logits, WDL and error stdev."""
     def __init__(self, model):
         super().__init__();self.model=model
+        self.game=model.game
+
+    @torch.jit.export
+    def game_name(self) -> str:
+        return self.game
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:

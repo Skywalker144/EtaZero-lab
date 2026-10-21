@@ -171,7 +171,7 @@ int main(){
         check(rejected,"parallel recurrent failure must propagate without deadlock");
     }
     for(int symmetry=0;symmetry<8;++symmetry){
-        auto map=mu::symmetry_mapping(6,symmetry);auto obs=game.observation();auto transformed=mu::transform_observation(obs,6,map);
+        auto map=mu::symmetry_mapping(6,symmetry);auto obs=game.observation();auto transformed=mu::transform_observation(obs,6,map,game.spec());
         for(int plane=0;plane<5;++plane)for(int action=0;action<36;++action)
             check(obs[plane*36+action]==transformed[plane*36+map[action]],"fixed orientation input/action consistency");
         Evaluation e;e.logits.resize(36);for(int action=0;action<36;++action)e.logits[map[action]]=action;

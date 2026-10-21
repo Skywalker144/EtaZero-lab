@@ -926,7 +926,7 @@ def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatc
 
 def test_graph_configuration_bounds_and_environment_override(config):
     from etazero.engine_config import load_engine_config,validate_engine_config
-    assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0)
+    assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0,graph_search_rep_bound=11)
     for match in (False,True):
         group='match' if match else 'analysis';prefix='MATCH_' if match else 'ANALYSIS_'
         for leak in (0,0.5,1):

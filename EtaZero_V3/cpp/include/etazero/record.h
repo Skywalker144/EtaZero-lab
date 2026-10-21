@@ -33,8 +33,11 @@ struct SidePosition {
 };
 struct FinishedGame {
     uint64_t id, seed;
-    int size, canvas, winner, reason;
+    int size, canvas, winner=0;
+    Reason reason=Reason::DRAW;
+    Outcome outcome() const { return {winner,reason}; }
     Rule rule;
+    RuleOptions options;
     std::vector<Step> steps;
     std::vector<float> final_observation;
     int final_player;

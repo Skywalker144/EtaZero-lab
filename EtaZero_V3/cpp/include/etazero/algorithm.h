@@ -21,14 +21,17 @@ public:
     virtual bool legal(int action) const = 0;
     virtual bool terminal() const = 0;
     virtual double terminal_value() const = 0;
+    virtual double terminal_draw_probability() const {return terminal_value()==0?1:0;}
     // Policy logits are returned in the original action coordinates.
     virtual Evaluation evaluate(SearchEvaluation options = {}) const = 0;
     virtual int symmetry_count() const { return 1; }
-    // Exact situation identity includes all rule/history/input conditions that affect continuations.
-    // Unsupported state adapters must refuse graph search explicitly.
+    // Exact identity by default. Go opts into KataGo's bounded-history sharing;
+    // the actual path remains authoritative for legality and terminal outcomes.
+    virtual void prepare_graph(int) const {}
+    virtual bool graph_approximates_history() const { return false; }
     virtual std::string graph_key() const { throw std::runtime_error("State does not support graph search"); }
     virtual bool supports_subtree_value_bias() const { return false; }
-    // Called BEFORE the selected move. False denotes insufficient real history.
+    // Called BEFORE the selected legal move. The game decides whether to share.
     virtual bool subtree_bias_key(int,SubtreeValueBiasKey&) const {
         throw std::runtime_error("State does not support real-board subtree value bias");
     }
@@ -38,41 +41,50 @@ public:
 class AlphaZeroState final : public SearchState {
     Game game_;
     Evaluator& evaluator_;
+    mutable int graph_rep_bound_=11;
 public:
     AlphaZeroState(const Game& game, Evaluator& evaluator) : game_(game), evaluator_(evaluator) {}
-    std::unique_ptr<SearchState> clone() const override { return std::make_unique<AlphaZeroState>(game_,evaluator_); }
+    std::unique_ptr<SearchState> clone() const override { return std::make_unique<AlphaZeroState>(*this); }
     bool reset_from(const SearchState& state) override {
         auto other=dynamic_cast<const AlphaZeroState*>(&state);
         if (!other || &evaluator_!=&other->evaluator_) return false;
-        game_=other->game_;return true;
+        game_=other->game_;graph_rep_bound_=other->graph_rep_bound_;return true;
     }
     int actions() const override { return game_.actions(); }
     bool legal(int action) const override { return game_.legal(action); }
     bool terminal() const override { return game_.finished(); }
     double terminal_value() const override { return game_.terminal_value(); }
-    int symmetry_count() const override { return game_.rule()==Rule::HEX?2:8; }
-    bool supports_subtree_value_bias() const override { return true; }
+    double terminal_draw_probability() const override {return game_.terminal_draw_probability();}
+    int symmetry_count() const override { return game_.spec().symmetries; }
+    void prepare_graph(int rep_bound) const override { graph_rep_bound_=rep_bound; }
+    bool graph_approximates_history() const override { return game_.rule()==Rule::GO; }
+    bool supports_subtree_value_bias() const override { return game_.spec().subtree_value_bias; }
     bool subtree_bias_key(int action,SubtreeValueBiasKey& key) const override {
-        if(game_.last_action()<0)return false;
-        key=subtree_value_bias_key(game_,action);return true;
+        return game_.subtree_bias_key(action,key);
     }
     Evaluation evaluate(SearchEvaluation options = {}) const override {
         return evaluator_.evaluate_symmetry(game_.observation(),options.symmetry,options.skip_cache,
                                            options.policy_temperature,options.randomize,options.optimism);
     }
     std::string graph_key() const override {
-        // NOVC Gomoku only adds stones: repetitions/ko/pass/history-based adjudication do not occur.
-        // The terminal flag/result distinguish an ended path from a playable board of the same layout.
         std::string key;
-        for(int n:{game_.size(),game_.canvas(),game_.player(),game_.turn(),int(game_.rule()),
-                   int(game_.finished()),game_.winner(),game_.reason()}) {
+        auto append=[&](int n) {
             uint32_t bits=static_cast<uint32_t>(n);
             for(int i=0;i<4;++i)key.push_back(static_cast<char>((bits>>(8*i))&255));
-        }
+        };
+        for(int n:{game_.size(),game_.canvas(),int(game_.rule())})append(n);
         // Conditioning changes NN input at every depth and must split transpositions.
         double d=game_.pda_doublings();
         key.append(reinterpret_cast<const char*>(&d),sizeof(d));key.push_back(static_cast<char>(game_.pda_player()));
-        for(int8_t cell:game_.board().cells)key.push_back(static_cast<char>(cell));
+        if(graph_approximates_history()) {
+            // Do not append turn, recent NN history or the full move sequence:
+            // those would prevent the transpositions GraphHash deliberately permits.
+            key+=game_.graph_identity(graph_rep_bound_);
+        } else {
+            for(int n:{game_.player(),game_.turn(),int(game_.finished()),game_.winner(),int(game_.reason())})append(n);
+            for(int cell:game_.board().cells)key.push_back(static_cast<char>(cell));
+            key+=game_.history_identity();
+        }
         return key;
     }
     int move(int action) override {

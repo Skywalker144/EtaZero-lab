@@ -15,10 +15,13 @@ from .reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
 from .storage import atomic_write, load_json, save_json, sync_directory
 from .symmetry import augment_batch
 from .training_metrics import TrainingMetrics
+from .games import SPECS, spec_for_config
 
 
 def model_identity(config):
     fields = {'network_config': config['network']}
+    from .games import spec_for_config, layout_metadata
+    if spec_for_config(config).name in ('go','xiangqi'): fields['game_layout'] = layout_metadata(config)
     if config['agent']['algorithm'] == 'muzero':
         fields.update(algorithm='muzero', muzero_config=config['muzero'])
     return fields
@@ -47,11 +50,11 @@ def forward_batch(forward, tensors):
     return forward(*(tensors.get(key) for key in keys)), None
 
 
-def augment_training_batch(tensors, symmetry):
+def augment_training_batch(tensors, symmetry, spec=SPECS['gomoku']):
     if 'actions' in tensors:
         from .muzero.training import augment_batch as muzero_augment
-        return muzero_augment(tensors, symmetry)
-    return augment_batch(tensors, symmetry)
+        return muzero_augment(tensors, symmetry, spec)
+    return augment_batch(tensors, symmetry, spec)
 
 
 def device_check(device):
@@ -207,6 +210,7 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
     if not usable:
         log('validation',iteration=iteration,samples=0,batches=0,reason='no_complete_validation_batch')
         return
+    spec=spec_for_config(config)
     reader=BatchReader(snapshot,batch_size,config['training']['prefetch_depth'],
                        config['run']['seed']+iteration,split='validation',
                        shuffle_files=config['training']['randomize_validation_files'])
@@ -226,7 +230,7 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
                 tensors={k:torch.from_numpy(a).to(device=device,dtype=torch.int64 if k in ('actions','recurrent_indices') else torch.float32)
                          for k,a in batch.items()}
                 symmetry=symmetries.randrange(8);draws[symmetry]+=1
-                tensors=augment_training_batch(tensors,symmetry) # Always on for validation.
+                tensors=augment_training_batch(tensors,symmetry,spec) # Always on for validation.
                 context=torch.autocast('cuda',dtype=torch.float16 if amp=='float16' else torch.bfloat16) if amp!='off' else contextlib.nullcontext()
                 with context:
                     components,step_losses=forward_batch(forward,tensors)
@@ -255,6 +259,7 @@ def subepoch_ends(steps,segments):
 
 def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     root, iteration = Path(run_dir), plan["iteration"]
+    spec = spec_for_config(config)
     progress_path = root/".internal/iterations"/f"{iteration:06d}"/"learner.json"
     progress = load_json(progress_path) if progress_path.exists() else None
     if progress and progress['snapshot_id'] != plan['snapshot_id']:
@@ -343,7 +348,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                     tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
             symmetry = int(torch.randint(8, ()).item()) if config['training']['d4_augmentation'] else 0
             # White Hex canonicalization also applies when augmentation is off.
-            tensors = augment_training_batch(tensors, symmetry)
+            tensors = augment_training_batch(tensors, symmetry, spec)
             optimization.before_step()
             if hasattr(model, 'prepare_brenorm'):
                 model.prepare_brenorm(optimization.consumed_samples, config.get('brenorm'))

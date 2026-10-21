@@ -19,6 +19,7 @@ import signal
 import numpy as np
 from .data import open_raw, training_view, training_targets, TRAIN_TARGETS, game_row_ranges, game_identity
 from .schema import GLOBALS, PLANES
+from .games import spec_for_config, layout_metadata
 from .storage import atomic_write, load_json, save_json, save_npz, write_npz
 
 
@@ -223,16 +224,17 @@ def _merge_bucket(task):
 def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
     """Conservative array estimates, excluding interpreter/allocator and OS overhead."""
     s, canvas = config["shuffle"], config["network"]["canvas"]
+    spec = spec_for_config(config); actions = spec.actions(canvas)
     # Packed observations, int16 policies and float32 W-L Q/visits,
     # opponent/full-game gates, three TD WDLs and main WDL.
     # Estimate all targets conservatively, including optional Q outputs.
-    train_bytes = len(GLOBALS)*4 + len(PLANES)*((canvas*canvas+7)//8) + 12*canvas*canvas + 2*4 + 9*4 + 12
+    train_bytes = spec.globals*4 + spec.planes*((canvas*canvas+7)//8) + 12*actions + 2*4 + 9*4 + 12
     # Raw includes int64 visits and at most twice as many observations as moves.
-    raw_bytes = 20*canvas*canvas + 10*((canvas*canvas+7)//8) + 164
+    raw_bytes = 20*actions + 2*spec.planes*((canvas*canvas+7)//8) + 164
     if config.get('agent', {}).get('algorithm') == 'muzero':
         steps = config['unroll']['steps']
-        train_bytes += steps * (12*canvas*canvas + 56) + 8*steps + 9*(steps+1)
-        raw_bytes += 6*canvas*canvas
+        train_bytes += steps * (12*actions + 56) + 8*steps + 9*(steps+1)
+        raw_bytes += 6*actions
     # Configuration determines the plan; estimates never shrink groups/buckets.
     group_rows=s['group_rows']
     nominal=s['training_shard_rows']
@@ -387,7 +389,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None, counts=None):
             usable=sum(e['rows']//config['training']['batch_size']*config['training']['batch_size'] for e in files)
             partition.update(usable_rows_per_pass=usable,complete_batches_per_pass=usable//config['training']['batch_size'],
                              discarded_tail_rows_per_pass=sum(e['rows'] for e in files)-usable)
-        manifest = {"id":identity,"canvas":config["network"]["canvas"],
+        manifest = {**layout_metadata(config), "id":identity,"canvas":config["network"]["canvas"],
                     "iteration":iteration,"seed":seed,"rows":sum(e['rows'] for e in outputs),
                     "window_rows":rows,"desired_rows":desired,"keep_prob":plan['keep_prob'],"resource_plan":plan,
                     'sources':train_sources,'files':outputs,'selection':selection,

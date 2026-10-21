@@ -31,13 +31,15 @@ SearchResult Search::analysis_snapshot(int actions,const GumbelSettings* gumbel)
     SearchResult out;
     out.policy.assign(actions,0);out.move_policy=out.network_policy=out.search_policy=out.policy;out.visits.assign(actions,0);
     auto parent=snapshot(*root_);out.value=parent.win_loss;
-    out.network_wdl=root_->initial_wdl;out.search_wdl=wdl_from_value(parent.win_loss,parent.draw);
+    auto eval=root_->evaluated();
+    out.network_wdl=eval->initial_wdl;out.search_wdl=wdl_from_value(parent.win_loss,parent.draw);
     std::vector<int> visited;std::vector<RootChildStats> stats;
     std::map<int,std::pair<int,RootChildStats>> ordered;
     // Root moves are immutable once workers start. Acquire publication before reading a child.
     for(size_t i=0;i<root_->move_count;++i) {
+        if(eval->prior[i]<0)continue;
         const auto& move=root_->moves[i];AnalysisCandidate c;c.action=move.action;c.pv.push_back(c.action);
-        out.network_policy[c.action]=move.prior;out.search_policy[c.action]=move.search_prior;
+        out.network_policy[c.action]=eval->prior[i];out.search_policy[c.action]=eval->search_prior[i];
         int index=move.child_index.load(std::memory_order_acquire);
         if(index>=0) {
             auto& edge=root_->edge(index);auto n=edge.n.load();Node* child=edge.child.load(std::memory_order_acquire);
@@ -47,12 +49,14 @@ SearchResult Search::analysis_snapshot(int actions,const GumbelSettings* gumbel)
                     double scale=double(n)/q.visits,perspective=edge.perspective.load();
                     c.has_value=true;c.weight=q.weight*scale;c.utility=perspective*q.value;c.win_loss=perspective*q.win_loss;
                     c.wdl=wdl_from_value(c.win_loss,q.draw);out.visits[c.action]=n;
-                    ordered.emplace(index,std::make_pair(c.action,RootChildStats{move.search_prior,c.weight*c.utility,q.value_sq*c.weight,n,
+                    ordered.emplace(index,std::make_pair(c.action,RootChildStats{eval->search_prior[i],c.weight*c.utility,q.value_sq*c.weight,n,
                         c.weight,q.weight_sq*scale,q.draw*c.weight,c.win_loss*c.weight}));
                     std::unordered_set<Node*> seen{root_};Node* current=child;
                     while(current && c.pv.size()<32 && seen.insert(current).second && current->status.load(std::memory_order_acquire)==Node::READY) {
+                        auto current_eval=current->evaluated();
                         int best=-1;int64_t count=0;
                         for(int j=0;j<current->child_count.load(std::memory_order_acquire);++j) {
+                            if(current_eval->prior[current->edge(j).move_index]<0)continue;
                             auto visits=current->edge(j).n.load();if(visits>count){count=visits;best=j;}
                         }
                         if(best<0)break;

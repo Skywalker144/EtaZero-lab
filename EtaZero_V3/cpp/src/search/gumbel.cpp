@@ -6,7 +6,7 @@
 #include <numeric>
 namespace etazero {
 void GumbelSettings::validate() const {
-    if(max_num_considered_actions<1 || max_num_considered_actions>625 ||
+    if(max_num_considered_actions<1 || max_num_considered_actions>2086 ||
        !std::isfinite(c_visit) || c_visit<0 || !std::isfinite(c_scale) || c_scale<=0 ||
        !std::isfinite(noise_scale) || noise_scale<0)
         throw std::runtime_error("Invalid Gumbel settings");

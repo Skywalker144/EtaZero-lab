@@ -1,4 +1,5 @@
 """Resumable paired matches and equal committed-time Elo, adapted from MuZero_V2."""
+from .outcomes import has_result
 import argparse
 from dataclasses import asdict, dataclass
 import hashlib
@@ -206,7 +207,7 @@ class PairStore:
         if type(index) is not int or index < 0:
             raise ValueError('Invalid event ID')
         moves = event['moves']
-        if not isinstance(moves, list) or not moves or any(type(m) is not int or m < 0 for m in moves):
+        if not isinstance(moves, list) or (kind=='game' and not moves) or any(type(m) is not int or m < 0 for m in moves):
             raise ValueError('Invalid move history')
         if kind == 'opening':
             if index >= self.total // 2 or event['generator'] != index % 2 or not math.isfinite(event['value']):
@@ -349,6 +350,7 @@ def load_results(output: Path) -> tuple[dict, list[dict]]:
         a, b = pair['players']
         store = PairStore(output / 'pairs' / pair['id'], manifest['games_per_pair'])
         for row in store.games():
+            if not has_result(row.get('reason')): continue
             games.append({'pair': pair['id'], 'opening_id': row['opening_id'],
                           'black': a if row['black_a'] else b, 'white': b if row['black_a'] else a,
                           'score': (row['winner'] + 1) / 2})
@@ -364,7 +366,13 @@ def native_config(config, players):
 def validate_match_models(config, models):
     """Check shared match conditions against model metadata or planned networks."""
     canvases = set()
+    from .games import spec_for_rule
+    expected = spec_for_rule(config['match']['rule'])
     for info in models:
+        if 'game' not in info:
+            raise ValueError('Match model metadata is missing game')
+        if spec_for_rule(info['game']).layout != expected.layout:
+            raise ValueError('Match rule and model game layout differ')
         canvases.add(info['canvas'])
         if info.get('algorithm') == 'muzero' and (config['match']['reuse_tree'] or
                 config['match']['use_graph_search'] or config['match']['root_num_symmetries_to_sample'] != 1):

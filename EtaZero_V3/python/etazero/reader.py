@@ -11,6 +11,7 @@ import threading
 import numpy as np
 from .storage import load_json
 from .schema import PLANES, GLOBALS, unpack_observations
+from .games import spec_for_metadata
 from .data import TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 
 
@@ -86,19 +87,20 @@ class BatchReader:
         if self.manifest.get('algorithm') == 'muzero':
             from .muzero.data import validate_view
             validate_view(arrays, info['rows'], self.manifest['canvas'], self.manifest['unroll_steps'],
-                          self.manifest.get('targets', TRAIN_TARGETS))
+                          self.manifest.get('targets', TRAIN_TARGETS), self.manifest)
             return arrays
         if set(arrays) != {'obs', 'globals', *self.manifest.get('targets', TRAIN_TARGETS)} or len(arrays["value"]) != info["rows"]:
             raise ValueError(f"Invalid training view: {path}")
         canvas = self.manifest["canvas"]
-        expected = {"obs": ((info["rows"],len(PLANES),(canvas*canvas+7)//8),np.uint8),
-                    "globals": ((info["rows"],len(GLOBALS)),np.float32),
+        spec = spec_for_metadata(self.manifest)
+        expected = {"obs": ((info["rows"],spec.planes,(canvas*canvas+7)//8),np.uint8),
+                    "globals": ((info["rows"],spec.globals),np.float32),
                     "td_value": ((info["rows"],3,3),np.float32),
                     "full_game_weight": ((info["rows"],),np.float32),
-                    "q_values": ((info['rows'],canvas*canvas),np.float32),
-                    "q_visits": ((info['rows'],canvas*canvas),np.float32),
-                    "policy": ((info["rows"],canvas*canvas),np.int16),
-                    "opponent_policy": ((info["rows"],canvas*canvas),np.int16),
+                    "q_values": ((info['rows'],spec.actions(canvas)),np.float32),
+                    "q_visits": ((info['rows'],spec.actions(canvas)),np.float32),
+                    "policy": ((info["rows"],spec.actions(canvas)),np.int16),
+                    "opponent_policy": ((info["rows"],spec.actions(canvas)),np.int16),
                     "opponent_policy_weight": ((info["rows"],),np.float32),"value": ((info["rows"],3),np.float32)}
         for key in arrays:
             shape,dtype = expected[key]
@@ -132,7 +134,7 @@ class BatchReader:
                 if key in batch:batch[key]=batch[key].astype(np.float32)
             if self.manifest.get('algorithm') == 'muzero':
                 from .muzero.data import prepare_batch
-                batch = prepare_batch(batch, self.manifest['unroll_weight_mean'], self.random)
+                batch = prepare_batch(batch, self.manifest['unroll_weight_mean'], self.random, spec_for_metadata(self.manifest))
                 self._rng_state=self.random.getstate()
             if self.remaining_batches is not None:self.remaining_batches-=1
             return batch

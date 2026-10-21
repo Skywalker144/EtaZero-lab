@@ -1,10 +1,13 @@
 """Full-game records, checked AlphaZero views, and a derived unique-row catalog."""
+from .games import spec_for_rule
+from .outcomes import Reason, has_result, ordinary_wdl, terminal_wdl
 import json
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
 import numpy as np
-from .schema import RAW_DTYPES, PLANES, GLOBALS, unpack_observations
+from .schema import RAW_DTYPES, PLANES, GLOBALS, RULES, REASONS, unpack_observations
+from .games import spec_for_metadata
 
 
 def metadata(arrays):
@@ -78,6 +81,7 @@ def validate_raw(a, source="record", *, deep=True):
         require(a[key].dtype == np.dtype(dtype), f"{key}: dtype mismatch")
     m = metadata(a)
     n, t, canvas = m["games"], m["plies"], m["canvas"]
+    spec = spec_for_metadata(m); planes, globals_count, actions_count = spec.planes, spec.globals, spec.actions(canvas)
     require(n > 0 and t > 0 and 5 <= canvas <= 25, "invalid shard dimensions")
     require(a["game_offsets"].shape == (n+1,) and a["observation_offsets"].shape == (n+1,), "offset shapes")
     lengths = np.diff(a["game_offsets"])
@@ -100,10 +104,10 @@ def validate_raw(a, source="record", *, deep=True):
     samples = np.flatnonzero(a['row_repeats'] > 0)
     require(np.array_equal(a['sample_indices'], samples), "sample indices must match positive row repeats")
     s = len(samples)
-    expected = {"observations": (t+n, len(PLANES), (canvas*canvas+7)//8), "players": (t+n,), "globals": (t+n,len(GLOBALS)),
-                "sample_indices": (s,), "forbidden_input": (int(a["row_repeats"].sum()),), "policies": (s, canvas*canvas), "visits": (s, canvas*canvas),
-                "opponent_policies": (s, canvas*canvas), "opponent_policy_weights": (s,),
-                "q_values": (len(a['forbidden_input']),canvas*canvas), "q_visits": (s,canvas*canvas),
+    expected = {"observations": (t+n, planes, (canvas*canvas+7)//8), "players": (t+n,), "globals": (t+n,globals_count),
+                "sample_indices": (s,), "forbidden_input": (int(a["row_repeats"].sum()),), "policies": (s, actions_count), "visits": (s, actions_count),
+                "opponent_policies": (s, actions_count), "opponent_policy_weights": (s,),
+                "q_values": (len(a['forbidden_input']),actions_count), "q_visits": (s,actions_count),
                 "network_wdl": (t,3), "search_wdl": (t,3)}
     for key in ("game_ids", "seeds", "sizes", "rules", "winners", "reasons", "opening_moves", "balanced_moves", "policy_moves",
                 "opening_attempts", "opening_status", "start_values", "initial_position_moves", "initial_position_kind", "hint_actions"):
@@ -114,11 +118,11 @@ def validate_raw(a, source="record", *, deep=True):
     for key, shape in expected.items():
         require(a[key].shape == shape, f"{key}: shape mismatch")
     d = len(a['side_players'])
-    side_shapes = {'side_observations': (d,len(PLANES),(canvas*canvas+7)//8),
-                   'side_globals': (d,len(GLOBALS)), 'side_policies': (d,canvas*canvas),
-                   'side_visits': (d,canvas*canvas), 'side_wdl': (d,3),
-                   'side_q_values': (int(a['side_row_repeats'].sum()),canvas*canvas),
-                   'side_q_visits': (d,canvas*canvas),
+    side_shapes = {'side_observations': (d,planes,(canvas*canvas+7)//8),
+                   'side_globals': (d,globals_count), 'side_policies': (d,actions_count),
+                   'side_visits': (d,actions_count), 'side_wdl': (d,3),
+                   'side_q_values': (int(a['side_row_repeats'].sum()),actions_count),
+                   'side_q_visits': (d,actions_count),
                    'side_forbidden_input': (int(a['side_row_repeats'].sum()),)}
     for key in ('side_game_indices','side_players','side_row_repeats','side_target_weights'):
         side_shapes[key] = (d,)
@@ -129,7 +133,7 @@ def validate_raw(a, source="record", *, deep=True):
     if muzero:
         require(type(m.get('unroll_steps')) is int and m['unroll_steps'] >= 1, 'invalid unroll length')
         for key in extra:
-            require(a[key].shape == (t,canvas*canvas) and a[key].dtype == np.int16, f'{key}: layout mismatch')
+            require(a[key].shape == (t,actions_count) and a[key].dtype == np.int16, f'{key}: layout mismatch')
     game_row_ranges(a)
     # Native writers publish complete immutable records. Replay reads check the
     # layout; trajectory reconstruction is an explicit offline/test operation.
@@ -140,11 +144,11 @@ def validate_raw(a, source="record", *, deep=True):
         validate_trajectory(a)
     require(len(np.unique(a["game_ids"])) == n, "duplicate game IDs in shard")
     require(((a["sizes"] >= 5) & (a["sizes"] <= canvas)).all(), "game sizes/lengths")
-    require(np.isin(a["rules"], [0, 1, 2, 3]).all() and np.isin(a["winners"], [-1, 0, 1]).all() and
-            np.isin(a["reasons"], [0, 1, 2, 3]).all(), "invalid rule/result")
+    require(np.isin(a["rules"], range(len(RULES))).all() and np.isin(a["winners"], [-1, 0, 1]).all() and
+            np.isin(a["reasons"], range(len(REASONS))).all(), "invalid rule/result")
     if canvas*canvas % 8:
         require((a["observations"][:, :, -1] & ((1 << (8-canvas*canvas % 8))-1) == 0).all(), "nonzero packed tail bits")
-    for key in ("policies", "opponent_policies", "opponent_policy_weights", "temperatures", "rewards", "globals", "target_weights", "policy_surprises", "value_surprises", "network_wdl", "search_wdl"):
+    for key in ("policies", "opponent_policies", "opponent_policy_weights", "temperatures", "rewards", "globals", "side_globals", "target_weights", "policy_surprises", "value_surprises", "network_wdl", "search_wdl"):
         require(np.isfinite(a[key]).all(), f"nonfinite {key}")
     require(np.isin(a["train_mask"], [0, 1]).all(), "invalid train mask")
     game_row_ranges(a)
@@ -156,7 +160,7 @@ def validate_raw(a, source="record", *, deep=True):
     require(np.isin(kind,[0,1,2,3,4]).all(), 'initial position kind')
     require(((kind==0) <= (a['initial_position_moves']==0)).all() and
             ((kind>0) <= ((a['balanced_moves']==0) & (a['policy_moves']==0) & (a['opening_attempts']==0))).all(), 'initial prefix split')
-    require(((kind==1)==(hint>=0)).all() and ((hint>=-1)&(hint<canvas*canvas)).all(), 'hint action/kind')
+    require(((kind==1)==(hint>=0)).all() and ((hint>=-1)&(hint<actions_count)).all(), 'hint action/kind')
     require(((kind<2) | (a['initial_position_moves']>0)).all(), 'fork prefix length')
     require(np.isin(a["opening_status"], [0, 1, 2]).all() and (a["opening_attempts"] >= 0).all() and
             np.isfinite(a["start_values"]).all() and (np.abs(a["start_values"]) <= 1).all(), "opening result")
@@ -201,11 +205,11 @@ def validate_raw(a, source="record", *, deep=True):
         require((a[key]>=0).all() and not a[key][a["reanalyzed"]==0].any(), f"invalid reanalysis diagnostic: {key}")
     require((a["reanalysis_original_visits"][a["reanalyzed"]==1]>=1).all(), "missing original cheap visits")
     d = len(a['side_players'])
-    side_shapes = {'side_observations': (d,len(PLANES),(canvas*canvas+7)//8),
-                   'side_globals': (d,len(GLOBALS)), 'side_policies': (d,canvas*canvas),
-                   'side_visits': (d,canvas*canvas), 'side_wdl': (d,3),
-                   'side_q_values': (int(a['side_row_repeats'].sum()),canvas*canvas),
-                   'side_q_visits': (d,canvas*canvas),
+    side_shapes = {'side_observations': (d,planes,(canvas*canvas+7)//8),
+                   'side_globals': (d,globals_count), 'side_policies': (d,actions_count),
+                   'side_visits': (d,actions_count), 'side_wdl': (d,3),
+                   'side_q_values': (int(a['side_row_repeats'].sum()),actions_count),
+                   'side_q_visits': (d,actions_count),
                    'side_forbidden_input': (int(a['side_row_repeats'].sum()),)}
     for key in ('side_game_indices','side_players','side_row_repeats','side_target_weights'):
         side_shapes[key] = (d,)
@@ -228,6 +232,10 @@ def validate_raw(a, source="record", *, deep=True):
     require(not a['side_q_values'][a['side_q_visits'][sq_rows]==0].any(), 'side Q value on unvisited child')
     side_row_games = np.repeat(a['side_game_indices'], a['side_row_repeats'])
     require(not a['side_forbidden_input'][a['rules'][side_row_games] != 2].any(), 'side forbidden outside Renju')
+    if spec.name in ('go', 'xiangqi'):
+        from .rules_audit import validate_games
+        validate_games(a, require)
+        return
     for i, g in enumerate(a['side_game_indices']):
         observation = unpack_observations(a['side_observations'][i:i+1],canvas)[0]
         size, rule, player = a['sizes'][g], a['rules'][g], a['side_players'][i]
@@ -310,14 +318,14 @@ def validate_raw(a, source="record", *, deep=True):
         require((obs[-1, 1] == (board == players[-1])).all() and (obs[-1, 2] == (board == -players[-1])).all(), "final observation")
         winner = a["winners"][i]
         if a['rules'][i]==3:
-            require(winner!=0 and a['reasons'][i]==3, 'Hex requires a connection winner')
+            require(winner!=0 and a['reasons'][i]==Reason.CONNECTION, 'Hex requires a connection winner')
         else:
-            require(a['reasons'][i]!=3, 'connection result outside Hex')
+            require(a['reasons'][i]!=Reason.CONNECTION, 'connection result outside Hex')
         require((a["rewards"][lo:hi-1] == 0).all() and a["rewards"][hi-1] == winner*players[-2], "terminal reward")
-        require((winner == 0) == (a["reasons"][i] == 0), "draw/result reason mismatch")
+        require((winner == 0) == (a["reasons"][i] == Reason.DRAW), "draw/result reason mismatch")
         if winner == 0:
             require(hi-lo == size*size, "non-full draw")
-        if a["reasons"][i] == 2:
+        if a["reasons"][i] == Reason.FORBIDDEN:
             require(a["rules"][i] == 2 and winner == -1 and players[-2] == 1, "forbidden-loss metadata")
 
 
@@ -361,8 +369,8 @@ def full_trajectory_td(a):
         lo, hi = a['game_offsets'][g:g+2]
         ol = a['observation_offsets'][g]
         winner = a['winners'][g]
-        terminal = np.array([winner == 1, winner == 0, winner == -1], np.float64)
-        td[lo:hi] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(size)**2)
+        terminal = terminal_wdl(winner, a['reasons'][g], dtype=np.float64)
+        td[lo:hi] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, spec_for_rule(RULES[a['rules'][g]]).area(int(size)))
     return td
 
 
@@ -378,7 +386,7 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
         td = full_trajectory_td(a)
     obs = a["observations"][obs_ix]
     globals = a["globals"][obs_ix]
-    dropped = a["forbidden_input"] == 0
+    dropped = (a["forbidden_input"] == 0) & (a["rules"][games] == 2)
     obs[dropped, 3:5] = 0
     globals[dropped, 3] = 0
     # KataGo suppresses outcome-derived auxiliary targets on these reanalysis
@@ -386,9 +394,10 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     # through ix so every repeated output row receives the same gate.
     full_game_weight = ((a['reanalyzed'][ix] == 0) |
                         (a['reanalysis_used_outcome'][ix] != 0)).astype(np.float32)
+    # No-result main rows have zero repeats at the writer boundary.
     main = {"obs": obs, "globals": globals,
             "policy": a['policies'][rows],
-            "value": np.stack((result==1,result==0,result==-1),axis=1).astype(np.float32)}
+            "value": ordinary_wdl(result)}
     if 'opponent_policy' in targets:
         main.update(opponent_policy=a['opponent_policies'][rows],
                     opponent_policy_weight=a['opponent_policy_weights'][rows])
@@ -400,7 +409,7 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
 
     side_rows = np.repeat(np.arange(len(a['side_players'])), a['side_row_repeats'])
     side_obs, side_globals = a['side_observations'][side_rows], a['side_globals'][side_rows]
-    dropped = a['side_forbidden_input'] == 0
+    dropped = (a['side_forbidden_input'] == 0) & (a['rules'][a['side_game_indices'][side_rows]] == 2)
     side_obs[dropped,3:5] = 0;side_globals[dropped,3] = 0
     side_value = a['side_wdl'][side_rows]
     side = {'obs': side_obs, 'globals': side_globals, 'policy': a['side_policies'][side_rows],
@@ -438,7 +447,7 @@ def game_weight_statistics(a):
     result=[]
     for g,game in enumerate(a['game_ids']):
         lo,hi=a['game_offsets'][g:g+2]
-        valid=a['train_mask'][lo:hi].astype(bool)
+        valid=a['train_mask'][lo:hi].astype(bool) & has_result(a['reasons'][g])
         result.append({'id':game_identity(m, game),
                        'sum':float(a['target_weights'][lo:hi][valid].sum(dtype=np.float64)),
                        'count':int(valid.sum())})
@@ -505,7 +514,7 @@ class Catalog:
                 weights = game_weight_statistics(a)
                 stats = {'games':int(owners.sum()),'rows':m['rows'],'plies':int(np.diff(offsets)[owners].sum()),
                          'black_wins':int((winners[owners]==1).sum()),'white_wins':int((winners[owners]==-1).sum()),
-                         'draws':int((winners[owners]==0).sum()),'opening_moves':int(prefix[owners].sum()),
+                         'draws':int(((winners[owners]==0)&has_result(a['reasons'][owners])).sum()),'no_results':int((~has_result(a['reasons'][owners])).sum()),'opening_moves':int(prefix[owners].sum()),
                          'balanced_games':int((status[owners]==1).sum()),'opening_failures':int((status[owners]==2).sum()),
                          'opening_attempts':int(a['opening_attempts'][owners].sum()),'policy_moves':int(a['policy_moves'][owners].sum())}
                 if 'root_policy_invalid_mass_count' in m:

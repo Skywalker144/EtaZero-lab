@@ -86,6 +86,18 @@ def test_opening_read_does_not_require_valid_search_overrides(profiles):
     assert load_match_opening_config(profiles,environ=env)==load_engine_config(profiles,True,environ={})['opening']
 
 
+@pytest.mark.parametrize('match', [False, True])
+def test_go_graph_repetition_bound_default_and_overrides(profiles, match):
+    mode = 'match' if match else 'analysis'
+    key = mode.upper() + '_GRAPH_SEARCH_REP_BOUND'
+    assert load_engine_config(profiles, match, environ={})[mode]['graph_search_rep_bound'] == 11
+    for bound in (3, 17, 50):
+        assert load_engine_config(profiles, match, environ={key: str(bound)})[mode]['graph_search_rep_bound'] == bound
+    for bound in ('2', '51', '3.5'):
+        with pytest.raises(ValueError, match='graph_search_rep_bound'):
+            load_engine_config(profiles, match, environ={key: bound})
+
+
 def test_cli_loads_standalone_profile_and_requires_model_source(profiles):
     result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'analysis','--config',str(profiles/'analysis.cfg')],
                           text=True,capture_output=True)
