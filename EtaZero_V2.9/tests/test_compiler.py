@@ -37,17 +37,18 @@ def test_timer_excludes_only_this_attempt_compilation(monkeypatch):
     wall=iter([100.,115.,200.,208.]);compile_time=iter([50.,56.,80.,82.])
     monkeypatch.setattr(compiler.time,'monotonic',lambda:next(wall))
     monkeypatch.setattr(compiler,'compilation_seconds',lambda:next(compile_time))
-    assert compiler.WorkTimer(True).finish()==dict(seconds=9.,wall_seconds=15.,compile_seconds=6.)
+    assert compiler.WorkTimer(True).finish()==dict(seconds=9.,wall_seconds=15.,compile_seconds=6., timing_valid=True)
     # Earlier failed attempts/other runs must not be subtracted again.
-    assert compiler.WorkTimer(True).finish()==dict(seconds=6.,wall_seconds=8.,compile_seconds=2.)
+    assert compiler.WorkTimer(True).finish()==dict(seconds=6.,wall_seconds=8.,compile_seconds=2., timing_valid=True)
 
 
 def test_uncompiled_timer_and_invalid_counter_reset(monkeypatch):
     wall=iter([10.,14.,20.,25.])
     monkeypatch.setattr(compiler.time,'monotonic',lambda:next(wall))
     monkeypatch.setattr(compiler,'compilation_seconds',lambda:pytest.fail('Eager must not read compiler counters'))
-    assert compiler.WorkTimer(False).finish()==dict(seconds=4.,wall_seconds=4.,compile_seconds=0.)
+    assert compiler.WorkTimer(False).finish()==dict(seconds=4.,wall_seconds=4.,compile_seconds=0., timing_valid=True)
     compile_time=iter([20.,0.])
     monkeypatch.setattr(compiler,'compilation_seconds',lambda:next(compile_time))
-    with pytest.raises(RuntimeError,match='Invalid compiler timing'):
-        compiler.WorkTimer(True).finish()
+    with pytest.warns(RuntimeWarning,match='Invalid compiler timing'):
+        result = compiler.WorkTimer(True).finish()
+    assert result == dict(seconds=5.,wall_seconds=5.,compile_seconds=0.,timing_valid=False)
