@@ -51,8 +51,8 @@ void TorchBackend::initialize() {
     }
     model_=shared_model_->prepare(path_,device_,precision_);
     auto meta = model_.get_method("metadata")({}).toTuple();
-    if (meta->elements().size() != 2 || meta->elements()[0].toInt() != canvas_ || meta->elements()[1].toStringRef() != CONTRACT_ID)
-        throw std::runtime_error("Model contract/canvas mismatch");
+    if (meta->elements().size() != 2 || meta->elements()[0].toInt() != canvas_ || meta->elements()[1].toStringRef() != "alphazero")
+        throw std::runtime_error("Model algorithm/canvas mismatch");
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(device_.is_cuda());
     host_ = torch::empty({max_batch_, INPUT_PLANES, canvas_, canvas_}, options);
     global_host_ = torch::empty({max_batch_, GLOBAL_FEATURES}, options);

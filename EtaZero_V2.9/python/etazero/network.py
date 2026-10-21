@@ -8,7 +8,7 @@ import math
 import torch
 from torch import nn
 from .config import network_widths
-from .schema import CONTRACT_ID, PLANES, GLOBALS, POLICY_HEADS
+from .schema import PLANES, GLOBALS, POLICY_HEADS
 
 
 def init_weights(tensor, scale=1.0, identity=False, fan_tensor=None, activation='mish'):
@@ -225,7 +225,6 @@ class PolicyValueNet(nn.Module):
         self.model_version = 17 if architecture == 'transformer' else 15
         activation = 'relu' if architecture == 'transformer' else 'mish'
         self.canvas = canvas
-        self.contract = CONTRACT_ID
         self.stem = nn.Conv2d(len(PLANES), channels, 3, padding=1, bias=False)
         self.linear_global = nn.Linear(len(GLOBALS), channels, bias=False)
         init_weights(self.stem.weight, 0.8, activation=activation)
@@ -253,7 +252,7 @@ class PolicyValueNet(nn.Module):
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:
-        return self.canvas, self.contract
+        return self.canvas, 'alphazero'
 
     @torch.jit.export
     def forward_all(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

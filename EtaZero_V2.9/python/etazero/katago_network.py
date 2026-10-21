@@ -9,7 +9,7 @@ import math
 import torch
 from torch import nn
 from .katago_configs import resolve, validate_dimensions
-from .schema import CONTRACT_ID, PLANES, GLOBALS
+from .schema import PLANES, GLOBALS
 from ._vendor.katago import model_pytorch as source
 
 
@@ -51,7 +51,7 @@ class KataGoNet(nn.Module):
         self.network.set_brenorm_params(0.001, 1.0, 0.0)
 
     def metadata(self) -> tuple[int, str]:
-        return self.canvas, CONTRACT_ID
+        return self.canvas, 'alphazero'
 
     def parameter_groups(self):
         groups = {}
@@ -133,11 +133,11 @@ class SearchOutputs(nn.Module):
 class SerializedSearch(nn.Module):
     def __init__(self, graph, canvas):
         super().__init__()
-        self.graph, self.canvas, self.contract = graph, canvas, CONTRACT_ID
+        self.graph, self.canvas = graph, canvas
 
     @torch.jit.export
     def metadata(self) -> tuple[int, str]:
-        return self.canvas, self.contract
+        return self.canvas, 'alphazero'
 
     @torch.jit.export
     def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
