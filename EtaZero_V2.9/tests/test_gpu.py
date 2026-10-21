@@ -582,7 +582,7 @@ def test_single_d4_root_only_and_inference_precision(tmp_path,pipeline,gpu_confi
 def test_match_same_bot_clear_and_different_bot_reuse(tmp_path,pipeline):
     from etazero.arena import single_match
     root,state=pipeline;a=root/state['model']['path']
-    b=root/load_json(root/'logs/iterations/000001.json')['model']['path']
+    b=root/load_json(root/'.internal/iterations/000001/status.json')['commit']['model']['path']
     config=load_engine_config(CONFIGS / 'smoke_test',True)
     config['match'].update(inference_precision='auto',search_threads=4,server_threads=2)
     _,same=single_match(config,BINARY,a,a,tmp_path/'same')
@@ -600,12 +600,12 @@ def test_match_same_bot_clear_and_different_bot_reuse(tmp_path,pipeline):
 class LeafFailureModel(torch.nn.Module):
     def __init__(self,canvas):
         super().__init__()
-        from etazero.schema import CONTRACT_ID
-        self.canvas=canvas;self.contract=CONTRACT_ID
+
+        self.canvas=canvas
 
     @torch.jit.export
     def metadata(self) -> tuple[int,str]:
-        return self.canvas,self.contract
+        return self.canvas,'alphazero'
 
     def forward(self,x,globals):
         # A device-side failure remains data dependent under CUDA Graph replay.
@@ -763,7 +763,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeyp
         model=make_network(c).cuda();model.load_state_dict(saved["model"])
         optimizer=optimizer_for(model,c);optimizer.load_state_dict(saved["optimizer"])
         scaler=torch.amp.GradScaler("cuda",init_scale=2**32)
-        restore_rng(saved["rng"])
+        restore_rng(saved["rng"], next(model.parameters()).device)
         optimization=Optimization(model,c,optimizer,saved['optimization'])
         base=commit_checkpoint(tmp_path,c,model,optimizer,scaler,0,0,0,None,optimization)
         del optimization,model,optimizer,scaler,saved
@@ -841,7 +841,7 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
         optimizer=optimizer_for(model,c);optimizer.load_state_dict(saved['optimizer'])
         optimization=Optimization(model,c,optimizer,saved['optimization'])
         scaler=torch.amp.GradScaler('cuda',init_scale=1)
-        restore_rng(saved['rng'])
+        restore_rng(saved['rng'], next(model.parameters()).device)
         bases.append(commit_checkpoint(dest,c,model,optimizer,scaler,0,0,0,None,optimization))
     original=make_network
     inject={'remaining':1}
@@ -1405,7 +1405,7 @@ def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeyp
 def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
     from etazero.experiment import experiment_plan, run_experiment
     from etazero.plotting import run_history
-    from etazero.schema import CONTRACT_ID
+
     umbrella = tmp_path/'umbrella'; umbrella.mkdir()
     (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_hours = 0\narm_gpus = 0\nshared_init = true\n')
     (umbrella/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'
@@ -1449,7 +1449,7 @@ def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
         assert history[2]['avg_game_length'] >= history[2]['avg_rows_per_game']
         hashes.update({p: sha256(p) for p in (root/'selfplay').rglob('*.npz')})
     assert all(torch.equal(value, checkpoints[1]['model'][key]) for key, value in checkpoints[0]['model'].items())
-    assert all(c['contract'] == CONTRACT_ID and c['total_steps'] == 0 for c in checkpoints)
+    assert all(c['total_steps'] == 0 for c in checkpoints)
     assert run_experiment(plan, BINARY) == 0
     assert all(sha256(path) == digest for path, digest in hashes.items())
     invocation = load_json(load_json(evaluation/'status.json')['performance'])
@@ -1606,7 +1606,8 @@ def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch
     before_compile=compilation_seconds()
     base=run_training(root,c,BINARY,max_iteration=1)
     def verify_time(state):
-        rows=[load_json(p) for p in sorted((root/'logs/iterations').glob('*.json'))]
+        rows=[load_json(p)['commit'] for p in sorted((root/'.internal/iterations').glob('*/status.json'))
+              if 'commit' in load_json(p)]
         assert len(rows)==state['iteration']
         assert state['elapsed_seconds']==pytest.approx(sum(r['seconds'] for r in rows))
         for row in rows:
@@ -1689,7 +1690,7 @@ def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monke
     assert 0<=result['result']['action']<25 and len(result['result']['policy'])==25
     mc=load_engine_config(CONFIGS / 'smoke_test',True)
     a=root/state['model']['path']
-    b=root/load_json(root/'logs/iterations/000001.json')['model']['path']
+    b=root/load_json(root/'.internal/iterations/000001/status.json')['commit']['model']['path']
     output=tmp_path/'match'
     original=PairStore.accept
     interrupted=False
@@ -1863,13 +1864,13 @@ def test_reduce_visits_pcr_native_training_and_resume(tmp_path,gpu_config,lookba
 class OpeningChoiceModel(torch.nn.Module):
     def __init__(self,canvas,ascending,value_logit):
         super().__init__()
-        from etazero.schema import CONTRACT_ID
-        self.canvas=canvas;self.contract=CONTRACT_ID
+
+        self.canvas=canvas
         self.ascending=ascending;self.value_logit=value_logit
 
     @torch.jit.export
     def metadata(self) -> tuple[int,str]:
-        return self.canvas,self.contract
+        return self.canvas,'alphazero'
 
     def forward(self,x,globals):
         order=torch.arange(self.canvas*self.canvas,device=x.device,dtype=x.dtype)
@@ -2023,15 +2024,15 @@ def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config,ba
 class DiamondCudaModel(torch.nn.Module):
     def __init__(self,canvas,fail_after=-1):
         super().__init__()
-        from etazero.schema import CONTRACT_ID
-        self.canvas=canvas;self.contract=CONTRACT_ID;self.fail_after=fail_after
+
+        self.canvas=canvas;self.fail_after=fail_after
         black=torch.full((canvas*canvas,),-1000.0);white=black.clone()
         black[0]=black[1]=0;white[canvas+1]=white[canvas+2]=0
         self.register_buffer('black',black);self.register_buffer('white',white)
 
     @torch.jit.export
     def metadata(self) -> tuple[int,str]:
-        return self.canvas,self.contract
+        return self.canvas,'alphazero'
 
     def forward(self,x,globals):
         black=(x[:,1].sum((1,2))==x[:,2].sum((1,2))).unsqueeze(1)
@@ -2100,8 +2101,8 @@ def test_graph_shared_cuda_failure_releases_all_parents(tmp_path,gpu_config):
 class SearchCorrectionsCudaModel(torch.nn.Module):
     def __init__(self,canvas,error):
         super().__init__()
-        from etazero.schema import CONTRACT_ID
-        self.canvas=canvas;self.contract=CONTRACT_ID;self.error=error
+
+        self.canvas=canvas;self.error=error
         ordinary=torch.zeros(canvas*canvas);optimistic=ordinary.clone()
         ordinary[4]=np.log(9);optimistic[1]=np.log(9)
         self.register_buffer('ordinary',ordinary);self.register_buffer('optimistic',optimistic)
@@ -2109,7 +2110,7 @@ class SearchCorrectionsCudaModel(torch.nn.Module):
 
     @torch.jit.export
     def metadata(self) -> tuple[int,str]:
-        return self.canvas,self.contract
+        return self.canvas,'alphazero'
 
     def forward(self,x,globals):
         zero=x[:,0].sum((1,2))*0
@@ -2196,13 +2197,13 @@ def test_selfplay_nondefault_search_corrections_cuda(tmp_path,gpu_config):
 class PdaCudaModel(torch.nn.Module):
     def __init__(self,canvas):
         super().__init__()
-        from etazero.schema import CONTRACT_ID
-        self.canvas=canvas;self.contract=CONTRACT_ID
+
+        self.canvas=canvas
         self.register_buffer('grid',torch.linspace(-.2,.2,canvas*canvas))
 
     @torch.jit.export
     def metadata(self) -> tuple[int,str]:
-        return self.canvas,self.contract
+        return self.canvas,'alphazero'
 
     def forward(self,x,globals):
         advantage=globals[:,5].float()
@@ -2583,7 +2584,7 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
         base=initialize(root,c);value=load_checkpoint(root,base,c)
         model=make_network(c).cuda();model.load_state_dict(value['model']);optimizer=optimizer_for(model,c);optimizer.load_state_dict(value['optimizer'])
         o=Optimization(model,c,optimizer,value['optimization']);scaler=torch.amp.GradScaler('cuda',init_scale=1)
-        restore_rng(value['rng']);bases.append(commit_checkpoint(root,c,model,optimizer,scaler,0,0,0,None,o))
+        restore_rng(value['rng'], next(model.parameters()).device);bases.append(commit_checkpoint(root,c,model,optimizer,scaler,0,0,0,None,o))
     original=make_network;injection={'remaining':1}
     def instrumented(configuration):
         model=original(configuration)
@@ -2667,7 +2668,7 @@ def recovery_parent(tmp_path_factory,gpu_config):
 
 
 @pytest.mark.parametrize('boundary',['selfplay_finish','shuffle_finish','checkpoint_payload','learner_pointer',
-                                      'export_stage','export_rename','metrics','state_commit','publication'])
+                                      'export_stage','export_rename','metrics','round_commit','state_commit','publication'])
 def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gpu_config,monkeypatch,boundary):
     import etazero.runtime as runtime
     import etazero.training as training
@@ -2715,11 +2716,12 @@ def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gp
                 if Path(dst).parent==root/'models':fail()
                 return value
             patch.setattr(exporting.os,'rename',rename)
-        elif boundary=='metrics':
+        elif boundary in ('metrics', 'round_commit'):
             original=runtime.save_json
             def write(path,*args,**kwargs):
                 value=original(path,*args,**kwargs)
-                if Path(path)==root/'logs/iterations/000002.json':fail()
+                if boundary=='metrics' and Path(path)==root/'logs/iterations/000002.json':fail()
+                if boundary=='round_commit' and Path(path)==root/'.internal/iterations/000002/status.json' and 'commit' in args[0]:fail()
                 return value
             patch.setattr(runtime,'save_json',write)
         elif boundary=='state_commit':
@@ -2746,7 +2748,11 @@ def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gp
              # lineage JSON, the final checkpoint, raw games and models remain.
              not (committed and p.parent==root/'checkpoints' and p.suffix=='.pt' and p!=root/failed_state['checkpoint']['path'])}
     assert pending
+    pending_commit=load_json(root/'.internal/iterations/000002/status.json').get('commit')
     resumed=run_training(root,gpu_config,BINARY,resume=True,max_iteration=2)
+    if pending_commit is not None:
+        assert resumed['elapsed_seconds']==pending_commit['elapsed_seconds']
+        assert load_json(root/'.internal/iterations/000002/status.json')['commit']==pending_commit
     budget=load_json(root/'.internal/iterations/000002/status.json')
     steps=base['checkpoint']['total_steps']+budget['train_steps']
     assert resumed['iteration']==3 and resumed['checkpoint']['total_steps']==steps
@@ -2843,3 +2849,103 @@ def test_native_final_row_shards_cuda_training_and_export(tmp_path,gpu_config):
     assert verify_export(root,info,c['network']['canvas'])==info
     save_json(root/'writer_validation.json',{'shards':len(entries),'rows':rows,'games':4,'represented_trajectories':len(represented),
         'checkpoint':reference,'export':info})
+
+
+@pytest.mark.parametrize('interrupt', [False, True])
+def test_missing_summary_preserves_commit_and_elo(tmp_path, recovery_parent, gpu_config, monkeypatch, interrupt):
+    import warnings
+    import etazero.runtime as runtime
+    from etazero.arena import discover_players
+    from etazero.plotting import run_history
+    parent, _ = recovery_parent
+    root = tmp_path/'run'
+    shutil.copytree(parent, root)
+    original_save, original_open = runtime.save_json, Path.open
+    summary = root/'logs/iterations/000002.json'
+    def save(path, *args, **kwargs):
+        if Path(path) == summary:
+            raise OSError('injected summary write failure')
+        return original_save(path, *args, **kwargs)
+    def open_log(path, *args, **kwargs):
+        if path.parent == root/'logs' and path.suffix == '.jsonl' and path.name != 'events.jsonl':
+            raise OSError('injected native log failure')
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(runtime, 'save_json', save)
+    monkeypatch.setattr(Path, 'open', open_log)
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter('always')
+        pending = None
+        if interrupt:
+            original_state = runtime.Controller.state
+            def state(self, value):
+                if value['iteration'] == 3:
+                    raise OSError('injected state pointer failure')
+                original_state(self, value)
+            with monkeypatch.context() as patch:
+                patch.setattr(runtime.Controller, 'state', state)
+                with pytest.raises(OSError, match='state pointer failure'):
+                    run_training(root, gpu_config, BINARY, resume=True, max_iteration=2)
+            assert load_json(root/'.internal/state.json')['iteration'] == 2
+            pending = load_json(root/'.internal/iterations/000002/status.json')['commit']
+        result = run_training(root, gpu_config, BINARY, resume=True, max_iteration=2)
+        history = run_history(root)
+        assert run_training(root, gpu_config, BINARY, resume=True, max_iteration=2) == result
+    assert result['iteration'] == 3 and not summary.exists()
+    commit = load_json(root/'.internal/iterations/000002/status.json')['commit']
+    assert commit['elapsed_seconds'] == result['elapsed_seconds']
+    if pending is not None:
+        assert commit == pending
+    assert history[-1]['total_samples'] == result['checkpoint']['total_samples']
+    assert 'loss' not in history[-1] and 'metrics_error' in history[-1]
+    assert [(p.iteration, p.seconds) for p in discover_players(root)] == [
+        (r['iteration'], r['elapsed_seconds']) for r in history if r['model']]
+    assert any('summary could not be saved' in str(w.message) for w in reported)
+    assert any('Native log unavailable' in str(w.message) for w in reported)
+    assert not any('plotting failed' in str(w.message) for w in reported)
+    assert all((root/name).is_file() for name in ('training.png', 'loss.png', 'logs/performance.png'))
+
+
+def test_observation_failures_do_not_block_completed_training(tmp_path, gpu_config, monkeypatch):
+    import warnings
+    import etazero.compiler as compiler
+    from etazero.arena import discover_players
+    from etazero.runtime import Journal
+    c = copy.deepcopy(gpu_config)
+    # Exercise an unavailable compiler counter while real CUDA training proceeds.
+    monkeypatch.setattr('etazero.runtime.compilation_enabled', lambda _: True)
+    monkeypatch.setattr(compiler, 'compilation_seconds', lambda: float('nan'))
+    def missing_metrics(*args, **kwargs):
+        raise ValueError('injected missing update events')
+    monkeypatch.setattr('etazero.plotting.round_history', missing_metrics)
+    original = Journal.__call__
+    def missing_log(self, event, **fields):
+        if event == 'update':
+            self._failed(OSError('injected log write failure'))
+        else:
+            original(self, event, **fields)
+    monkeypatch.setattr(Journal, '__call__', missing_log)
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter('always')
+        state = run_training(tmp_path, c, BINARY, max_iteration=1)
+    assert state['iteration'] == 2 and state['checkpoint']['total_steps'] > 0
+    assert not state['timing_valid'] and (tmp_path/state['model']['path']).is_file()
+    summary = load_json(tmp_path/'logs/iterations/000001.json')
+    assert summary['metrics_error'] == 'injected missing update events'
+    assert 'loss' not in summary
+    assert not load_json(tmp_path/'.internal/iterations/000001/status.json')['commit']['timing_valid']
+    assert (tmp_path/'training.png').is_file() and (tmp_path/'loss.png').is_file()
+    assert any('training continues' in str(w.message) for w in reported)
+    with pytest.raises(ValueError, match='invalid compiler timing'):
+        discover_players(tmp_path)
+
+
+def test_rng_restore_uses_only_the_learner_device(monkeypatch):
+    from etazero.training import rng_state
+    torch.cuda.init()
+    state = rng_state(torch.device('cuda:0'))
+    expected = torch.rand(8, device='cuda:0')
+    def unrelated_topology():
+        pytest.fail('Restoring a learner must not enumerate unrelated GPUs')
+    monkeypatch.setattr(torch.cuda, 'device_count', unrelated_topology)
+    restore_rng(state, 'cuda:0')
+    torch.testing.assert_close(torch.rand(8, device='cuda:0'), expected, rtol=0, atol=0)
