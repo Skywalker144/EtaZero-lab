@@ -14,8 +14,7 @@ import sys
 import time
 from .config import ROOT, FILES, FIELDS, boolean, load_config, validate
 from .config_files import read_config_file
-from .schema import CONTRACT_ID
-from .storage import atomic_write, load_json, save_json, sha256
+from .storage import atomic_write, load_json, save_json
 
 EXP_FIELDS = {'max_iteration': int, 'max_hours': float, 'arm_gpus': str,
               'shared_init': boolean, 'autoelo': boolean}
@@ -101,7 +100,7 @@ def load_experiment_arms(directory):
 
 
 def initialization_key(config):
-    identity = [CONTRACT_ID, config['network'], config['run']['seed']]
+    identity = [config['network'], config['run']['seed']]
     if config['agent']['algorithm'] == 'muzero':
         identity.append({'algorithm': 'muzero', 'muzero_config': config['muzero']})
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -119,29 +118,14 @@ def prepare_initializations(work, arms):
             references[arm['name']] = prepared[key]
             continue
         path = work/'.internal/initializations'/f'{key}.pt'
-        record = path.with_suffix('.json')
-        if record.exists():
-            reference = load_json(record)
-            if reference['key'] != key or reference['sha256'] != sha256(path):
-                raise ValueError(f'Shared initialization checksum mismatch: {path}')
-        else:
+        if not path.exists():
             # CPU-only creation does not consume any arm's learner RNG stream.
             with torch.random.fork_rng(devices=[]):
                 torch.random.default_generator.manual_seed(arm['config']['run']['seed'])
                 model = make_network(arm['config'])
-                value = {'contract': CONTRACT_ID, **model_identity(arm['config']),
-                         'model': model.state_dict()}
-                if path.exists():
-                    # A crash between payload and sidecar publication is repairable.
-                    saved = torch.load(path, map_location='cpu', weights_only=False)
-                    if saved['contract'] != value['contract'] or saved['network_config'] != value['network_config'] or \
-                            set(saved['model']) != set(value['model']) or any(
-                                not torch.equal(saved['model'][k], v) for k, v in value['model'].items()):
-                        raise ValueError(f'Uncommitted initialization differs from its seed: {path}')
-                else:
-                    atomic_write(path, lambda p: torch.save(value, p), immutable=True)
-            reference = {'key': key, 'path': str(path), 'sha256': sha256(path)}
-            save_json(record, reference, immutable=True)
+                value = {**model_identity(arm['config']), 'model': model.state_dict()}
+                atomic_write(path, lambda p: torch.save(value, p), immutable=True)
+        reference = {'key': key, 'path': str(path)}
         prepared[key] = reference
         references[arm['name']] = reference
     return references
@@ -274,7 +258,7 @@ class Scheduler:
 
 def run_experiment(plan, binary):
     from .runtime import verify_build
-    binary_hash = verify_build(binary)
+    verify_build(binary)
     work = Path(plan['work_dir']); (work/'.internal').mkdir(parents=True, exist_ok=True)
     with (work/'.internal/experiment.lock').open('a+') as lock:
         try:
@@ -287,7 +271,7 @@ def run_experiment(plan, binary):
                     if not (Path(arm['run_dir'])/'.internal/run.json').exists()]
         initializations = prepare_initializations(work, new_arms) if plan['settings']['shared_init'] else {}
         save_json(work/'.internal/plan.json', {**plan, 'initializations': initializations,
-                                             'binary_sha256': binary_hash})
+                                             'binary': str(Path(binary).resolve())})
         code = Scheduler(work, plan, binary, initializations).run()
         if code == 0 and plan['settings']['autoelo']:
             # Keep the controller lock through evaluation. Failures are distinct
