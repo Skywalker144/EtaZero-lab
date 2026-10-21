@@ -18,8 +18,8 @@ import ctypes
 import signal
 import numpy as np
 from .data import open_raw, training_view, training_targets, TRAIN_TARGETS, game_row_ranges, game_identity
-from .schema import CONTRACT_ID, GLOBALS, PLANES
-from .storage import atomic_write, load_json, save_json, save_npz, sync_directory, write_npz
+from .schema import GLOBALS, PLANES
+from .storage import atomic_write, load_json, save_json, save_npz, write_npz
 
 
 def _follow_parent(parent_pid):
@@ -141,7 +141,7 @@ def partition_rows(rows, buckets, rng):
 
 
 def view_key(entry, targets=TRAIN_TARGETS):
-    return CONTRACT_ID + '_' + entry['metadata']['shard_id'] + '_' + ''.join(str(i) for i,k in enumerate(TRAIN_TARGETS) if k in targets)
+    return entry['metadata']['shard_id'] + '_' + ''.join(str(i) for i,k in enumerate(TRAIN_TARGETS) if k in targets)
 
 
 def _source_view(path, source_id, cache, targets):
@@ -150,7 +150,7 @@ def _source_view(path, source_id, cache, targets):
         return _load_view(view_path)
     with open_raw(path) as raw:
         arrays = training_view(raw, targets)
-    atomic_write(view_path, lambda p: _temporary(p, arrays), durable=False)
+    atomic_write(view_path, lambda p: _temporary(p, arrays))
     return arrays
 
 
@@ -387,7 +387,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None, counts=None):
             usable=sum(e['rows']//config['training']['batch_size']*config['training']['batch_size'] for e in files)
             partition.update(usable_rows_per_pass=usable,complete_batches_per_pass=usable//config['training']['batch_size'],
                              discarded_tail_rows_per_pass=sum(e['rows'] for e in files)-usable)
-        manifest = {"id":identity,"contract":CONTRACT_ID,"canvas":config["network"]["canvas"],
+        manifest = {"id":identity,"canvas":config["network"]["canvas"],
                     "iteration":iteration,"seed":seed,"rows":sum(e['rows'] for e in outputs),
                     "window_rows":rows,"desired_rows":desired,"keep_prob":plan['keep_prob'],"resource_plan":plan,
                     'sources':train_sources,'files':outputs,'selection':selection,
@@ -405,7 +405,7 @@ def build_snapshot(run_dir, iteration, entries, config, pool=None, counts=None):
                             unroll_weight_mean=replay_weight_mean(root, train_sources))
             manifest['recipe'].update(agent=config['agent'], unroll=config['unroll'])
         save_json(stage/"manifest.json",manifest,immutable=True)
-        sync_directory(stage);os.rename(stage,snapshots/identity);sync_directory(snapshots)
+        os.rename(stage,snapshots/identity)
         return identity
     finally:
         # Only this uniquely named unpublished workspace is eligible for cleanup.
@@ -423,7 +423,7 @@ def restore_snapshot(snapshot):
         if (snapshot/'data').is_dir():
             return
         manifest = load_json(snapshot/'manifest.json')
-        if manifest['contract']!=CONTRACT_ID or manifest['id']!=snapshot.name:
+        if manifest['id']!=snapshot.name:
             raise ValueError(f'Invalid snapshot identity: {snapshot}')
         root = snapshot.parent.parent
         stage = snapshot/('.restore_'+uuid.uuid4().hex)
@@ -447,7 +447,7 @@ def restore_snapshot(snapshot):
                                            manifest['validation_resource_plan'],manifest['seed'],output_name='data/validation',partition=1)
             if outputs != manifest['files'] or validation_outputs!=manifest['validation_files']:
                 raise ValueError(f'Rebuilt snapshot differs from original manifest: {snapshot}')
-            sync_directory(stage);os.rename(stage/'data',snapshot/'data');sync_directory(snapshot)
+            os.rename(stage/'data',snapshot/'data')
         finally:
             if scratch.exists():
                 shutil.rmtree(scratch)
@@ -469,7 +469,7 @@ def prune_derived(run_dir, snapshots, keep_views):
                 # Atomic removal from the readable namespace; a crash can only
                 # leave disposable scratch, never a partially readable payload.
                 garbage = path/('.evicted_'+uuid.uuid4().hex)
-                os.rename(path/'data',garbage);sync_directory(path)
+                os.rename(path/'data',garbage)
                 shutil.rmtree(garbage)
     cache = root/'.internal/training_views'
     for path in cache.glob('*'):
