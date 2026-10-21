@@ -9,7 +9,7 @@ from etazero.engine_config import load_engine_config
 from etazero.arena import Player, build_schedule, discover_players, PairStore, save_manifest
 from etazero.runtime import recover_iteration
 from etazero.storage import save_json, load_json
-from etazero.schema import CONTRACT_ID
+
 
 
 def test_eval_profiles_are_independent(tmp_path,monkeypatch):
@@ -63,9 +63,10 @@ def test_committed_selection_and_schedule(tmp_path, monkeypatch):
         model=None
         if i:
             path=arm/'models'/str(i)/'model.pt';path.parent.mkdir(parents=True);path.write_bytes(str(i).encode())
-            model={'id':str(i),'path':str(path.relative_to(arm)),'contract':CONTRACT_ID,'canvas':6,'bytes':path.stat().st_size}
+            model={'id':str(i),'path':str(path.relative_to(arm)),'canvas':6,'bytes':path.stat().st_size}
             save_json(path.parent/'manifest.json',model)
-        save_json(arm/'logs/iterations'/f'{i:06d}.json',{'iteration':i,'elapsed_seconds':i*i,'model':model})
+        save_json(arm/'.internal/iterations'/f'{i:06d}'/'status.json',
+                  {'commit': {'iteration':i,'elapsed_seconds':i*i,'model':model}})
     original_open = Path.open
     def metadata_only(path, *args, **kwargs):
         assert path.name != 'model.pt', 'Elo discovery must not reread model payloads'
@@ -104,3 +105,13 @@ def test_cli_requires_explicit_model_source():
     assert result.returncode!=0 and 'requires --model or --run-dir' in result.stderr
     help_result=subprocess.run(['bash',str(ROOT/'scripts/run.sh'),'--help'],text=True,capture_output=True)
     assert help_result.returncode==0 and 'arena' in help_result.stdout
+
+
+def test_pair_storage_leaves_move_legality_to_game_rules(tmp_path):
+    store = PairStore(tmp_path, 4)
+    store.accept({'type':'opening','id':0,'generator':0,'seed':71,'moves':[12],
+                  'attempts':1,'value':.1})
+    game = {'type':'game','id':0,'opening_id':0,'black_a':True,'winner':1,
+            'moves':[12,0,12],'seconds':.2}
+    store.accept(game)
+    assert store.games() == [game]
