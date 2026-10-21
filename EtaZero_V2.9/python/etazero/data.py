@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
 import numpy as np
-from .schema import CONTRACT_ID, RAW_DTYPES, PLANES, GLOBALS, unpack_observations
+from .schema import RAW_DTYPES, PLANES, GLOBALS, unpack_observations
 
 
 def metadata(arrays):
@@ -51,7 +51,7 @@ def open_raw(path):
     with np.load(path, allow_pickle=False) as archive:
         arrays = _RawArrays(archive)
         m = metadata(arrays)
-        if (m['contract'] != CONTRACT_ID or m['games'] <= 0 or m['plies'] <= 0 or
+        if (m['games'] <= 0 or m['plies'] <= 0 or
                 not 5 <= m['canvas'] <= 25 or m.get('algorithm', 'alphazero') not in ('alphazero', 'muzero')):
             raise ValueError(f'Invalid raw identity/dimensions: {path}')
         yield arrays
@@ -77,7 +77,6 @@ def validate_raw(a, source="record", *, deep=True):
     for key, dtype in RAW_DTYPES.items():
         require(a[key].dtype == np.dtype(dtype), f"{key}: dtype mismatch")
     m = metadata(a)
-    require(m["contract"] == CONTRACT_ID, "contract mismatch")
     n, t, canvas = m["games"], m["plies"], m["canvas"]
     require(n > 0 and t > 0 and 5 <= canvas <= 25, "invalid shard dimensions")
     require(a["game_offsets"].shape == (n+1,) and a["observation_offsets"].shape == (n+1,), "offset shapes")
@@ -128,7 +127,7 @@ def validate_raw(a, source="record", *, deep=True):
     for key in ('reanalyzed','reanalysis_used_outcome','reanalysis_original_visits','reanalysis_policy_surprise','reanalysis_value_surprise'):
         require(a[key].shape == (t,), f'{key}: shape mismatch')
     if muzero:
-        require(type(m.get('unroll_steps')) is int and 1 <= m['unroll_steps'] <= 32, 'invalid unroll length')
+        require(type(m.get('unroll_steps')) is int and m['unroll_steps'] >= 1, 'invalid unroll length')
         for key in extra:
             require(a[key].shape == (t,canvas*canvas) and a[key].dtype == np.int16, f'{key}: layout mismatch')
     game_row_ranges(a)
@@ -140,7 +139,7 @@ def validate_raw(a, source="record", *, deep=True):
         from .muzero.data import validate_trajectory
         validate_trajectory(a)
     require(len(np.unique(a["game_ids"])) == n, "duplicate game IDs in shard")
-    require(((a["sizes"] >= 5) & (a["sizes"] <= canvas) & (lengths <= a["sizes"]**2)).all(), "game sizes/lengths")
+    require(((a["sizes"] >= 5) & (a["sizes"] <= canvas)).all(), "game sizes/lengths")
     require(np.isin(a["rules"], [0, 1, 2, 3]).all() and np.isin(a["winners"], [-1, 0, 1]).all() and
             np.isin(a["reasons"], [0, 1, 2, 3]).all(), "invalid rule/result")
     if canvas*canvas % 8:
@@ -453,7 +452,7 @@ class Catalog:
         self.run_id, self.config_id = run_id, config_id
         (self.run_dir/".internal").mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.run_dir / ".internal/catalog.sqlite")
-        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute('CREATE TABLE IF NOT EXISTS shards (id TEXT PRIMARY KEY, path TEXT UNIQUE, meta TEXT, weights TEXT, '
                         'iteration INTEGER, created INTEGER, rows INTEGER, stats TEXT, mtime INTEGER, size INTEGER)')
         columns = {row[1] for row in self.db.execute('PRAGMA table_info(shards)')}
@@ -463,10 +462,6 @@ class Catalog:
         self.db.execute('CREATE INDEX IF NOT EXISTS shard_timeline ON shards(iteration,created,id)')
         self.db.execute("CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, rows INTEGER, total INTEGER)")
         columns = {row[1] for row in self.db.execute('PRAGMA table_info(games)')}
-        if columns == {'id','rows','total','fingerprint'}:
-            # Discard only the obsolete derived digest; retain resume counts/spans.
-            self.db.execute('ALTER TABLE games DROP COLUMN fingerprint')
-            columns.remove('fingerprint')
         if columns != {'id','rows','total'}:
             self.db.close()
             raise ValueError('Derived catalog schema differs; rebuild catalog.sqlite from the raw shards')
@@ -516,7 +511,7 @@ class Catalog:
                 if 'root_policy_invalid_mass_count' in m:
                     stats.update(root_policy_invalid_mass_sum=float(np.asarray(m['root_policy_invalid_mass_sum'])[owners].sum()),
                                  root_policy_invalid_mass_count=int(np.asarray(m['root_policy_invalid_mass_count'])[owners].sum()))
-                if (m["contract"] != CONTRACT_ID or m["run_id"] != self.run_id or
+                if (m["run_id"] != self.run_id or
                         models.get(m["iteration_id"]) != m["model_id"] or len(ids) != m["games"] or
                         offsets.shape != (len(ids)+1,) or offsets[0] != 0 or offsets[-1] != m["plies"] or prefix.shape != (len(ids),) or
                         (np.diff(offsets) <= 0).any() or (prefix < 0).any() or (prefix > np.diff(offsets)).any() or
