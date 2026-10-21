@@ -179,7 +179,6 @@ protected:
     struct Sync { std::mutex mutex; std::condition_variable changed; };
     std::array<Sync,64> locks_;
     std::atomic<size_t> next_node_{0};
-    std::atomic<int> pending_count_{0};
     struct Visit { Node* parent;Edge* edge;int perspective;bool increment_edge=true; };
     struct ThreadState {
         std::unique_ptr<SearchState> state;
