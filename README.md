@@ -24,6 +24,6 @@
 
 本项目采用多版本演进目录结构，最新主线版本及详细文档请参考：
 
-- **最新主线版本**：[EtaZero_V2.9](EtaZero_V2.9/README.md)（包含完整的构建、配置、训练、评估与算法文档路由）
+- **最新主线版本**：[EtaZero_V3](EtaZero_V3/README.md)（包含完整的构建、配置、训练、评估与算法文档路由）
 - **Web 交互与分析工作台**：[web](web/README.md)（支持人机对弈、局面研究与搜索树诊断）
 - **项目开发与研究规范**：[RULES.md](RULES.md) | [AGENTS.md](AGENTS.md)
