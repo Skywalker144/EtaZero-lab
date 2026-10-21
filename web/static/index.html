@@ -29,6 +29,8 @@
         <label class="field">权重代数 <small id="model-count"></small><select id="model" required></select></label>
         <div id="model-summary" class="model-summary"></div>
         <div class="field-row"><label class="field">棋盘<select id="size"></select></label><label class="field">棋规<select id="rule"></select></label></div>
+        <div id="go-options" hidden><label class="field">贴目<input id="komi" type="number" step="0.5" value="7.5"></label><label class="field">围棋规则<select id="go-rules"><option value="chinese">中国规则</option><option value="chinese-ogs">中国规则（位置超级劫）</option><option value="tromp-taylor">Tromp–Taylor</option><option value="japanese">日本规则</option></select></label></div>
+        <label id="xiangqi-options" class="field" hidden>初始 FEN（留空为标准开局）<input id="fen" type="text" placeholder="标准开局"></label>
         <label class="field">开局<select id="opening"><option value="empty">空盘</option><option value="balanced">平衡开局</option></select></label>
         <button id="new-game" class="primary" type="submit">创建棋局</button>
         </fieldset>
@@ -54,7 +56,7 @@
       <div class="status-line"><span id="status-dot" class="dot"></span><span id="status" role="status" aria-live="polite">选择模型，创建棋局</span><span id="move-count">第 0 手</span></div>
       <div id="session-info" class="session-info">—</div>
       <div id="opening-info" class="muted" hidden></div>
-      <div class="actions"><button id="analyze" class="primary" disabled aria-pressed="false" title="持续分析当前局面，不落子 (A)">开启分析 <kbd>A</kbd></button><button id="step" disabled title="当前方由 AI 落一手 (S)">AI 单步 <kbd>S</kbd></button><button id="stop" hidden>停止搜索</button><button id="undo" disabled title="撤回落子 (U)">撤回 <kbd>U</kbd></button><button id="retry" hidden>重试 AI</button></div>
+      <div class="actions"><button id="analyze" class="primary" disabled aria-pressed="false" title="持续分析当前局面，不落子 (A)">开启分析 <kbd>A</kbd></button><button id="step" disabled title="当前方由 AI 落一手 (S)">AI 单步 <kbd>S</kbd></button><button id="stop" hidden>停止搜索</button><button id="pass" hidden>停一手</button><button id="undo" disabled title="撤回落子 (U)">撤回 <kbd>U</kbd></button><button id="retry" hidden>重试 AI</button></div>
       <div class="board-surround"><div id="board" class="board" role="group" aria-label="五子棋棋盘"></div></div>
       <div class="board-footer"><label class="check"><input id="numbers" type="checkbox" checked> 手数</label><label class="overlay-label">叠加<select id="overlay"><option value="candidates">候选分析</option><option value="none">无</option><option value="network_prior">网络先验</option><option value="visit_policy">访问分布</option><option value="selection_weight">选择权重</option></select></label><span id="board-coordinate" class="mono">—</span></div>
       <div class="candidate-controls"><label>Top K <input id="candidate-top" type="number" min="1" max="625" value="10"></label><label>最低访问 % <input id="candidate-min" type="number" min="0" max="100" step="0.1" value="1"></label><span>大字得分率 · 小字访问 · 角标排名</span></div>
