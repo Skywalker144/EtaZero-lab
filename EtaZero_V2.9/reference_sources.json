@@ -9,7 +9,7 @@
   },
   "KataGo": {
     "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
-    "root": "/home/sky/RL/SkyZero/KataGo",
+    "root": "/home/sky/RL/SkyZero-lab/KataGo",
     "sha256": {
       "SelfplayTraining.md": "600d0a328e663ba1a20bbbd5412e3d8b8cbcac91c990730f67e9cf2bc8e13d14",
       "cpp/command/selfplay.cpp": "af36f0a675c57c89237fa8088a39fae50166c578af084472f28f00d9ed694605",
@@ -205,7 +205,7 @@
   },
   "KataGoMuon": {
     "repository": "https://github.com/lightvector/KataGo",
-    "root": "/home/sky/RL/SkyZero/KataGo",
+    "root": "/home/sky/RL/SkyZero-lab/KataGo",
     "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
     "sha256": {
       "python/muon/muon.py": "4879f6c491adaf2ac320529718018eaea2e4cd4ea6473ec5edba94fe6eeb21be",
