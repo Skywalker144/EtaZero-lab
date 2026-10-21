@@ -9,7 +9,7 @@ import signal
 import pytest
 from etazero.export import verify_export
 from etazero.runtime import recover_iteration, run_training
-from etazero.schema import CONTRACT_ID
+
 from etazero.storage import save_json, sha256
 
 
@@ -51,7 +51,7 @@ def test_shuffle_parent_death_race_exits_before_work():
 
 def exported(root):
     path=root/'models/fixed/model.pt';path.parent.mkdir(parents=True);path.write_bytes(b'complete artifact')
-    info={'id':'fixed','path':'models/fixed/model.pt','contract':CONTRACT_ID,'canvas':6,
+    info={'id':'fixed','path':'models/fixed/model.pt','canvas':6,
           'checkpoint':{'id':'fixed'},'weights':'model','bytes':path.stat().st_size}
     save_json(path.parent/'manifest.json',info)
     return path,info
@@ -66,7 +66,7 @@ def test_export_requires_complete_manifest_and_matching_payload(tmp_path, monkey
     path.write_bytes(b'complete artifact')
     modified={**info,'weights':'swa'}
     with pytest.raises(ValueError,match='manifest'):verify_export(tmp_path,modified,6)
-    with pytest.raises(ValueError,match='contract'):verify_export(tmp_path,info,7)
+    with pytest.raises(ValueError,match='canvas'):verify_export(tmp_path,info,7)
     modified={**info,'path':'models/.tmp_fixed/model.pt'}
     with pytest.raises(ValueError,match='identity'):verify_export(tmp_path,modified,6)
 
