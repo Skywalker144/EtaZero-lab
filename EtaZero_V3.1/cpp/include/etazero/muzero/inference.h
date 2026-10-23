@@ -49,7 +49,7 @@ class BatchEvaluator final : public Evaluator {
     std::deque<Request*> initial_;
     std::vector<std::deque<Request*>> recurrent_;
     std::vector<CacheEntry> cache_;
-    std::mutex mutex_,cache_mutex_,random_mutex_;
+    std::mutex mutex_,random_mutex_;std::deque<std::mutex> cache_locks_;
     std::condition_variable changed_;
     size_t batch_,capacity_,queued_=0,active_=0;int wait_us_,canvas_,symmetry_;bool randomize_;
     std::mt19937_64 random_;
@@ -58,7 +58,7 @@ class BatchEvaluator final : public Evaluator {
     InferenceOutput submit(Request&,size_t server);
 public:
     BatchEvaluator(std::vector<std::unique_ptr<Backend>>,int canvas,size_t batch,int wait_us,
-                   size_t cache_entries,bool randomize,int symmetry,uint64_t seed,size_t queue_capacity=1024);
+                   size_t cache_entries,bool randomize,int symmetry,uint64_t seed,size_t queue_capacity=1024,int nn_mutex_pool_power_of_two=16);
     ~BatchEvaluator() override;
     InferenceOutput initial(const std::vector<float>&) override;
     InferenceOutput recurrent(std::shared_ptr<const Latent>,int) override;

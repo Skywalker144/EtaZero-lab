@@ -28,10 +28,13 @@ void restore_evaluation(Evaluation& e,const std::vector<int>& map) {
     }
 }
 BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends,int canvas,size_t batch,int wait,
-                               size_t cache,bool randomize,int symmetry,uint64_t seed,size_t capacity)
+                               size_t cache,bool randomize,int symmetry,uint64_t seed,size_t capacity,int mutex_power)
     :backends_(std::move(backends)),recurrent_(backends_.size()),cache_(cache),batch_(batch),capacity_(capacity),wait_us_(wait),
      canvas_(canvas),symmetry_(symmetry),randomize_(randomize),random_(seed) {
     if(backends_.empty() || !batch || !capacity || wait<0)throw std::runtime_error("Invalid MuZero service configuration");
+    if(mutex_power< -1||mutex_power>24)throw std::runtime_error("Invalid MuZero cache mutex pool power");
+    if(mutex_power<0)cache_.clear();
+    cache_locks_.resize(std::min(cache_.size(),size_t(1)<<std::max(0,mutex_power)));
     for(auto& backend:backends_)backend->initialize();
     spec_=backends_[0]->spec();
     for(const auto& backend:backends_)if(!same_layout(spec_,backend->spec()))throw std::runtime_error("MuZero server layout mismatch");
@@ -67,11 +70,11 @@ InferenceOutput BatchEvaluator::initial(const std::vector<float>& obs) {
         key.assign(reinterpret_cast<const char*>(obs.data()),obs.size()*sizeof(float));
         slot=std::hash<std::string>{}(key)%cache_.size();
         {std::lock_guard<std::mutex> lock(mutex_);if(error_)std::rethrow_exception(error_);if(closing_)throw std::runtime_error("MuZero service is closing");}
-        std::lock_guard<std::mutex> lock(cache_mutex_);
+        std::lock_guard<std::mutex> lock(cache_locks_[slot%cache_locks_.size()]);
         if(cache_[slot].key==key && cache_[slot].output.latent){cache_hits.fetch_add(1,std::memory_order_relaxed);return cache_[slot].output;}
     }
     thread_local Request request;request.observation=&obs;auto output=submit(request,0);
-    if(!cache_.empty()){std::lock_guard<std::mutex> lock(cache_mutex_);cache_[slot]={std::move(key),output};}
+    if(!cache_.empty()){std::lock_guard<std::mutex> lock(cache_locks_[slot%cache_locks_.size()]);cache_[slot]={std::move(key),output};}
     return output;
 }
 InferenceOutput BatchEvaluator::recurrent(std::shared_ptr<const Latent> latent,int action) {
