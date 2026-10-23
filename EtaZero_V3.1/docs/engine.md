@@ -75,3 +75,34 @@ Gomoku／Hex／Go 公共动作编号为实际棋盘的零起始行优先索引�
 主变化最多 32 手，按最大访问延伸；图搜索防止循环，MuZero 只发布可在真实棋盘重放的合法前缀，不把重复 latent 动作当成合法棋步。网络四头诊断只在正常结束后额外执行一次，不计入搜索耗时和 NN 请求数；被取消的搜索省略它。
 
 实现入口：[会话与协议](../cpp/src/commands/session.cpp)、[快照提取](../cpp/src/search/analysis.cpp)、[Web 引擎](../../web/engine.py)。
+
+## 动作限制与 focus
+
+JSON 的 `analyze`／`genmove` 接受 `avoid_moves` 或 `allow_moves`，两者互斥。每项包含执棋方、实际棋盘动作列表和 `until_depth`；根深度为 0，在深度小于该值时限制生效。allow 每个执棋方只允许一项。`avoid_rescale_root` 控制是否将保留的根先验重新归一化。
+
+```json
+{"id":"restricted","command":"analyze","visits":100,"allow_moves":[{"player":"b","moves":[0,1],"until_depth":1}]}
+{"id":"focused","command":"analyze","visits":100,"focus_moves":[0,1],"focus_weights":[3,1],"focus_probability":0.5}
+```
+
+Focus 按权重选择指定根动作，更新其子树，不计入根边访问／价值，也不消费普通搜索的 playout 配额；概率按来源限制到 0.99，保证仍有正常探索。对称别名映射到保留的代表动作。运行中可以发送 `set_focus` 并给出当前搜索的 `target_id`，原子替换这三个 focus 字段；空 moves 清除 focus。真实落子或新局会清除临时控制。
+
+GTP 的 `kata-analyze`／`kata-genmove_analyze` 可追加 `avoid B A1,B2 2` 或 `allow W C3 1`，最后一个数是深度。`maxmoves` 仍仅限制报告条目。
+
+## 棋钟与 pondering
+
+支持 GTP `time_settings`、`time_left`、`kgs-time_settings`、`kata-time_settings`、`kata-list_time_settings`。标准 `time_settings main period stones` 表示加拿大读秒；KGS 支持 none、absolute、byoyomi、canadian。`kata-time_settings` 另支持 `fischer main increment` 与 `fischer-capped main increment max_time max_time_per_move`。`time_left player seconds stones` 更新对应方剩余时间；日本读秒中 stones 表示剩余周期数，加拿大读秒中表示本周期剩余手数。
+
+JSON 提供同一状态接口：
+
+```json
+{"id":"clock","command":"time_settings","clock_type":"fischer","clock_arguments":[300,2]}
+{"id":"remaining","command":"time_left","player":"b","time":240,"stones":0}
+{"id":"ponder","command":"ponder"}
+```
+
+`genmove` 使用当前方棋钟，普通分析不受对局棋钟约束。时间预算采用来源 TimeControls，包含 lag buffer、阶段系数、明显招法的策略熵／surprise 调整、读秒取整及 futility 提前结束；搜索中的动态预算最多每 0.1 秒刷新。复用子树按保留访问比例和 `tree_reuse_carry_over_time_factor` 折算此前搜索时间。时钟值由调用者更新，返回结果不会自行扣减远端时钟。
+
+Ponder 使用独立 `max_visits_pondering`／`max_playouts_pondering`／`max_time_pondering`。配置 `pondering_enabled` 后，genmove 落子完成可自动在后台思考，下一条请求会取消正在运行的 ponder；明确的 `ponder` 命令返回搜索结果。停止和 EOF 会排空在途工作。MuZero 不跨真实步保留 latent，因此不会获得子树时间折算。
+
+更多开关及第二策略模型配置见 [通用搜索控制](search-controls.md)。胜负报告不包含模式惩罚；utility 报告反映实际搜索修正。

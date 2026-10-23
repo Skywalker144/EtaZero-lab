@@ -52,13 +52,13 @@ PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b
 
 ## 训练与推理
 
-参数分组采用来源 `add_reg_dict`，包含 metadata、attention、GAB/TAB、门控和寄存器参数；SGD、AdamW、Muon 均沿用各组角色。所有来源 norm kind 接入 LR/WD 分支，`rvglr` 在反缩放之后、裁剪之前将指定 3×3 卷积的中心梯度乘二。
+参数分组采用来源 `add_reg_dict`，包含 metadata、attention、GAB/TAB、门控和寄存器参数；SGD、AdamW、Muon／NorMuon／Aurora 均沿用各组角色。所有来源 norm kind 接入 LR/WD 分支，`rvglr` 在反缩放之后、裁剪之前将指定 3×3 卷积的中心梯度乘二。
 
 `rvgl` 的训练模型保留并行 1×1 分支；导出副本按来源 exporter 将其权重并入空间卷积的中心，移除该分支。原训练参数和 checkpoint 不受影响，合并可能改变浮点舍入。
 
 Frequency-mixing TAB 的复数 depthwise 卷积在导出副本中预先拼装为来源所用的两个实数 depthwise `Conv2d`，保留原有卷积拆分及实部/虚部输出运算。固定权重不再在推理时拼接，避免 TorchScript TensorExpr 对 AMP 与拼接的输出 stride 重写问题；训练参数和计算保持来源实现。
 
-Batch renorm 默认保持来源初始界限 `rmax=1,dmax=0`，EMA momentum 为 0.001。需要随样本数调整界限时，在 `train.cfg` 显式设置 `[brenorm]` 的 `avg_momentum`、`target_rmax`、`target_dmax`、`adjustment_scale`。界限按来源的指数更新公式由累计消费样本数推导；模型保存 running/renorm statistics，续训恢复样本时钟，不重新开始调整。
+Batch renorm 默认保持来源初始界限 `rmax=1,dmax=0`，EMA momentum 为 0.001。需要随样本数调整界限时，在 `train.cfg` 显式设置 `[brenorm]` 的 `avg_momentum`、`target_rmax`、`target_dmax`、`adjustment_scale`。界限在轮开始及每 500 batch 按来源增量指数公式更新；模型保存 running/renorm statistics，优化状态保存当前界限和上次更新时间，续训不重新开始调整。
 
 执行采用来源公开的 NCHW/SDPA 路径并保留显式 mask。单图编译按来源要求关闭 fused RoPE/QKV attention 路径；支持形状的 CUDA AMP SwiGLU 保留来源融合内核。导出关闭训练融合内核，以固定 canvas 的 tensor trace 封装成 TorchScript，并保留动态 batch 和输入设备；C++ 使用已有 LibTorch/CUDA Graph 后端。此执行选择不代表与来源默认 NHWC/flex attention 的性能或浮点运算顺序完全等价。
 

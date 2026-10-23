@@ -14,7 +14,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 `[muzero_training] auxiliary_losses=false` 只计算主 policy CE 和终局 WDL CE，系数均为 1。辅助输出结构保留，损失不读取对手、soft、TD、optimistic、误差或 Q 输出；此模式禁止开启 `predict_q_values`。导出模型携带 `has_auxiliary=false`，搜索使用主 policy 和单位叶节点权重，即使评估配置开启 optimism 或 uncertainty 也不会使用未受监督的辅助预测。启用辅助损失的模型仍由搜索开关决定是否使用这些预测。
 
-`katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）、AdamW 或 Muon，学习率与统一 weight decay 由 `[muzero_training]` 指定；Muon 的矩阵与辅助 Adam 分工见 [学习与数据使用](algorithms.md#学习与数据使用)。它使用 batch 均值反传，不启用 KataGo 分组 LR、自适应衰减、warmup、Lookahead 或 SWA；`gradient_clip=0` 表示不裁剪，发布当前训练权重。checkpoint 仍保存优化器、scaler、计数、训练指标累积和 RNG。
+`katago_optimizer=false` 使用 `[optimizer] kind` 选择的普通 SGD（momentum 0.9）、AdamW、Muon、NorMuon 或 Aurora，学习率与统一 weight decay 由 `[muzero_training]` 指定；Muon 的矩阵与辅助 Adam 分工见 [学习与数据使用](algorithms.md#学习与数据使用)。它使用 batch 均值反传，不启用 KataGo 分组 LR、自适应衰减、warmup、Lookahead 或 SWA；`gradient_clip=0` 表示不裁剪，发布当前训练权重。checkpoint 仍保存优化器、scaler、计数、训练指标累积和 RNG。
 
 没有配置 `[muzero_training]` 时使用共用辅助损失及 KataGo 优化器机制。关闭某组训练增强不会自动关闭搜索、采样或评估增强；这些属于独立条件。该能力不意味着逐项复现原论文或 MuZero_V2。
 
@@ -78,7 +78,7 @@ Go 和 Xiangqi 的根合法动作使用真实规则；根以下仅使用固定�
 
 [learner](../python/etazero/muzero/training.py) 采用来源中的梯度边界：根 loss 梯度系数 1，未来各步为 `1/K`；第二次及以后 dynamics 前按 `unroll.hidden_gradient_scale` 缩放 hidden 梯度，首次 representation→dynamics 不缩放。前向 loss 日志记录未缩放的各步损失和，反向系数不改变日志值。KataGo 优化器模式保留 batch 总和反传，普通优化器模式使用 batch 均值；consumed samples 计真实起点，不能当作展开状态数与 AlphaZero 比较。
 
-编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。两种主干的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW/Muon、Lookahead 和 SWA；NBT representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组；ResNet 主干中的归一化属于内部组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
+编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。两种主干的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW/Muon/NorMuon/Aurora、Lookahead 和 SWA；NBT representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组；ResNet 主干中的归一化属于内部组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
 
 ## KataGo 工程机制的适用边界
 
@@ -124,3 +124,10 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests/test_muzero_n
 测试覆盖 normalization、手算梯度边界、潜在树视角与访问预算、无真实树内规则、固定 D4、缓存/后端归属、并发失败、完整序列分片、cheap/side/reanalysis/吸收态、reader 与 learner 恢复，以及真实 CUDA 训练与 Python/TorchScript/LibTorch initial/recurrent 对照。初始预测与连续 recurrent 预测的数值对照在独立测试中执行，每轮导出不执行数值校验。短测试说明执行链路和所测算法性质成立，不代表训练收敛、吞吐或棋力收益已验证。
 
 MuZero 回放权重均值按选中训练分片涉及的不同完整棋局的真实可训练主局位置统计，排除开局、不按重复起点加权。catalog 入库时保存逐局总权重与位置数；shuffle 按棋局身份去重聚合，不再重读整个窗口。
+
+
+## 通用控制的适用范围
+
+根对称剪枝、按执棋方／深度的动作限制、weightless root focus、visit-cap、棋钟和专用 pondering 预算共用 [通用搜索控制](search-controls.md) 的语义。MuZero 的边访问数和子节点访问数分开保存，weightless 探索更新子树而不改变该边及以上的统计；root focus 不消费正常 playout 配额，HumanSL weightless 探索仍消费配额。Gumbel 根保留 sequential halving。
+
+HumanSL 非根探索使用独立的第二个 MuZero latent 模型，两套 latent 沿同一动作序列推进；根还可使用 AlphaZero 第二策略。真实棋盘图缓存、重复局部模式和 SVB 不作用于 latent 树，对应不支持的配置明确报错。训练辅助目标、权重、历史遮蔽和优化控制见 [训练机制](algorithms.md#历史遮蔽与完整轨迹辅助目标)；显式关闭 auxiliary_losses 的主策略／主价值消融仍保持其单位系数配方。
