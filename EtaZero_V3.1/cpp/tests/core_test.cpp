@@ -89,7 +89,7 @@ struct BroadState : SearchState {
     int move(int) override {++depth;return 1;}
 };
 void compare_exhaustive_bandit(bool heterogeneous) {
-    BanditState state(heterogeneous);std::vector<int64_t> expected(100,0);std::mt19937_64 rng(42);
+    BanditState state(heterogeneous);std::vector<int64_t> expected(100,0);
     const int budget=523,legal=66;
     for(int t=0;t<budget;++t) {
         double best=-std::numeric_limits<double>::infinity();std::vector<int> choices;
@@ -98,7 +98,7 @@ void compare_exhaustive_bandit(bool heterogeneous) {
             double score=q+1.5*(1.0/legal)*std::sqrt(static_cast<double>(t)+0.01)/(1+expected[a]);
             if(score>best){best=score;choices.clear();}if(score==best)choices.push_back(a);
         }
-        ++expected[choices[std::uniform_int_distribution<size_t>(0,choices.size()-1)(rng)]];
+        ++expected[choices.front()];
     }
     Search search({budget,1,1.5,1,0,0.3,true},42);auto result=search.run(state,0);
     check(result.visits==expected,"Sparse selection matches exhaustive PUCT including ties and masks");

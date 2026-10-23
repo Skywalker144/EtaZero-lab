@@ -1,4 +1,5 @@
 #include "etazero/muzero/search.h"
+#include "etazero/gumbel_search.h"
 #include <cmath>
 #include <iostream>
 using namespace etazero;
@@ -158,6 +159,25 @@ int main(){
         options.should_stop=[&] {return timed.initials>before;};
         r=limited.run(game,0,options);
         check(r.new_playouts==1&&r.simulations==0&&r.stopped_early,"explicit stop overrides time minimum after root");
+    }
+    {
+        auto build=[](){std::vector<std::unique_ptr<mu::Backend>> models;models.push_back(std::make_unique<QuotaBackend>());return std::make_shared<mu::BatchEvaluator>(std::move(models),6,8,0,0,false,0,5);};
+        auto primary=build(),secondary=build();primary->secondary=secondary;
+        SearchSettings s{64,1,2,1,0,1,false};s.value_weight_exponent=0;s.human_sl_root_weightless=1;s.human_sl_opponent_weightful=1;s.human_sl_chosen_move_proportion=1;
+        mu::Search human(*primary,s,9);auto r=human.run(game,0);
+        check(r.new_playouts==65&&r.root_visits==1&&r.q_visits[1]>r.visits[1],"MuZero secondary latent weightless backup");
+        s.human_sl_root_weightless=0;s.human_sl_opponent_weightful=0;s.human_sl_chosen_move_proportion=0;
+        for(int algorithm=0;algorithm<3;++algorithm){std::unique_ptr<GameSearch> controlled;
+            if(algorithm==0)controlled=std::make_unique<mu::Search>(*primary,s,9);
+            else if(algorithm==1)controlled=std::make_unique<mu::GumbelSearch<false>>(*primary,s,GumbelSettings{},9);
+            else controlled=std::make_unique<mu::GumbelSearch<true>>(*primary,s,GumbelSettings{},9);
+            controlled->set_root_focus({1},{1},.8);r=controlled->run(game,0);
+            check(r.new_playouts==65&&r.q_visits[1]>r.visits[1],"MuZero focus descendants don't consume root budget");
+            SearchRun constraints;constraints.avoid_until[game.player()==1?0:1].assign(36,1);constraints.avoid_until[game.player()==1?0:1][2]=0;
+            controlled->set_root_focus({}, {},0);r=controlled->run(game,0,constraints);
+            check(r.visits[2]==64&&r.action==2,"MuZero constrained root across search algorithms");
+            constraints.avoid_until[game.player()==1?0:1][2]=1;r=controlled->run(game,0,constraints);check(r.action==-1,"MuZero all-forbidden root terminates");
+        }
     }
     Probe cached;auto cache=service(cached,8);auto a=cache->initial(game.observation());auto b=cache->initial(game.observation());
     check(a.latent==b.latent&&cached.initials==1&&cache->cache_hits==1,"cache retains latent and prediction");

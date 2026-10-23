@@ -438,11 +438,11 @@ int main(){
         }
         Step prefix{};prefix.trainable=false;game.steps.insert(game.steps.begin(),prefix);
         std::mt19937_64 rng(3);apply_training_weights(game,0.5,0,rng);
-        near(game.steps[1].target_weight,0.7,"Per-game policy surprise redistribution");
-        near(game.steps[2].target_weight,1.1,"Weights can exceed one");
-        near(game.steps[3].target_weight,0.2,"Surprising cheap rows regain training weight");
+        near(game.steps[1].target_weight,double(0.7f),"Per-game policy surprise redistribution");
+        near(game.steps[2].target_weight,double(1.1f),"Weights can exceed one");
+        near(game.steps[3].target_weight,double(0.2f),"Surprising cheap rows regain training weight");
         check(game.steps[0].row_repeats==0 && game.steps[0].target_weight==0,"Opening prefix never gains surprise weight");
-        double weight=0;for(auto& s:game.steps)weight+=s.target_weight;near(weight,2,"Redistribution conserves expected rows");
+        double weight=0;for(auto& s:game.steps)weight+=s.target_weight;check(std::abs(weight-2)<1e-7,"Redistribution conserves expected rows within source float rounding");
         FinishedGame reduced_game{};reduced_game.size=5;reduced_game.winner=1;
         for(double base_weight:{1.0,0.1,0.0}) {
             Step s{};s.player=1;s.target_weight=base_weight;s.policy_surprise=base_weight==0.1?4:1;
@@ -450,7 +450,7 @@ int main(){
         }
         apply_training_weights(reduced_game,0.5,0,rng);
         weight=0;for(auto& s:reduced_game.steps)weight+=s.target_weight;
-        near(weight,1.1,"Surprise redistribution uses reduced base weights, not a full weight for every non-cheap row");
+        check(std::abs(weight-1.1)<1e-7,"Surprise redistribution preserves reduced base mass within source float rounding");
         check(reduced_game.steps[1].target_weight>0.1,"Excess policy surprise can restore weight on a reduced full search");
         FinishedGame value_game{};value_game.size=5;value_game.winner=-1;
         Step v{};v.player=-1;v.network_wdl={0.1,0.2,0.7};v.search_wdl={0.7,0.2,0.1};value_game.steps.push_back(v);
