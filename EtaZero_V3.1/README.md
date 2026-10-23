@@ -79,6 +79,8 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 
 | 任务 | 阅读入口 |
 |---|---|
+| 梳理 EtaZero 与 KataGo 的设计差异、逐项审查共有机制 | [KataGo 对照与审查清单](docs/katago-comparison.md) |
+| 查看通用机制逐项实现、保留差异及验证证据 | [KataGo 对齐审查](docs/katago-alignment-audit.md) |
 | 查看对局线程、搜索线程、共享组批及 C++ / Python 分工 | [执行架构](docs/implementation.md#执行架构) |
 | 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
@@ -93,6 +95,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
 | 查看 checkpoint、模型发布、故障恢复与运行证据 | [发布与恢复](docs/implementation.md#模型发布与恢复) |
 | 理解棋规、网络、价值视角、PUCT 和训练目标 | [AlphaZero](docs/algorithms.md#alphazero) |
+| 配置根剪枝、评估缓存、模式惩罚、HumanSL 与搜索并行 | [通用搜索控制](docs/search-controls.md) |
 | 配置局部模式共享的网络效用偏差及内存分片 | [SubtreeValueBias](docs/algorithms.md#subtreevaluebias) |
 | 选择 KataGo 网络名称、后缀与核对架构 | [KataGo 网络配置](docs/networks.md) |
 | 比较现有配置或命名预设的原生 CUDA Graph 推理速度 | [推理测速](docs/networks.md#原生推理测速) |
