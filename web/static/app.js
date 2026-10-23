@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const columns = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
 const rules = {freestyle: 'Freestyle', standard: 'Standard', renju: 'Renju', hex: 'Hex', go: '围棋', xiangqi: '中国象棋'};
 const notes = {go: '围棋 · 提子、劫争与终局计分按所选规则；连续停一手结束当前阶段。', xiangqi: '中国象棋 · 先选棋子，再选落点；无合法着法判负，重复局面按长将长捉规则裁定。', hex: 'Hex · 黑棋连接上下两边，白棋连接左右两边；按六邻接实际连通判胜。', freestyle: 'Freestyle · 五子或长连获胜。', standard: 'Standard · 恰好五子获胜，长连不计胜。', renju: 'Renju · 黑棋三三、四四、长连判负，恰好五子优先；白棋五子或长连获胜。'};
+const xiangqiNames = {1: ['', '車', '仕', '炮', '兵', '馬', '相', '帥'], '-1': ['', '車', '士', '砲', '卒', '馬', '象', '將']};
 let state = null, catalog = null, pending = false, online = false, notice = '';
 let formKey = '', viewTurn = null, highlight = null, catalogRevision = -1;
 let sortField = 'selection_weight', sortDirection = -1;
@@ -9,6 +10,8 @@ let analysisKey = null;
 let networkKey = null, boardMarkup = '';
 let historyKey = '';
 let selectedFrom = null;
+let xiangqiPosition = null;
+let xiangqiAnimation = null;
 const networkHeads = [
   ['普通策略', 'policy'], ['对手策略', 'opponent_policy'],
   ['长期 optimistic', 'long_optimistic_policy'], ['短期 optimistic', 'short_optimistic_policy'],
@@ -105,9 +108,96 @@ function compactVisits(visits) {
   if (visits >= 1000) return (visits / 1000).toFixed(1) + 'k';
   return String(visits);
 }
+function cancelXiangqiAnimation() {
+  if (!xiangqiAnimation) return;
+  cancelAnimationFrame(xiangqiAnimation.frame);
+  xiangqiAnimation.animations.forEach(animation => animation.cancel());
+  xiangqiAnimation = null;
+}
+function renderXiangqiPieces(game) {
+  const layer = $('board').querySelector('.xiangqi-pieces');
+  const key = `${state.instance}:${state.game_id}`;
+  const previous = xiangqiPosition?.key === key ? xiangqiPosition.game : null;
+  const live = viewTurn === null;
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const unchanged = previous && game && previous.turn === game.turn &&
+    previous.moves.every((action, i) => action === game.moves[i]) &&
+    previous.board.every((piece, i) => piece === game.board[i]);
+  const liveForward = previous && game && live && xiangqiPosition.live && game.turn > previous.turn &&
+    previous.moves.every((action, i) => action === game.moves[i]);
+  if ((unchanged && (!xiangqiAnimation || !reduced)) || (xiangqiAnimation && liveForward && !reduced)) {
+    xiangqiPosition.live = live;
+    return;
+  }
+
+  cancelXiangqiAnimation();
+  // Polling may deliver the human move and AI reply together. Play each saved
+  // board in order; history jumps still show their requested position directly.
+  if (liveForward && !reduced && game.turn > previous.turn + 1) {
+    const turn = previous.turn + 1;
+    game = {...game, board: game.boards[turn], moves: game.moves.slice(0, turn), turn, player: game.players[turn]};
+  }
+  xiangqiPosition = {key, game, live};
+  layer.replaceChildren();
+  if (!game) return;
+  const stride = game.board_stride;
+  function pieceAt(square, piece) {
+    const slot = document.createElement('span');
+    slot.className = 'xiangqi-piece-slot';
+    slot.style.left = `${10 + (square % stride) * 10}%`;
+    slot.style.top = `${(100 - Math.floor(square / stride) * 10) / 110 * 100}%`;
+    slot.innerHTML = `<span class="xiangqi-piece ${piece > 0 ? 'red-piece' : 'black-piece'}">${xiangqiNames[Math.sign(piece)][Math.abs(piece)]}</span>`;
+    layer.append(slot);
+    return slot;
+  }
+  const pieces = new Map();
+  game.board.forEach((piece, square) => {
+    if (piece) pieces.set(square, pieceAt(square, piece));
+  });
+  if (!previous || reduced) return;
+  const forward = game.turn === previous.turn + 1 && previous.moves.every((action, i) => action === game.moves[i]);
+  const backward = game.turn === previous.turn - 1 && game.moves.every((action, i) => action === previous.moves[i]);
+  if (!forward && !backward) return;
+  const move = catalog.xiangqi_moves[(forward ? game : previous).moves.at(-1)];
+  const [x, y, u, v] = forward ? move : [move[2], move[3], move[0], move[1]];
+  const destination = v * stride + u, moving = pieces.get(destination);
+  if (!moving || previous.board[y * stride + x] !== game.board[destination]) return;
+  const timing = {duration: 240, easing: 'cubic-bezier(.22,.68,.3,1)'};
+  moving.classList.add('moving-piece');
+  // Board units are square, so both axes use the board's width during resizing.
+  const movement = moving.animate([
+    {transform: `translate(calc(-50% + ${(x - u) * 10}cqw), calc(-50% + ${(v - y) * 10}cqw))`},
+    {transform: 'translate(-50%, -50%)'},
+  ], timing);
+  const playback = {animations: [movement], frame: null};
+  let captured = null;
+  if (forward && previous.board[destination]) {
+    captured = pieceAt(destination, previous.board[destination]);
+    captured.classList.add('captured-piece');
+    playback.animations.push(captured.animate([{opacity: 1}, {opacity: 1, offset: .65}, {opacity: 0}], timing));
+  }
+  xiangqiAnimation = playback;
+  playback.animations.forEach(animation => { animation.pause(); animation.currentTime = 0; });
+  // AI replies also rebuild the analysis panels. Start after that render so
+  // their work cannot consume the movement's visible duration.
+  playback.frame = requestAnimationFrame(() => playback.animations.forEach(animation => animation.play()));
+  movement.onfinish = () => {
+    if (xiangqiAnimation !== playback) return;
+    captured?.remove();
+    moving.classList.remove('moving-piece');
+    xiangqiAnimation = null;
+    render();
+  };
+}
 function renderXiangqiBoard(game, disabled) {
   $('board').classList.remove('hex-board'); $('board').classList.add('xiangqi-board');
   $('board').style.aspectRatio='10 / 11'; $('board').setAttribute('aria-label','中国象棋棋盘，红方在下');
+  if (!$('board').querySelector('.xiangqi-squares')) {
+    cancelXiangqiAnimation();
+    $('board').innerHTML = '<div class="xiangqi-squares"></div><div class="xiangqi-pieces" aria-hidden="true"></div>';
+    boardMarkup = '';
+    xiangqiPosition = null;
+  }
   const stride=game?.board_stride || 10;
   const point=(x,y)=>[10+x*10,100-y*10];
   let html='<svg viewBox="0 0 100 110" aria-hidden="true"><g stroke="var(--board-line)" stroke-width=".18" fill="none">';
@@ -126,12 +216,12 @@ function renderXiangqiBoard(game, disabled) {
   }
   html+='</svg>';
   const targets=new Set((game?.legal_actions||[]).filter(a=>{const m=catalog.xiangqi_moves[a];return m[1]*stride+m[0]===selectedFrom;}).map(a=>{const m=catalog.xiangqi_moves[a];return m[3]*stride+m[2];}));
-  const names={1:['','車','仕','炮','兵','馬','相','帥'], '-1':['','車','士','砲','卒','馬','象','將']};
   for(let y=0;y<10;y++) for(let x=0;x<9;x++) {
-    const a=y*stride+x, pc=game?.board[a]||0, [px,py]=point(x,y), name=pc?names[Math.sign(pc)][Math.abs(pc)]:'';
-    html+=`<button class="board-point ${a===selectedFrom?'selected-piece':''} ${targets.has(a)?'legal-destination':''}" data-square="${a}" aria-label="${'abcdefghi'[x]}${y} ${name||'空位'}" style="left:${px}%;top:${py/110*100}%;width:9%;height:${9/110*100}%" ${disabled?'disabled':''}>${pc?`<span class="xiangqi-piece ${pc>0?'red-piece':'black-piece'}">${name}</span>`:''}</button>`;
+    const a=y*stride+x, pc=game?.board[a]||0, [px,py]=point(x,y), name=pc?xiangqiNames[Math.sign(pc)][Math.abs(pc)]:'';
+    html+=`<button class="board-point ${a===selectedFrom?'selected-piece':''} ${targets.has(a)?'legal-destination':''}" data-square="${a}" aria-label="${'abcdefghi'[x]}${y} ${name||'空位'}" style="left:${px}%;top:${py/110*100}%;width:9%;height:${9/110*100}%" ${disabled?'disabled':''}></button>`;
   }
-  if(boardMarkup!==html){$('board').innerHTML=html;boardMarkup=html;}
+  if(boardMarkup!==html){$('board').querySelector('.xiangqi-squares').innerHTML=html;boardMarkup=html;}
+  renderXiangqiPieces(game);
 }
 function renderXiangqiNetwork(analysis, planes) {
   const stride = analysis.board_stride;
@@ -150,6 +240,8 @@ function renderXiangqiNetwork(analysis, planes) {
 }
 function renderBoard(game, disabled) {
   if ((game ? state.rule : $('rule').value) === 'xiangqi') { renderXiangqiBoard(game, disabled); return; }
+  cancelXiangqiAnimation();
+  xiangqiPosition = null;
   $('board').classList.remove('xiangqi-board');
   const size = game?.board_size || Number($('size').value) || catalog.default_size;
   const hex = game ? state.rule === 'hex' : $('rule').value === 'hex';
@@ -707,6 +799,7 @@ $('pass').addEventListener('click', () => command('play', {action:state.game.boa
 $('board').addEventListener('click', event => {
   const square=event.target.closest('button[data-square]');
   if (square && !square.disabled) {
+    if (xiangqiAnimation) return;
     const point=Number(square.dataset.square), game=state.game;
     const action=(game.legal_actions||[]).find(a=>{const [x,y,u,v]=catalog.xiangqi_moves[a];return y*game.board_stride+x===selectedFrom && v*game.board_stride+u===point;});
     if (action!==undefined) { selectedFrom=null; command('play',{action}); }
