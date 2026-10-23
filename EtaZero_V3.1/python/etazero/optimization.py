@@ -3,6 +3,7 @@ import math
 import torch
 from torch.optim.swa_utils import AveragedModel
 from .network import FixedScaleMask, BiasMask
+from .lr_schedule import effective_scale
 
 
 def parameter_groups(model):
@@ -52,12 +53,12 @@ def warmup_factor(samples, enabled=True):
     return 1 / denominators[int(samples // 250000)] if samples < 2000000 else 1.0
 
 
-def group_settings(name, options, batch_size, samples, norms, baselines, norm_kind='fixscaleonenorm'):
-    muon = options['kind'] == 'muon'
-    adamw = options['kind'] in ('adamw', 'muon')
+def group_settings(name, options, batch_size, samples, norms, baselines, norm_kind='fixscaleonenorm', schedule=None, completed_rounds=0):
+    muon = options['kind'] in ('muon', 'normuon', 'aurora')
+    adamw = options['kind'] == 'adamw' or muon
     batch_scale = math.sqrt(batch_size / 256) if adamw else batch_size / 256
     warmup = warmup_factor(samples, options['lr_warmup'])
-    scale = options['lr_scale']
+    scale = effective_scale(options['lr_scale'], schedule or {}, samples, completed_rounds)
     lr = (1.33 if adamw else 1) * 0.00003 * scale * warmup / options['lookahead_alpha']
     if adamw:
         lr *= batch_scale
@@ -67,6 +68,8 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
         lr *= options['head_lr_factor']
     if name in ('input_noreg', 'noreg', 'output_noreg'):
         lr *= options['noreg_lr_factor']
+    if muon and name not in ('normal','normal_attn','normal_gab','gab_mlp','tab_module'):
+        lr *= options.get('muon_adam_lr_factor', 1.0)
     if norm_kind in ('fixup', 'fixscale'):
         factor = (options['input_wd_factor'] if name == 'input' else options['normal_wd_factor'] if name == 'normal'
                   else options['normal_attn_wd_factor'] if name == 'normal_attn' else 1.0)
@@ -111,10 +114,10 @@ def group_settings(name, options, batch_size, samples, norms, baselines, norm_ki
     return lr, wd
 
 
-def optimizer_from_groups(groups, kind):
-    if kind == 'muon':
+def optimizer_from_groups(groups, kind, options=None):
+    if kind in ('muon', 'normuon', 'aurora'):
         from .muon import Muon
-        return Muon(groups)
+        return Muon(groups, {**(options or {}), 'kind': kind})
     if kind == 'adamw':
         return torch.optim.AdamW(groups, fused=groups[0]['params'][0].is_cuda)
     if kind == 'sgd':
@@ -127,7 +130,7 @@ def optimizer_for(model, config):
         from .plain_optimization import optimizer_for as plain_optimizer
         kind = config['optimizer']['kind']
         return plain_optimizer(model, kind, config['plain_optimizer'],
-                               parameter_groups(model) if kind == 'muon' else None)
+                               parameter_groups(model) if kind in ('muon','normuon','aurora') else None, config['optimizer'])
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.optimization import optimizer_for as muzero_optimizer
         return muzero_optimizer(model, config)
@@ -135,8 +138,8 @@ def optimizer_for(model, config):
     options = config['optimizer']
     for group in groups:
         group['lr'], group['weight_decay'] = group_settings(
-            group['group_name'], options, config['training']['batch_size'], 0, {}, {}, model.norm_kind)
-    return optimizer_from_groups(groups, options['kind'])
+            group['group_name'], options, config['training']['batch_size'], 0, {}, {}, model.norm_kind, config.get('lr_schedule'))
+    return optimizer_from_groups(groups, options['kind'], options)
 
 
 def optimization_for(model, config, optimizer, state=None, round_steps=None):
@@ -151,6 +154,10 @@ class Optimization:
     def __init__(self, model, config, optimizer, state=None, round_steps=None):
         self.model, self.optimizer = model, optimizer
         self.options, self.batch_size = config['optimizer'], config['training']['batch_size']
+        self.schedule = config.get('lr_schedule', {})
+        self.completed_rounds = 0 if state is None else state['completed_rounds']
+        from .muon import configure_floors
+        self.initial_rms = configure_floors(model, optimizer, self.options, state)
         self.lookahead_k = self.options['lookahead_k']
         if round_steps is not None:
             segments = min(config['training']['sub_epochs'], round_steps)
@@ -169,6 +176,9 @@ class Optimization:
         self.round_batches = 0 if state is None else state['round_batches']
         self.subepoch=0 if state is None else state['subepoch']
         self.subepoch_batches=0 if state is None else state['subepoch_batches']
+        from .brenorm import BoundsSchedule
+        self.brenorm = BoundsSchedule(model, config.get('brenorm'), self.consumed_samples,
+                                     None if state is None else state['brenorm'])
         self.norm_sums = {} if state is None else state['norm_sums'].copy()
         self.norm_weights = {} if state is None else state['norm_weights'].copy()
         self.pending_norms = None
@@ -187,7 +197,8 @@ class Optimization:
     def configure(self):
         for group in self.optimizer.param_groups:
             group['lr'], group['weight_decay'] = group_settings(
-                group['group_name'], self.options, self.batch_size, self.consumed_samples, self.norms, self.baselines, self.model.norm_kind)
+                group['group_name'], self.options, self.batch_size, self.consumed_samples, self.norms, self.baselines,
+                self.model.norm_kind, self.schedule, self.completed_rounds)
 
     @property
     def backward_scale(self):
@@ -203,6 +214,7 @@ class Optimization:
         self.subepoch=-1
         self.begin_subepoch()
         self.configure()
+        self.brenorm.update(self.consumed_samples)
 
     def begin_subepoch(self):
         # Source resets the counter, without copying fast weights to slow here.
@@ -239,9 +251,10 @@ class Optimization:
         # EtaZero logs mean losses. Backward uses the batch sum, like KataGo.
         if override:
             return override * self.batch_size
-        cap = (11000 if self.options['kind'] in ('adamw', 'muon') else
+        cap = (11000 if self.options['kind'] in ('adamw', 'muon', 'normuon', 'aurora') else
                5500 if self.model.norm_kind in ('bnorm', 'brenorm', 'fixbrenorm') else 2500)
-        return cap * math.sqrt(self.batch_size / 256) / math.sqrt(max(1e-7, self.options['lr_scale']))
+        scale = effective_scale(self.options['lr_scale'], self.schedule, self.consumed_samples, self.completed_rounds)
+        return cap * math.sqrt(self.batch_size / 256) / math.sqrt(max(1e-7, scale))
 
     @torch.no_grad()
     def after_step(self, successful=True):
@@ -250,6 +263,8 @@ class Optimization:
         self.consumed_samples += self.batch_size
         self.round_batches += 1
         self.subepoch_batches += 1
+        if self.round_batches % 500 == 0:
+            self.brenorm.update(self.consumed_samples)
         self.record_norms()
         if ((self.consumed_samples <= 200000000 and self.round_batches % 5 == 0)
                 or self.round_batches % 50 == 0):
@@ -270,6 +285,7 @@ class Optimization:
 
     @torch.no_grad()
     def finish_round(self):
+        self.completed_rounds += 1
         # Match the native epoch boundary: discard leftover fast weights while
         # retaining optimizer moments and separate consumption/update counters.
         if self.options['lookahead_alpha'] < 1:
@@ -278,7 +294,8 @@ class Optimization:
             self.counter = 0
 
     def state_dict(self):
-        return {'baselines': self.baselines, 'norms': self.norms,
+        return {'baselines': self.baselines, 'norms': self.norms, 'brenorm': self.brenorm.state_dict(),
+                'completed_rounds': self.completed_rounds, 'initial_rms': self.initial_rms,
                 'norm_sums': self.norm_sums, 'norm_weights': self.norm_weights,
                 'consumed_samples': self.consumed_samples, 'optimizer_steps': self.optimizer_steps,
                 'round_batches': self.round_batches,'subepoch':self.subepoch,'subepoch_batches':self.subepoch_batches,
