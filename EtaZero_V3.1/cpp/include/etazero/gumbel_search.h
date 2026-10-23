@@ -16,7 +16,7 @@ public:
     ~GumbelSearch() override;
     SearchResult run(const Game&,double,SearchRun={}) override;
     SearchResult run(const SearchState&,double,SearchRun={});
-    void advance(int) override { root_=nullptr;collect_nodes(nullptr);root_=new_node(); }
+    void advance(int) override { root_=nullptr;collect_nodes(nullptr);root_=new_node();set_root_focus({}, {},0); }
 };
 namespace muzero {
 template<bool Full> class GumbelSearch final : public Search {

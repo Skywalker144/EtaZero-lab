@@ -23,19 +23,20 @@ std::vector<int16_t> quantize_gumbel_policy(const std::vector<double>&);
 // One root search owns this scheduler. Its caller serializes reserve/commit.
 // Completed counts define Q; reserved counts prevent duplicate/over-budget work.
 class GumbelRoot {
-    struct Phase { int64_t begin, length; int actions, first_visit; };
+    struct Phase { int64_t begin, length; int actions; int64_t first_visit; };
     std::vector<Phase> phases_;
     std::vector<int64_t> visits_;
     std::vector<int> pending_;
     std::vector<double> logits_, noise_;
-    int budget_=0, issued_=0, pending_total_=0, considered_=-1;
+    int64_t budget_=0, issued_=0, considered_=-1;
+    int pending_total_=0;
 public:
-    GumbelRoot(const std::vector<double>& priors,int budget,const GumbelSettings&,std::mt19937_64&);
-    int considered_visit(int simulation) const;
+    GumbelRoot(const std::vector<double>& priors,int64_t budget,const GumbelSettings&,std::mt19937_64&);
+    int64_t considered_visit(int64_t simulation) const;
     bool done() const { return issued_>=budget_; }
     int reserve(const std::vector<double>& transformed_q);
     void commit(int action);
-    void cancel(int action);
+    void cancel(int action,bool retry=false);
     int winner(const std::vector<double>& transformed_q) const;
     const std::vector<int64_t>& visits() const { return visits_; }
     int pending() const { return pending_total_; }
