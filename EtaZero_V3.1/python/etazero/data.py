@@ -110,7 +110,7 @@ def validate_raw(a, source="record", *, deep=True):
                 "q_values": (len(a['forbidden_input']),actions_count), "q_visits": (s,actions_count),
                 "network_wdl": (t,3), "search_wdl": (t,3)}
     for key in ("game_ids", "seeds", "sizes", "rules", "winners", "reasons", "opening_moves", "balanced_moves", "policy_moves",
-                "opening_attempts", "opening_status", "start_values", "initial_position_moves", "initial_position_kind", "hint_actions"):
+                "opening_attempts", "opening_status", "start_values", "initial_position_moves", "initial_position_kind", "hint_actions", 'training_weights'):
         expected[key] = (n,)
     for key in ("actions", "simulations", "temperatures", "rewards", "train_mask", "row_repeats", "target_weights",
                 "policy_surprises", "value_surprises", "cheap_search"):
@@ -157,11 +157,12 @@ def validate_raw(a, source="record", *, deep=True):
             (a["initial_position_moves"] >= 0).all() and
             (a["opening_moves"] == a["balanced_moves"]+a["policy_moves"]+a["initial_position_moves"]).all(), "opening lengths")
     kind=a['initial_position_kind'];hint=a['hint_actions']
-    require(np.isin(kind,[0,1,2,3,4]).all(), 'initial position kind')
+    require(np.isin(kind,[0,1,2,3,4,5]).all(), 'initial position kind')
+    require(np.isfinite(a['training_weights']).all() and (a['training_weights']>=0).all(), 'invalid game loss weight')
     require(((kind==0) <= (a['initial_position_moves']==0)).all() and
-            ((kind>0) <= ((a['balanced_moves']==0) & (a['policy_moves']==0) & (a['opening_attempts']==0))).all(), 'initial prefix split')
+            ((kind>0) <= ((a['balanced_moves']==0) & ((kind==5) | (a['policy_moves']==0)) & (a['opening_attempts']==0))).all(), 'initial prefix split')
     require(((kind==1)==(hint>=0)).all() and ((hint>=-1)&(hint<actions_count)).all(), 'hint action/kind')
-    require(((kind<2) | (a['initial_position_moves']>0)).all(), 'fork prefix length')
+    require(((kind<2) | (kind==5) | (a['initial_position_moves']>0)).all(), 'fork prefix length')
     require(np.isin(a["opening_status"], [0, 1, 2]).all() and (a["opening_attempts"] >= 0).all() and
             np.isfinite(a["start_values"]).all() and (np.abs(a["start_values"]) <= 1).all(), "opening result")
     require(((a["opening_status"] == 1) == (a["balanced_moves"] > 0)).all() and
@@ -343,14 +344,14 @@ def trajectory_td_targets(search_wdl, players, terminal, area):
 
 
 TRAIN_TARGETS = ('policy', 'opponent_policy', 'opponent_policy_weight', 'value',
-                 'td_value', 'full_game_weight', 'q_values', 'q_visits')
+                 'td_value', 'full_game_weight', 'q_values', 'q_visits', 'future_positions', 'variance_time', 'training_weight')
 TRAIN_POLICY_TARGETS = ('policy', 'opponent_policy')
 
 
 def training_targets(config):
     if (config.get('agent', {}).get('algorithm') == 'muzero' and
             not config.get('muzero_training', {}).get('auxiliary_losses', True)):
-        return ('policy', 'value')
+        return ('policy', 'value', 'training_weight')
     return tuple(k for k in TRAIN_TARGETS if config['network'].get('predict_q_values', False)
                  or k not in ('q_values', 'q_visits'))
 
@@ -374,7 +375,36 @@ def full_trajectory_td(a):
     return td
 
 
-def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
+def full_trajectory_auxiliary(a):
+    """Real boards at t+8/t+32, capped at terminal, and future W-L variation.
+
+    Occupancy is signed in each target row's current-player perspective. Unlike
+    TD's smoothed target, variance-time uses changes between raw search values.
+    The reverse cumulative sums implement sum_i (i-t)*(WL_i-WL_{i-1})**2.
+    """
+    m = metadata(a)
+    spec = spec_for_metadata(m)
+    obs = unpack_observations(a['observations'], m['canvas']).astype(np.float32)
+    if spec.name == 'xiangqi':
+        signed = obs[:, 1:8].sum(1) - obs[:, 8:15].sum(1)
+    else:
+        signed = obs[:, 1] - obs[:, 2]
+    signed *= a['players'][:, None, None]
+    future = np.empty((len(a['actions']), 2, m['canvas'], m['canvas']), np.float32)
+    variance = np.empty(len(a['actions']), np.float32)
+    for g in range(len(a['sizes'])):
+        lo, hi = a['game_offsets'][g:g+2]
+        ol = a['observation_offsets'][g]
+        indices = ol + np.arange(hi-lo)
+        future[lo:hi] = signed[np.minimum(indices[:, None] + [8, 32], ol+hi-lo)] * a['players'][indices, None, None, None]
+        wl = (a['search_wdl'][lo:hi, 0] - a['search_wdl'][lo:hi, 2]).astype(np.float64) * a['players'][indices]
+        terminal = terminal_wdl(a['winners'][g], a['reasons'][g], dtype=np.float64)
+        changes = np.diff(np.r_[wl, terminal[0]-terminal[2]]) ** 2
+        variance[lo:hi] = np.cumsum(np.cumsum(changes[::-1]))[::-1]
+    return future, variance, signed
+
+
+def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None, auxiliary=None):
     # Each sampled position is stored once; multiplicity is resolved only here.
     samples = a['sample_indices']
     rows = np.repeat(np.arange(len(samples)), a['row_repeats'][samples])
@@ -384,6 +414,8 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     result = a['winners'][games] * a['players'][obs_ix]
     if 'td_value' in targets and td is None:
         td = full_trajectory_td(a)
+    if 'future_positions' in targets and auxiliary is None:
+        auxiliary = full_trajectory_auxiliary(a)
     obs = a["observations"][obs_ix]
     globals = a["globals"][obs_ix]
     dropped = (a["forbidden_input"] == 0) & (a["rules"][games] == 2)
@@ -398,6 +430,8 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     main = {"obs": obs, "globals": globals,
             "policy": a['policies'][rows],
             "value": ordinary_wdl(result)}
+    if 'training_weight' in targets:
+        main['training_weight'] = a['training_weights'][games]
     if 'opponent_policy' in targets:
         main.update(opponent_policy=a['opponent_policies'][rows],
                     opponent_policy_weight=a['opponent_policy_weights'][rows])
@@ -406,6 +440,8 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     if 'q_values' in targets:
         main.update(q_values=a['q_values'].astype(np.float32)/32000.0,
                     q_visits=a['q_visits'][rows].astype(np.float32))
+    if 'future_positions' in targets:
+        main.update(future_positions=auxiliary[0][ix], variance_time=auxiliary[1][ix])
 
     side_rows = np.repeat(np.arange(len(a['side_players'])), a['side_row_repeats'])
     side_obs, side_globals = a['side_observations'][side_rows], a['side_globals'][side_rows]
@@ -414,6 +450,8 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     side_value = a['side_wdl'][side_rows]
     side = {'obs': side_obs, 'globals': side_globals, 'policy': a['side_policies'][side_rows],
             'value': side_value}
+    if 'training_weight' in targets:
+        side['training_weight'] = a['training_weights'][a['side_game_indices'][side_rows]]
     if 'opponent_policy' in targets:
         side.update(opponent_policy=np.ones((len(side_rows),main['policy'].shape[1]),np.int16),
                     opponent_policy_weight=np.zeros(len(side_rows),np.float32))
@@ -423,6 +461,9 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None):
     if 'q_values' in targets:
         side.update(q_values=a['side_q_values'].astype(np.float32)/32000.0,
                     q_visits=a['side_q_visits'][side_rows].astype(np.float32))
+    if 'future_positions' in targets:
+        side.update(future_positions=np.zeros((len(side_rows), *main['future_positions'].shape[1:]), np.float32),
+                    variance_time=np.zeros(len(side_rows), np.float32))
     totals, starts, ends = game_row_ranges(a)
     # Source writes each finished game's main rows followed by its side rows.
     # Select after constructing full-horizon targets, so a shard boundary never

@@ -51,9 +51,39 @@ def xiangqi_maps(canvas, device):
     return torch.stack(spatial).to(device), torch.stack(actions).to(device)
 
 
+def mask_history(batch, spec, include=None):
+    """Drop a suffix of NN history, preserving current board and rule state.
+
+    Go is the source's five-step mask, including ladder-history substitution.
+    Xiangqi applies the same per-step stop probability to its seven past boards.
+    Gomoku/Hex have no historical input features.
+    """
+    if spec.name not in ('go', 'xiangqi'):
+        return batch
+    obs, globals = batch['obs'].clone(), batch['globals'].clone()
+    depth = 5 if spec.name == 'go' else 7
+    if include is None:
+        stop = torch.rand((len(obs), depth), device=obs.device) >= 0.98
+        include = (stop.cumsum(1) == 0).to(obs.dtype)
+    if spec.name == 'go':
+        obs[:, 9:14] *= include[:, :, None, None]
+        h0, h1 = include[:, 0, None, None], include[:, 1, None, None]
+        previous = obs[:, 15].clone()
+        obs[:, 15] = obs[:, 14] + h0 * (previous - obs[:, 14])
+        obs[:, 16] = obs[:, 15] + h1 * (obs[:, 16] - previous)
+        globals[:, :5] *= include
+    else:
+        history = obs[:, 15:].reshape(len(obs), 7, 14, *obs.shape[-2:])
+        history *= include[:, :, None, None, None]
+        available = (globals[:, 5] * 8).round()
+        globals[:, 5] = torch.minimum(available, 1 + include.sum(1)) / 8
+    return {**batch, 'obs': obs, 'globals': globals}
+
+
 def augment_batch(batch, symmetry, spec=SPECS['gomoku']):
     if symmetry not in range(8):
         raise ValueError('D4 requires a square tensor and a symmetry in [0,7]')
+    batch = mask_history(batch, spec)
     obs, globals = batch['obs'], batch['globals']
     canvas = obs.shape[-1]
     if spec.symmetry == 'xiangqi':
@@ -76,6 +106,8 @@ def augment_batch(batch, symmetry, spec=SPECS['gomoku']):
     spatial_mapping = spatial[choices]
     policy_mapping = spatial_mapping if spec.action_layout == 'points' else policy[choices]
     result={**batch,'obs':transform(obs,spatial_mapping)}
+    if 'future_positions' in batch:
+        result['future_positions'] = transform(batch['future_positions'], spatial_mapping)
     for key in ('policy','opponent_policy','q_values','q_visits'):
         if key in batch:
             result[key]=transform(batch[key],policy_mapping)

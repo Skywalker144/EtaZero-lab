@@ -17,7 +17,7 @@ Q_POLICY_HEAD = "q_winloss_pretanh"
 RAW_DTYPES = {
     "observations": "uint8", "globals": "float32", "players": "int8", "actions": "int32",
     "policies": "int16", "opponent_policies": "int16", "opponent_policy_weights": "float32",
-    "visits": "int64", "simulations": "int32",
+    "visits": "int64", "simulations": "int64",
     "q_values": "int16", "q_visits": "int16",
     "temperatures": "float32", "rewards": "float32", "game_offsets": "int64",
     "observation_offsets": "int64", "game_ids": "uint64", "seeds": "uint64",
@@ -28,6 +28,7 @@ RAW_DTYPES = {
     "balanced_moves": "int16", "policy_moves": "int16", "opening_attempts": "int32",
     "initial_position_moves": "int16", "initial_position_kind": "int8", "hint_actions": "int32",
     "opening_status": "int8", "start_values": "float32",
+    'training_weights': 'float32',
     "sample_indices": "int64", "forbidden_input": "uint8",
     "reanalyzed": "uint8", "reanalysis_used_outcome": "uint8", "reanalysis_original_visits": "int64",
     "reanalysis_policy_surprise": "float32", "reanalysis_value_surprise": "float32",
