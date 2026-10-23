@@ -35,15 +35,18 @@ def check_model_identity(saved, config):
 
 
 def training_forward(model, config):
+    if config["agent"]["algorithm"] == "muzero":
+        from .attention_penalty import configure
+        configure(model, config.get("attention_penalty", {}))
     if config['agent']['algorithm'] == 'muzero':
         from .muzero.training import TrainingForward as MuZeroForward
         return MuZeroForward(model, config)
-    return TrainingForward(model, config['training']['soft_policy_weight_scale'], config['training']['disable_optimistic_policy'])
+    return TrainingForward(model, config['training']['soft_policy_weight_scale'], config['training']['disable_optimistic_policy'], config.get('losses'), config.get('attention_penalty'))
 
 
 def forward_batch(forward, tensors):
     keys = ('obs', 'globals', 'policy', 'opponent_policy', 'opponent_policy_weight',
-            'value', 'td_value', 'full_game_weight', 'q_values', 'q_visits')
+            'value', 'td_value', 'full_game_weight', 'q_values', 'q_visits', 'future_positions', 'variance_time', 'training_weight')
     if 'actions' in tensors:
         keys += ('actions', 'step_weights', 'recurrent_indices')
         return forward(*(tensors.get(key) for key in keys))
@@ -153,6 +156,9 @@ def initialize(run_dir, config, weights=None):
     random.seed(seed); np.random.seed(seed % 2**32); torch.manual_seed(seed)
     device = device_check(config["devices"]["train"])
     model = make_network(config).to(device)
+    if config['optimizer'].get('wd_floor_frac', 0):
+        from .muon import initialization_rms
+        model.initial_rms = initialization_rms(model)
     if weights:
         source = torch.load(weights, map_location=device, weights_only=False)
         if source["network_config"] != config["network"]:
@@ -173,6 +179,12 @@ def initialize(run_dir, config, weights=None):
 LOSS_NAMES=('loss','policy_loss','opponent_policy_loss','soft_policy_loss',
             'soft_opponent_policy_loss','value_loss','td_value_long_loss','td_value_mid_loss',
             'td_value_short_loss','long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')
+
+
+def loss_names(model):
+    return (LOSS_NAMES + (('q_winloss_loss',) if model.predict_q_values else ()) +
+            (('future_position_loss', 'variance_time_loss') if getattr(model, 'auxiliary_losses', True) else ()) +
+            (('attention_logit_penalty', 'attention_logit_bound_max') if getattr(model, 'has_attention_penalty', False) else ()))
 
 
 def finish_optimizer_step(parameters, optimizer, scaler, grad_norm, cap, packed, loss_count):
@@ -218,7 +230,7 @@ def validate_epoch(snapshot,model,forward,config,iteration,device,log):
     # state. The source promises uniform D4, not a shared seeded draw sequence.
     symmetries=random.Random((config['run']['seed']+iteration)^0x56414c)
     amp=config['training']['amp'];maximum=config['training']['max_validation_samples']
-    names=LOSS_NAMES+(('q_winloss_loss',) if model.predict_q_values else ())
+    names=loss_names(model)
     sums=[0.0]*len(names);samples=batches=0;draws=[0]*8;step_sums=None
     was_training=model.training
     try:
@@ -350,8 +362,6 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             # White Hex canonicalization also applies when augmentation is off.
             tensors = augment_training_batch(tensors, symmetry, spec)
             optimization.before_step()
-            if hasattr(model, 'prepare_brenorm'):
-                model.prepare_brenorm(optimization.consumed_samples, config.get('brenorm'))
             learning_rates = {g["group_name"]: g["lr"] for g in optimizer.param_groups}
             weight_decays = {g["group_name"]: g["weight_decay"] for g in optimizer.param_groups}
             context = torch.autocast("cuda",dtype=torch.float16 if amp=="float16" else torch.bfloat16) if amp!="off" else contextlib.nullcontext()
@@ -359,7 +369,10 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                 components,step_losses=forward_batch(forward,tensors)
             loss,pl,opl,spl,sopl,vl=components[:6]
             optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss * optimization.backward_scale).backward()
+            backward_loss = loss
+            if getattr(model, 'has_attention_penalty', False):
+                backward_loss = backward_loss + config['attention_penalty']['coefficient'] * components[-2]
+            scaler.scale(backward_loss * optimization.backward_scale).backward()
             scaler.unscale_(optimizer)
             if hasattr(model, 'scale_repvgg_gradients'):
                 model.scale_repvgg_gradients()
@@ -403,9 +416,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             if step_losses is not None:
                 start=len(components)+1
                 diagnostics={'step_losses':values[start:start+len(diagnostics_tensors)]}
-            loss_names=LOSS_NAMES
-            if model.predict_q_values:loss_names+=('q_winloss_loss',)
-            measured_losses = dict(zip(loss_names, values))
+            measured_losses = dict(zip(loss_names(model), values))
             measured_norm = values[len(components)]
             clipped = measured_norm * optimization.backward_scale > cap
             for accumulator in (round_metrics, window_metrics):
