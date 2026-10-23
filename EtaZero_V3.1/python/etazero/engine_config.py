@@ -6,7 +6,7 @@ is flattened once for native consumers and provenance; no training files are rea
 import math
 import os
 from pathlib import Path
-from .config import ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_game_symmetry
+from .config import PATTERN_DEFAULTS, resolve_pattern_corpora, HUMAN_SL_DEFAULTS, TIME_CONTROL_DEFAULTS, ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_game_symmetry
 from .schema import RULES
 from .config_files import read_config_file
 from .config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_search_combination
@@ -14,16 +14,22 @@ from .config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_se
 ENGINE_FIELDS = dict(go_rules=str, komi=float, playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
               temperature=float, temperature_early=float, max_batch=int, server_threads=int, cache_entries=int,
-              inference_precision=str, batch_wait_us=int, muzero_queue_capacity=int,
+              inference_precision=str, batch_wait_us=int, muzero_queue_capacity=int,nn_mutex_pool_power_of_two=int,
               use_fpu=boolean, fpu_reduction_max=float, root_fpu_reduction_max=float,
               fpu_parent_weight_by_visited_policy_pow=float, use_lcb=boolean,
               lcb_stdevs=float, min_visit_prop_for_lcb=float, policy_target_pruning=boolean, **SEARCH_PARAMETERS)
-ENGINE_FIELDS.update(root_search_algo=str, nonroot_search_algo=str,
+ENGINE_FIELDS.update(pondering_enabled=boolean,root_search_algo=str, nonroot_search_algo=str,
                      **{'gumbel_'+key: value for key, value in GUMBEL_FIELDS.items()})
 
 
 def load_engine_config(source, match=False, environ=None, *, overrides=None):
     result = _load_profile(source, match, environ, overrides=overrides)
+    group=result['match' if match else 'analysis']
+    base=Path(source);base=base if base.is_dir() else base.parent
+    group['pattern_corpora']=resolve_pattern_corpora(group['pattern_corpora'],base)
+    if group['human_model']:
+        path=Path(group['human_model']);base=Path(source);base=base if base.is_dir() else base.parent
+        group['human_model']=str((base/path).resolve() if not path.is_absolute() else path)
     validate_engine_config(result, match)
     return result
 
@@ -96,7 +102,20 @@ def _load_profile(source, match, environ, *, groups=None, overrides=None):
                 else:
                     raw = defaults.get(key)
             if raw is None and group == section:
-                if key == 'graph_search_rep_bound': raw = '11'
+                if key in PATTERN_DEFAULTS: raw=str(PATTERN_DEFAULTS[key])
+                elif key in HUMAN_SL_DEFAULTS: raw = str(HUMAN_SL_DEFAULTS[key]).lower() if isinstance(HUMAN_SL_DEFAULTS[key],bool) else str(HUMAN_SL_DEFAULTS[key])
+                elif key in TIME_CONTROL_DEFAULTS: raw = str(TIME_CONTROL_DEFAULTS[key])
+                elif key == 'graph_search_rep_bound': raw = '11'
+                elif key == 'node_table_shards_power_of_two': raw = '16'
+                elif key == 'min_playouts_per_thread': raw = '8' if group=='analysis' else '0'
+                elif key == 'pondering_enabled': raw = 'false'
+                elif key == 'root_symmetry_pruning': raw = 'true' if group=='analysis' else 'false'
+                elif key == 'use_eval_cache': raw = 'false'
+                elif key == 'eval_cache_min_visits': raw = '100'
+                elif key == 'wide_root_noise': raw = '.04' if group=='analysis' else '0'
+                elif key in ('futile_visits_threshold','visit_cap_contempt','visit_cap_contempt_player'): raw = '0'
+                elif key == 'nn_mutex_pool_power_of_two': raw = '17'
+                elif key in ('ignore_pre_root_history','ignore_all_history'): raw = 'false'
                 elif key == 'go_rules': raw = 'chinese'
                 elif key == 'komi': raw = '7.5'
                 elif key in ('root_search_algo', 'nonroot_search_algo'):
@@ -124,7 +143,7 @@ def validate_engine_config(config, match=False):
     for group, values in config.items():
         for key, value in values.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if not math.isfinite(value) or (value < 0 and key != 'komi'):
+                if not math.isfinite(value) or (value < 0 and key not in ('komi','nn_mutex_pool_power_of_two','visit_cap_contempt_player')):
                     raise ValueError(f'Invalid {group}.{key}')
     if not 0 <= c['seed'] < 2**64 or not 5 <= c['board_size'] <= 25:
         raise ValueError('Invalid engine seed or board size')
@@ -137,13 +156,15 @@ def validate_engine_config(config, match=False):
     if c['rule']=='go':
         from .games import validate_go_komi
         validate_go_komi(c['komi'])
-    if not 1 <= c['visits'] <= 2**31-1 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','muzero_queue_capacity')) or c['c_puct'] <= 0:
+    if not 1 <= c['visits'] <= 2**50 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','muzero_queue_capacity')) or c['c_puct'] < 0:
         raise ValueError('Engine requires visits >= 1 and positive execution/search sizes')
     if c['lcb_stdevs'] <= 0 or c['fpu_parent_weight_by_visited_policy_pow'] < 0 or c['min_visit_prop_for_lcb'] > 1:
         raise ValueError('Invalid engine FPU/LCB settings')
     if not 0<=c['playout_doubling_advantage']<=math.log2(100) or c['playout_doubling_advantage_player'] not in ('black','white'):
         raise ValueError('Invalid engine PDA condition')
     validate_search_parameters(c)
+    if not -1<=c['nn_mutex_pool_power_of_two']<=24:
+        raise ValueError('Invalid NN cache mutex pool power')
     validate_game_symmetry(c,spec)
     if c['rule']=='xiangqi' and c['board_size']!=10: raise ValueError('Xiangqi requires board_size=10')
     if c['device'] != 'cpu' and not (c['device'].startswith('cuda:') and c['device'][5:].isdigit()):

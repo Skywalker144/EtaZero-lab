@@ -52,10 +52,61 @@ SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncer
                          root_num_symmetries_to_sample=int, nn_policy_temperature=float,
                          root_policy_temperature_early=float, root_policy_temperature=float,
                          temperature_halflife=float, temperature_only_below_prob=float)
+SEARCH_PARAMETERS.update(root_symmetry_pruning=boolean)
+SEARCH_PARAMETERS.update(use_eval_cache=boolean,eval_cache_min_visits=int)
+SEARCH_PARAMETERS.update(wide_root_noise=float,futile_visits_threshold=float,visit_cap_contempt=int,visit_cap_contempt_player=int)
+SEARCH_PARAMETERS.update(node_table_shards_power_of_two=int,min_playouts_per_thread=float,ignore_pre_root_history=boolean,ignore_all_history=boolean)
 
+
+PATTERN_DEFAULTS={'avoid_repeated_pattern_utility':0.0,'pattern_corpora':'[]'}
+PATTERN_FIELDS={'avoid_repeated_pattern_utility':float,'pattern_corpora':str}
+SEARCH_PARAMETERS.update(PATTERN_FIELDS)
+
+def resolve_pattern_corpora(value,base):
+    import json
+    sources=json.loads(value)
+    if not isinstance(sources,list): raise ValueError('pattern_corpora must be a JSON array')
+    for source in sources:
+        if not isinstance(source,dict) or set(source)-{'paths','penalty','decay','min_turn','max_files','players'}: raise ValueError('Invalid pattern corpus fields')
+        if not isinstance(source.get('paths'),list) or not source['paths']: raise ValueError('Pattern corpus requires paths')
+        for key,low,high in [('penalty',0,3),('decay',0,1),('min_turn',0,2**50),('max_files',0,2**50)]:
+            if key in source and not low<=source[key]<=high: raise ValueError(f'Invalid pattern corpus {key}')
+        source['paths']=[str((Path(base)/p).resolve()) for p in source['paths']]
+    return json.dumps(sources,separators=(',',':'))
+
+HUMAN_SL_DEFAULTS = {'human_model': '', 'human_sl_cpuct_exploration': 1.0, 'human_sl_cpuct_permanent': 0.0, 'human_sl_root_weightless': 0.0, 'human_sl_root_weightful': 0.0, 'human_sl_player_weightless': 0.0, 'human_sl_player_weightful': 0.0, 'human_sl_opponent_weightless': 0.0, 'human_sl_opponent_weightful': 0.0, 'human_sl_chosen_move_proportion': 0.0, 'human_sl_chosen_move_pikl_lambda': 1000000000.0, 'human_sl_chosen_move_ignore_pass': False}
+HUMAN_SL_FIELDS = {'human_model':str, 'human_sl_cpuct_exploration':float, 'human_sl_cpuct_permanent':float, 'human_sl_root_weightless':float, 'human_sl_root_weightful':float, 'human_sl_player_weightless':float, 'human_sl_player_weightful':float, 'human_sl_opponent_weightless':float, 'human_sl_opponent_weightful':float, 'human_sl_chosen_move_proportion':float, 'human_sl_chosen_move_pikl_lambda':float, 'human_sl_chosen_move_ignore_pass':boolean}
+SEARCH_PARAMETERS.update(HUMAN_SL_FIELDS)
+
+TIME_CONTROL_DEFAULTS = {'max_visits_pondering': 1125899906842624, 'max_playouts_pondering': 1125899906842624, 'max_time_pondering': 1e+20, 'lag_buffer': 0.0, 'tree_reuse_carry_over_time_factor': 0.0, 'overallocate_time_factor': 1.0, 'midgame_time_factor': 1.0, 'midgame_turn_peak_time': 130.0, 'endgame_turn_time_decay': 100.0, 'obvious_moves_time_factor': 1.0, 'obvious_moves_policy_entropy_tolerance': 0.3, 'obvious_moves_policy_surprise_tolerance': 0.15}
+TIME_CONTROL_FIELDS = {'max_visits_pondering':int, 'max_playouts_pondering':int, 'max_time_pondering':float, 'lag_buffer':float, 'tree_reuse_carry_over_time_factor':float, 'overallocate_time_factor':float, 'midgame_time_factor':float, 'midgame_turn_peak_time':float, 'endgame_turn_time_decay':float, 'obvious_moves_time_factor':float, 'obvious_moves_policy_entropy_tolerance':float, 'obvious_moves_policy_surprise_tolerance':float}
+SEARCH_PARAMETERS.update(TIME_CONTROL_FIELDS)
 
 def validate_search_parameters(c):
-    bounds={'uncertainty_coeff':(.0001,1),'uncertainty_exponent':(0,2),'uncertainty_max_weight':(1,100),
+    if not 0<=c.get("avoid_repeated_pattern_utility",0)<=3: raise ValueError("Invalid repeated-pattern utility")
+    for key,value in HUMAN_SL_DEFAULTS.items():
+        if isinstance(value,(str,bool)):continue
+        maximum=1e9 if key.endswith('pikl_lambda') else 1000 if 'cpuct' in key else 1
+        if not 0<=c.get(key,value)<=maximum:raise ValueError(f'Invalid {key}')
+    if not c.get('human_model','') and any(c.get(k,0)>0 for k in HUMAN_SL_DEFAULTS if k.endswith(('weightless','weightful','proportion'))):
+        raise ValueError('Secondary policy mixing or exploration requires human_model')
+    if not 0<=c.get('wide_root_noise',0)<=5 or not 0<=c.get('futile_visits_threshold',0)<=1:
+        raise ValueError('Invalid root exploration noise or futile visits threshold')
+    if not 1<=c.get('eval_cache_min_visits',100)<=2**50: raise ValueError('Invalid eval cache visit threshold')
+    cap=c.get('visit_cap_contempt',0)
+    if cap==1 or not 0<=cap<=2**50 or c.get('visit_cap_contempt_player',0) not in (-1,0,1):
+        raise ValueError('Visit cap must be 0 or [2,2^50], player must be -1,0,1')
+    if not 8<=c.get('node_table_shards_power_of_two',16)<=24 or not 0<=c.get('min_playouts_per_thread',0)<=1e20:
+        raise ValueError('Invalid search shard power or minimum playouts per thread')
+    for key in ('max_visits_pondering','max_playouts_pondering'):
+        if not 1<=c.get(key,2**50)<=2**50: raise ValueError(f'Invalid {key}')
+    time_bounds=dict(max_time_pondering=(0,1e20),lag_buffer=(0,3600),tree_reuse_carry_over_time_factor=(0,1),
+        overallocate_time_factor=(.01,100),midgame_time_factor=(.01,100),midgame_turn_peak_time=(0,1000),
+        endgame_turn_time_decay=(0,1000),obvious_moves_time_factor=(.01,1),obvious_moves_policy_entropy_tolerance=(.001,2),
+        obvious_moves_policy_surprise_tolerance=(.001,2))
+    for key,(low,high) in time_bounds.items():
+        if not low<=c.get(key,TIME_CONTROL_DEFAULTS[key])<=high: raise ValueError(f'Invalid {key}')
+    bounds={'uncertainty_coeff' :(.0001,1),'uncertainty_exponent':(0,2),'uncertainty_max_weight':(1,100),
             'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50),
             'subtree_value_bias_factor':(0,1),'subtree_value_bias_free_prop':(0,1),'subtree_value_bias_weight_exponent':(0,1)}
     for key,(low,high) in bounds.items():
@@ -67,7 +118,7 @@ def validate_search_parameters(c):
         raise ValueError('subtree_value_bias_table_num_shards must be a positive int32')
     if type(c['graph_search_rep_bound']) is not int or not 3 <= c['graph_search_rep_bound'] <= 50:
         raise ValueError('graph_search_rep_bound must be an integer in [3,50]')
-    if not 0 <= c['nn_symmetry'] < 8 or not 0 <= c['max_playouts'] <= 2**31-1:
+    if not 0 <= c['nn_symmetry'] < 8 or not 0 <= c['max_playouts'] <= 2**50:
         raise ValueError('Invalid NN symmetry or playout cap')
     if not 1 <= c['root_num_symmetries_to_sample'] <= 8:
         raise ValueError('Root symmetry count must be in [1,8]')
@@ -76,8 +127,35 @@ def validate_search_parameters(c):
     if any(c[k] <= 0 for k in ('c_puct_base','c_puct_stdev_prior','nn_policy_temperature',
                               'root_policy_temperature','root_policy_temperature_early','temperature_halflife')):
         raise ValueError('Policy temperatures, halflife and PUCT scales must be positive')
+    if any(not .01<=c[key]<=100 for key in ('root_policy_temperature','root_policy_temperature_early')):
+        raise ValueError('Root policy temperatures must be in [0.01,100]')
+
+OPTION_DEFAULTS = {
+    'patterns':PATTERN_DEFAULTS,
+    'human_sl': HUMAN_SL_DEFAULTS,
+    'time_control': TIME_CONTROL_DEFAULTS,
+    'losses': dict(value_scale=0.6, td_long_scale=0.6, td_mid_scale=0.6, td_short_scale=0.6,
+                   variance_time_scale=1.0, main_head_scale=-1.0, intermediate_head_scale=-1.0),
+    'optimizer': dict(muon_adam_lr_factor=1.0, wd_floor_frac=0.0, ns_steps=5,
+                      use_polar_express=False, aurora_pp_iterations=2, aurora_pp_beta=0.5),
+    'lr_schedule': dict(mode='constant', auto2_factor=1.0, points='', cycle_low=1.0,
+                        cycle_high=1.0, cycle_up_rounds=0, cycle_down_rounds=0, cycle_rounds=1),
+    'attention_penalty': dict(cap=-1.0, coefficient=1e-3, batch_fraction=1.0),
+    'data_weight': dict(scale_data_weight=1.0),
+    'start_positions': dict(probability=0.0, files='', excludes='', load_probability=1.0, turn_weight_lambda=0.0,
+                            policy_init=False, policy_area_proportion=0.0, policy_gamma_shape=1.0, policy_temperature=1.0),
+    'graph_search': dict(node_table_shards_power_of_two=16,use_eval_cache=False,eval_cache_min_visits=100),
+    'parallelism': dict(min_playouts_per_thread=0.0),
+    'inference': dict(nn_mutex_pool_power_of_two=16),
+    'search_extras': dict(root_symmetry_pruning=False,wide_root_noise=0.0,futile_visits_threshold=0.0,visit_cap_contempt=0,visit_cap_contempt_player=0),
+    'search_history': dict(ignore_pre_root_history=False,ignore_all_history=False),
+}
+
 
 FIELDS = {
+    'patterns':('selfplay',PATTERN_FIELDS),
+    'human_sl': ('selfplay',HUMAN_SL_FIELDS),
+    'time_control': ('selfplay',TIME_CONTROL_FIELDS),
     "run": ("run", {"run_dir": str, "seed": int, "max_iteration": int,
                     "max_seconds": float, "cpu_threads": int}),
     "agent": ("run", {"algorithm": str, "root_search_algo": str, "nonroot_search_algo": str}),
@@ -95,11 +173,15 @@ FIELDS = {
     "plain_optimizer": ("train", {"learning_rate": float, "weight_decay": float}),
     "brenorm": ("train", {"avg_momentum": float, "target_rmax": float,
                            "target_dmax": float, "adjustment_scale": float}),
+    'losses': ('train', {key: float for key in OPTION_DEFAULTS['losses']}),
+    'lr_schedule': ('train', {key: type(value) for key, value in OPTION_DEFAULTS['lr_schedule'].items()}),
+    'attention_penalty': ('train', {key: float for key in OPTION_DEFAULTS['attention_penalty']}),
     "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
                            'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "log_every": int, "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
                            "replay_ratio": float, "d4_augmentation": boolean, "soft_policy_weight_scale": float, "disable_optimistic_policy": boolean}),
     "optimizer": ("train", {"kind": str, "lr_scale": float, "lr_warmup": boolean,
+                             **{key: boolean if type(value) is bool else type(value) for key, value in OPTION_DEFAULTS['optimizer'].items()},
                              "head_lr_factor": float, "noreg_lr_factor": float,
                              "input_wd_factor": float, "normal_wd_factor": float, "normal_attn_wd_factor": float,
                              "norm_interval": int, "norm_only_at_print": boolean, "lookahead_print": boolean,
@@ -113,7 +195,7 @@ FIELDS = {
     'search': ("selfplay", {'full_search_visits': int, 'cheap_search_visits': int,
                             'cheap_search_probs': float, 'cheap_search_target_weight': float,
                             'reuse_tree': boolean, 'clear_before_search': boolean, 'max_playouts': int, 'max_time': float}),
-    'graph_search': ("selfplay", {'use_graph_search': boolean, 'graph_search_catch_up_leak_prob': float, 'graph_search_rep_bound': int}),
+    'graph_search': ("selfplay", {'use_graph_search': boolean, 'graph_search_catch_up_leak_prob': float, 'graph_search_rep_bound': int,'node_table_shards_power_of_two':int,'use_eval_cache':boolean,'eval_cache_min_visits':int}),
     'uncertainty': ("selfplay", dict(use_uncertainty=boolean,uncertainty_coeff=float,uncertainty_exponent=float,uncertainty_max_weight=float)),
     'optimistic_policy': ("selfplay", dict(policy_optimism=float,root_policy_optimism=float)),
     'noise_pruning': ("selfplay", dict(use_noise_pruning=boolean,noise_prune_utility_scale=float,noise_pruning_cap=float)),
@@ -121,6 +203,10 @@ FIELDS = {
         'subtree_value_bias_factor','subtree_value_bias_free_prop','subtree_value_bias_weight_exponent','subtree_value_bias_table_num_shards')}),
     'reanalysis': ("selfplay", dict(use_reanalyze=boolean,reanalyze_prop=float,reanalyze_policy_surprise_weight=float,reanalyze_value_surprise_weight=float,reanalyze_surprise_exponent=float,reanalyze_use_outcome_targets=boolean)),
     'hint_positions': ("selfplay", dict(hint_positions_prob=float,positions_file=str)),
+    'data_weight': ('selfplay', dict(scale_data_weight=float)),
+    'search_extras': ('selfplay',dict(root_symmetry_pruning=boolean,wide_root_noise=float,futile_visits_threshold=float,visit_cap_contempt=int,visit_cap_contempt_player=int)),
+    'search_history': ('selfplay', dict(ignore_pre_root_history=boolean,ignore_all_history=boolean)),
+    'start_positions': ('selfplay', {key: boolean if type(value) is bool else type(value) for key,value in OPTION_DEFAULTS['start_positions'].items()}),
     'game_forks': ("selfplay", dict(early_fork_game_prob=float,fork_game_prob=float,early_fork_game_expected_move_prop=float,
                                   fork_game_min_choices=int,early_fork_game_max_choices=int,fork_game_max_choices=int)),
     'side_positions': ("selfplay", dict(side_position_prob=float)),
@@ -157,8 +243,9 @@ FIELDS = {
                                  'policy_temperature': float}),
     'surprise_weighting': ("selfplay", {'policy_surprise_data_weight': float,
                                         'value_surprise_data_weight': float, 'use_search_value_surprise': boolean}),
-    'parallelism': ("selfplay", {'game_threads': int, 'search_threads': int}),
+    'parallelism': ("selfplay", {'game_threads': int, 'search_threads': int,'min_playouts_per_thread':float}),
     'inference': ("selfplay", {'server_threads': int, 'max_batch': int, 'inference_precision': str,
+                               'nn_mutex_pool_power_of_two':int,
                                'cache_entries': int, 'batch_wait_us': int, 'muzero_queue_capacity': int}),
     'writer': ("selfplay", {'writer_queue': int, 'shard_rows': int, 'first_file_min_random_proportion': float}),
 }
@@ -232,6 +319,9 @@ def load_config(directory, run_dir=None):
             if section=="reanalysis" and key!="use_reanalyze" and (section,key) not in values and not config[section]["use_reanalyze"]:
                 continue
             if (section, key) not in values:
+                if key in OPTION_DEFAULTS.get(section, {}):
+                    config[section][key] = OPTION_DEFAULTS[section][key]
+                    continue
                 if section == 'gumbel':
                     config[section][key] = GUMBEL_DEFAULTS[key]
                     continue
@@ -245,6 +335,8 @@ def load_config(directory, run_dir=None):
             except ValueError as error:
                 raise ValueError(f"Invalid {section}.{key}: {error}") from error
     hints=config['hint_positions']
+    for key in ('files', 'excludes'):
+        config['start_positions'][key] = ','.join(str((directory/Path(path)).resolve()) for path in csv(config['start_positions'][key]))
     if hints['positions_file']:
         path=Path(hints['positions_file']);path=path if path.is_absolute() else directory/path
         hints['positions_file']=str(path.resolve())
@@ -262,6 +354,11 @@ def load_config(directory, run_dir=None):
         except ValueError as error:
             raise ValueError(f"Configuration outside {ROOT/'configs'} requires an explicit run_dir or --run-dir: {directory}") from error
         destination = ROOT/'data'/relative
+    config['patterns']['pattern_corpora']=resolve_pattern_corpora(config['patterns']['pattern_corpora'],directory)
+    if config['agent']['algorithm']=='muzero' and (config['patterns']['avoid_repeated_pattern_utility']!=0 or config['patterns']['pattern_corpora']!='[]'):
+        raise ValueError('Pattern bonuses require a real-board AlphaZero search')
+    if config['human_sl']['human_model']:
+        path=Path(config['human_sl']['human_model']);config['human_sl']['human_model']=str((directory/path).resolve() if not path.is_absolute() else path)
     config['run']['run_dir'] = str(destination.resolve())
     return config
 
@@ -307,8 +404,8 @@ NUMERIC_MINIMUMS = {
     'side_positions': ((), ('side_position_prob',)),
     'pda': (('max_asymmetric_ratio',), ('normal_asymmetric_playout_prob',)),
     'selfplay': (('bootstrap_games',), ()),
-    'reduce_visits': (('reduce_visits_threshold_lookback', 'reduced_visits_min'), ('reduce_visits_threshold', 'reduced_visits_weight')),
-    'puct': (('c_puct', 'c_puct_base', 'c_puct_stdev_prior'), ('c_puct_log', 'c_puct_stdev_prior_weight', 'c_puct_stdev_scale', 'virtual_loss')),
+    'reduce_visits': (('reduced_visits_min',), ('reduce_visits_threshold_lookback','reduce_visits_threshold', 'reduced_visits_weight')),
+    'puct': (('c_puct_base', 'c_puct_stdev_prior'), ('c_puct','c_puct_log', 'c_puct_stdev_prior_weight', 'c_puct_stdev_scale', 'virtual_loss')),
     'fpu': ((), ('fpu_reduction_max', 'root_fpu_reduction_max', 'fpu_parent_weight_by_visited_policy_pow', 'fpu_loss_prop', 'root_fpu_loss_prop', 'fpu_parent_weight')),
     'value_weighting': ((), ('value_weight_exponent',)),
     'forced_playouts': ((), ('root_desired_per_child_visits_coeff',)),
@@ -341,6 +438,8 @@ def validate(c):
         if c['graph_search']['use_graph_search'] or c['search']['reuse_tree']:
             raise ValueError('Gumbel requires use_graph_search=false and reuse_tree=false')
     if a['algorithm'] == 'muzero':
+        if c['graph_search']['use_eval_cache']: raise ValueError('MuZero has no real-board graph evaluation cache')
+        if c['patterns']['avoid_repeated_pattern_utility'] or c['patterns']['pattern_corpora']!='[]': raise ValueError('Pattern bonuses require real-board AlphaZero search')
         if c['subtree_value_bias']['subtree_value_bias_factor'] != 0:
             raise ValueError('MuZero latent search requires subtree_value_bias_factor=0')
         from .muzero.network import network_config
@@ -429,22 +528,22 @@ def validate(c):
     if c['writer']['first_file_min_random_proportion'] > 1:
         raise ValueError('writer.first_file_min_random_proportion must be in [0,1]')
     search = c['search']
-    validate_search_parameters({key: value for section in ('search', 'graph_search', 'uncertainty', 'optimistic_policy', 'noise_pruning', 'subtree_value_bias', 'fpu', 'puct', 'symmetry', 'temperature')
+    validate_search_parameters({key: value for section in ('search', 'graph_search', 'uncertainty', 'optimistic_policy', 'noise_pruning', 'subtree_value_bias', 'fpu', 'puct', 'symmetry', 'temperature','parallelism','search_extras','search_history','time_control','human_sl','patterns')
                                 for key, value in c[section].items()})
-    if (not 2 <= search['full_search_visits'] <= 2**31 - 1 or search['cheap_search_probs'] > 1
-            or (search['cheap_search_probs'] > 0 and not 2 <= search['cheap_search_visits'] <= search['full_search_visits'])
+    if (not 1 <= search['full_search_visits'] <= 2**50 or search['cheap_search_probs'] > 1
+            or (search['cheap_search_probs'] > 0 and not 1 <= search['cheap_search_visits'] <= min(10000000,search['full_search_visits']))
             or (search['cheap_search_probs'] > 0 and search['cheap_search_target_weight'] > 1) or c['lcb']['min_visit_prop_for_lcb'] > 1):
         raise ValueError('Invalid cheap search cap/probability/weight or LCB visit proportion')
     if (search['cheap_search_probs'] == 1 and search['cheap_search_target_weight'] == 0 and
             not (c['reanalysis']['use_reanalyze'] and c['reanalysis']['reanalyze_prop']>0)):
         raise ValueError('All-cheap zero-weight searches produce no training rows')
     if c['reduce_visits']['reduce_visits'] and (c['reduce_visits']['reduce_visits_threshold'] > 0.999999 or
-            not 1 <= c['reduce_visits']['reduce_visits_threshold_lookback'] <= 1000 or
-            not 2 <= c['reduce_visits']['reduced_visits_min'] <= search['full_search_visits'] or
+            not 0 <= c['reduce_visits']['reduce_visits_threshold_lookback'] <= 1000 or
+            not 1 <= c['reduce_visits']['reduced_visits_min'] <= min(10000000,search['full_search_visits']) or
             c['reduce_visits']['reduced_visits_weight'] > 1):
         raise ValueError('Invalid Reduce Visits threshold/lookback/minimum/weight')
     forks=c['game_forks'];hints=c['hint_positions']
-    if any(forks[k]>1 for k in ('early_fork_game_prob','fork_game_prob')) or not 0<=hints['hint_positions_prob']<=1:
+    if any(forks[k]>.5 for k in ('early_fork_game_prob','fork_game_prob')) or not 0<=hints['hint_positions_prob']<=1:
         raise ValueError('Invalid hint/game fork probability')
     if hints['hint_positions_prob']>0 and not hints['positions_file']:
         raise ValueError('Enabled hint sampling requires positions_file')
@@ -470,29 +569,55 @@ def validate(c):
             budgets.append(search['full_search_visits'])
             if c['reduce_visits']['reduce_visits']:
                 budgets.append(c['reduce_visits']['reduced_visits_min'])
-            if search['max_playouts'] != 2**31 - 1:
-                budgets.append(search['max_playouts'])
+            budgets.append(search['max_playouts'])
         if search['cheap_search_probs'] > 0:
             budgets.append(search['cheap_search_visits'])
         if hints['hint_positions_prob'] > 0:
-            budgets.append(4 * search['full_search_visits'])
-            if search['max_playouts'] != 2**31 - 1:
-                budgets.append(4 * search['max_playouts'])
+            budgets.append(min(2**50,4 * search['full_search_visits']))
+            budgets.append(min(2**50,4 * search['max_playouts']))
         ratio = c['pda']['max_asymmetric_ratio']
         if (math.floor(min(budgets) * 2 / (1 + ratio) + .5) < 5 or
-                math.floor(max(budgets) * 2 * ratio / (1 + ratio) + .5) > 2**31 - 1):
-            raise ValueError('PDA-scaled full/cheap/reduced/hint/playout budgets must stay in [5, int32 max]')
+                math.floor(max(budgets) * 2 * ratio / (1 + ratio) + .5) > 2**62):
+            raise ValueError('PDA-scaled full/cheap/reduced/hint/playout budgets must stay in [5, 2^62]')
     if c['surprise_weighting']['policy_surprise_data_weight'] + c['surprise_weighting']['value_surprise_data_weight'] > 1:
         raise ValueError('Surprise weight fractions must sum to <= 1')
     if c["training"]["amp"] not in ("off", "float16", "bfloat16"):
         raise ValueError("Invalid optimizer or AMP mode")
     o = c['optimizer']
-    if o['kind'] not in ('sgd', 'adamw', 'muon'):
-        raise ValueError('Optimizer kind must be sgd, adamw or muon')
+    start=c['start_positions']
+    if (not 0<=start['probability']<=1 or not 0<=start['load_probability']<=1 or not -10<=start['turn_weight_lambda']<=10 or
+            not 0<=start['policy_area_proportion']<=1 or not .5<=start['policy_gamma_shape']<=10 or not .1<=start['policy_temperature']<=5):
+        raise ValueError('Invalid external starting-position configuration')
+    if start['probability']>0 and not start['files']:
+        raise ValueError('External starting positions require files')
+    if not .01<=c['data_weight']['scale_data_weight']<=10:
+        raise ValueError('Invalid data weight scale')
+    for key, value in c.get('losses', {}).items():
+        if not math.isfinite(value) or value < (-1 if key.endswith('head_scale') else 0):
+            raise ValueError(f'Invalid losses.{key}')
+    if o['kind'] not in ('sgd', 'adamw', 'muon', 'normuon', 'aurora'):
+        raise ValueError('Optimizer kind must be sgd, adamw, muon, normuon or aurora')
+    if (o['muon_adam_lr_factor'] < 0 or o['wd_floor_frac'] < 0 or o['ns_steps'] < 1 or
+            o['aurora_pp_iterations'] < 1 or not 0 <= o['aurora_pp_beta'] <= 1):
+        raise ValueError('Invalid Muon optimizer options')
+    if o['wd_floor_frac'] > 0 and o['kind'] not in ('muon','normuon','aurora'):
+        raise ValueError('Weight-decay floors require a Muon-family optimizer')
+    from .lr_schedule import validate as validate_lr_schedule
+    validate_lr_schedule(c['lr_schedule'])
+    if c['lr_schedule']['mode']!='constant' and ('plain_optimizer' in c or not c.get('muzero_training',{}).get('katago_optimizer',True)):
+        raise ValueError('Fixed plain optimizer does not use the KataGo learning-rate schedule')
+    if c['lr_schedule']['mode'] != 'constant' and o['lr_scale'] != 1.0:
+        raise ValueError('Scheduled LR requires optimizer.lr_scale=1')
+    penalty = c['attention_penalty']
+    if (not all(math.isfinite(x) for x in penalty.values()) or penalty['cap'] < -1 or
+            penalty['coefficient'] < 0 or not 0 < penalty['batch_fraction'] <= 1):
+        raise ValueError('Invalid attention penalty')
     if not 0 < o['lookahead_alpha'] <= 1 or o['swa_scale'] < 1:
         raise ValueError('lookahead_alpha must be in (0,1] and swa_scale must be >= 1')
     if c['inference']['inference_precision'] not in ("float32", "float16"):
         raise ValueError("Invalid inference precision")
+    if not -1<=c['inference']['nn_mutex_pool_power_of_two']<=24:
+        raise ValueError('Invalid NN cache mutex pool power')
     if c['inference']['inference_precision'] == "float16" and "cpu" in csv(c["devices"]["selfplay"]):
         raise ValueError("FP16 inference requires CUDA selfplay devices")
     opening, policy_init = c["opening"], c["policy_init"]
@@ -541,7 +666,7 @@ def write_native(config, path):
 
 def resume_config(config):
     """State/layout requirements, independent of paths and execution resources."""
-    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'plain_optimizer', 'brenorm', 'optimizer', 'training')
+    sections = ('agent', 'network', 'muzero', 'unroll', 'muzero_training', 'plain_optimizer', 'brenorm', 'losses', 'lr_schedule', 'attention_penalty', 'optimizer', 'training')
     result = {name: dict(config[name]) for name in sections if name in config}
     for key in ('log_every','checkpoint_every','checkpoint_keep','prefetch_depth','cuda_prefetch','compile',
                 'max_validation_samples','randomize_validation_files'):
