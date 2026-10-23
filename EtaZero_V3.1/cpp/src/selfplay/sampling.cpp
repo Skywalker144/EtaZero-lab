@@ -2,6 +2,8 @@
 #include "etazero/sampling.h"
 #include <cmath>
 #include <iterator>
+#include <filesystem>
+#include <set>
 namespace etazero {
 void ForkPool::add(InitialPosition position) {
     if(position.game.finished())throw std::runtime_error("Cannot enqueue terminal fork");
@@ -16,7 +18,9 @@ std::optional<InitialPosition> ForkPool::take(std::mt19937_64& rng) {
 }
 GameForkConfig::GameForkConfig(const Config& c)
     :GameForkConfig(c.number("game_forks.early_fork_game_prob"),c.number("game_forks.fork_game_prob"),c.number("game_forks.early_fork_game_expected_move_prop"),
-                    c.integer("game_forks.fork_game_min_choices"),c.integer("game_forks.early_fork_game_max_choices"),c.integer("game_forks.fork_game_max_choices")) {}
+                    c.integer("game_forks.fork_game_min_choices"),c.integer("game_forks.early_fork_game_max_choices"),c.integer("game_forks.fork_game_max_choices")) {
+    if(early_probability>.5 || late_probability>.5)throw std::runtime_error("Configured game-fork probabilities must be <= 0.5");
+}
 GameForkConfig::GameForkConfig(double early,double late,double proportion,int minimum,int early_maximum,int late_maximum)
     :early_probability(early),late_probability(late),early_expected_move_proportion(proportion),
      minimum_choices(minimum),early_maximum_choices(early_maximum),late_maximum_choices(late_maximum) {
@@ -47,7 +51,14 @@ std::vector<InitialPosition> load_hint_positions(const Config& c,int canvas) {
             int local;if(!(row>>local)||local<0||local>=game.local_actions())throw std::runtime_error("Invalid game hint prefix");
             int action=game.native_action(local);position.game.play(action);position.actions.push_back(action);
         }
-        std::string extra;if(row>>extra)throw std::runtime_error("Trailing game hint fields");
+        std::string extra;
+        if(row>>extra) {
+            const std::string prefix="training_weight=";
+            if(extra.rfind(prefix,0)!=0)throw std::runtime_error("Trailing game hint fields");
+            size_t consumed=0;auto value=extra.substr(prefix.size());position.training_weight=std::stod(value,&consumed);
+            if(consumed!=value.size()||!std::isfinite(position.training_weight)||position.training_weight<0||row>>extra)
+                throw std::runtime_error("Invalid hint training weight");
+        }
         if(position.game.finished()||!position.game.legal(position.hint_action))throw std::runtime_error("Terminal hint position or occupied hint move");
         positions.push_back(std::move(position));
     }
@@ -61,6 +72,82 @@ std::optional<InitialPosition> sample_hint_position(const std::vector<InitialPos
     if(positions.empty())throw std::runtime_error("Enabled hint sampling lacks positions");
     std::vector<double> weights;for(const auto& p:positions)weights.push_back(p.sampling_weight);
     return positions[std::discrete_distribution<size_t>(weights.begin(),weights.end())(rng)];
+}
+
+std::vector<InitialPosition> load_start_positions(const Config& c,int canvas,std::mt19937_64& rng) {
+    std::vector<InitialPosition> positions;
+    if(!c.contains("start_positions.probability") || c.number("start_positions.probability")==0)return positions;
+    const double load=c.number("start_positions.load_probability"),lambda=c.number("start_positions.turn_weight_lambda");
+    if(load<0||load>1||lambda< -10||lambda>10)throw std::runtime_error("Invalid start-position sampling parameters");
+    std::set<std::string> excludes,unique;
+    for(const auto& path:c.list("start_positions.excludes")) {
+        std::ifstream file(path);if(!file)throw std::runtime_error("Cannot open start-position exclusions: "+path);
+        for(std::string line;std::getline(file,line);) {line=trim(line);if(!line.empty()&&line[0]!='#')excludes.insert(line);}
+    }
+    std::vector<std::filesystem::path> files;
+    for(const auto& path:c.list("start_positions.files")) {
+        if(std::filesystem::is_directory(path)) {
+            for(const auto& entry:std::filesystem::recursive_directory_iterator(path))
+                if(entry.is_regular_file() && (entry.path().extension()==".startpos" || entry.path().extension()==".txt"))files.push_back(entry.path());
+        } else files.emplace_back(path);
+    }
+    std::sort(files.begin(),files.end());
+    const auto options=rule_options(c,GameConfigMode::SELFPLAY);
+    for(const auto& path:files) {
+        std::ifstream file(path);if(!file)throw std::runtime_error("Cannot open start positions: "+path.string());
+        for(std::string line;std::getline(file,line);) {
+            line=trim(line);if(line.empty()||line[0]=='#')continue;
+            // Corpus id, board size, rule, sampling weight, loss weight, move count,
+            // then moves in physical coordinates. Rows explicitly enumerate starts.
+            std::istringstream row(line);std::string id,rule;int size,count;double sampling,training;
+            if(!(row>>id>>size>>rule>>sampling>>training>>count)||size<5||size>canvas||count<0||
+               !std::isfinite(sampling)||sampling<0||!std::isfinite(training)||training<0)
+                throw std::runtime_error("Invalid start position row: "+line);
+            if(excludes.count(id))continue;
+            InitialPosition position{Game(size,canvas,parse_rule(rule),options),{},InitialKind::External,-1,sampling,training};
+            if(!same_layout(game_spec(parse_rule(c.list("environment.rules").front())),position.game.spec()))
+                throw std::runtime_error("Start position layout differs from environment");
+            for(int i=0;i<count;++i) {
+                int local;if(!(row>>local)||local<0||local>=position.game.local_actions())throw std::runtime_error("Invalid start prefix");
+                int action=position.game.native_action(local);
+                if(!position.game.legal(action)||position.game.finished())throw std::runtime_error("Illegal start prefix");
+                position.game.play(action);position.actions.push_back(action);
+            }
+            std::string extra;if(row>>extra)throw std::runtime_error("Trailing start position fields");
+            if(position.game.finished())continue;
+            // Parent history is intentionally excluded from corpus deduplication,
+            // as in iterAllUniquePositions(hashParent=false). The chosen row still
+            // retains its entire legal history for actual play and NN features.
+            std::string key=std::to_string(size)+":"+rule+":"+std::to_string(position.game.player())+":";
+            for(auto cell:position.game.board().cells)key+=std::to_string(cell)+",";
+            if(!unique.insert(key).second || !std::bernoulli_distribution(load)(rng))continue;
+            position.sampling_weight*=std::exp(-position.game.turn()*lambda);
+            if(!std::isfinite(position.sampling_weight)||position.sampling_weight>=1e200)
+                throw std::runtime_error("Nonfinite start position sampling mass");
+            positions.push_back(std::move(position));
+        }
+    }
+    double total_weight=0;for(const auto& p:positions)total_weight+=p.sampling_weight;
+    if(!positions.empty()&&!(total_weight>0))throw std::runtime_error("Start corpus has zero sampling weight");
+    return positions;
+}
+
+void initialize_start_policy(InitialPosition& position,const Config& c,Evaluator& evaluator,
+                             std::mt19937_64& rng,const std::function<bool()>& should_stop) {
+    if(!c.boolean("start_positions.policy_init"))return;
+    double proportion=c.number("start_positions.policy_area_proportion");if(proportion<=0)return;
+    double shape=c.number("start_positions.policy_gamma_shape"),mean=position.game.area()*proportion;
+    int count=static_cast<int>(std::floor(shape==1 ? std::exponential_distribution<double>(1)(rng)*mean :
+                                       std::gamma_distribution<double>(shape,mean/shape)(rng)));
+    for(int i=0;i<count && !position.game.finished();++i) {
+        if(should_stop && should_stop())return;
+        auto probabilities=evaluate_policy(position.game,evaluator,c.number("start_positions.policy_temperature"),
+                                           c.boolean("symmetry.nn_randomize"),c.integer("symmetry.nn_symmetry"));
+        std::vector<int> legal;for(int a=0;a<position.game.actions();++a)if(position.game.legal(a)&&probabilities[a]>0)legal.push_back(a);
+        int action=std::bernoulli_distribution(.0002)(rng)?legal[std::uniform_int_distribution<size_t>(0,legal.size()-1)(rng)]:
+                   static_cast<int>(std::discrete_distribution<size_t>(probabilities.begin(),probabilities.end())(rng));
+        position.game.play(action);position.actions.push_back(action);
+    }
 }
 SelfplaySearchContext hint_context(const Game& current,const Game& start,int hint,InitialKind kind,bool force_full) {
     SelfplaySearchContext context;context.hint_action=hint;context.current_turn=current.turn();context.force_full=force_full;
@@ -99,7 +186,7 @@ std::optional<InitialPosition> make_game_fork(const FinishedGame& record,const G
         double value=nn.wdl[2]-nn.wdl[0];if(chosen<0 || value>best){chosen=candidates[i];best=value;}
     }
     game.play(chosen);if(game.finished())return {};actions.push_back(chosen);
-    return InitialPosition{game,std::move(actions),early?InitialKind::EarlyFork:InitialKind::GameFork};
+    return InitialPosition{game,std::move(actions),early?InitialKind::EarlyFork:InitialKind::GameFork,-1,1,record.training_weight};
 }
 std::optional<InitialPosition> make_hint_fork(const FinishedGame& record) {
     size_t prefix=record.opening.actions.size();int hint=record.opening.hint_action;
@@ -108,7 +195,7 @@ std::optional<InitialPosition> make_hint_fork(const FinishedGame& record) {
     for(size_t i=0;i<prefix;++i){int action=record.steps[i].action;game.play(action);actions.push_back(action);}
     if(game.finished()||!game.legal(hint))return {};
     game.play(hint);if(game.finished())return {};actions.push_back(hint);
-    return InitialPosition{game,std::move(actions),InitialKind::HintFork};
+    return InitialPosition{game,std::move(actions),InitialKind::HintFork,-1,1,record.training_weight};
 }
 int sample_fork_move(const Game& game,const std::vector<double>& policy,int banned,std::mt19937_64& rng) {
     if(policy.size()!=static_cast<size_t>(game.actions()))throw std::runtime_error("Fork policy shape mismatch");
@@ -139,7 +226,7 @@ std::vector<double> evaluate_policy(const Game& game,Evaluator& evaluator,double
     return policy;
 }
 void search_side_positions(std::vector<Game>& positions,FinishedGame& record,GameSearch& search,Evaluator& evaluator,
-                           int full_visits,bool randomize,int symmetry,
+                           int64_t full_visits,bool randomize,int symmetry,
                            const std::function<double(const Game&)>& temperature,std::mt19937_64& rng,
                            const std::function<bool()>& should_stop) {
     // Source processes the growing queue after main-game reanalysis/weight computation.

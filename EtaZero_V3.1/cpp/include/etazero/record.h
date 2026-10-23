@@ -3,7 +3,8 @@
 #include <filesystem>
 namespace etazero {
 struct Step {
-    int player, action, simulations;
+    int player, action;
+    int64_t simulations;
     float temperature, reward;
     std::vector<float> observation;
     std::vector<double> policy;
@@ -43,13 +44,14 @@ struct FinishedGame {
     int final_player;
     OpeningResult opening;
     double forbidden_feature_dropout_prob = 0.5;
+    double training_weight = 1.0;
     std::vector<SidePosition> side_positions;
     double root_policy_invalid_mass_sum = 0;
     uint64_t root_policy_invalid_mass_count = 0;
 };
 void compute_value_surprises(FinishedGame& game,bool direct=false);
 void apply_training_weights(FinishedGame& game,double policy_factor,double value_factor,std::mt19937_64& rng,
-                            bool direct=false,bool use_reanalyze=false);
+                            bool direct=false,bool use_reanalyze=false,double scale_data_weight=1.0);
 // Source trainingwrite.cpp's float32 stochastic rounding, without Go score Q.
 int16_t quantize_q_value(float winloss,std::mt19937_64& rng);
 size_t first_file_row_limit(size_t maximum,double minimum_proportion,double uniform);

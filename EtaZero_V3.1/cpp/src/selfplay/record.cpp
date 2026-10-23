@@ -68,7 +68,8 @@ void compute_value_surprises(FinishedGame& game,bool direct) {
         step.value_surprise=std::clamp(kl,0.0,1.0);
     }
 }
-void apply_training_weights(FinishedGame& game,double policy_factor,double value_factor,std::mt19937_64& rng,bool direct,bool use_reanalyze) {
+void apply_training_weights(FinishedGame& game,double policy_factor,double value_factor,std::mt19937_64& rng,bool direct,bool use_reanalyze,double scale_data_weight) {
+    if(!std::isfinite(scale_data_weight)||scale_data_weight<.01||scale_data_weight>10)throw std::runtime_error("Invalid scale_data_weight");
     if(!std::isfinite(policy_factor)||!std::isfinite(value_factor)||policy_factor<0||value_factor<0||policy_factor+value_factor>1)
         throw std::runtime_error("Invalid surprise weighting");
     compute_value_surprises(game,direct);
@@ -95,10 +96,18 @@ void apply_training_weights(FinishedGame& game,double policy_factor,double value
         }
     }
     for(auto& s:game.steps)if(s.trainable) {
+        s.target_weight=static_cast<float>(s.target_weight*scale_data_weight);
         if(!std::isfinite(s.target_weight)||s.target_weight<0||s.target_weight>std::numeric_limits<int32_t>::max()-1.0)
             throw std::runtime_error("Invalid final target weight");
         int whole=static_cast<int>(s.target_weight);
         s.row_repeats=whole+(std::bernoulli_distribution(s.target_weight-whole)(rng)?1:0);
+    }
+    for(auto& side:game.side_positions) {
+        side.target_weight=static_cast<float>(side.target_weight*scale_data_weight);
+        if(!std::isfinite(side.target_weight)||side.target_weight<0||side.target_weight>std::numeric_limits<int32_t>::max()-1.0)
+            throw std::runtime_error("Invalid final side target weight");
+        int whole=static_cast<int>(side.target_weight);
+        side.row_repeats=whole+(std::bernoulli_distribution(side.target_weight-whole)(rng)?1:0);
     }
 }
 
@@ -231,13 +240,13 @@ struct RecordWriter::Buffers {
     std::vector<float> reanalysis_policy_surprise,reanalysis_value_surprise;
     std::vector<int32_t> row_repeats;
     std::vector<float> target_weights,policy_surprises,value_surprises,network_wdl,search_wdl;
-    std::vector<float> start_values, globals;
+    std::vector<float> start_values, globals, training_weights;
     std::vector<std::string> opening_failures;
     std::vector<uint64_t> ids,seeds;
     std::vector<double> root_policy_invalid_mass_sum;
     std::vector<uint64_t> root_policy_invalid_mass_count;
     std::vector<int64_t> game_offsets,obs_offsets,visits,sample_indices;
-    std::vector<int32_t> actions,simulations;
+    std::vector<int32_t> actions;std::vector<int64_t> simulations;
     std::vector<int16_t> policies,opponent_policies;
     std::vector<int16_t> trajectory_policy,trajectory_q_values,trajectory_q_visits;
     std::vector<float> opponent_policy_weights,temperatures,rewards;
@@ -271,7 +280,7 @@ struct RecordWriter::Buffers {
         reanalysis_policy_surprise.clear();reanalysis_value_surprise.clear();
         row_repeats.clear();target_weights.clear();policy_surprises.clear();value_surprises.clear();
         network_wdl.clear();search_wdl.clear();cheap_search.clear();sample_indices.clear();forbidden_input.clear();
-        opening_status.clear();train_mask.clear();start_values.clear();opening_failures.clear();
+        opening_status.clear();train_mask.clear();start_values.clear();opening_failures.clear();training_weights.clear();
         game_offsets.clear();obs_offsets.clear();game_offsets.push_back(0);obs_offsets.push_back(0);
     }
     void observation(const std::vector<float>& obs,int player) {
@@ -306,6 +315,8 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
     b.opening_moves.push_back(g.opening.actions.size());b.balanced_moves.push_back(g.opening.balanced_moves);
     b.policy_moves.push_back(g.opening.policy_moves);b.opening_attempts.push_back(g.opening.attempts);
     b.opening_status.push_back(static_cast<int8_t>(g.opening.status));b.start_values.push_back(g.opening.start_value);
+    if(!std::isfinite(g.training_weight)||g.training_weight<0)throw std::runtime_error("Invalid per-game training weight");
+    b.training_weights.push_back(g.training_weight);
     b.opening_failures.push_back(g.opening.failure);
     if(!std::isfinite(g.forbidden_feature_dropout_prob) || g.forbidden_feature_dropout_prob<0 || g.forbidden_feature_dropout_prob>1)
         throw std::runtime_error("Invalid forbidden feature dropout probability");
@@ -486,7 +497,7 @@ void RecordWriter::publish() {
     zip.array("policies", b.policies, "<i2", {s, static_cast<size_t>(actions_count)});
     zip.array("opponent_policies", b.opponent_policies, "<i2", {s, static_cast<size_t>(actions_count)});
     zip.array("opponent_policy_weights", b.opponent_policy_weights, "<f4", {s});
-    zip.array("visits", b.visits, "<i8", {s, static_cast<size_t>(actions_count)}); zip.array("simulations", b.simulations, "<i4", {t});
+    zip.array("visits", b.visits, "<i8", {s, static_cast<size_t>(actions_count)}); zip.array("simulations", b.simulations, "<i8", {t});
     zip.array("q_values",b.q_values,"<i2",{b.forbidden_input.size(),static_cast<size_t>(actions_count)});
     zip.array("q_visits",b.q_visits,"<i2",{s,static_cast<size_t>(actions_count)});
     zip.array("temperatures", b.temperatures, "<f4", {t}); zip.array("rewards", b.rewards, "<f4", {t});
@@ -507,6 +518,7 @@ void RecordWriter::publish() {
     zip.array("policy_moves", b.policy_moves, "<i2", {n});zip.array("opening_attempts", b.opening_attempts, "<i4", {n});
     zip.array("forbidden_input", b.forbidden_input, "|u1", {b.forbidden_input.size()});
     zip.array("opening_status", b.opening_status, "|i1", {n});zip.array("start_values", b.start_values, "<f4", {n});
+    zip.array("training_weights", b.training_weights, "<f4", {n});
     size_t d=b.side_players.size();
     zip.array("side_observations",b.side_observations,"|u1",{d,static_cast<size_t>(b.planes),static_cast<size_t>(b.packed_area)});
     zip.array("side_globals",b.side_globals,"<f4",{d,static_cast<size_t>(b.global_count)});

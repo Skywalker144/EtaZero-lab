@@ -5,12 +5,12 @@
 namespace etazero {
 namespace {
 void validate(const SelfplaySearchConfig& c) {
-    if(c.max_playouts<0 || c.full_visits<2 ||
+    if(c.max_playouts<0 || c.full_visits<1 || c.full_visits>SEARCH_CONFIG_LIMIT || c.max_playouts>SEARCH_CONFIG_LIMIT ||
        !std::isfinite(c.cheap_probability) || c.cheap_probability<0 || c.cheap_probability>1 ||
-       (c.cheap_probability>0 && (c.cheap_visits<2 || c.cheap_visits>c.full_visits ||
+       (c.cheap_probability>0 && (c.cheap_visits<1 || c.cheap_visits>10000000 || c.cheap_visits>c.full_visits ||
         !std::isfinite(c.cheap_target_weight) || c.cheap_target_weight<0 || c.cheap_target_weight>1)) ||
        (c.reduce_visits && (!std::isfinite(c.reduce_threshold) || c.reduce_threshold<0 || c.reduce_threshold>0.999999 ||
-        c.reduce_lookback<1 || c.reduce_lookback>1000 || c.reduced_visits_min<2 || c.reduced_visits_min>c.full_visits ||
+        c.reduce_lookback<0 || c.reduce_lookback>1000 || c.reduced_visits_min<1 || c.reduced_visits_min>10000000 || c.reduced_visits_min>c.full_visits ||
         !std::isfinite(c.reduced_visits_weight) || c.reduced_visits_weight<0 || c.reduced_visits_weight>1)))
         throw std::runtime_error("Invalid selfplay PCR / Reduce Visits settings");
 }
@@ -30,12 +30,12 @@ double playout_budget_factor(PlayoutAdvantage a,int player) {
     double ratio=std::pow(2.0,a.doublings);return 2*(player==a.player?ratio:1)/(1+ratio);
 }
 SelfplaySearchConfig selfplay_search_config(const Config& c) {
-    SelfplaySearchConfig result{c.integer("search.full_search_visits"),c.integer("search.cheap_search_visits"),
+    SelfplaySearchConfig result{c.integer64("search.full_search_visits"),c.integer64("search.cheap_search_visits"),
         c.number("search.cheap_search_probs"),c.number("search.cheap_search_target_weight"),
         c.boolean("search.clear_before_search"),c.boolean("reduce_visits.reduce_visits"),
         c.number("reduce_visits.reduce_visits_threshold"),c.integer("reduce_visits.reduce_visits_threshold_lookback"),
-        c.integer("reduce_visits.reduced_visits_min"),c.number("reduce_visits.reduced_visits_weight")};
-    result.max_playouts=c.integer("search.max_playouts");validate(result);
+        c.integer64("reduce_visits.reduced_visits_min"),c.number("reduce_visits.reduced_visits_weight")};
+    result.max_playouts=c.integer64("search.max_playouts");validate(result);
     const double probability=c.number("pda.normal_asymmetric_playout_prob"),ratio=c.number("pda.max_asymmetric_ratio");
     if(!std::isfinite(probability) || probability<0 || probability>1 || !std::isfinite(ratio) || ratio<1 || ratio>100)
         throw std::runtime_error("Invalid PDA sampling parameters");
@@ -80,10 +80,7 @@ SelfplaySearchLimits selfplay_search_limits(const SelfplaySearchConfig& c,
     limits.search.clear_before_search=c.clear_before_search;limits.cheap_search=cheap_selected;limits.target_weight=1;
     // KataGo play.cpp: PCR and Reduce Visits are mutually exclusive branches.
     if(hinted) {
-        if(c.full_visits>std::numeric_limits<int>::max()/4 ||
-           (c.max_playouts!=std::numeric_limits<int>::max() && c.max_playouts>std::numeric_limits<int>::max()/4))
-            throw std::runtime_error("Hint fourfold budget exceeds int32 ceiling");
-        limits.search.max_visits=c.full_visits*4;limits.search.clear_before_search=true;
+        limits.search.max_visits=std::min(SEARCH_CONFIG_LIMIT,c.full_visits*4);limits.search.clear_before_search=true;
         limits.search.hint_action=context.hint_action;
     } else if(cheap_selected) {
         limits.search.max_visits=c.cheap_visits;
@@ -104,31 +101,30 @@ SelfplaySearchLimits selfplay_search_limits(const SelfplaySearchConfig& c,
         if(extreme>c.reduce_threshold) {
             double proportion=(extreme-c.reduce_threshold)/(1-c.reduce_threshold);
             reduction=proportion*proportion;
-            limits.search.max_visits=std::max(c.reduced_visits_min,static_cast<int>(std::round(
+            limits.search.max_visits=std::max(c.reduced_visits_min,static_cast<int64_t>(std::round(
                 c.full_visits+reduction*(c.reduced_visits_min-c.full_visits))));
             limits.target_weight=1+reduction*(c.reduced_visits_weight-1);
             // Reduced full searches retain full-search tree and exploration settings,
             // even when their target weight reaches zero.
         }
     }
-    limits.search.max_playouts=hinted && c.max_playouts!=std::numeric_limits<int>::max()?c.max_playouts*4:c.max_playouts;
+    limits.search.max_playouts=hinted?std::min(SEARCH_CONFIG_LIMIT,c.max_playouts*4):c.max_playouts;
     if(cheap_selected)limits.search.max_playouts=std::min(c.max_playouts,c.cheap_visits);
-    else if(reduction>0 && c.max_playouts!=std::numeric_limits<int>::max()) {
+    else if(reduction>0) {
         if(c.max_playouts<c.reduced_visits_min)throw std::runtime_error("Reduced minimum exceeds playout cap");
         double r=reduction;
-        limits.search.max_playouts=static_cast<int>(std::round(c.max_playouts+r*(double(c.reduced_visits_min)-c.max_playouts)));
+        limits.search.max_playouts=static_cast<int64_t>(std::round(c.max_playouts+r*(double(c.reduced_visits_min)-c.max_playouts)));
     }
     double factor=playout_budget_factor(advantage,player);
     if(advantage.doublings!=0) {
         limits.search.clear_before_search=true;
         double visits=std::round(limits.search.max_visits*factor);
-        if(visits<5 || visits>std::numeric_limits<int>::max())throw std::runtime_error("PDA budget outside [5, int32 max]");
-        limits.search.max_visits=static_cast<int>(visits);
-        // int32 max denotes the inherited unlimited ceiling in EtaZero.
-        if(c.max_playouts!=std::numeric_limits<int>::max() || cheap_selected || limits.search.max_playouts!=c.max_playouts) {
+        if(visits<5 || visits>double(int64_t(1)<<62))throw std::runtime_error("PDA budget outside [5, 2^62]");
+        limits.search.max_visits=static_cast<int64_t>(visits);
+        {
             double playouts=std::round(limits.search.max_playouts*factor);
-            if(playouts<5 || playouts>std::numeric_limits<int>::max())throw std::runtime_error("PDA playout budget outside [5, int32 max]");
-            limits.search.max_playouts=static_cast<int>(playouts);
+            if(playouts<5 || playouts>double(int64_t(1)<<62))throw std::runtime_error("PDA playout budget outside [5, 2^62]");
+            limits.search.max_playouts=static_cast<int64_t>(playouts);
         }
     }
     return limits;

@@ -3,13 +3,14 @@
 #include "search_limits.h"
 #include <optional>
 namespace etazero {
-enum class InitialKind { Ordinary, Hint, EarlyFork, GameFork, HintFork };
+enum class InitialKind { Ordinary, Hint, EarlyFork, GameFork, HintFork, External };
 struct InitialPosition {
     Game game;
     std::vector<int> actions;
     InitialKind kind=InitialKind::Ordinary;
     int hint_action=-1;
     double sampling_weight=1;
+    double training_weight=1;
 };
 class ForkPool {
     std::mutex mutex_;
@@ -25,6 +26,9 @@ struct GameForkConfig {
     GameForkConfig(double early,double late,double proportion,int minimum,int early_maximum,int late_maximum);
 };
 std::vector<InitialPosition> load_hint_positions(const Config& config,int canvas);
+std::vector<InitialPosition> load_start_positions(const Config& config,int canvas,std::mt19937_64& rng);
+void initialize_start_policy(InitialPosition& position,const Config& config,Evaluator& evaluator,
+                             std::mt19937_64& rng,const std::function<bool()>& should_stop);
 std::optional<InitialPosition> sample_hint_position(const std::vector<InitialPosition>& positions,double probability,std::mt19937_64& rng);
 SelfplaySearchContext hint_context(const Game& current,const Game& start,int hint,InitialKind kind,bool force_full=false);
 std::optional<InitialPosition> make_game_fork(const FinishedGame& record,const GameForkConfig& config,Evaluator& evaluator,
@@ -46,7 +50,7 @@ void reanalyze_positions(FinishedGame& record,const std::vector<Game>& positions
                         GameSearch& search,const std::function<double(const Game&)>& temperature,std::mt19937_64& rng,
                         const std::function<bool()>& should_stop);
 void search_side_positions(std::vector<Game>& positions,FinishedGame& record,GameSearch& search,Evaluator& evaluator,
-                           int full_visits,bool randomize,int symmetry,
+                           int64_t full_visits,bool randomize,int symmetry,
                            const std::function<double(const Game&)>& move_temperature,std::mt19937_64& rng,
                            const std::function<bool()>& should_stop);
 }
