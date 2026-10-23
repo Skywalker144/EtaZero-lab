@@ -12,12 +12,12 @@
 #include <cerrno>
 namespace etazero {
 namespace {
-int integer(const Json& object,const char* key,int fallback,int minimum,int maximum) {
+int64_t integer(const Json& object,const char* key,int64_t fallback,int64_t minimum,int64_t maximum) {
     if(!object.contains(key))return fallback;
     const auto& v=object.at(key);
     if(!v.is_number_integer() || v.get<int64_t>()<minimum || v.get<int64_t>()>maximum)
         throw std::runtime_error(std::string(key)+" is outside its integer range");
-    return v.get<int>();
+    return v.get<int64_t>();
 }
 int number(const std::string& s) {return parse_integer(s,"command");}
 const std::string columns="ABCDEFGHJKLMNOPQRSTUVWXYZ";
@@ -53,17 +53,18 @@ struct Request {
     std::string command,gtp_id;
     std::vector<std::string> args;
     std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
-    bool continuous=false,streaming=false;
+    bool continuous=false,streaming=false,internal=false;
 };
 const std::vector<std::string> commands={"protocol_version","name","version","list_commands","known_command",
     "boardsize","clear_board","play","undo","genmove","quit","kata-analyze","kata-genmove_analyze",
-    "stop","kata-raw-nn","etazero-rule","komi","showboard"};
+    "stop","kata-raw-nn","etazero-rule","komi","showboard","time_settings","time_left","kgs-time_settings","kata-time_settings","kata-list_time_settings"};
 class Session {
     GameSearch& search_;InferenceService& evaluator_;const Config& config_;uint64_t seed_;
     std::string protocol_;int canvas_;std::optional<Game> game_;std::vector<int> history_;Json opening_=nullptr;
     std::vector<std::vector<int>> boards_;std::vector<int> players_;
     std::function<Json(const Game&)> raw_;std::function<double(const Game&)> temperature_;std::function<bool()> interrupted_;
     std::mutex mutex_,output_mutex_;std::condition_variable changed_;std::deque<Request> queue_;std::optional<Request> active_;bool eof_=false;
+    std::array<TimeControls,2> clocks_;bool want_ponder_=false;int search_for_player_=0;
     std::set<std::string> pending_ids_;
     std::string input_buffer_;bool input_closed_=false;
     bool read_line(std::string& line) {
@@ -163,14 +164,91 @@ class Session {
         }
         return out.str()+"\n";
     }
+    std::vector<int> move_list(const Json& moves) const {
+        if(!moves.is_array())throw std::runtime_error("moves must be an array");
+        std::vector<int> result;
+        for(const auto& item:moves) {
+            if(!item.is_number_integer() || item.get<int64_t>()<0 || item.get<int64_t>()>=game_->local_actions())throw std::runtime_error("Move outside board");
+            result.push_back(native(item.get<int>()));
+        }
+        return result;
+    }
+    void set_focus(const Json& data) {
+        auto moves=move_list(data.value("focus_moves",Json::array()));
+        auto weights=data.contains("focus_weights")?data.at("focus_weights").get<std::vector<double>>():std::vector<double>(moves.size(),1);
+        double probability=data.value("focus_probability",.5);
+        if(!std::isfinite(probability) || probability<0 || probability>1)throw std::runtime_error("Focus probability must be in [0,1]");
+        search_.set_root_focus(std::move(moves),std::move(weights),probability);
+    }
+    void restrictions(const Json& data,SearchRun& options) {
+        if(data.contains("avoid_moves") && data.contains("allow_moves"))throw std::runtime_error("Cannot combine allow_moves and avoid_moves");
+        bool allow=data.contains("allow_moves");const char* key=allow?"allow_moves":"avoid_moves";
+        if(data.contains(key)) {
+            const auto& entries=data.at(key);if(!entries.is_array())throw std::runtime_error("Move restrictions must be an array");
+            bool seen[2]={false,false};
+            for(const auto& entry:entries) {
+                int player=entry.at("player").is_string()?color(entry.at("player").get<std::string>()):entry.at("player").get<int>();
+                if(player!=1 && player!=-1)throw std::runtime_error("Restriction player must be black or white");
+                int index=player==1?0:1,depth=integer(entry,"until_depth",-1,1,1000000000);
+                if(depth<1)throw std::runtime_error("Missing until_depth");
+                if(allow && seen[index])throw std::runtime_error("Only one allow_moves entry per player is permitted");seen[index]=true;
+                auto moves=move_list(entry.at("moves"));auto& avoid=options.avoid_until[index];avoid.resize(game_->actions(),0);
+                if(allow)std::fill(avoid.begin(),avoid.end(),depth);
+                for(int action:moves)avoid[action]=allow?0:depth;
+            }
+        }
+        options.avoid_rescale_root=data.value("avoid_rescale_root",false);
+    }
+    void set_clock(const std::vector<std::string>& args,bool standard) {
+        auto time=[&](size_t i,bool negative=false){if(i>=args.size())throw std::runtime_error("Missing time argument");size_t n=0;double value=std::stod(args[i],&n);
+            if(n!=args[i].size()||!std::isfinite(value)||value>(TimeControls::MAX_USER_INPUT_TIME)||(!negative&&value<0))throw std::runtime_error("Invalid time");
+            return negative&&value<0?TimeControls::MAX_USER_INPUT_TIME:value;};
+        auto count=[&](size_t i){if(i>=args.size())throw std::runtime_error("Missing period count");int value=number(args[i]);if(value<0||value>100000)throw std::runtime_error("Invalid period count");return value;};
+        TimeControls clock;std::string kind=standard?"canadian":args.empty()?"":args[0];size_t first=standard?0:1;
+        size_t expected=kind=="none"?1:kind=="absolute"?2:kind=="fischer"?3:kind=="fischer-capped"?5:first+3;
+        if(args.size()!=expected)throw std::runtime_error("Wrong number of clock arguments");
+        if(kind=="none"){}
+        else if(kind=="absolute")clock=TimeControls::absoluteTime(time(1));
+        else if(kind=="fischer")clock=TimeControls::fischerTime(time(1),time(2));
+        else if(kind=="fischer-capped")clock=TimeControls::fischerCappedTime(time(1),time(2),time(3,true),time(4,true));
+        else if(kind=="canadian"||kind=="byoyomi") {
+            double main=time(first),period=time(first+1);int n=count(first+2);
+            if(n==0)clock=kind=="canadian"&&period>0?TimeControls():TimeControls::absoluteTime(main);
+            else clock=TimeControls::canadianOrByoYomiTime(main,period,kind=="byoyomi"?n:1,kind=="canadian"?n:1);
+        } else throw std::runtime_error("Unknown clock type");
+        clocks_.fill(clock);
+    }
+    void clock_left(const std::vector<std::string>& args) {
+        if(args.size()!=3)throw std::runtime_error("Expected player, time, and stones");
+        int player=color(args[0]),stones=number(args[2]);size_t used=0;double time=std::stod(args[1],&used);
+        if(used!=args[1].size() || !std::isfinite(time)||time< -10||time>TimeControls::MAX_USER_INPUT_TIME || stones<0||stones>100000)throw std::runtime_error("Invalid time left");
+        auto clock=clocks_[player==1?0:1];
+        if(stones>0 && clock.originalNumPeriods<=0)throw std::runtime_error("Clock has no overtime periods");
+        if(stones==0){clock.mainTimeLeft=time;clock.inOvertime=false;clock.numPeriodsLeftIncludingCurrent=clock.originalNumPeriods;clock.numStonesLeftInPeriod=0;clock.timeLeftInPeriod=0;}
+        else {clock.mainTimeLeft=0;clock.inOvertime=true;clock.timeLeftInPeriod=time;
+            bool japanese=clock.originalNumPeriods>1&&clock.numStonesPerPeriod==1;
+            clock.numPeriodsLeftIncludingCurrent=japanese?std::min(stones,clock.originalNumPeriods):1;
+            clock.numStonesLeftInPeriod=japanese?1:std::min(stones,clock.numStonesPerPeriod);}
+        clocks_[player==1?0:1]=clock;
+    }
+    void ponder(Request& r) {
+        if(!game_ || game_->finished())return;
+        SearchRun options;options.pondering=true;options.search_for_player=search_for_player_?search_for_player_:-game_->player();
+        options.should_stop=[&]{return r.cancelled->load()||interrupted_();};
+        auto result=search_.run(*game_,temperature_(*game_),options);
+        if(!r.internal)reply(r,{{"state",state()},{"analysis",analysis_json(result,*game_,0,0,true)}});
+    }
     Json analyze(Request& r) {
         if(game_->finished())throw std::runtime_error("Game has finished");
-        int visits=integer(r.data,"visits",config_.integer("analysis.visits"),2,2147483647);
+        int64_t visits=integer(r.data,"visits",config_.integer64("analysis.visits"),1,SEARCH_CONFIG_LIMIT);
         int interval=integer(r.data,"report_interval_ms",protocol_=="text"?0:250,0,60000);
-        SearchRun options;options.max_visits=r.continuous?2147483647:visits;
+        SearchRun options;restrictions(r.data,options);{std::lock_guard<std::mutex> lock(mutex_);set_focus(active_->data);}
+        options.max_visits=r.continuous?SEARCH_CONFIG_LIMIT:visits;
+        const bool generate_move=r.command=="genmove"||r.command=="kata-genmove_analyze";
+        if(generate_move){options.time_controls=&clocks_[game_->player()==1?0:1];options.search_for_player=game_->player();}
         options.clear_before_search=r.data.value("fresh",true);options.collect_analysis=true;
         options.should_stop=[&]{return r.cancelled->load()||interrupted_();};
-        if(r.continuous){options.max_playouts=2147483647;options.max_time=1e20;}
+        if(r.continuous){options.max_playouts=SEARCH_CONFIG_LIMIT;options.max_time=1e20;}
         auto requests=evaluator_.requests.load(),batches=evaluator_.batches.load();Game before=*game_;
         const bool gtp_stream=protocol_=="gtp"&&(r.command=="kata-analyze"||r.command=="kata-genmove_analyze");
         if(gtp_stream){output("="+r.gtp_id+"\n");r.streaming=true;}
@@ -192,7 +270,8 @@ class Session {
             // Cancellation and committing a generated move have one ordering point.
             std::lock_guard<std::mutex> lock(mutex_);
             moved=generate&&result.action>=0&&!r.cancelled->load()&&!interrupted_();
-            if(moved)play(before.local_action(result.action));
+            if(moved){search_for_player_=before.player();play(before.local_action(result.action));
+                want_ponder_=config_.contains("analysis.pondering_enabled")&&config_.boolean("analysis.pondering_enabled")&&!game_->finished();}
             active_.reset();
         }
         if(protocol_=="gtp") {
@@ -206,11 +285,13 @@ class Session {
     }
     void execute(Request& r) {
         if(((r.cancelled->load()&&!r.continuous)||interrupted_())&&protocol_=="json") {reply(r,{{"cancelled",true},{"state",state()},{"played",false}});return;}
-        const auto& cmd=r.command;bool gtp=protocol_=="gtp";std::string value;bool search_reply=false;
+        const auto& cmd=r.command;
+        if(cmd=="ponder"){ponder(r);return;}
+        bool gtp=protocol_=="gtp";std::string value;bool search_reply=false;
         if(gtp) {
             if(std::find(commands.begin(),commands.end(),cmd)==commands.end())throw std::runtime_error("Unknown command");
             size_t expected=(cmd=="known_command"||cmd=="boardsize"||cmd=="etazero-rule"||cmd=="komi"||cmd=="genmove")?1:cmd=="play"?2:0;
-            if(cmd!="kata-analyze"&&cmd!="kata-genmove_analyze"&&cmd!="kata-raw-nn"&&r.args.size()!=expected)throw std::runtime_error("Unexpected command arguments");
+            if(cmd!="kata-analyze"&&cmd!="kata-genmove_analyze"&&cmd!="kata-raw-nn"&&cmd!="time_settings"&&cmd!="time_left"&&cmd!="kata-time_settings"&&cmd!="kgs-time_settings"&&r.args.size()!=expected)throw std::runtime_error("Unexpected command arguments");
             if(cmd=="protocol_version")value="2";else if(cmd=="name")value="EtaZero";else if(cmd=="version")value="2.9";
             else if(cmd=="known_command")value=std::find(commands.begin(),commands.end(),r.args[0])!=commands.end()?"true":"false";
             else if(cmd=="list_commands"){for(const auto& c:commands){if(!value.empty())value+='\n';value+=c;}}
@@ -224,6 +305,9 @@ class Session {
                 create({{"size",game_->size()},{"rule","go"},{"komi",komi},{"go_rules",game_->options().go_rules},{"moves",history_}},r);
             } else if(cmd=="play") {if(color(r.args[0])!=game_->player())throw std::runtime_error("Color is not side to move");play(action(r.args[1],*game_));}
             else if(cmd=="undo")undo(1);
+            else if(cmd=="time_settings"||cmd=="kata-time_settings"||cmd=="kgs-time_settings"){if(cmd=="kgs-time_settings"&&!r.args.empty()&&r.args[0].rfind("fischer",0)==0)throw std::runtime_error("Use kata-time_settings for Fischer clocks");set_clock(r.args,cmd=="time_settings");}
+            else if(cmd=="time_left")clock_left(r.args);
+            else if(cmd=="kata-list_time_settings")value="none absolute byoyomi canadian fischer fischer-capped";
             else if(cmd=="genmove"||cmd=="kata-analyze"||cmd=="kata-genmove_analyze") {
                 size_t i=0;bool needs_color=cmd!="kata-analyze";
                 if(i<r.args.size()&&(r.args[i]=="b"||r.args[i]=="w"||r.args[i]=="B"||r.args[i]=="W"||r.args[i]=="black"||r.args[i]=="white")) {
@@ -236,7 +320,15 @@ class Session {
                 while(i<r.args.size()) {
                     std::string key=r.args[i++];if(i==r.args.size())throw std::runtime_error("Missing analysis option value");
                     if(key=="interval")r.data["report_interval_ms"]=number(r.args[i++])*10;
-                    else if(key=="maxmoves"||key=="visits")r.data[key]=number(r.args[i++]);
+                    else if(key=="maxmoves"||key=="visits"){auto value=r.args[i++];size_t used=0;int64_t count=std::stoll(value,&used);if(used!=value.size())throw std::runtime_error("Invalid visit count");r.data[key]=count;}
+                    else if(key=="avoid"||key=="allow") {
+                        if(i+2>=r.args.size())throw std::runtime_error("Expected player, comma-separated moves, depth");
+                        int player=color(r.args[i++]);std::string list=r.args[i++];Json moves=Json::array();
+                        std::istringstream stream(list);for(std::string v;std::getline(stream,v,',');)moves.push_back(game_->local_action(action(v,*game_)));
+                        std::string field=key=="allow"?"allow_moves":"avoid_moves";
+                        if(!r.data.contains(field))r.data[field]=Json::array();
+                        r.data[field].push_back({{"player",player},{"moves",moves},{"until_depth",number(r.args[i++])}});
+                    }
                     else throw std::runtime_error("Unsupported analysis option: "+key);
                 }
                 if(r.data.contains("visits"))r.continuous=false;
@@ -248,7 +340,12 @@ class Session {
             } else if(cmd=="showboard")value=state().dump();
             output("="+r.gtp_id+(value.empty()?"":" "+value)+"\n\n");return;
         }
-        if(cmd=="new")create(r.data,r);
+        if(cmd=="time_settings") {
+            std::vector<std::string> args{r.data.at("clock_type").get<std::string>()};
+            for(const auto& value:r.data.value("clock_arguments",Json::array()))args.push_back(value.is_string()?value.get<std::string>():value.dump());
+            set_clock(args,false);
+        } else if(cmd=="time_left"){auto player=r.data.at("player");if(!player.is_string()&&(!player.is_number_integer()||std::abs(player.get<int>())!=1))throw std::runtime_error("Clock player must be black/white or +1/-1");clock_left({player.is_string()?player.get<std::string>():player.get<int>()==1?"b":"w",r.data.at("time").dump(),r.data.at("stones").dump()});}
+        else if(cmd=="new")create(r.data,r);
         else if(cmd=="quit"||cmd=="stop"){if(protocol_=="json")reply(r,{{"state",state()}});return;}
         else if(!game_&&!(r.data.contains("moves")&&(cmd=="analyze"||cmd=="genmove")))throw std::runtime_error("Start a new game first");
         else if(cmd=="play")play(integer(r.data,"action",-1,0,game_->local_actions()-1));
@@ -267,9 +364,13 @@ class Session {
     void work() {
         for(;;) {
             Request r;
-            {std::unique_lock<std::mutex> lock(mutex_);changed_.wait(lock,[&]{return eof_||!queue_.empty();});
-                if(queue_.empty())return;r=std::move(queue_.front());queue_.pop_front();active_=r;}
+            {std::unique_lock<std::mutex> lock(mutex_);changed_.wait(lock,[&]{return eof_||!queue_.empty()||want_ponder_;});
+                if(queue_.empty()) {
+                    if(eof_)return;r.command="ponder";r.internal=true;want_ponder_=false;
+                } else {r=std::move(queue_.front());queue_.pop_front();want_ponder_=false;}
+                active_=r;}
             try{execute(r);}catch(const std::exception& error) {
+                if(r.internal){std::cerr<<"Pondering failed: "<<error.what()<<'\n';std::lock_guard<std::mutex> lock(mutex_);active_.reset();continue;}
                 if(protocol_=="gtp")output(r.streaming?"error "+std::string(error.what())+"\n\n":"?"+r.gtp_id+" "+error.what()+"\n\n");
                 else {Json reply={{"ok",false},{"error",error.what()}};if(protocol_=="json") {
                     reply["id"]=r.id;reply["event"]="result";reply["final"]=true;
@@ -295,7 +396,7 @@ public:
                     r.data=Json::parse(line);if(!r.data.is_object())throw std::runtime_error("Request must be an object");
                     r.id=r.data.at("id");if(!r.id.is_string()&&!r.id.is_number_integer())throw std::runtime_error("id must be a string or integer");
                     r.command=r.data.at("command").get<std::string>();
-                    const std::set<std::string> allowed={"id","command","size","rule","moves","action","count","visits","report_interval_ms","fresh","opening","seed","timeout_ms","target_id","continuous","fen","komi","go_rules"};
+                    const std::set<std::string> allowed={"id","command","size","rule","moves","action","count","visits","report_interval_ms","fresh","opening","seed","timeout_ms","target_id","continuous","fen","komi","go_rules","avoid_moves","allow_moves","avoid_rescale_root","focus_moves","focus_weights","focus_probability","clock_type","clock_arguments","player","time","stones"};
                     for(auto it=r.data.begin();it!=r.data.end();++it)if(!allowed.count(it.key()))throw std::runtime_error("Unsupported request field: "+it.key());
                     r.continuous=r.data.value("continuous",false);
                     if(r.continuous&&r.command!="analyze")throw std::runtime_error("continuous requires analyze");
@@ -309,13 +410,28 @@ public:
                         if(r.command=="new"&&(a.size()==2||a.size()==5)) {r.data={{"size",number(a[0])},{"rule",a[1]}};if(a.size()==5)r.data.update({{"opening",a[2]},{"seed",a[3]},{"timeout_ms",number(a[4])}});}
                         else if(r.command=="play"&&a.size()==1)r.data["action"]=number(a[0]);
                         else if(r.command=="undo"&&a.size()==1)r.data["count"]=number(a[0]);
-                        else if((r.command=="analyze"||r.command=="genmove")&&a.size()==1)r.data["visits"]=number(a[0]);
+                        else if((r.command=="analyze"||r.command=="genmove")&&a.size()==1){size_t used=0;int64_t count=std::stoll(a[0],&used);if(used!=a[0].size())throw std::runtime_error("Invalid visit count");r.data["visits"]=count;}
                         else if(!a.empty()||!(r.command=="state"||r.command=="quit"||r.command=="stop"))throw std::runtime_error("Unknown command or arguments");
                     }
+                }
+                if(protocol_=="json" && r.command=="set_focus") {
+                    {std::lock_guard<std::mutex> lock(mutex_);
+                        if(!active_ || (active_->command!="analyze" && active_->command!="genmove") ||
+                           !r.data.contains("target_id") || r.data.at("target_id")!=active_->id)
+                            throw std::runtime_error("set_focus requires the active search target_id");
+                        set_focus(r.data);
+                        active_->data["focus_moves"]=r.data.value("focus_moves",Json::array());
+                        active_->data["focus_weights"]=r.data.value("focus_weights",Json(std::vector<double>(active_->data["focus_moves"].size(),1)));
+                        active_->data["focus_probability"]=r.data.value("focus_probability",.5);
+
+                    }
+                    emit({{"id",r.id},{"ok",true},{"event","result"},{"final",true}});continue;
                 }
                 bool quitting=r.command=="quit";
                 {std::lock_guard<std::mutex> lock(mutex_);
                     if(protocol_=="json"&&!pending_ids_.insert(r.id.dump()).second)throw std::runtime_error("Duplicate pending request id");
+                    if(active_ && active_->command=="ponder")active_->cancelled->store(true);
+                    if(r.command=="stop"||r.command=="quit")want_ponder_=false;
                     bool mutation=r.command=="new"||r.command=="play"||r.command=="undo"||r.command=="boardsize"||r.command=="clear_board"||r.command=="etazero-rule"||r.command=="komi";
                     if(r.command=="stop"||mutation||(protocol_=="gtp"&&active_&&active_->continuous)) {
                         auto cancel=[&](Request& job){if(!r.data.contains("target_id")||job.id==r.data["target_id"])job.cancelled->store(true);};
@@ -330,7 +446,7 @@ public:
                 else {Json response={{"ok",false},{"error",error.what()},{"id",r.id},{"final",true},{"event","result"}};emit(response);}
             }
         }
-        {std::lock_guard<std::mutex> lock(mutex_);eof_=true;if(active_&&active_->continuous)active_->cancelled->store(true);for(auto& r:queue_)if(r.continuous)r.cancelled->store(true);}
+        {std::lock_guard<std::mutex> lock(mutex_);eof_=true;if(active_&&(active_->continuous||active_->command=="ponder"))active_->cancelled->store(true);for(auto& r:queue_)if(r.continuous)r.cancelled->store(true);}
         changed_.notify_all();worker.join();return interrupted_()?130:0;
     }
 };

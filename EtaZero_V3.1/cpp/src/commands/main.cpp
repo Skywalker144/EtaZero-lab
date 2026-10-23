@@ -55,15 +55,51 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     auto key = [&](const std::string& group, const std::string& name) {
         return (selfplay ? group : section) + "." + name;
     };
-    SearchSettings s{selfplay?c.integer("search.full_search_visits")-1:std::max(1,c.integer(section+".visits")-1),
+    SearchSettings s{selfplay?c.integer64("search.full_search_visits")-1:std::max<int64_t>(0,c.integer64(section+".visits")-1),
                      c.integer(key("parallelism","search_threads")),
                      c.number(key("puct","c_puct")),c.number(key("puct","virtual_loss")),
                      selfplay?c.number("dirichlet_noise.noise_fraction"):0,
                      selfplay?c.number("dirichlet_noise.dirichlet_total_concentration"):1,c.boolean(key("search","reuse_tree")),
-                     selfplay?0:c.integer(section+".visits")};
+                     selfplay?0:c.integer64(section+".visits")};
+    if(c.contains(key("patterns","avoid_repeated_pattern_utility")))s.avoid_repeated_pattern_utility=c.number(key("patterns","avoid_repeated_pattern_utility"));
+    if(c.contains(key("patterns","pattern_corpora")))s.external_patterns=PatternBonusTable::load(c.text(key("patterns","pattern_corpora")),c.integer("network.canvas"),RuleOptions{});
+    s.use_eval_cache=c.contains(key("graph_search","use_eval_cache"))&&c.boolean(key("graph_search","use_eval_cache"));
+    s.eval_cache_min_visits=c.contains(key("graph_search","eval_cache_min_visits"))?c.integer64(key("graph_search","eval_cache_min_visits")):100;
     s.graph_search=c.boolean(key("graph_search","use_graph_search"));
     if(c.contains(key("graph_search","graph_search_rep_bound")))s.graph_rep_bound=c.integer(key("graph_search","graph_search_rep_bound"));
     s.graph_catch_up_leak_prob=c.number(key("graph_search","graph_search_catch_up_leak_prob"));
+    if(c.contains(key("graph_search","node_table_shards_power_of_two")))s.node_table_shards_power_of_two=c.integer(key("graph_search","node_table_shards_power_of_two"));
+    s.min_playouts_per_thread=c.contains(key("parallelism","min_playouts_per_thread"))?c.number(key("parallelism","min_playouts_per_thread")):(section=="analysis"?8:0);
+    s.ignore_pre_root_history=c.contains(key("search_history","ignore_pre_root_history"))&&c.boolean(key("search_history","ignore_pre_root_history"));
+    s.ignore_all_history=c.contains(key("search_history","ignore_all_history"))&&c.boolean(key("search_history","ignore_all_history"));
+    if(c.contains(key("time_control","max_visits_pondering")))s.max_visits_pondering=c.integer64(key("time_control","max_visits_pondering"));
+    if(c.contains(key("time_control","max_playouts_pondering")))s.max_playouts_pondering=c.integer64(key("time_control","max_playouts_pondering"));
+    if(c.contains(key("time_control","max_time_pondering")))s.max_time_pondering=c.number(key("time_control","max_time_pondering"));
+    if(c.contains(key("time_control","lag_buffer")))s.lag_buffer=c.number(key("time_control","lag_buffer"));
+    if(c.contains(key("time_control","tree_reuse_carry_over_time_factor")))s.tree_reuse_carry_over_time_factor=c.number(key("time_control","tree_reuse_carry_over_time_factor"));
+    if(c.contains(key("time_control","overallocate_time_factor")))s.overallocate_time_factor=c.number(key("time_control","overallocate_time_factor"));
+    if(c.contains(key("time_control","midgame_time_factor")))s.midgame_time_factor=c.number(key("time_control","midgame_time_factor"));
+    if(c.contains(key("time_control","midgame_turn_peak_time")))s.midgame_turn_peak_time=c.number(key("time_control","midgame_turn_peak_time"));
+    if(c.contains(key("time_control","endgame_turn_time_decay")))s.endgame_turn_time_decay=c.number(key("time_control","endgame_turn_time_decay"));
+    if(c.contains(key("time_control","obvious_moves_time_factor")))s.obvious_moves_time_factor=c.number(key("time_control","obvious_moves_time_factor"));
+    if(c.contains(key("time_control","obvious_moves_policy_entropy_tolerance")))s.obvious_moves_policy_entropy_tolerance=c.number(key("time_control","obvious_moves_policy_entropy_tolerance"));
+    if(c.contains(key("time_control","obvious_moves_policy_surprise_tolerance")))s.obvious_moves_policy_surprise_tolerance=c.number(key("time_control","obvious_moves_policy_surprise_tolerance"));
+    if(c.contains(key("human_sl","human_sl_cpuct_exploration")))s.human_sl_cpuct_exploration=c.number(key("human_sl","human_sl_cpuct_exploration"));
+    if(c.contains(key("human_sl","human_sl_cpuct_permanent")))s.human_sl_cpuct_permanent=c.number(key("human_sl","human_sl_cpuct_permanent"));
+    if(c.contains(key("human_sl","human_sl_root_weightless")))s.human_sl_root_weightless=c.number(key("human_sl","human_sl_root_weightless"));
+    if(c.contains(key("human_sl","human_sl_root_weightful")))s.human_sl_root_weightful=c.number(key("human_sl","human_sl_root_weightful"));
+    if(c.contains(key("human_sl","human_sl_player_weightless")))s.human_sl_player_weightless=c.number(key("human_sl","human_sl_player_weightless"));
+    if(c.contains(key("human_sl","human_sl_player_weightful")))s.human_sl_player_weightful=c.number(key("human_sl","human_sl_player_weightful"));
+    if(c.contains(key("human_sl","human_sl_opponent_weightless")))s.human_sl_opponent_weightless=c.number(key("human_sl","human_sl_opponent_weightless"));
+    if(c.contains(key("human_sl","human_sl_opponent_weightful")))s.human_sl_opponent_weightful=c.number(key("human_sl","human_sl_opponent_weightful"));
+    if(c.contains(key("human_sl","human_sl_chosen_move_proportion")))s.human_sl_chosen_move_proportion=c.number(key("human_sl","human_sl_chosen_move_proportion"));
+    if(c.contains(key("human_sl","human_sl_chosen_move_pikl_lambda")))s.human_sl_chosen_move_pikl_lambda=c.number(key("human_sl","human_sl_chosen_move_pikl_lambda"));
+    if(c.contains(key("human_sl","human_sl_chosen_move_ignore_pass")))s.human_sl_chosen_move_ignore_pass=c.boolean(key("human_sl","human_sl_chosen_move_ignore_pass"));
+    s.root_symmetry_pruning=c.contains(key("search_extras","root_symmetry_pruning"))?c.boolean(key("search_extras","root_symmetry_pruning")):(section=="analysis");
+    s.wide_root_noise=c.contains(key("search_extras","wide_root_noise"))?c.number(key("search_extras","wide_root_noise")):(section=="analysis"?.04:0);
+    s.futile_visits_threshold=c.contains(key("search_extras","futile_visits_threshold"))?c.number(key("search_extras","futile_visits_threshold")):0;
+    s.visit_cap_contempt=c.contains(key("search_extras","visit_cap_contempt"))?c.integer64(key("search_extras","visit_cap_contempt")):0;
+    s.visit_cap_contempt_player=c.contains(key("search_extras","visit_cap_contempt_player"))?c.integer(key("search_extras","visit_cap_contempt_player")):0;
     s.use_uncertainty=c.boolean(key("uncertainty","use_uncertainty"));
     s.uncertainty_coeff=c.number(key("uncertainty","uncertainty_coeff"));
     s.uncertainty_exponent=c.number(key("uncertainty","uncertainty_exponent"));
@@ -82,7 +118,7 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     s.fpu_parent_power=c.number(key("fpu","fpu_parent_weight_by_visited_policy_pow"));
     s.fpu_parent_weight_by_visited_policy=c.boolean(key("fpu","fpu_parent_weight_by_visited_policy"));
     s.fpu_parent_weight=c.number(key("fpu","fpu_parent_weight"));
-    s.max_playouts=c.integer(key("search","max_playouts"));s.max_time=c.number(key("search","max_time"));
+    s.max_playouts=c.integer64(key("search","max_playouts"));s.max_time=c.number(key("search","max_time"));
     s.use_lcb=c.boolean(key("lcb","use_lcb"));s.lcb_stdevs=c.number(key("lcb","lcb_stdevs"));
     s.min_lcb_visit_prop=c.number(key("lcb","min_visit_prop_for_lcb"));
     s.policy_target_pruning=c.boolean(key("policy_target","policy_target_pruning"));
@@ -142,6 +178,26 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
     if(!prepared)prepared=detected_model?std::make_shared<PreparedModel>(std::move(*detected_model)):
                                         std::make_shared<PreparedModel>();
     auto random_spec=kind=="random"?game_spec(parse_rule(c.list("environment.rules").front())):game_spec(GameKind::GOMOKU);
+    auto attach_secondary=[&](std::unique_ptr<InferenceService> primary) {
+        std::string key=(mode=="infer"||mode=="selfplay"?"human_sl":prefix)+".human_model";
+        if(!c.contains(key)||c.text(key).empty())return primary;
+        std::string path=c.text(key),device=a.get("device"),precision=c.text(prefix+".inference_precision");
+        if(precision=="auto")precision=device.rfind("cuda",0)==0?"float16":"float32";
+        auto model=torch::jit::load(path,torch::Device(device));model.eval();auto metadata=model.get_method("metadata")({}).toTuple();
+        std::string secondary_algorithm=metadata->elements().at(1).toStringRef();
+        auto prepared_secondary=std::make_shared<PreparedModel>(std::move(model));
+        uint64_t seed=std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")));
+        if(secondary_algorithm=="alphazero") {
+            std::vector<std::unique_ptr<Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(std::make_unique<TorchBackend>(path,device,canvas,batch,precision,prepared_secondary));
+            primary->secondary=std::make_shared<BatchEvaluator>(std::move(models),path,canvas,batch,c.integer(prefix+".batch_wait_us"),c.integer(prefix+".cache_entries"),false,0,seed,
+                c.contains(prefix+".nn_mutex_pool_power_of_two")?c.integer(prefix+".nn_mutex_pool_power_of_two"):16);
+        } else if(secondary_algorithm=="muzero") {
+            std::vector<std::unique_ptr<muzero::Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(std::make_unique<muzero::TorchBackend>(path,device,canvas,batch,precision,prepared_secondary));
+            primary->secondary=std::make_shared<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),c.integer(prefix+".cache_entries"),false,0,seed,c.integer(prefix+".muzero_queue_capacity"),c.contains(prefix+".nn_mutex_pool_power_of_two")?c.integer(prefix+".nn_mutex_pool_power_of_two"):16);
+        } else throw std::runtime_error("Unknown secondary network algorithm");
+        if(!same_layout(primary->spec(),primary->secondary->spec()))throw std::runtime_error("Secondary policy game layout differs");
+        return primary;
+    };
     if(algorithm=="muzero") {
         std::vector<std::unique_ptr<muzero::Backend>> models;
         for(int i=0;i<c.integer(prefix+".server_threads");++i) {
@@ -153,10 +209,10 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
                     prepared));
             }
         }
-        return std::make_unique<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),
+        return attach_secondary(std::make_unique<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),
             c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
             c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
-            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))),c.integer(prefix+".muzero_queue_capacity"));
+            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))),c.integer(prefix+".muzero_queue_capacity")));
     }
     if(algorithm!="alphazero")throw std::runtime_error("Unknown model algorithm");
     for (int i=0;i<c.integer(prefix+".server_threads");++i) {
@@ -164,11 +220,12 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         else backends.push_back(std::make_unique<TorchBackend>(a.get("model"),a.get("device"),canvas,batch,
                                                          c.text(prefix+".inference_precision"),prepared));
     }
-    return std::make_unique<BatchEvaluator>(std::move(backends), a.get("model-id"), canvas,
+    return attach_secondary(std::make_unique<BatchEvaluator>(std::move(backends), a.get("model-id"), canvas,
                                           batch, c.integer(prefix+".batch_wait_us"),
                                           c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
                                           c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
-                                          std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))));
+                                          std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))),
+                                          c.contains(prefix+".nn_mutex_pool_power_of_two")?c.integer(prefix+".nn_mutex_pool_power_of_two"):16));
 }
 std::unique_ptr<GameSearch> search_for(InferenceService& evaluator,SearchSettings settings,uint64_t seed,const Config& c,const std::string& mode) {
     std::string prefix=mode=="selfplay"?"agent":mode;
@@ -221,6 +278,8 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
     auto* eval=&service;eval->reset_stats();
     OpeningConfig opening(c,"policy_init"); auto search_config=selfplay_search_config(c);auto reanalysis=reanalysis_config(c);
     GameForkConfig fork_config(c);auto hints=load_hint_positions(c,canvas);
+    std::mt19937_64 corpus_rng(std::stoull(a.get("seed"))^0xE7037ED1A0B428DBULL);
+    auto starts=load_start_positions(c,canvas,corpus_rng);
     bool random=a.get("evaluator","network")=="random";
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
     if(c.text("agent.algorithm")=="muzero")source.unroll_steps=c.integer("unroll.steps");
@@ -244,11 +303,17 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                 int size = sizes[std::discrete_distribution<size_t>(sw.begin(),sw.end())(rng)];
                 Rule rule = rules[std::discrete_distribution<size_t>(rw.begin(),rw.end())(rng)];
                 auto initial=forks.take(rng);
+                if(!initial && !starts.empty())initial=sample_hint_position(starts,c.number("start_positions.probability"),rng);
                 if(!initial)initial=sample_hint_position(hints,c.number("hint_positions.hint_positions_prob"),rng);
+                int external_prefix=initial?static_cast<int>(initial->actions.size()):0;
+                if(initial && initial->kind==InitialKind::External && !random)
+                    initialize_start_policy(*initial,c,*eval,rng,[&]{return stop_requested.load()||failure.load();});
+                if(stop_requested || failure)break;
                 if(initial){size=initial->game.size();rule=initial->game.rule();}
                 Game game=initial?initial->game:Game(size,canvas,rule,game_options);search.reset(rng());
                 FinishedGame record{}; record.id=id; record.seed=game_seed; record.size=size; record.canvas=canvas; record.rule=rule;record.options=game.options();
                 record.forbidden_feature_dropout_prob=c.number("environment.forbidden_feature_dropout_prob");
+                record.training_weight=initial?initial->training_weight:1.0;
                 InitialKind kind=initial?initial->kind:InitialKind::Ordinary;
                 bool fork_start=kind==InitialKind::EarlyFork || kind==InitialKind::GameFork || kind==InitialKind::HintFork;
                 auto advantage=fork_start?PlayoutAdvantage{}:sample_playout_advantage(c.number("pda.normal_asymmetric_playout_prob"),c.number("pda.max_asymmetric_ratio"),rng);
@@ -257,6 +322,10 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                 if(initial) {
                     record.opening.actions=initial->actions;record.opening.initial_position_moves=initial->actions.size();
                     record.opening.initial_position_kind=static_cast<int>(kind);record.opening.hint_action=initial->hint_action;
+                    if(kind==InitialKind::External) {
+                        record.opening.initial_position_moves=external_prefix;
+                        record.opening.policy_moves=initial->actions.size()-external_prefix;
+                    }
                 } else if(!random) {
                     record.opening=initialize_opening(game,opening,*eval,rng,[&]{return stop_requested || failure;});
                     if(record.opening.status==OpeningStatus::Interrupted)break;
@@ -301,12 +370,13 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                     [&](const Game& position){return move_temperature(c,"selfplay",position);},rng,
                     [&]{return stop_requested.load() || failure.load();});
                 if(stop_requested || failure)break;
-                apply_training_weights(record,c.number("surprise_weighting.policy_surprise_data_weight"),c.number("surprise_weighting.value_surprise_data_weight"),rng,reanalysis.direct_value_surprise,reanalysis.enabled);
                 search_side_positions(side_positions,record,search,*eval,search_config.full_visits,
                     c.boolean("symmetry.nn_randomize"),c.integer("symmetry.nn_symmetry"),
                     [&](const Game& position){return move_temperature(c,"selfplay",position);},rng,
                     [&]{return stop_requested.load() || failure.load();});
                 if(stop_requested || failure)break;
+                apply_training_weights(record,c.number("surprise_weighting.policy_surprise_data_weight"),c.number("surprise_weighting.value_surprise_data_weight"),rng,reanalysis.direct_value_surprise,reanalysis.enabled,
+                                       c.contains("data_weight.scale_data_weight")?c.number("data_weight.scale_data_weight"):1.0);
                 if(auto position=make_game_fork(record,fork_config,*eval,c.boolean("symmetry.nn_randomize"),c.integer("symmetry.nn_symmetry"),rng,
                                                [&]{return stop_requested.load() || failure.load();}))forks.add(std::move(*position));
                 if(stop_requested || failure)break;
