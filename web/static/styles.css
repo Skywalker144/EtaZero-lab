@@ -227,6 +227,10 @@ footer {display:flex;justify-content:space-between;gap:12px;max-width:1840px;mar
 @media(prefers-reduced-motion:reduce) {* {animation:none!important;transition:none!important}}
 @media(forced-colors:active) {.check input {appearance:auto}.check input::before {display:none}#timeline {appearance:auto}#timeline::-webkit-slider-runnable-track {background:CanvasText}#timeline::-webkit-slider-thumb {background:ButtonText}}
 
+.xiangqi-squares,.xiangqi-pieces {position:absolute;inset:0}
+.xiangqi-pieces {pointer-events:none;z-index:2}
+.xiangqi-piece-slot {position:absolute;display:grid;place-items:center;width:9%;height:8.181818%;transform:translate(-50%,-50%)}
+.xiangqi-piece-slot.moving-piece {z-index:1}
 .xiangqi-piece { display:grid;place-items:center;width:90%;height:90%;border-radius:50%;background:#f7dfad;border:2px solid currentColor;box-shadow:0 2px 3px #0004;font-size:clamp(15px,3.4cqw,32px);font-family:serif;font-weight:bold; }
 .red-piece {color:#ae2924;} .black-piece {color:#282b2d;}
 .tiny-stone.red {background:radial-gradient(circle at 30% 25%,#d65046,#ae2924 75%);box-shadow:0 1px 2px #0004}
