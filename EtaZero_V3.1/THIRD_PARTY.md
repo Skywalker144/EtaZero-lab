@@ -4,7 +4,7 @@
 
 KataGo copyright and MIT terms are retained in [licenses/KataGo.txt](licenses/KataGo.txt), and KataGomo terms in [licenses/KataGomo.txt](licenses/KataGomo.txt). These notices also cover the corresponding KataGo-derived modules inspected through SkyZero. Runtime semantics are maintained in the algorithm and implementation documents; this file records attribution and adaptation scope.
 
-The Muon kernels in [python/etazero/_vendor/muon.py](python/etazero/_vendor/muon.py) are copied unchanged from the registered `KataGoMuon` source. Keller Jordan's MIT notice is retained in [licenses/Muon.txt](licenses/Muon.txt), alongside KataGo's MIT notice for its extensions. EtaZero selects standard single-device Muon, adapts parameter roles and the LR/WD policy, and raises on incompatible optimizer state instead of dropping it. Source DDP and optimizer variants are not exposed by EtaZero configuration.
+The Muon kernels in [python/etazero/_vendor/muon.py](python/etazero/_vendor/muon.py) are copied unchanged from the registered `KataGoMuon` source. Keller Jordan's MIT notice is retained in [licenses/Muon.txt](licenses/Muon.txt), alongside KataGo's MIT notice for its extensions. EtaZero exposes single-device Muon, NorMuon and Aurora, adapts parameter roles and the LR/WD policy, and raises on incompatible optimizer state instead of dropping it. Source DDP remains outside the single-device learner. Optional auxiliary Adam LR, decay floors, Newton–Schulz/Polar Express and Aurora PP controls are passed through with their training state.
 
 MiniZero's small-span latent normalization guard is adapted from `scale_hidden_state` at revision `394b2e483d00cb658d5a24ccca297f864c3280c7`. Its Apache-2.0 license and RLG Lab copyright notice are retained in [licenses/MiniZero.txt](licenses/MiniZero.txt); EtaZero retains FP32 masked reductions and implements the guard without an in-place update.
 
@@ -51,3 +51,6 @@ The native session and GTP analysis orchestration use SkyZero V8.1 / KataGo Asyn
 围棋规则、NN 输入和 GraphHash 复制自上述 KataGo commit，位于 `cpp/external/katago/`，按 MIT 条款保留；编译规则、特征、图身份及必要 core 依赖，棋盘编译上限为 25。图共享的历史折叠、非法着重评估和根边清理按来源接入 EtaZero 的 WDL 搜索；没有接入完整 KataGo 引擎或其分数效用。
 
 中国象棋使用 Pikafish `545c4e3b251afbb94f493c6c5f32549f900e76fd` 的 Position、Attacks、Bitboard、MoveGen 和规则裁定，位于 `cpp/external/pikafish/`。许可证为 [GPL v3](licenses/Pikafish.txt)，包含该代码的构建受相应分发条款约束。适配增加了状态复制入口和规则裁定原因输出（沿用原判定顺序），并去掉不参与规则的置换表／搜索历史预取；没有使用 Pikafish 搜索、NNUE 评估或网络权重。来源递归头文件随代码保留。
+
+
+`cpp/external/katago/search/localpattern.{h,cpp}` are copied unchanged from the pinned KataGo source for Go pattern bonuses. `cpp/src/search/timecontrols.cpp` and its header adapt KataGo TimeControls to the common board-area/occupied-point interface; search timing, HumanSL, pattern table loading, history dropout and auxiliary targets are derived from the same source, with the documented WDL, multigame and data-format adaptations.
