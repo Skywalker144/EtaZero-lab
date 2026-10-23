@@ -7,6 +7,7 @@ import copy
 import math
 import torch
 from torch import nn
+from torch.nn import functional as F
 from .config import network_widths
 from .schema import PLANES, GLOBALS, POLICY_HEADS
 
@@ -207,17 +208,22 @@ class ValueHead(nn.Module):
         self.bias = BiasMask(width)
         self.pool = ValuePool()
         self.hidden = nn.Linear(3 * width, hidden)
-        self.out = nn.Linear(hidden, 13)
+        self.out = nn.Linear(hidden, 14)
+        self.future = nn.Conv2d(channels, 2, 1, bias=False)
         self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
         init_weights(self.conv.weight, activation=activation)
         init_weights(self.hidden.weight, activation=activation)
         init_weights(self.hidden.bias, 0.2, fan_tensor=self.hidden.weight, activation=activation)
         init_weights(self.out.weight, identity=True)
         init_weights(self.out.bias, 0.2, identity=True, fan_tensor=self.out.weight)
+        init_weights(self.future.weight, 0.2, identity=True)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         features = self.act(self.bias(self.conv(x), mask))
         return self.out(self.act(self.hidden(self.pool(features, mask))))
+
+    def training_outputs(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.forward(x, mask), self.future(x) * mask
 
 
 class PolicyValueNet(nn.Module):
@@ -276,6 +282,10 @@ class PolicyValueNet(nn.Module):
     @torch.jit.export
     def forward_all(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Six policies, WDL, three TD WDLs and raw error; current-player W/D/L."""
+        policy, value, _ = self.head_outputs(obs, globals)
+        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
+
+    def head_outputs(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mask = obs[:, 0:1]
         x = self.stem(obs * mask) + self.linear_global(globals).unsqueeze(-1).unsqueeze(-1)
         for block in self.blocks:
@@ -285,10 +295,16 @@ class PolicyValueNet(nn.Module):
         # independent export copy follows the configured inference autocast.
         if self.fp32_heads:
             with torch.autocast("cuda", enabled=False):
-                policy, value = self.policy_head(x.float(), mask.float()), self.value_head(x.float(), mask.float())
+                policy = self.policy_head(x.float(), mask.float())
+                value, future = self.value_head.training_outputs(x.float(), mask.float())
         else:
-            policy, value = self.policy_head(x, mask), self.value_head(x, mask)
-        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
+            policy = self.policy_head(x, mask)
+            value, future = self.value_head.training_outputs(x, mask)
+        return policy, value, future
+
+    def training_outputs(self, obs, globals):
+        policy, value, future = self.head_outputs(obs, globals)
+        return ((policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12], future, value[:, 13]),)
 
     def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         policy, value, _, _ = self.forward_all(obs, globals)
@@ -321,7 +337,7 @@ def row_mean(value, weight=None):
     return value.mean(0) if weight is None else (value * weight.reshape((-1,) + (1,) * (value.ndim-1))).mean(0)
 
 
-def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight=None, action_layout='points'):
+def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight=None, action_layout='points', value_scale=0.6):
     """Float targets on the logits' device: policy/opponent [N,A], weight [N], WDL [N,3].
 
     Training logits are [N,heads,A], with the game's fixed action count A. Reduce every weighted component
@@ -342,7 +358,7 @@ def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_wei
     soft_policy_loss = soft_policy_weight_scale * row_mean(ce[:, 2], row_weight)
     soft_opponent_policy_loss = row_mean(0.15 * soft_policy_weight_scale * opponent_policy_weight * ce[:, 3], row_weight)
     # v15 ordinary policy scale; value CE's internal 1.20 times CLI default 0.6.
-    value_loss = 1.20 * 0.6 * -row_mean((target * torch.log_softmax(value.float(), dim=1)).sum(1), row_weight)
+    value_loss = 1.20 * value_scale * -row_mean((target * torch.log_softmax(value.float(), dim=1)).sum(1), row_weight)
     total = policy_loss + opponent_policy_loss + soft_policy_loss + soft_opponent_policy_loss + value_loss
     # Log weighted contributions, so all five components add up to total loss.
     return total, policy_loss, opponent_policy_loss, soft_policy_loss, soft_opponent_policy_loss, value_loss
@@ -365,12 +381,37 @@ def error_variance(raw):
     return 0.25 * ErrorSoftplus.apply(raw.float())
 
 
+class VarianceTimeSoftplus(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, raw):
+        ctx.save_for_backward(raw)
+        return F.softplus(raw)
+
+    @staticmethod
+    def backward(ctx, grad):
+        raw, = ctx.saved_tensors
+        return grad * (0.05 + 0.95 * torch.sigmoid(raw))
+
+
+def continuation_losses(future_logits, raw_variance_time, obs, future_target, variance_target,
+                        full_game_weight, row_weight=None, variance_scale=1.0):
+    mask = obs[:, :1]
+    error = (torch.tanh(future_logits.float()) - future_target).square() * mask
+    error = error[:, 0].sum((1, 2)) + 0.25 * error[:, 1].sum((1, 2))
+    future = row_mean(0.25 * full_game_weight * error / mask.sum((1, 2, 3)).sqrt(), row_weight)
+    predicted = 40.0 * VarianceTimeSoftplus.apply(raw_variance_time.float())
+    difference = (predicted - (variance_target + 1e-5)).abs()
+    huber = torch.where(difference <= 50, 0.5 * difference.square(), 50 * (difference - 25))
+    variance = row_mean(0.0003 * variance_scale * full_game_weight * huber, row_weight)
+    return future, variance
+
+
 def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
-                     full_game_weight, disable_optimistic_policy, row_weight=None, action_layout='points'):
+                     full_game_weight, disable_optimistic_policy, row_weight=None, action_layout='points', td_scales=(0.6, 0.6, 0.6)):
     """Row multiplicity is already resolved; complete-game gate is independent of TD."""
     td_logp = torch.log_softmax(td_logits.float(), dim=2)
     entropy = -(td_target * torch.log(td_target + 1e-30)).sum(2)
-    td = 0.72 * row_mean(-(td_target * td_logp).sum(2) - entropy, row_weight)
+    td = 1.20 * row_mean(-(td_target * td_logp).sum(2) - entropy, row_weight)
     variance = error_variance(raw_error)
     predicted = torch.softmax(td_logits[:, 2].float(), dim=1)
     predicted = (predicted[:, 0] - predicted[:, 2]).detach()
@@ -392,7 +433,7 @@ def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_targe
     ce = -(normalized[:, None] * logp).sum(2)
     long_loss = row_mean(0.100 * long_weight * ce[:, 0], row_weight)
     short_loss = row_mean(0.200 * short_weight * ce[:, 1], row_weight)
-    return td[0], td[1], td[2], long_loss, short_loss, error_loss
+    return td[0]*td_scales[0], td[1]*td_scales[1], td[2]*td_scales[2], long_loss, short_loss, error_loss
 
 
 def q_winloss_loss(prediction, target, visits, row_weight=None):
@@ -410,39 +451,62 @@ def q_winloss_loss(prediction, target, visits, row_weight=None):
 
 def losses(logits, value, td_logits, raw_error, obs, policy, opponent_policy,
            opponent_policy_weight, target, td_target, full_game_weight,
-           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None, row_weight=None, action_layout='points'):
-    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight, action_layout)
+           soft_policy_weight_scale, disable_optimistic_policy, q_values=None, q_visits=None, row_weight=None, action_layout='points',
+           future_logits=None, raw_variance_time=None, future_target=None, variance_target=None,
+           value_scale=0.6, td_scales=(0.6,0.6,0.6), variance_scale=1.0):
+    base = base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight, action_layout, value_scale)
     auxiliary = auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
-                                 full_game_weight, disable_optimistic_policy, row_weight, action_layout)
+                                 full_game_weight, disable_optimistic_policy, row_weight, action_layout, td_scales)
+    extra = ()
     if logits.shape[1]==7:
         if q_values is None or q_visits is None:
             raise ValueError('Enabled Q head requires per-action Q value/node-visit targets')
         qloss=q_winloss_loss(logits[:,6],q_values,q_visits,row_weight)
-        return (base[0] + sum(auxiliary)+qloss, *base[1:], *auxiliary, qloss)
-    return (base[0] + sum(auxiliary), *base[1:], *auxiliary)
+        extra = (qloss,)
+    if future_target is not None:
+        extra += continuation_losses(future_logits, raw_variance_time, obs, future_target,
+                                     variance_target, full_game_weight, row_weight, variance_scale)
+    return (base[0] + sum(auxiliary) + sum(extra), *base[1:], *auxiliary, *extra)
 
 
 class TrainingForward(nn.Module):
     """Compile the network and all supervision in one graph."""
-    def __init__(self, model, soft_policy_weight_scale, disable_optimistic_policy):
+    def __init__(self, model, soft_policy_weight_scale, disable_optimistic_policy, options=None, attention_options=None):
         super().__init__()
         self.model = model
         from .games import SPECS
         self.action_layout = SPECS[model.game].action_layout
         self.soft_policy_weight_scale = soft_policy_weight_scale
         self.disable_optimistic_policy = disable_optimistic_policy
+        self.options = options or {}
+        self.attention_cap = (attention_options or {}).get('cap', -1)
+        from .attention_penalty import configure
+        configure(model, attention_options or {})
 
     def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight, target, td_target, full_game_weight,
-                q_values=None, q_visits=None):
+                q_values=None, q_visits=None, future_target=None, variance_target=None, training_weight=None):
         outputs = (self.model.training_outputs(obs, globals) if hasattr(self.model, 'training_outputs')
                    else (self.model.forward_all(obs, globals),))
         with torch.autocast("cuda", enabled=False):
-            components = [losses(*head, obs, policy, opponent_policy, opponent_policy_weight,
+            components = [losses(*head[:4], obs, policy, opponent_policy, opponent_policy_weight,
                                  target, td_target, full_game_weight, self.soft_policy_weight_scale,
-                                 self.disable_optimistic_policy, q_values, q_visits, action_layout=self.action_layout) for head in outputs]
+                                 self.disable_optimistic_policy, q_values, q_visits, row_weight=training_weight,
+                                 action_layout=self.action_layout, future_logits=head[4], raw_variance_time=head[5],
+                                 future_target=future_target, variance_target=variance_target,
+                                 value_scale=self.options.get('value_scale', 0.6),
+                                 td_scales=tuple(self.options.get(k, 0.6) for k in ('td_long_scale','td_mid_scale','td_short_scale')),
+                                 variance_scale=self.options.get('variance_time_scale', 1.0)) for head in outputs]
             weights = getattr(self.model, 'head_loss_weights', (1.0,))
-            return tuple(sum(weight * value for weight, value in zip(weights, values))
-                         for values in zip(*components))
+            if len(weights) == 1 and self.options.get('main_head_scale', -1) >= 0:
+                weights = (self.options['main_head_scale'],)
+            if len(weights) == 2:
+                weights = (self.options.get('main_head_scale', -1), self.options.get('intermediate_head_scale', -1))
+                weights = tuple(default if scale < 0 else scale for scale, default in zip(weights, self.model.head_loss_weights))
+            result = tuple(sum(weight * value for weight, value in zip(weights, values)) for values in zip(*components))
+            if self.attention_cap >= 0:
+                from .attention_penalty import metrics
+                result += metrics(self.model, self.attention_cap)
+            return result
 
 
 class InferencePolicyValueNet(nn.Module):

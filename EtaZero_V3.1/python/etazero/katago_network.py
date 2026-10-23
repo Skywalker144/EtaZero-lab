@@ -103,7 +103,8 @@ class KataGoNet(nn.Module):
 
     def training_outputs(self, obs, globals):
         mask = obs[:, 0:1]
-        return tuple(self.select_outputs(head, mask) for head in self.source_outputs(obs, globals))
+        return tuple((*self.select_outputs(head, mask), head[6], head[2][:, 3])
+                     for head in self.source_outputs(obs, globals))
 
     def forward_all(self, obs, globals):
         return self.select_outputs(self.source_outputs(obs, globals)[0], obs[:, 0:1])
@@ -116,18 +117,10 @@ class KataGoNet(nn.Module):
         # Source configure_model_for_compile makes this same choice for one graph.
         self.network.disable_fused_attention_kernels()
 
-    def prepare_brenorm(self, samples, options):
+    def set_brenorm_bounds(self, momentum, rmax, dmax):
         if self.norm_kind not in ('brenorm', 'fixbrenorm'):
             return
-        # Source starts at rmax=1,dmax=0. Omitted schedule keeps these initial
-        # bounds; configured targets follow its exponential sample clock.
-        if options is None:
-            self.network.set_brenorm_params(0.001, 1.0, 0.0)
-        else:
-            fraction = -math.expm1(-samples / options['adjustment_scale'])
-            self.network.set_brenorm_params(options['avg_momentum'],
-                                           1 + fraction * (options['target_rmax'] - 1),
-                                           fraction * options['target_dmax'])
+        self.network.set_brenorm_params(momentum, rmax, dmax)
 
     def scale_repvgg_gradients(self):
         if self.source_config.get('use_repvgg_learning_rate', False):

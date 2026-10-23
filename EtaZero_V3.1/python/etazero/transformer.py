@@ -41,6 +41,8 @@ class Attention(nn.Module):
         cos, sin = rope_tables(canvas)
         self.register_buffer('cos', cos, persistent=False)
         self.register_buffer('sin', sin, persistent=False)
+        self.penalty_fraction = 0.0
+        self.logit_bound = torch.empty(0)
         # Source initialize() is a no-op: preserve nn.Linear defaults.
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -60,6 +62,11 @@ class Attention(nn.Module):
         # Keep the SDPA boundary explicitly contiguous in BHSD order.
         # Learner compilation also preserves the selected NCHW trunk layout.
         q,k,v = q.transpose(1,2).contiguous(),k.transpose(1,2).contiguous(),v.transpose(1,2).contiguous()
+        if self.training and self.penalty_fraction > 0:
+            count = max(1, math.ceil(batch * self.penalty_fraction))
+            qmax = q[:count].float().square().sum(-1).amax(-1)
+            kmax = k[:count].float().square().sum(-1).amax(-1)
+            self.logit_bound = (qmax * kmax).clamp(min=1.0).sqrt() / math.sqrt(32.0)
         bias = torch.zeros_like(mask.reshape(batch,1,1,seq),dtype=q.dtype)
         bias = bias.masked_fill(mask.reshape(batch,1,1,seq)==0,float('-inf'))
         attended = F.scaled_dot_product_attention(q,k,v,attn_mask=bias,dropout_p=0.0,scale=1/math.sqrt(32.0))
