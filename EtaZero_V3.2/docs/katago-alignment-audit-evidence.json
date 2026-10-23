@@ -1,0 +1,1054 @@
+{
+  "date": "2026-10-23",
+  "eta_commit": "8726295fba463caa8be864a9257676ac76e072d7",
+  "source": {
+    "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "root": "/home/sky/RL/SkyZero-lab/KataGo",
+    "sha256": {
+      "SelfplayTraining.md": "600d0a328e663ba1a20bbbd5412e3d8b8cbcac91c990730f67e9cf2bc8e13d14",
+      "cpp/command/selfplay.cpp": "af36f0a675c57c89237fa8088a39fae50166c578af084472f28f00d9ed694605",
+      "cpp/core/threadsafequeue.h": "eeee51255e874bc39eb2c3f9fc337d6f47bb485fc91458fbfda67ccaf67a3a29",
+      "cpp/dataio/trainingwrite.cpp": "3627b85c1d3ff120eb93fa7f40b051e10e9cb56ba02196573ae32e18e18fadc0",
+      "cpp/neuralnet/nneval.cpp": "2efe3ef52cf791abdd578eb7e8d4187f8ad14c912859b07c9f603cc684f275e5",
+      "cpp/neuralnet/nneval.h": "86e794bd5ebcce6cab522c76a3dd7f9ebaec1b29b2d7c30e3421dce04437604c",
+      "cpp/program/selfplaymanager.cpp": "d7b1f52489caf89a139bc5669c2bdecac1f3657171587f17b06c7017d8fb5e53",
+      "python/katago/train/data_processing_pytorch.py": "374df65b15c11f2c83c033a259527e61fa4ca96cb70247d936dbb459bd297c9d",
+      "python/shuffle.py": "e8dc0c8ae84ebd595066c5befe11cf366cfaddfb993cc843bc2400681f2fbb2b",
+      "cpp/search/search.h": "ad9dc5dfea7cacd57f0cd3daa4ab1d79059e2097025294c7ee03b0aa9434632e",
+      "cpp/search/searchnode.h": "6f394798473fb5cc59fdadf51da55273345cd8890f303682dc52398f4e1b2654",
+      "cpp/search/searchnode.cpp": "e354548b1b25a62af081d251c597b20ea5028e32eec05570f877d2796b60a91f",
+      "cpp/core/multithread.h": "e4a222bb197a60e6bcd59eb2a7bd29987b27e7633b4d404d9255ba78d2fcba1b",
+      "cpp/dataio/trainingwrite.h": "7f448829f58d2b4a9035cf02ac3bd98262b7892a6dd9c99a37fb1204375c392e",
+      "python/katago/train/trainloop_helpers.py": "669bed8c0b6616e9c138db01a07b7a7b5ac4ffc89407c9206eb5c1538ad47456",
+      "python/train.py": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f",
+      "cpp/command/match.cpp": "5d383c2837f7ccd55f1e458faf22ed690d57dab1e1cda785c40c072800003cfe",
+      "cpp/configs/match_example.cfg": "6608934b686a51aa9cf3f030fe5501e0451e72a9ee3b6b5c9496e6e049f36819",
+      "cpp/search/search.cpp": "2b81e2660d8dd31050b40ce99e66cf12f3a655782a4dbe62a6b67d43941fe34f",
+      "cpp/search/searchparams.h": "e654508ca0a034de1361be2634fbb688e5c9dde23b2c0d7ebf7747e675b331dc",
+      "cpp/search/searchhelpers.cpp": "6044555fa93131341773852028726ccdab4d73d74945cbd95d123f3f9138d0e0",
+      "cpp/search/searchexplorehelpers.cpp": "473ffb1ee53b2054a43ece45ef0d8a083d5d79c76b6e680a5baa63642f113861",
+      "cpp/search/searchresults.cpp": "edbcdbe407db2e339152cdc3b288e155f13a9d20d53b223cc8dcce00d25b4ef8",
+      "cpp/program/play.cpp": "604c12138ec97d3717cb2813ee79e7c596bfadbf556ac028fd811e746343fb1e",
+      "cpp/configs/training/selfplay1.cfg": "6ad799f2d7653bd7273eca8e3df996a6260a863b9ba0498edaf86af046c16838",
+      "cpp/search/searchparams.cpp": "bb615e1898fb8daebb825d7f5ab0d2b0d95ca31c066488a86389df8f7e458163",
+      "python/katago/train/model_pytorch.py": "bde17b3fff4ebc97717969bf68f2843fb5fd1c781386048c7f19dae13d1d9517",
+      "python/katago/train/metrics_pytorch.py": "a5416cadb4bb4facb4a1af1d13b5a3d07ce7faf17b83eb05ca22c884748d71dc",
+      "cpp/search/searchupdatehelpers.cpp": "93de7096923d6d9d28c3ae52d7b2d3030f7be143556d85b92a72a4c3224efd7c",
+      "cpp/search/distributiontable.h": "a031e456e3e287c3e277af79d0bb83eb927635b6a9c539629b2c5752e15b5a1f",
+      "cpp/search/distributiontable.cpp": "8896ccfc1c0f7aa241b815e7e9fe1eda6d31c1dc382fc5c0d8f4d2217fc107eb",
+      "cpp/search/searchnnhelpers.cpp": "82e4098b429e352bb385fca94f19c1f92b47dde95e107cba92e1a73c98ff40b4",
+      "cpp/core/fancymath.cpp": "0c4668731eb4a252783f6accb70060a4df836b69a16b975fc0d1865515275a5b",
+      "cpp/program/playsettings.cpp": "de8c04113549a85f7b897dcef50526cde56503debca1ba70c00282a3b0e3366c",
+      "cpp/program/playsettings.h": "163a06f9e517eeea9cf2720a6253333241388f00e3e7d039cd5d881b64349225",
+      "python/export_model_pytorch.py": "eaaaf92d0f6e2f8b7486036822dd5fc1ee8add4200cdad27cba1e8bcfe604d9e",
+      "python/katago/train/modelconfigs.py": "4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e",
+      "docs/NetworkArchitectures.md": "c3198aaeb5762b69a59eef7192d4c66d6c2d83e800f569d5d831226afe18d9e4",
+      "docs/KataGoMethods.md": "95a6039d76fcc0bbd629e65c3248fa88d6fcf3216854c8038ab428ecd91c84d2",
+      "python/katago/train/metrics_logging.py": "e4a4bfe209f4b91a92dc183d69e7b37a74ed5c03e4fd3d913b12e7268fe10755",
+      "cpp/program/setup.cpp": "363dd9470f10f24998f4114dbeabd93835ef4a75d44b4cb761991036b8b31f4b",
+      "cpp/configs/training/selfplay8mainb18.cfg": "fe83edefccf869826e2f0019c259a707421824c3f76fd8cab4e998dc342124c0",
+      "cpp/neuralnet/nninputs.cpp": "643f6753453996d678ce10550d32d4a39d7a4cf54e3b3fd1074d892c88c077ec",
+      "cpp/neuralnet/nninputs.h": "53a18a9e653bb27b7ed7548b0908dd1f5fe3c83375f94cda9388db08eac0c607",
+      "cpp/game/graphhash.cpp": "99e78ffdce4c429eea98b90844062891f2c15104a32ee9d6b7d3fefd8a886410",
+      "cpp/game/graphhash.h": "c91ca68075fec3dd3e6b1425d303b31cc9c2c31cee33e9efab64adb122b5889e",
+      "cpp/neuralnet/cudaandrocmbackend.inc": "4e170b0c014693d0c99962df3a563460f8019a458c23004e653aa1c5932d359e",
+      "python/katago/train/fused_swiglu.py": "0ff1ca85fd6dcdc8871b4607a11c6c79ed94b28c5757a768a97d253b01a8b0d9",
+      "python/katago/utils/training_data_generator.py": "e1b9535b94e7aba76bc00d8802a03b30370692f735cb92cfb66672dcacf84b6f",
+      "python/selfplay/shuffle.sh": "755ebf8f7368d5edc34f1387846407fb2767d571a508c883f3e0b4f93e2580bf",
+      "python/selfplay/synchronous_loop.sh": "f9ea27696a8fefb13773547931d87c46bab29dab8bf6b23c2d96161d284a01e5",
+      "python/katago/train/fused_rope.py": "5c3f85381f8554100f90ca0ba09d805bf95769ae2d289b4fc183c0793a9354c9",
+      "cpp/search/subtreevaluebiastable.h": "d59e1e542cd1701b48eb57d016ae9e9526c476c607578cb658b2b5ee3087cc6f",
+      "cpp/search/subtreevaluebiastable.cpp": "880f47f960e73cfb89d53281c6dfd1570ef28daf33b4be64fec46d0dd65f488e",
+      "cpp/search/localpattern.h": "ceb392a9026b43e639cf3d8958263e00c1bff6bb3373d5d9d8b02b8252608447",
+      "cpp/search/localpattern.cpp": "85d71dd10148128ae133a624641b3460b3d0fc9e3e7f116df3de96a824f6e299"
+    }
+  },
+  "scope": "Read-only implementation audit. CPU only. No strength or throughput claim.",
+  "build": {
+    "command": "conda run --no-capture-output -n pytorch cmake --build EtaZero_V3/build --parallel 2",
+    "exit_code": 0
+  },
+  "ctest": {
+    "command": "conda run --no-capture-output -n pytorch ctest --test-dir EtaZero_V3/build --output-on-failure -j 2",
+    "passed": 16,
+    "failed": 0,
+    "output": "Start testing: Oct 23 18:13 CST\n----------------------------------------------------------\n8/16 Testing: core\n8/16 Test: core\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/core_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"core\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nRules, perspectives, search budgets, persistent workers and failure propagation passed\n<end of output>\nTest time =   0.20 sec\n----------------------------------------------------------\nTest Passed.\n\"core\" end time: Oct 23 18:13 CST\n\"core\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n13/16 Testing: go_graph\n13/16 Test: go_graph\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/go_graph_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"go_graph\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 0\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 1, action 1\nGraph move is illegal on the current history; refreshing NN output at node 4, action 0\nGraph move is illegal on the current history; refreshing NN output at node 4, action 1\nGraph move is illegal on the current history; refreshing NN output at node 4, action 1\nGraph move is illegal on the current history; refreshing NN output at node 4, action 0\nGo graph tests passed\n<end of output>\nTest time =   0.03 sec\n----------------------------------------------------------\nTest Passed.\n\"go_graph\" end time: Oct 23 18:13 CST\n\"go_graph\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n2/16 Testing: multigame\n2/16 Test: multigame\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/multigame_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"multigame\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\n<end of output>\nTest time =   0.06 sec\n----------------------------------------------------------\nTest Passed.\n\"multigame\" end time: Oct 23 18:13 CST\n\"multigame\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n9/16 Testing: opening\n9/16 Test: opening\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/opening_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"opening\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nRandom evaluator, KataGomo opening, perspectives, retries and policy init passed\n<end of output>\nTest time =   0.08 sec\n----------------------------------------------------------\nTest Passed.\n\"opening\" end time: Oct 23 18:13 CST\n\"opening\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n1/16 Testing: game_state\n1/16 Test: game_state\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/game_state_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"game_state\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nAll rule states clone/reset independently; Gomoku/Hex reset allocations: 0\n<end of output>\nTest time =   0.05 sec\n----------------------------------------------------------\nTest Passed.\n\"game_state\" end time: Oct 23 18:13 CST\n\"game_state\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n15/16 Testing: subtree_value_bias\n15/16 Test: subtree_value_bias\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/subtree_value_bias_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"subtree_value_bias\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nsubtree value bias tests passed; fixed bytes per 65536 shards=5767168\n<end of output>\nTest time =   0.45 sec\n----------------------------------------------------------\nTest Passed.\n\"subtree_value_bias\" end time: Oct 23 18:13 CST\n\"subtree_value_bias\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n12/16 Testing: graph\n12/16 Test: graph\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/graph_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"graph\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\ngraph tests passed\n<end of output>\nTest time =   0.03 sec\n----------------------------------------------------------\nTest Passed.\n\"graph\" end time: Oct 23 18:13 CST\n\"graph\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n11/16 Testing: record_contract\n11/16 Test: record_contract\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/record_contract_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"record_contract\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\n{\"event\":\"shard\",\"file\":\"/tmp/etazero_record_contract_8019043692409/b7e76bf619bcd545.npz\",\"rows\":11,\"plies\":9,\"games\":1}\n{\"event\":\"shard\",\"file\":\"/tmp/etazero_record_contract_8019043692409/long/7eca4cb0e804e379.npz\",\"rows\":39,\"plies\":37,\"games\":1}\n<end of output>\nTest time =   0.01 sec\n----------------------------------------------------------\nTest Passed.\n\"record_contract\" end time: Oct 23 18:13 CST\n\"record_contract\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n16/16 Testing: sampling\n16/16 Test: sampling\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/sampling_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"sampling\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nPDA, side, hint and fork checks passed\n<end of output>\nTest time =   0.03 sec\n----------------------------------------------------------\nTest Passed.\n\"sampling\" end time: Oct 23 18:13 CST\n\"sampling\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n10/16 Testing: search_features\n10/16 Test: search_features\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/search_features_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"search_features\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nWDL, FPU, shaped noise, forced playouts, pruning, LCB, reuse and surprise sampling passed\n<end of output>\nTest time =   0.01 sec\n----------------------------------------------------------\nTest Passed.\n\"search_features\" end time: Oct 23 18:13 CST\n\"search_features\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n5/16 Testing: gumbel\n5/16 Test: gumbel\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/gumbel_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"gumbel\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nGumbel math and all four search combinations passed\n<end of output>\nTest time =   0.01 sec\n----------------------------------------------------------\nTest Passed.\n\"gumbel\" end time: Oct 23 18:13 CST\n\"gumbel\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n3/16 Testing: analysis\n3/16 Test: analysis\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/analysis_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"analysis\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nAnalysis diagnostics preserve all six search paths\n<end of output>\nTest time =   0.00 sec\n----------------------------------------------------------\nTest Passed.\n\"analysis\" end time: Oct 23 18:13 CST\n\"analysis\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n7/16 Testing: muzero_search\n7/16 Test: muzero_search\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/muzero_search_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"muzero_search\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nMuZero search, masking, perspective, routing, cache and failures passed\n<end of output>\nTest time =   0.01 sec\n----------------------------------------------------------\nTest Passed.\n\"muzero_search\" end time: Oct 23 18:13 CST\n\"muzero_search\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n6/16 Testing: hex\n6/16 Test: hex\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/hex_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"hex\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nHex rules, opening and model coordinates passed\n<end of output>\nTest time =   0.00 sec\n----------------------------------------------------------\nTest Passed.\n\"hex\" end time: Oct 23 18:13 CST\n\"hex\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n4/16 Testing: match\n4/16 Test: match\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/match_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"match\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nmatch scheduler passed\n<end of output>\nTest time =   0.00 sec\n----------------------------------------------------------\nTest Passed.\n\"match\" end time: Oct 23 18:13 CST\n\"match\" time elapsed: 00:00:00\n----------------------------------------------------------\n\n14/16 Testing: search_corrections\n14/16 Test: search_corrections\nCommand: \"/home/sky/RL/EtaZero-lab/EtaZero_V3/build/search_corrections_test\"\nDirectory: /home/sky/RL/EtaZero-lab/EtaZero_V3/build\n\"search_corrections\" start time: Oct 23 18:13 CST\nOutput:\n----------------------------------------------------------\nsearch corrections passed\n<end of output>\nTest time =   0.00 sec\n----------------------------------------------------------\nTest Passed.\n\"search_corrections\" end time: Oct 23 18:13 CST\n\"search_corrections\" time elapsed: 00:00:00\n----------------------------------------------------------\n\nEnd testing: Oct 23 18:13 CST\n"
+  },
+  "reference_checks": [
+    {
+      "name": "sampling",
+      "code": 0,
+      "seconds": 0.46,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_sampling.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/sampling.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"cases\": {\n    \"pda_budget_input\": 204,\n    \"value_surprise\": 216\n  },\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": {\n    \"cpp/program/play.cpp\": \"604c12138ec97d3717cb2813ee79e7c596bfadbf556ac028fd811e746343fb1e\",\n    \"cpp/neuralnet/nninputs.cpp\": \"643f6753453996d678ce10550d32d4a39d7a4cf54e3b3fd1074d892c88c077ec\",\n    \"cpp/search/searchnnhelpers.cpp\": \"82e4098b429e352bb385fca94f19c1f92b47dde95e107cba92e1a73c98ff40b4\"\n  },\n  \"scope\": \"PDA signed input, explicit finite visits/playouts, direct/smoothed fixed-perspective WDL; no Go komi/handicap/score; EtaZero int32 max is unlimited; no source RNG/scheduling equivalence claim\"\n}\n"
+    },
+    {
+      "name": "sampling_weights",
+      "code": 0,
+      "seconds": 1.08,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_sampling_weights.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/sampling_weights.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"cases\": 336,\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": \"604c12138ec97d3717cb2813ee79e7c596bfadbf556ac028fd811e746343fb1e\",\n  \"native_library_sha256\": \"d2575f6f0861f4baa74b4a6ed05c934dad81ccd5096249b516534d780a6af012\",\n  \"max_absolute_difference\": 5.960464477539063e-08,\n  \"scope\": \"Actual production apply_training_weights linked without copying its implementation; direct source KL and complete redistribution block; zero/low/all/excess/reanalyze/reduced gates; row stochastic rounding is separately checked, never multiplied as loss weight\",\n  \"precision\": \"Source float intermediates versus double internal frequency, both serialized float32; 3e-7 relative and 6e-8 absolute.\"\n}\n"
+    },
+    {
+      "name": "forks",
+      "code": 0,
+      "seconds": 0.33,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_forks.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/forks.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"cases\": 3072,\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": \"604c12138ec97d3717cb2813ee79e7c596bfadbf556ac028fd811e746343fb1e\",\n  \"scope\": \"Complete fixed-source limits body: exact hint/hash mismatch, six-turn boundary, forceFull, PCR/reduced priority, PDA both players, explicit finite playouts; effective hint clear from runBotWithLimits\",\n  \"differences\": [\n    \"Source float targetWeight vs EtaZero double internal frequency (float32 disk), abs tolerance 6e-8 only on weight; all budgets/flags/probabilities use 1e-12/1e-14.\",\n    \"Pure NOVC hint input and W-L fork ranking; Go SGF/score/komi/seki excluded; source RNG/scheduling equivalence not claimed.\"\n  ]\n}\n"
+    },
+    {
+      "name": "search_corrections",
+      "code": 0,
+      "seconds": 0.28,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_search_corrections.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/search_corrections.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"cases\": {\n    \"float_logit_mix\": 48,\n    \"noise_pruning\": 240,\n    \"uncertainty\": 504\n  },\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": {\n    \"cpp/search/searchupdatehelpers.cpp\": \"93de7096923d6d9d28c3ae52d7b2d3030f7be143556d85b92a72a4c3224efd7c\",\n    \"cpp/neuralnet/cudaandrocmbackend.inc\": \"4e170b0c014693d0c99962df3a563460f8019a458c23004e653aa1c5932d359e\"\n  },\n  \"mapping\": \"pure W-L, Go score utility derivative=0; output logit mix float arithmetic as source; no optimization or search scheduling equivalence claim\"\n}\n"
+    },
+    {
+      "name": "graph",
+      "code": 0,
+      "seconds": 0.26,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_graph.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/graph.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"diamond_steps\": 200,\n  \"source_scalar_cases\": 1080,\n  \"catch_up_playouts\": 48,\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": {\n    \"cpp/search/searchnode.h\": \"6f394798473fb5cc59fdadf51da55273345cd8890f303682dc52398f4e1b2654\",\n    \"cpp/search/search.cpp\": \"2b81e2660d8dd31050b40ce99e66cf12f3a655782a4dbe62a6b67d43941fe34f\",\n    \"cpp/search/searchupdatehelpers.cpp\": \"93de7096923d6d9d28c3ae52d7b2d3030f7be143556d85b92a72a4c3224efd7c\"\n  },\n  \"scope\": \"one-thread diamond; leak=0/1; terminal and shared node counts; raw moments and distinct LCB/aggregation weightSq\",\n  \"limits\": \"Not a full Go search equivalence or concurrent scheduling/performance proof.\"\n}\n"
+    },
+    {
+      "name": "subtree_value_bias",
+      "code": 0,
+      "seconds": 0.46,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_subtree_value_bias.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/subtree_value_bias.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"cases\": 21792,\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"scope\": \"verbatim shared-entry replacement, weighted residual, leaf bias, partial/double removal; W-L utility adaptation\"\n}\n"
+    },
+    {
+      "name": "go_bias",
+      "code": 0,
+      "seconds": 11.22,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_go_bias.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/go_bias.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"positions\": 1885,\n  \"patterns\": 479519,\n  \"atari\": 26321,\n  \"ko\": 22,\n  \"previous_pass\": 25945\n}\n"
+    },
+    {
+      "name": "go_graph",
+      "code": 0,
+      "seconds": 8.46,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_go_graph.py",
+        "--source",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/go_graph.log",
+      "output": "{\n  \"status\": \"passed\",\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"positions\": 1380\n}\n"
+    },
+    {
+      "name": "clocks",
+      "code": 0,
+      "seconds": 2.84,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_clocks.py",
+        "--output",
+        "/tmp/etazero-v3-katago-audit-20261023/clocks.json"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/clocks.log",
+      "output": "{\n  \"status\": \"verified\",\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": \"19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f\",\n  \"step_cases\": 3696,\n  \"source_lines\": {\n    \"lr\": 1871,\n    \"lookahead\": 1882,\n    \"swa\": 1896,\n    \"subepoch_reset\": 1674,\n    \"epoch_finish\": 1910\n  },\n  \"scope\": \"Unmodified AST LR/WD refresh, Lookahead, SWA, segment-reset and end-of-epoch blocks; scalar fast/slow/SWA states, source float32 operation order, skips, 200M boundary and reset clock ordering.\",\n  \"adaptations\": \"Local fixed budget splits into floor boundaries, not source probabilistic file-selection budgets. Successful step schedule supplied identically; actual CUDA GradScaler skips separately tested. Local epoch-end counter normalized to zero; source resets it at the next segment. No training bucket.\"\n}\n"
+    },
+    {
+      "name": "replay",
+      "code": 0,
+      "seconds": 5.83,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_replay.py",
+        "--output",
+        "/tmp/etazero-v3-katago-audit-20261023/replay.json"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/replay.log",
+      "output": "{\n  \"status\": \"verified\",\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": {\n    \"python/shuffle.py\": \"e8dc0c8ae84ebd595066c5befe11cf366cfaddfb993cc843bc2400681f2fbb2b\",\n    \"python/katago/utils/training_data_generator.py\": \"e1b9535b94e7aba76bc00d8802a03b30370692f735cb92cfb66672dcacf84b6f\",\n    \"python/katago/train/data_processing_pytorch.py\": \"374df65b15c11f2c83c033a259527e61fa4ca96cb70247d936dbb459bd297c9d\",\n    \"python/katago/train/modelconfigs.py\": \"4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e\",\n    \"python/selfplay/shuffle.sh\": \"755ebf8f7368d5edc34f1387846407fb2767d571a508c883f3e0b4f93e2580bf\",\n    \"python/selfplay/synchronous_loop.sh\": \"f9ea27696a8fefb13773547931d87c46bab29dab8bf6b23c2d96161d284a01e5\"\n  },\n  \"cases\": {\n    \"window_formula\": 2592,\n    \"group_threshold\": 30,\n    \"output_plan\": 324,\n    \"game_identity_md5\": 10000,\n    \"file_orders\": 264,\n    \"source_reader_batches\": 68\n  },\n  \"scope\": \"Unmodified pinned source helpers, TrainingDataGenerator and full NPZ reader; identical RNG file orders and RNG state; original Go-shaped fixtures and EtaZero row-ID prefixes; whole-file tails and explicit exhaustion.\",\n  \"adaptations\": \"Game-identity holdout replaces source file-basename holdout; Go random/tdata identity maps to model_id=random; single learner world_size=1; immutable per-round snapshots instead of live directory reconciliation; private deterministic shuffle/validation streams, no source gameplay RNG sequence equivalence; configured groups and bucket/file counts are used directly, with resource estimates that do not limit execution.\"\n}\n"
+    },
+    {
+      "name": "q",
+      "code": 0,
+      "seconds": 0.64,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_q.py",
+        "--output",
+        "/tmp/etazero-v3-katago-audit-20261023/q.json"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/q.log",
+      "output": "{\n  \"status\": \"verified\",\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": \"3627b85c1d3ff120eb93fa7f40b051e10e9cb56ba02196573ae32e18e18fadc0\",\n  \"native_library_sha256\": \"d2575f6f0861f4baa74b4a6ed05c934dad81ccd5096249b516534d780a6af012\",\n  \"quantization_cases\": 46140,\n  \"max_distance_to_unclamped_scaled_value\": 31.25,\n  \"scope\": \"Unmodified source float32 clampToRadius32000, fixed identical Bernoulli RNG shim; positive/negative fractions, zero, caps, adjacent float32 endpoints, independent repeats. Production core linked, not copied.\",\n  \"adaptation\": \"Seed streams differ from Go writer (score quantization omitted); no source RNG-sequence equivalence claim.\"\n}\n"
+    },
+    {
+      "name": "muon",
+      "code": 0,
+      "seconds": 2.85,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_muon.py",
+        "--output",
+        "/tmp/etazero-v3-katago-audit-20261023/muon.json"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/muon.log",
+      "output": "Passed: 4 source optimizer updates, 624 source LR/WD comparisons\n"
+    },
+    {
+      "name": "persistence",
+      "code": 0,
+      "seconds": 2.13,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_persistence.py"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/persistence.log",
+      "output": "{\n  \"status\": \"verified\",\n  \"source_commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\",\n  \"source_sha256\": \"19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f\",\n  \"source_save_lines\": [\n    645,\n    691\n  ],\n  \"source_save_cases\": 4,\n  \"source_checkpoint_fields\": [\n    \"config\",\n    \"last_val_metrics\",\n    \"metrics\",\n    \"model\",\n    \"optimizer\",\n    \"running_metrics\",\n    \"swa_model\",\n    \"train_state\"\n  ],\n  \"local_checkpoint_fields\": [\n    \"id\",\n    \"iteration\",\n    \"model\",\n    \"network_config\",\n    \"optimization\",\n    \"optimizer\",\n    \"optimizer_steps\",\n    \"reader\",\n    \"resume_config\",\n    \"rng\",\n    \"scaler\",\n    \"source_id\",\n    \"step\",\n    \"total_samples\",\n    \"total_steps\",\n    \"training_metrics\"\n  ],\n  \"local_rng_fields\": [\n    \"cuda\",\n    \"numpy\",\n    \"python\",\n    \"torch\"\n  ],\n  \"local_optimization_fields\": [\n    \"baselines\",\n    \"consumed_samples\",\n    \"lookahead_counter\",\n    \"norm_sums\",\n    \"norm_weights\",\n    \"norms\",\n    \"optimizer_steps\",\n    \"round_batches\",\n    \"slow\",\n    \"subepoch\",\n    \"subepoch_batches\",\n    \"swa\",\n    \"swa_samples\"\n  ],\n  \"scope\": \"Original save function executed; local real CPU checkpoint roundtrip; field-scope comparison, not recovery equivalence.\",\n  \"differences\": [\n    \"Source saves model/optimizer/metrics/train_state/SWA; save function does not capture Python/NumPy/Torch/CUDA RNG, AMP scaler or Lookahead local cache/counter.\",\n    \"Source train_state owns SWA accumulated samples and file usage, not Eta consumed file-row cursor and whole-round quota/commit authority.\",\n    \"Eta exact learner resume has extra persisted state; controller resumes completed phases and the saved learner cursor.\"\n  ]\n}\n"
+    },
+    {
+      "name": "formulas",
+      "code": 0,
+      "seconds": 0.29,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_reference_formulas.py",
+        "--katago-root",
+        "/home/sky/RL/SkyZero-lab/KataGo"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/formulas.log",
+      "output": "{\n  \"replay_equal_cases\": 252,\n  \"optimizer_group_equal_cases\": 31104,\n  \"fixup_optimizer_group_equal_cases\": 36288,\n  \"float_tolerance\": {\n    \"relative\": 1e-12,\n    \"absolute\": 1e-15\n  },\n  \"gradient_caps\": {\n    \"sgd_fson_equal_cases\": 12,\n    \"adamw_equal_cases\": 12,\n    \"sgd_fson_example\": {\n      \"batch_size\": 128,\n      \"lr_scale\": 1.0,\n      \"etazero_cap\": 1767.766952966369,\n      \"katago_cap\": 1767.766952966369,\n      \"ratio\": 1.0\n    }\n  },\n  \"norm_history_equal_cases\": 5760,\n  \"sources\": [\n    {\n      \"path\": \"/home/sky/RL/EtaZero-lab/EtaZero_V3/python/etazero/shuffle.py\",\n      \"sha256\": \"b0abe195ab27606c2ea22aca345daae98f05e954c6e66a464ef502f25db96af3\"\n    },\n    {\n      \"path\": \"/home/sky/RL/EtaZero-lab/EtaZero_V3/python/etazero/optimization.py\",\n      \"sha256\": \"ed0c7abf446fc5d957f56a14e27b88fef135c01c6cf4b0b03cff823a590c5f84\"\n    },\n    {\n      \"path\": \"/home/sky/RL/SkyZero-lab/KataGo/python/shuffle.py\",\n      \"sha256\": \"e8dc0c8ae84ebd595066c5befe11cf366cfaddfb993cc843bc2400681f2fbb2b\"\n    },\n    {\n      \"path\": \"/home/sky/RL/SkyZero-lab/KataGo/python/train.py\",\n      \"sha256\": \"19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f\"\n    },\n    {\n      \"path\": \"/home/sky/RL/SkyZero-lab/KataGo/python/katago/train/metrics_logging.py\",\n      \"sha256\": \"e4a4bfe209f4b91a92dc183d69e7b37a74ed5c03e4fd3d913b12e7268fe10755\"\n    },\n    {\n      \"path\": \"/home/sky/RL/SkyZero-lab/KataGo/python/katago/train/trainloop_helpers.py\",\n      \"sha256\": \"669bed8c0b6616e9c138db01a07b7a7b5ac4ffc89407c9206eb5c1538ad47456\"\n    }\n  ],\n  \"checker_sha256\": \"0d2e4d59d67b3e955eda31640c031602aef77adc068b571e20fecd4b07ab88ee\"\n}\n"
+    },
+    {
+      "name": "network",
+      "code": 0,
+      "seconds": 8.2,
+      "command": [
+        "/home/sky/miniconda3/envs/pytorch/bin/python",
+        "/home/sky/RL/EtaZero-lab/EtaZero_V3/tests/reference/check_katago_network.py",
+        "--device",
+        "cpu",
+        "--output",
+        "/tmp/etazero-v3-katago-audit-20261023/network.json"
+      ],
+      "log": "/tmp/etazero-v3-katago-audit-20261023/network.log",
+      "output": "{\"status\": \"verified\", \"source\": {\"commit\": \"d91ea855110dae533f0aada947b2b7d78cc8a4e1\", \"sha256\": {\"python/katago/train/modelconfigs.py\": \"4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e\", \"python/katago/train/model_pytorch.py\": \"bde17b3fff4ebc97717969bf68f2843fb5fd1c781386048c7f19dae13d1d9517\", \"python/katago/train/trainloop_helpers.py\": \"669bed8c0b6616e9c138db01a07b7a7b5ac4ffc89407c9206eb5c1538ad47456\", \"python/katago/train/fused_swiglu.py\": \"0ff1ca85fd6dcdc8871b4607a11c6c79ed94b28c5757a768a97d253b01a8b0d9\"}}, \"device\": \"cpu\", \"initialization_cases\": 170}\nplain {'preset': 'b10c128-fson-mish', 'parameters': 2930445, 'max_forward_abs': 2.086162567138672e-07, 'max_gradient_abs': 1.33514404296875e-05, 'mapped_parameter_roles': 88, 'amp': 'off', 'compiled': False, 'oracle_execution': 'eager', 'source_input_projection_shapes': [5, 8], 'predict_q_values': False, 'execution_gaps': [], 'tolerances': {'forward': [3e-05, 3e-06], 'gradient': [8e-05, 2e-05]}}\nnbt {'preset': 'b5c192nbt-fson-mish', 'parameters': 1848077, 'max_forward_abs': 3.5762786865234375e-07, 'max_gradient_abs': 2.09808349609375e-05, 'mapped_parameter_roles': 118, 'amp': 'off', 'compiled': False, 'oracle_execution': 'eager', 'source_input_projection_shapes': [5, 8], 'predict_q_values': False, 'execution_gaps': [], 'tolerances': {'forward': [3e-05, 3e-06], 'gradient': [8e-05, 2e-05]}}\ntransformer {'preset': 'b5c192h3nbttfrs', 'parameters': 1333293, 'max_forward_abs': 1.7881393432617188e-07, 'max_gradient_abs': 2.1457672119140625e-06, 'mapped_parameter_roles': 134, 'amp': 'off', 'compiled': False, 'oracle_execution': 'eager', 'source_input_projection_shapes': [5, 8], 'predict_q_values': False, 'execution_gaps': [], 'tolerances': {'forward': [3e-05, 3e-06], 'gradient': [8e-05, 2e-05]}}\n"
+    }
+  ],
+  "reference_json": {
+    "architectures": {
+      "status": "verified",
+      "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+      "device": "cpu",
+      "configurations_checked": 848640,
+      "architectures": {
+        "b5c192nbt-fson-mish": {
+          "parameters": 1860545,
+          "max_forward_abs": 0.0,
+          "max_gradient_abs": 0.0,
+          "backward": true
+        },
+        "b10c128-brn-mish": {
+          "parameters": 2939841,
+          "max_forward_abs": 0.0,
+          "max_gradient_abs": 0.0,
+          "backward": true
+        },
+        "b10c128-fson-mish-ih": {
+          "parameters": 2979330,
+          "max_forward_abs": 0.0,
+          "max_gradient_abs": 0.0,
+          "backward": true
+        }
+      }
+    },
+    "clocks": {
+      "status": "verified",
+      "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+      "source_sha256": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f",
+      "step_cases": 3696,
+      "source_lines": {
+        "lr": 1871,
+        "lookahead": 1882,
+        "swa": 1896,
+        "subepoch_reset": 1674,
+        "epoch_finish": 1910
+      },
+      "scope": "Unmodified AST LR/WD refresh, Lookahead, SWA, segment-reset and end-of-epoch blocks; scalar fast/slow/SWA states, source float32 operation order, skips, 200M boundary and reset clock ordering.",
+      "adaptations": "Local fixed budget splits into floor boundaries, not source probabilistic file-selection budgets. Successful step schedule supplied identically; actual CUDA GradScaler skips separately tested. Local epoch-end counter normalized to zero; source resets it at the next segment. No training bucket."
+    },
+    "muon": {
+      "source": {
+        "repository": "https://github.com/lightvector/KataGo",
+        "root": "/home/sky/RL/SkyZero-lab/KataGo",
+        "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+        "sha256": {
+          "python/muon/muon.py": "4879f6c491adaf2ac320529718018eaea2e4cd4ea6473ec5edba94fe6eeb21be",
+          "python/muon/LICENSE": "8c8d17398ecce3dd3fcb1bb77b5d268a427f8250f364ac655c9b38df5b693f6b",
+          "python/train.py": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f"
+        }
+      },
+      "updates": 4,
+      "lr_wd_cases": 624,
+      "passed": true
+    },
+    "network": {
+      "status": "verified",
+      "source": {
+        "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+        "sha256": {
+          "python/katago/train/modelconfigs.py": "4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e",
+          "python/katago/train/model_pytorch.py": "bde17b3fff4ebc97717969bf68f2843fb5fd1c781386048c7f19dae13d1d9517",
+          "python/katago/train/trainloop_helpers.py": "669bed8c0b6616e9c138db01a07b7a7b5ac4ffc89407c9206eb5c1538ad47456",
+          "python/katago/train/fused_swiglu.py": "0ff1ca85fd6dcdc8871b4607a11c6c79ed94b28c5757a768a97d253b01a8b0d9"
+        }
+      },
+      "device": "cpu",
+      "initialization_cases": 170,
+      "architectures": {
+        "plain": {
+          "preset": "b10c128-fson-mish",
+          "parameters": 2930445,
+          "source_config": {
+            "version": 15,
+            "norm_kind": "fixscaleonenorm",
+            "bnorm_epsilon": 0.0001,
+            "bnorm_running_avg_momentum": 0.001,
+            "initial_conv_1x1": false,
+            "trunk_num_channels": 128,
+            "mid_num_channels": 128,
+            "gpool_num_channels": 32,
+            "gamma_weight_decay_center_1": true,
+            "block_kind": [
+              [
+                "rconv1",
+                "regular"
+              ],
+              [
+                "rconv2",
+                "regular"
+              ],
+              [
+                "rconv3",
+                "regular"
+              ],
+              [
+                "rconv4",
+                "regular"
+              ],
+              [
+                "rconv5",
+                "regulargpool"
+              ],
+              [
+                "rconv6",
+                "regular"
+              ],
+              [
+                "rconv7",
+                "regular"
+              ],
+              [
+                "rconv8",
+                "regulargpool"
+              ],
+              [
+                "rconv9",
+                "regular"
+              ],
+              [
+                "rconv10",
+                "regular"
+              ]
+            ],
+            "p1_num_channels": 32,
+            "g1_num_channels": 32,
+            "v1_num_channels": 32,
+            "sbv2_num_channels": 64,
+            "num_scorebeliefs": 6,
+            "v2_size": 80,
+            "bnorm_use_gamma": true,
+            "activation": "mish"
+          },
+          "max_forward_abs": 2.086162567138672e-07,
+          "max_gradient_abs": 1.33514404296875e-05,
+          "mapped_parameter_roles": 88,
+          "amp": "off",
+          "compiled": false,
+          "oracle_execution": "eager",
+          "source_input_projection_shapes": [
+            5,
+            8
+          ],
+          "predict_q_values": false,
+          "execution_gaps": [],
+          "tolerances": {
+            "forward": [
+              3e-05,
+              3e-06
+            ],
+            "gradient": [
+              8e-05,
+              2e-05
+            ]
+          },
+          "cases": [
+            {
+              "training": true,
+              "mapped_gradient_tensors": 90
+            },
+            {
+              "training": true,
+              "mapped_gradient_tensors": 90
+            },
+            {
+              "training": false,
+              "mapped_gradient_tensors": 90
+            }
+          ]
+        },
+        "nbt": {
+          "preset": "b5c192nbt-fson-mish",
+          "parameters": 1848077,
+          "source_config": {
+            "version": 15,
+            "norm_kind": "fixscaleonenorm",
+            "bnorm_epsilon": 0.0001,
+            "bnorm_running_avg_momentum": 0.001,
+            "initial_conv_1x1": false,
+            "trunk_num_channels": 192,
+            "mid_num_channels": 96,
+            "gpool_num_channels": 32,
+            "gamma_weight_decay_center_1": true,
+            "block_kind": [
+              [
+                "rconv1",
+                "bottlenest2"
+              ],
+              [
+                "rconv2",
+                "bottlenest2gpool"
+              ],
+              [
+                "rconv3",
+                "bottlenest2"
+              ],
+              [
+                "rconv4",
+                "bottlenest2gpool"
+              ],
+              [
+                "rconv5",
+                "bottlenest2"
+              ]
+            ],
+            "p1_num_channels": 32,
+            "g1_num_channels": 32,
+            "v1_num_channels": 32,
+            "sbv2_num_channels": 64,
+            "num_scorebeliefs": 6,
+            "v2_size": 80,
+            "bnorm_use_gamma": true,
+            "activation": "mish"
+          },
+          "max_forward_abs": 3.5762786865234375e-07,
+          "max_gradient_abs": 2.09808349609375e-05,
+          "mapped_parameter_roles": 118,
+          "amp": "off",
+          "compiled": false,
+          "oracle_execution": "eager",
+          "source_input_projection_shapes": [
+            5,
+            8
+          ],
+          "predict_q_values": false,
+          "execution_gaps": [],
+          "tolerances": {
+            "forward": [
+              3e-05,
+              3e-06
+            ],
+            "gradient": [
+              8e-05,
+              2e-05
+            ]
+          },
+          "cases": [
+            {
+              "training": true,
+              "mapped_gradient_tensors": 120
+            },
+            {
+              "training": true,
+              "mapped_gradient_tensors": 120
+            },
+            {
+              "training": false,
+              "mapped_gradient_tensors": 120
+            }
+          ]
+        },
+        "transformer": {
+          "preset": "b5c192h3nbttfrs",
+          "parameters": 1333293,
+          "source_config": {
+            "version": 17,
+            "norm_kind": "fixup",
+            "bnorm_epsilon": 0.0001,
+            "bnorm_running_avg_momentum": 0.001,
+            "initial_conv_1x1": false,
+            "gamma_weight_decay_center_1": true,
+            "trunk_num_channels": 192,
+            "mid_num_channels": 96,
+            "gpool_num_channels": 32,
+            "transformer_ffn_channels": 256,
+            "transformer_heads": 3,
+            "transformer_kv_heads": 3,
+            "block_kind": [
+              [
+                "block1",
+                "bottlenest2transformerropesg"
+              ],
+              [
+                "block2",
+                "bottlenest2transformerropesg"
+              ],
+              [
+                "block3",
+                "bottlenest2transformerropesg"
+              ],
+              [
+                "block4",
+                "bottlenest2transformerropesg"
+              ],
+              [
+                "block5",
+                "bottlenest2transformerropesg"
+              ]
+            ],
+            "p1_num_channels": 32,
+            "g1_num_channels": 32,
+            "v1_num_channels": 32,
+            "sbv2_num_channels": 48,
+            "num_scorebeliefs": 4,
+            "v2_size": 64
+          },
+          "max_forward_abs": 1.7881393432617188e-07,
+          "max_gradient_abs": 2.1457672119140625e-06,
+          "mapped_parameter_roles": 134,
+          "amp": "off",
+          "compiled": false,
+          "oracle_execution": "eager",
+          "source_input_projection_shapes": [
+            5,
+            8
+          ],
+          "predict_q_values": false,
+          "execution_gaps": [],
+          "tolerances": {
+            "forward": [
+              3e-05,
+              3e-06
+            ],
+            "gradient": [
+              8e-05,
+              2e-05
+            ]
+          },
+          "cases": [
+            {
+              "training": true,
+              "mapped_gradient_tensors": 136
+            },
+            {
+              "training": true,
+              "mapped_gradient_tensors": 136
+            },
+            {
+              "training": false,
+              "mapped_gradient_tensors": 136
+            }
+          ]
+        }
+      }
+    },
+    "q": {
+      "status": "verified",
+      "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+      "source_sha256": "3627b85c1d3ff120eb93fa7f40b051e10e9cb56ba02196573ae32e18e18fadc0",
+      "native_library_sha256": "d2575f6f0861f4baa74b4a6ed05c934dad81ccd5096249b516534d780a6af012",
+      "quantization_cases": 46140,
+      "max_distance_to_unclamped_scaled_value": 31.25,
+      "scope": "Unmodified source float32 clampToRadius32000, fixed identical Bernoulli RNG shim; positive/negative fractions, zero, caps, adjacent float32 endpoints, independent repeats. Production core linked, not copied.",
+      "adaptation": "Seed streams differ from Go writer (score quantization omitted); no source RNG-sequence equivalence claim."
+    },
+    "replay": {
+      "status": "verified",
+      "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+      "source_sha256": {
+        "python/shuffle.py": "e8dc0c8ae84ebd595066c5befe11cf366cfaddfb993cc843bc2400681f2fbb2b",
+        "python/katago/utils/training_data_generator.py": "e1b9535b94e7aba76bc00d8802a03b30370692f735cb92cfb66672dcacf84b6f",
+        "python/katago/train/data_processing_pytorch.py": "374df65b15c11f2c83c033a259527e61fa4ca96cb70247d936dbb459bd297c9d",
+        "python/katago/train/modelconfigs.py": "4ced5464586c18492247033cb9f9b5aa66e9d41e335d10baebe83ec1e68a9d2e",
+        "python/selfplay/shuffle.sh": "755ebf8f7368d5edc34f1387846407fb2767d571a508c883f3e0b4f93e2580bf",
+        "python/selfplay/synchronous_loop.sh": "f9ea27696a8fefb13773547931d87c46bab29dab8bf6b23c2d96161d284a01e5"
+      },
+      "cases": {
+        "window_formula": 2592,
+        "group_threshold": 30,
+        "output_plan": 324,
+        "game_identity_md5": 10000,
+        "file_orders": 264,
+        "source_reader_batches": 68
+      },
+      "scope": "Unmodified pinned source helpers, TrainingDataGenerator and full NPZ reader; identical RNG file orders and RNG state; original Go-shaped fixtures and EtaZero row-ID prefixes; whole-file tails and explicit exhaustion.",
+      "adaptations": "Game-identity holdout replaces source file-basename holdout; Go random/tdata identity maps to model_id=random; single learner world_size=1; immutable per-round snapshots instead of live directory reconciliation; private deterministic shuffle/validation streams, no source gameplay RNG sequence equivalence; configured groups and bucket/file counts are used directly, with resource estimates that do not limit execution."
+    }
+  },
+  "architectures_command": "OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 conda run --no-capture-output -n pytorch python tests/reference/check_katago_architectures.py --device cpu --architecture b5c192nbt-fson-mish b10c128-brn-mish b10c128-fson-mish-ih --all-configs --backward --output /tmp/etazero-v3-katago-audit-20261023/architectures.json",
+  "pytest": {
+    "command": "OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 conda run --no-capture-output -n pytorch python -m pytest -q tests/test_optimization.py tests/test_auxiliary.py tests/test_wdl_targets.py tests/test_replay.py tests/test_qvalues.py tests/test_schedule.py tests/test_multigame.py tests/test_katago_architectures.py --junitxml=/tmp/etazero-v3-katago-audit-20261023/pytest.xml",
+    "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3",
+    "summary": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "8",
+      "tests": "274",
+      "time": "81.385",
+      "timestamp": "2026-10-23T18:17:23.842042+08:00",
+      "hostname": "sky-5080"
+    },
+    "passed": 266,
+    "skipped_cases": [
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[False-alphazero-go]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[False-alphazero-xiangqi]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[False-muzero-go]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[False-muzero-xiangqi]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[True-alphazero-go]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[True-alphazero-xiangqi]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[True-muzero-go]",
+        "reason": "Host CUDA acceptance"
+      },
+      {
+        "name": "tests.test_multigame.test_cuda_training_resume_evaluation_and_web[True-muzero-xiangqi]",
+        "reason": "Host CUDA acceptance"
+      }
+    ],
+    "xml_sha256": "e1e5a6e35a143c6e23502585f724db180ffe8ab002fd082489deb1851bd748d5"
+  },
+  "reproductions": {
+    "method": "Exact source AST functions; production Eta methods. CPU synthetic tensors, no training run.",
+    "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "source_manifest_files": 56,
+    "source_hashes_all_match": true,
+    "brenorm": [
+      {
+        "consumed_samples": 0,
+        "source_bounds": [
+          1.0,
+          0.0
+        ],
+        "eta_bounds": [
+          1.0,
+          -0.0
+        ]
+      },
+      {
+        "consumed_samples": 128,
+        "source_bounds": [
+          1.0,
+          0.0
+        ],
+        "eta_bounds": [
+          1.000255983616699,
+          0.0006399590417475706
+        ]
+      },
+      {
+        "consumed_samples": 63872,
+        "source_bounds": [
+          1.0,
+          0.0
+        ],
+        "eta_bounds": [
+          1.1237498562897315,
+          0.30937464072432874
+        ]
+      },
+      {
+        "consumed_samples": 64000,
+        "source_bounds": [
+          1.123990000938541,
+          0.30997500234635267
+        ],
+        "eta_bounds": [
+          1.123990000938541,
+          0.30997500234635256
+        ]
+      }
+    ],
+    "history_dropout": {
+      "samples": 10000,
+      "seed": 853,
+      "source_rows_with_masked_history": 926,
+      "eta_rows_with_masked_history": 0,
+      "source_masked_counts_by_lag": [
+        212,
+        404,
+        573,
+        758,
+        926
+      ],
+      "expected_probability_any": 0.09607920320000007
+    }
+  },
+  "tie_reproduction": {
+    "local_result": {
+      "seeds": 100,
+      "first_child_counts": [
+        43,
+        57
+      ]
+    },
+    "source_result": "By inspected strict-greater scan at searchexplorehelpers.cpp:601,695,755: first action. Full source engine not executed.",
+    "compiler_command": "/home/sky/miniconda3/envs/pytorch/bin/x86_64-conda-linux-gnu-c++ -std=c++17 -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Icpp/include -Ibuild/generated /tmp/etazero-v3-katago-audit-20261023/tie.cpp build/libetazero_core.a build/libetazero_go_rules.a build/libetazero_xiangqi_rules.a -pthread -lz -L/home/sky/miniconda3/envs/pytorch/lib -Wl,-rpath,/home/sky/miniconda3/envs/pytorch/lib -o /tmp/etazero-v3-katago-audit-20261023/tie",
+    "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3"
+  },
+  "reproduction_sources": {
+    "reproduce.py": "import ast\nimport hashlib\nimport json\nimport math\nfrom pathlib import Path\nimport subprocess\nimport sys\nimport textwrap\nfrom types import SimpleNamespace\nimport torch\n\neta = Path('/home/sky/RL/EtaZero-lab/EtaZero_V3')\nsource = Path('/home/sky/RL/SkyZero-lab/KataGo')\nsys.path.insert(0, str(eta / 'python'))\nfrom etazero.katago_network import KataGoNet\nfrom etazero.symmetry import augment_batch\nfrom etazero.games import SPECS\n\ndef source_function(path, name):\n    tree = ast.parse(path.read_text())\n    return next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)\n\nclass Receiver:\n    def set_brenorm_params(self, momentum, rmax, dmax):\n        self.bounds = [rmax, dmax]\n\nref, local = Receiver(), Receiver()\nstate = {'global_step_samples': 0}\noptions = {'avg_momentum': 0.001, 'target_rmax': 3.0, 'target_dmax': 5.0, 'adjustment_scale': 1000000.0}\nnode = source_function(source / 'python/train.py', 'maybe_update_brenorm_params')\nfactory = 'def make_update():\\n    last_brenorm_update_samples_this_instance = 0\\n' + textwrap.indent(ast.unparse(node), '    ') + '\\n    return maybe_update_brenorm_params\\n'\nnamespace = {'math': math, 'train_state': state, 'model_config': {'norm_kind': 'brenorm'},\n             'raw_model': ref, 'brenorm_adjustment_scale': options['adjustment_scale'],\n             'brenorm_target_rmax': options['target_rmax'], 'brenorm_target_dmax': options['target_dmax'],\n             'brenorm_avg_momentum': options['avg_momentum']}\nexec(factory, namespace)\nupdate = namespace['make_update']()\nupdate()\nrenorm = []\nfor samples in (0, 128, 499*128, 500*128):\n    state['global_step_samples'] = samples\n    if samples == 500*128:\n        update()\n    KataGoNet.prepare_brenorm(SimpleNamespace(norm_kind='brenorm', network=local), samples, options)\n    renorm.append({'consumed_samples': samples, 'source_bounds': ref.bounds[:], 'eta_bounds': local.bounds[:]})\nassert renorm[1]['source_bounds'] != renorm[1]['eta_bounds']\n\npath = source / 'python/katago/train/data_processing_pytorch.py'\nnamespace = {'torch': torch, 'modelconfigs': SimpleNamespace(ModelConfig=dict,\n    get_num_bin_input_features=lambda _: 22, get_num_global_input_features=lambda _: 19)}\nfor name in ('build_history_matrices', 'apply_history_matrices'):\n    exec(compile(ast.Module(body=[source_function(path, name)], type_ignores=[]), str(path), 'exec'), namespace)\nn = 10000\nobs = torch.ones(n, 22, 3, 3)\nglob = torch.ones(n, 19)\ntargets = torch.ones(n, 41)\nbase, builder = namespace['build_history_matrices']({}, 'cpu')\ntorch.manual_seed(853)\nout, gout = namespace['apply_history_matrices']({}, obs, glob, targets, base, builder)\nlocal_batch = augment_batch({'obs': obs, 'globals': glob}, 0, SPECS['go'])\nhistory = {'samples': n, 'seed': 853,\n    'source_rows_with_masked_history': int((gout[:, :5] == 0).any(1).sum()),\n    'eta_rows_with_masked_history': int((local_batch['globals'][:, :5] == 0).any(1).sum()),\n    'source_masked_counts_by_lag': (gout[:, :5] == 0).sum(0).tolist(),\n    'expected_probability_any': 1 - 0.98**5}\nassert history['source_rows_with_masked_history'] > 0 and history['eta_rows_with_masked_history'] == 0\n\nrecord = json.loads((eta/'reference_sources.json').read_text())['KataGo']\nmatches = {name: hashlib.sha256((source/name).read_bytes()).hexdigest() == sha for name, sha in record['sha256'].items()}\nassert all(matches.values())\nresult = {'method': 'Exact source AST functions; production Eta methods. CPU synthetic tensors, no training run.',\n          'source_commit': subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD'],text=True).strip(),\n          'source_manifest_files': len(matches), 'source_hashes_all_match': all(matches.values()),\n          'brenorm': renorm, 'history_dropout': history}\nPath(__file__).with_name('reproductions.json').write_text(json.dumps(result, indent=2)+'\\n')\nprint(json.dumps(result, indent=2))\n",
+    "tie.cpp": "#include \"etazero/search.h\"\n#include <iostream>\nusing namespace etazero;\nstruct EqualState : SearchState {\n    int action=-1;\n    std::unique_ptr<SearchState> clone() const override { return std::make_unique<EqualState>(*this); }\n    int actions() const override { return 2; }\n    bool legal(int a) const override { return action<0 && a>=0 && a<2; }\n    bool terminal() const override { return action>=0; }\n    double terminal_value() const override { return 0; }\n    Evaluation evaluate(SearchEvaluation = {}) const override { return {{0,0},{.5,0,.5}}; }\n    int move(int a) override { action=a; return -1; }\n};\nint main() {\n    int counts[2]={0,0};\n    for(int seed=0; seed<100; ++seed) {\n        SearchSettings settings{1,1,1.5,3,0,6.75,false};\n        settings.max_playouts=2;\n        settings.max_visits=2;\n        settings.value_weight_exponent=0;\n        settings.chosen_move_prune=0;\n        Search search(settings,seed);\n        auto result=search.run(EqualState(),0);\n        if(result.simulations!=1)throw std::runtime_error(\"Expected one root-edge simulation\");\n        for(int i=0;i<2;++i)if(result.visits[i]>0)++counts[i];\n    }\n    std::cout<<\"{\\\"seeds\\\":100,\\\"first_child_counts\\\":[\"<<counts[0]<<\",\"<<counts[1]<<\"]}\\n\";\n}\n"
+  },
+  "configuration_boundaries": {
+    "method": "Load tests/fixtures/configs/smoke_test, deepcopy per case, change one field, enable reduce_visits for reduce cases; call production validate. Source ranges read from fixed setup.cpp and playsettings.cpp.",
+    "results": [
+      {
+        "field": "puct.c_puct",
+        "value": 0,
+        "eta_error": "puct.c_puct must be positive"
+      },
+      {
+        "field": "reduce_visits.reduce_visits_threshold_lookback",
+        "value": 0,
+        "eta_error": "reduce_visits.reduce_visits_threshold_lookback must be positive"
+      },
+      {
+        "field": "reduce_visits.reduced_visits_min",
+        "value": 1,
+        "eta_error": "Invalid Reduce Visits threshold/lookback/minimum/weight"
+      },
+      {
+        "field": "search.max_playouts",
+        "value": 2147483648,
+        "eta_error": "Invalid NN symmetry or playout cap"
+      }
+    ]
+  },
+  "v3_1_implementation": {
+    "target": "EtaZero_V3.1",
+    "version_base_commit": "15d5fc9ba8d29c96536b8aca05e3c3d4d771f06e",
+    "state": "Working tree implementation; no implementation commit requested.",
+    "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "source_root": "/home/sky/RL/SkyZero-lab/KataGo",
+    "source_manifest_files": 61,
+    "source_hashes_all_match": true,
+    "completed_items": [
+      "A01",
+      "A02",
+      "A03",
+      "A04",
+      "A05",
+      "B01",
+      "B02",
+      "B03",
+      "B04",
+      "B05",
+      "B06",
+      "B07",
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "D01",
+      "D02",
+      "D03",
+      "E01",
+      "E02",
+      "F01",
+      "F02",
+      "F03",
+      "G01"
+    ],
+    "excluded_items": [
+      "G02"
+    ],
+    "preserved": {
+      "EtaZero_V3": "git status --porcelain is empty",
+      "EtaZero_V3.1/configs": "git status --porcelain is empty"
+    },
+    "build": {
+      "command": "/home/sky/miniconda3/envs/pytorch/bin/cmake --build build --parallel 2",
+      "exit_code": 0,
+      "log": "/tmp/etazero-v31-build-final.log"
+    },
+    "ctest": {
+      "command": "/home/sky/miniconda3/envs/pytorch/bin/ctest --test-dir build --output-on-failure -j 2",
+      "passed": 17,
+      "failed": 0,
+      "log": "/tmp/etazero-v31-ctest-final.log"
+    },
+    "checks": {
+      "quick_suite": {
+        "command": "OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 /home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests --ignore=tests/test_gpu.py --junitxml=/tmp/etazero-v31-pytest-final.xml",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-pytest-final.log",
+        "summary": "789 passed, 204 skipped, 169 warnings in 190.17s (0:03:10)",
+        "passed": 789,
+        "skipped": 204,
+        "failed": 0,
+        "note": "Before final raw-policy fallback/import placement and one additional source-gradient test; subsequent affected-path checks below."
+      },
+      "final_search_paths": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_engine_session.py tests/test_analysis_commands.py tests/test_named_sessions.py tests/test_gumbel.py tests/test_alignment_training.py",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-search-final.log",
+        "summary": "28 passed, 28 skipped, 39 warnings in 15.77s",
+        "passed": 28,
+        "skipped": 28,
+        "failed": 0
+      },
+      "training_and_source_gradient": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_alignment_training.py tests/test_optimization.py",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-training-final.log",
+        "summary": "61 passed, 4 skipped, 32 warnings in 10.16s",
+        "passed": 61,
+        "skipped": 4,
+        "failed": 0
+      },
+      "final_optimizer_import": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_optimization.py",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-optimizer-final.log",
+        "summary": "40 passed, 14 warnings in 2.26s",
+        "passed": 40,
+        "failed": 0
+      },
+      "cuda_pipeline": {
+        "command": "ETAZERO_GPU_TESTS=1 /home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_gpu.py::test_gpu_pipeline_and_idempotent_completed_resume tests/test_muzero_pipeline.py::test_cuda_amp_pipeline_and_mixed_match[bfloat16] tests/test_gumbel.py::test_cuda_pipeline_resume_analysis_and_match",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-cuda-pipeline.log",
+        "summary": "1 failed, 5 passed, 47 warnings in 598.50s (0:09:58)",
+        "note": "Five passed initially; AlphaZero trained successfully but its pre-existing loss-sum assertion omitted the new losses. Assertion updated and AlphaZero rerun below."
+      },
+      "cuda_alphazero_and_secondary": {
+        "command": "ETAZERO_GPU_TESTS=1 /home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_gpu.py::test_gpu_pipeline_and_idempotent_completed_resume 'tests/test_alignment_training.py::test_native_secondary_model_clock_and_constraints[cuda:0-alphazero]' 'tests/test_alignment_training.py::test_native_secondary_model_clock_and_constraints[cuda:0-muzero]'",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-cuda-final.log",
+        "summary": "3 passed, 31 warnings in 42.13s",
+        "passed": 3,
+        "failed": 0
+      },
+      "cuda_optional_training": {
+        "command": "ETAZERO_GPU_TESTS=1 /home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_alignment_training.py::test_cuda_optional_training_controls_and_resume",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-cuda-optional.log",
+        "summary": "2 passed, 34 warnings in 109.87s (0:01:49)",
+        "passed": 2,
+        "failed": 0,
+        "note": "Actual RTX 5080, BF16 NorMuon BRN and Aurora Transformer; floor/Polar Express/piecewise LR, attention penalty on Aurora, small training/export/resume."
+      },
+      "final_cpu_cuda_secondary": {
+        "command": "ETAZERO_GPU_TESTS=1 /home/sky/miniconda3/envs/pytorch/bin/python -m pytest -q tests/test_alignment_training.py::test_native_secondary_model_clock_and_constraints",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "log": "/tmp/etazero-v31-secondary-final.log",
+        "summary": "4 passed, 17 warnings in 32.64s",
+        "passed": 4,
+        "failed": 0,
+        "note": "Two CPU and two actual CUDA cases after final zero-weight selection fixes; real native primary and secondary model loading, depth constraint, clocks, ponder, genmove and GTP."
+      }
+    },
+    "reference_checks": {
+      "clocks": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python tests/reference/check_katago_clocks.py --output /tmp/etazero-v31-clocks-final.json",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "exit_code": 0,
+        "result": {
+          "status": "verified",
+          "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+          "source_sha256": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f",
+          "step_cases": 3696,
+          "source_lines": {
+            "lr": 1871,
+            "lookahead": 1882,
+            "swa": 1896,
+            "subepoch_reset": 1674,
+            "epoch_finish": 1910
+          },
+          "scope": "Unmodified AST LR/WD refresh, Lookahead, SWA, segment-reset and end-of-epoch blocks; scalar fast/slow/SWA states, source float32 operation order, skips, 200M boundary and reset clock ordering.",
+          "adaptations": "Local fixed budget splits into floor boundaries, not source probabilistic file-selection budgets. Successful step schedule supplied identically; actual CUDA GradScaler skips separately tested. Local epoch-end counter normalized to zero; source resets it at the next segment. No training bucket."
+        }
+      },
+      "muon": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python tests/reference/check_katago_muon.py --output /tmp/etazero-v31-muon-final.json",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "exit_code": 0,
+        "result": {
+          "source": {
+            "repository": "https://github.com/lightvector/KataGo",
+            "root": "/home/sky/RL/SkyZero-lab/KataGo",
+            "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+            "sha256": {
+              "python/muon/muon.py": "4879f6c491adaf2ac320529718018eaea2e4cd4ea6473ec5edba94fe6eeb21be",
+              "python/muon/LICENSE": "8c8d17398ecce3dd3fcb1bb77b5d268a427f8250f364ac655c9b38df5b693f6b",
+              "python/train.py": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f"
+            }
+          },
+          "updates": 4,
+          "lr_wd_cases": 624,
+          "passed": true
+        }
+      },
+      "search_corrections": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python tests/reference/check_katago_search_corrections.py --source /home/sky/RL/SkyZero-lab/KataGo --output /tmp/etazero-v31-search-reference.json",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "exit_code": 0,
+        "result": {
+          "status": "passed",
+          "cases": {
+            "float_logit_mix": 48,
+            "noise_pruning": 240,
+            "uncertainty": 504
+          },
+          "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+          "source_sha256": {
+            "cpp/search/searchupdatehelpers.cpp": "93de7096923d6d9d28c3ae52d7b2d3030f7be143556d85b92a72a4c3224efd7c",
+            "cpp/neuralnet/cudaandrocmbackend.inc": "4e170b0c014693d0c99962df3a563460f8019a458c23004e653aa1c5932d359e"
+          },
+          "mapping": "pure W-L, Go score utility derivative=0; output logit mix float arithmetic as source; no optimization or search scheduling equivalence claim"
+        }
+      },
+      "formulas": {
+        "command": "/home/sky/miniconda3/envs/pytorch/bin/python tests/reference/check_reference_formulas.py --katago-root /home/sky/RL/SkyZero-lab/KataGo",
+        "cwd": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1",
+        "exit_code": 0,
+        "result": {
+          "replay_equal_cases": 252,
+          "optimizer_group_equal_cases": 31104,
+          "fixup_optimizer_group_equal_cases": 36288,
+          "float_tolerance": {
+            "relative": 1e-12,
+            "absolute": 1e-15
+          },
+          "gradient_caps": {
+            "sgd_fson_equal_cases": 12,
+            "adamw_equal_cases": 12,
+            "sgd_fson_example": {
+              "batch_size": 128,
+              "lr_scale": 1.0,
+              "etazero_cap": 1767.766952966369,
+              "katago_cap": 1767.766952966369,
+              "ratio": 1.0
+            }
+          },
+          "norm_history_equal_cases": 5760,
+          "sources": [
+            {
+              "path": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1/python/etazero/shuffle.py",
+              "sha256": "b0abe195ab27606c2ea22aca345daae98f05e954c6e66a464ef502f25db96af3"
+            },
+            {
+              "path": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1/python/etazero/optimization.py",
+              "sha256": "f968361001d0c2d79f555ebf0a071ffd7c8bd94077d5fcab440abfb5c04f4267"
+            },
+            {
+              "path": "/home/sky/RL/EtaZero-lab/EtaZero_V3.1/python/etazero/lr_schedule.py",
+              "sha256": "0564bb32ff75baeab2309709f9c57042bb023797334f4dbcc9aca02fdec34a49"
+            },
+            {
+              "path": "/home/sky/RL/SkyZero-lab/KataGo/python/shuffle.py",
+              "sha256": "e8dc0c8ae84ebd595066c5befe11cf366cfaddfb993cc843bc2400681f2fbb2b"
+            },
+            {
+              "path": "/home/sky/RL/SkyZero-lab/KataGo/python/train.py",
+              "sha256": "19a4ec904a8b7457a26e8a60a2d788d71ddbd4a954dfce2e550385adbdedd71f"
+            },
+            {
+              "path": "/home/sky/RL/SkyZero-lab/KataGo/python/katago/train/metrics_logging.py",
+              "sha256": "e4a4bfe209f4b91a92dc183d69e7b37a74ed5c03e4fd3d913b12e7268fe10755"
+            },
+            {
+              "path": "/home/sky/RL/SkyZero-lab/KataGo/python/katago/train/trainloop_helpers.py",
+              "sha256": "669bed8c0b6616e9c138db01a07b7a7b5ac4ffc89407c9206eb5c1538ad47456"
+            }
+          ],
+          "checker_sha256": "4094b835faf120a780841bfe5c78c893fd7eaa11eb9eff55470a7d46c95db123"
+        }
+      }
+    },
+    "limitations": [
+      "No strength or equal-time throughput experiment.",
+      "No full network/game/algorithm Cartesian CUDA matrix.",
+      "No full dual-engine concurrent trace equivalence claim.",
+      "G02 profiles are deliberately unchanged.",
+      "Pure W-L, latent-state, Gumbel-root, formats/backends/scheduling and recovery adaptations remain as documented."
+    ]
+  },
+  "record_layout": "Original top-level audit fields describe EtaZero_V3 before implementation. v3_1_implementation separately records current implementation and its own validation."
+}
