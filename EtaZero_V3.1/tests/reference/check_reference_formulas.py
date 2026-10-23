@@ -144,7 +144,8 @@ def check_gradient_caps(eta, reference):
     for kind, batch, scale in itertools.product(
             ('sgd', 'adamw'), (64, 128, 256, 1024), (0.25, 1.0, 4.0)):
         fixture = SimpleNamespace(options={'kind': kind, 'lr_scale': scale}, batch_size=batch,
-                                  model=SimpleNamespace(norm_kind='fixscaleonenorm'))
+                                  model=SimpleNamespace(norm_kind='fixscaleonenorm'),
+                                  schedule={'mode':'constant'},consumed_samples=0,completed_rounds=0)
         actual = eta['gradient_cap'](fixture, 0)
         reference.update(use_adamw=kind == 'adamw', use_muon=False, batch_size=batch,
                          world_size=1, model_config={'norm_kind': 'fixscaleonenorm'},
@@ -197,6 +198,7 @@ def main():
     eta_root = Path(__file__).resolve().parents[2]
     eta_shuffle = Source(eta_root/'python/etazero/shuffle.py')
     eta_optimizer = Source(eta_root/'python/etazero/optimization.py')
+    eta_lr_schedule = Source(eta_root/'python/etazero/lr_schedule.py')
     kg_shuffle = Source(args.katago_root/'python/shuffle.py')
     kg_train = Source(args.katago_root/'python/train.py')
     kg_metrics = Source(args.katago_root/'python/katago/train/metrics_logging.py')
@@ -205,6 +207,7 @@ def main():
     reference = {'math': math, 'logging': logging, 'np': SimpleNamespace(float64=float),
                  'lr_scale_auto_factor': lambda state: 1.0}
     eta_shuffle.load(('desired_window',), eta)
+    eta_lr_schedule.load(('effective_scale',), eta)
     eta_optimizer.load(('warmup_factor', 'group_settings', 'gradient_cap', 'record_norms'), eta)
     kg_metrics.load(('accumulate_metrics', 'log_metrics'), reference)
     kg_helpers.load(('set_snapshot_metrics',), reference)
@@ -220,7 +223,7 @@ def main():
         'float_tolerance': {'relative': REL_TOL, 'absolute': ABS_TOL},
         'gradient_caps': check_gradient_caps(eta, reference),
         'norm_history_equal_cases': check_norm_history(eta, reference),
-        'sources': [source.evidence() for source in (eta_shuffle, eta_optimizer, kg_shuffle, kg_train, kg_metrics, kg_helpers)],
+        'sources': [source.evidence() for source in (eta_shuffle, eta_optimizer, eta_lr_schedule, kg_shuffle, kg_train, kg_metrics, kg_helpers)],
         'checker_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
     print(json.dumps(result, indent=2))

@@ -66,7 +66,12 @@
       "cpp/search/subtreevaluebiastable.h": "d59e1e542cd1701b48eb57d016ae9e9526c476c607578cb658b2b5ee3087cc6f",
       "cpp/search/subtreevaluebiastable.cpp": "880f47f960e73cfb89d53281c6dfd1570ef28daf33b4be64fec46d0dd65f488e",
       "cpp/search/localpattern.h": "ceb392a9026b43e639cf3d8958263e00c1bff6bb3373d5d9d8b02b8252608447",
-      "cpp/search/localpattern.cpp": "85d71dd10148128ae133a624641b3460b3d0fc9e3e7f116df3de96a824f6e299"
+      "cpp/search/localpattern.cpp": "85d71dd10148128ae133a624641b3460b3d0fc9e3e7f116df3de96a824f6e299",
+      "cpp/search/patternbonustable.cpp": "086d189bf867c63f70a6f5ec0c618dd8cbb68bff26caad50bc3a3d71bec0a120",
+      "cpp/search/patternbonustable.h": "e1b97a48466192fc5e4cbbbe6b4045eb686d012d60ce6c8910eadb0a0e70c0e4",
+      "cpp/search/timecontrols.cpp": "771952bfc2dac0e18b12542ceff5a5fa281751817805ed0f128b888f599aad58",
+      "cpp/search/timecontrols.h": "edbcbdc5cd620deb1335c461fa27011e7bd82a3ba6c8b03fefe9300769cdaf27",
+      "cpp/search/searchtimehelpers.cpp": "649fe84b0e51eefb2c219bbb5c008360b325c8606802b48bcf6624fd9fe612eb"
     }
   },
   "MuZero_V2": {
