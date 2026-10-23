@@ -164,15 +164,24 @@ class Prediction(nn.Module):
         self.fp32_heads = True
 
     def forward(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        policy, value, _ = self.head_outputs(hidden)
+        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
+
+    def head_outputs(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mask = hidden[:, -1:]
         x = self.trunk(self.projection(hidden[:, :-1] * mask), mask)
         if self.fp32_heads:
             with torch.autocast('cuda', enabled=False):
                 policy = self.policy_head(x.float(), mask.float())
-                value = self.value_head(x.float(), mask.float())
+                value, future = self.value_head.training_outputs(x.float(), mask.float())
         else:
-            policy, value = self.policy_head(x, mask), self.value_head(x, mask)
-        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
+            policy = self.policy_head(x, mask)
+            value, future = self.value_head.training_outputs(x, mask)
+        return policy, value, future
+
+    def training_outputs(self, hidden):
+        policy, value, future = self.head_outputs(hidden)
+        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12], future, value[:, 13]
 
 
 class MuZeroNet(nn.Module):

@@ -21,9 +21,10 @@ class TrainingForward(nn.Module):
         self.soft_scale = config['training']['soft_policy_weight_scale']
         self.disable_optimistic = config['training']['disable_optimistic_policy']
         self.auxiliary_losses = config.get('muzero_training', {}).get('auxiliary_losses', True)
+        self.options = config.get('losses', {})
 
     def components(self, hidden, obs, targets, step, weight):
-        logits, value, td, error = self.model.prediction(hidden)
+        logits, value, td, error, future, variance = self.model.prediction.training_outputs(hidden)
         with torch.autocast('cuda', enabled=False):
             if not self.auxiliary_losses:
                 # Only main policy and terminal WDL, with unit coefficients.
@@ -37,15 +38,25 @@ class TrainingForward(nn.Module):
                 vl = -row_mean((targets[3][:, step] * torch.log_softmax(value.float(), dim=1)).sum(1), weight)
                 zero = pl.new_zeros(())
                 return (pl + vl, pl, zero, zero, zero, vl, *([zero] * 6))
-            return losses(logits, value, td, error, obs,
+            components = losses(logits, value, td, error, obs,
                           *(t[:, step] for t in targets[:6]), self.soft_scale,
-                          self.disable_optimistic, *(t[:, step] if t is not None else None for t in targets[6:]), row_weight=weight, action_layout=self.action_layout)
+                          self.disable_optimistic, *(t[:, step] if t is not None else None for t in targets[6:8]),
+                          row_weight=weight, action_layout=self.action_layout,
+                          future_logits=future, raw_variance_time=variance,
+                          future_target=targets[8][:, step], variance_target=targets[9][:, step],
+                          value_scale=self.options.get('value_scale', 0.6),
+                          td_scales=tuple(self.options.get(k, 0.6) for k in ('td_long_scale','td_mid_scale','td_short_scale')),
+                          variance_scale=self.options.get('variance_time_scale', 1.0))
+            scale = self.options.get('main_head_scale', -1)
+            return tuple(x * scale for x in components) if scale >= 0 else components
 
     def forward(self, obs, globals, policy, opponent_policy, opponent_policy_weight,
                 target, td_target, full_game_weight, q_values, q_visits,
-                actions, step_weights, recurrent_indices):
+                future_target, variance_target, training_weight, actions, step_weights, recurrent_indices):
         targets = (policy, opponent_policy, opponent_policy_weight, target, td_target,
-                   full_game_weight, q_values, q_visits)
+                   full_game_weight, q_values, q_visits, future_target, variance_target)
+        if training_weight is not None:
+            step_weights = step_weights * training_weight
         hidden = self.model.representation(obs, globals)
         total = self.components(hidden, obs, targets, 0, step_weights[:, 0])
         # Diagnostics retain the weighted forward loss, before backward-only

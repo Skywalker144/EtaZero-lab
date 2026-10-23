@@ -9,7 +9,7 @@ from ..outcomes import terminal_wdl
 import math
 import numpy as np
 
-from ..data import metadata, alphazero_training_view, full_trajectory_td, TRAIN_TARGETS, TRAIN_POLICY_TARGETS
+from ..data import metadata, alphazero_training_view, full_trajectory_td, full_trajectory_auxiliary, TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 from ..schema import PLANES, GLOBALS, RULES
 from ..games import spec_for_metadata, static_action_mask, SPECS
 
@@ -39,7 +39,8 @@ def validate_trajectory(a):
 
 def training_view(a, targets=TARGETS):
     td = full_trajectory_td(a) if 'td_value' in targets else None
-    root = alphazero_training_view(a, targets, td=td)
+    auxiliary = full_trajectory_auxiliary(a) if 'future_positions' in targets else None
+    root = alphazero_training_view(a, targets, td=td, auxiliary=auxiliary)
     m = metadata(a); k = m['unroll_steps']; n = len(root['value']); area = spec_for_metadata(m).actions(m['canvas'])
     result = {key: root[key] for key in ('obs', 'globals')}
     for key in targets:
@@ -64,6 +65,8 @@ def training_view(a, targets=TARGETS):
         raise ValueError('MuZero start-row ordering mismatch')
     outcomes = terminal_wdl(a['winners'], a['reasons'])
     for row, (g, start) in enumerate(starts):
+        if 'training_weight' in targets:
+            result['training_weight'][row] = a['training_weights'][g]
         # Normalizable masked targets also keep loss evaluation finite when a
         # side-only batch has no recurrent rows.
         mask = static_action_mask(RULES[a['rules'][g]], int(a['sizes'][g]), m['canvas'])
@@ -85,6 +88,10 @@ def training_view(a, targets=TARGETS):
             perspective = player * (-1 if step % 2 else 1)
             terminal = outcomes[g, ::perspective]
             result['value'][row, step] = terminal
+            if auxiliary is not None:
+                result['future_positions'][row, step] = (auxiliary[0][current] if current < hi
+                    else auxiliary[2][ol+hi-lo] * perspective)
+                result['variance_time'][row, step] = auxiliary[1][current] if current < hi else 0
             if current >= hi:
                 result['absorbing'][row, step] = 1
                 result['step_weights'][row, step] = 1
@@ -133,6 +140,7 @@ def validate_view(arrays, rows, canvas, steps, targets=TARGETS, game_metadata=No
               'sequence_mask': (rows, steps+1), 'absorbing': (rows, steps+1)}
     for key in targets:
         trailing = (spec.actions(canvas),) if key in ('policy', 'opponent_policy', 'q_values', 'q_visits') else (3,3) if key == 'td_value' else (3,) if key == 'value' else ()
+        if key == 'future_positions': trailing = (2, canvas, canvas)
         shapes[key] = (rows, steps+1, *trailing)
     if set(arrays) != set(shapes):
         raise ValueError('MuZero training-view fields mismatch')

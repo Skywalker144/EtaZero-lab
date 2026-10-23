@@ -40,10 +40,10 @@ def optimizer_for(model, config):
     if not plain.get('katago_optimizer', True):
         from ..plain_optimization import optimizer_for as plain_optimizer
         kind = config['optimizer']['kind']
-        return plain_optimizer(model, kind, plain, parameter_groups(model) if kind == 'muon' else None)
+        return plain_optimizer(model, kind, plain, parameter_groups(model) if kind in ('muon','normuon','aurora') else None, config['optimizer'])
     groups = parameter_groups(model)
     options = config['optimizer']
     for group in groups:
         group['lr'], group['weight_decay'] = group_settings(
-            group['group_name'], options, config['training']['batch_size'], 0, {}, {}, model.norm_kind)
-    return optimizer_from_groups(groups, options['kind'])
+            group['group_name'], options, config['training']['batch_size'], 0, {}, {}, model.norm_kind, config.get('lr_schedule'))
+    return optimizer_from_groups(groups, options['kind'], options)
