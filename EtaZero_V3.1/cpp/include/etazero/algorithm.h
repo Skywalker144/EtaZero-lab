@@ -2,6 +2,8 @@
 #include "game.h"
 #include "inference.h"
 #include "subtree_value_bias.h"
+#include "history_features.h"
+#include "pattern_bonus.h"
 namespace etazero {
 // WDL search over terminal-outcome games: no intermediate reward or discount.
 struct SearchEvaluation {
@@ -10,6 +12,7 @@ struct SearchEvaluation {
     double policy_temperature = 1;
     bool randomize = false;
     double optimism = 0;
+    int max_history = -1;
 };
 class SearchState {
 public:
@@ -18,12 +21,20 @@ public:
     // Adapters with cheap in-place reset can reuse per-thread state storage.
     virtual bool reset_from(const SearchState&) { return false; }
     virtual int actions() const = 0;
+    virtual int pass_action() const {return -1;}
+    virtual int player() const { return 1; }
     virtual bool legal(int action) const = 0;
     virtual bool terminal() const = 0;
     virtual double terminal_value() const = 0;
     virtual double terminal_draw_probability() const {return terminal_value()==0?1:0;}
     // Policy logits are returned in the original action coordinates.
     virtual Evaluation evaluate(SearchEvaluation options = {}) const = 0;
+    virtual Evaluation evaluate_with(Evaluator&,SearchEvaluation) const {throw std::runtime_error("State has no secondary network adapter");}
+    virtual std::vector<int> root_symmetry_representatives(const std::vector<int>&) const {
+        std::vector<int> result(actions());for(int i=0;i<actions();++i)result[i]=i;return result;
+    }
+    virtual std::string pattern_key(int) const {throw std::runtime_error("State has no real-board pattern adapter");}
+    virtual void repeated_patterns(PatternBonusTable&,double,int) const {throw std::runtime_error("State has no pattern history adapter");}
     virtual int symmetry_count() const { return 1; }
     // Exact identity by default. Go opts into KataGo's bounded-history sharing;
     // the actual path remains authoritative for legality and terminal outcomes.
@@ -51,10 +62,15 @@ public:
         game_=other->game_;graph_rep_bound_=other->graph_rep_bound_;return true;
     }
     int actions() const override { return game_.actions(); }
+    int pass_action() const override {return game_.rule()==Rule::GO?game_.canvas_area():-1;}
+    int player() const override { return game_.player(); }
     bool legal(int action) const override { return game_.legal(action); }
     bool terminal() const override { return game_.finished(); }
     double terminal_value() const override { return game_.terminal_value(); }
     double terminal_draw_probability() const override {return game_.terminal_draw_probability();}
+    std::vector<int> root_symmetry_representatives(const std::vector<int>& avoid) const override {return game_.root_symmetry_representatives(avoid);}
+    std::string pattern_key(int action) const override {return game_.pattern_key(action);}
+    void repeated_patterns(PatternBonusTable& table,double bonus,int player) const override {table.add_game(game_,bonus,player);}
     int symmetry_count() const override { return game_.spec().symmetries; }
     void prepare_graph(int rep_bound) const override { graph_rep_bound_=rep_bound; }
     bool graph_approximates_history() const override { return game_.rule()==Rule::GO; }
@@ -63,7 +79,11 @@ public:
         return game_.subtree_bias_key(action,key);
     }
     Evaluation evaluate(SearchEvaluation options = {}) const override {
-        return evaluator_.evaluate_symmetry(game_.observation(),options.symmetry,options.skip_cache,
+        return evaluate_with(evaluator_,options);
+    }
+    Evaluation evaluate_with(Evaluator& evaluator,SearchEvaluation options) const override {
+        auto observation=game_.observation();limit_history_features(observation,game_.canvas(),game_.spec(),options.max_history);
+        return evaluator.evaluate_symmetry(observation,options.symmetry,options.skip_cache,
                                            options.policy_temperature,options.randomize,options.optimism);
     }
     std::string graph_key() const override {

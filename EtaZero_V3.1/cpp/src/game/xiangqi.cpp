@@ -147,6 +147,12 @@ public:
         g[5]=recent_.size()/8.f;g[6]=bool(position_.checkers());g[7]=position_.game_ply()/200.f;
         return out;
     }
+    bool symmetry_history_ok(const std::vector<int>& mapping) const override {
+        for(size_t i=initial_.size();i<identity_.size();i+=sizeof(int)) {
+            int action;std::memcpy(&action,identity_.data()+i,sizeof(action));if(mapping[action]!=action)return false;
+        }
+        return true;
+    }
     std::string identity() const override{return identity_;}
     std::string fen() const override{return position_.fen();}
 };

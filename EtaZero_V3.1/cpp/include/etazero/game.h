@@ -8,6 +8,7 @@ class Game {
     RuleOptions options_;
     int size_,canvas_,turn_=0,last_action_=-1;
     Rule rule_;
+    std::vector<int> moves_;
     double pda_doublings_=0;
     int pda_player_=0;
 public:
@@ -18,6 +19,8 @@ public:
     Game& operator=(Game&&)=default;
     GameSpec spec() const { return game_spec(rule_); }
     const RuleOptions& options() const { return options_; }
+    const std::vector<int>& moves() const {return moves_;}
+    std::string pattern_key(int action,int symmetry=0,bool flip=false) const;
     std::string history_identity() const { return state_->identity(); }
     std::string graph_identity(int rep_bound) const { return state_->graph_identity(rep_bound); }
     std::string fen() const { return state_->fen(); }
@@ -31,6 +34,7 @@ public:
     int planes() const { return spec().planes; }
     int globals() const { return spec().globals; }
     int actions() const { return spec().actions(canvas_); }
+    std::vector<int> root_symmetry_representatives(const std::vector<int>& avoid={}) const;
     int local_actions() const { return spec().actions(size_); }
     int local_action(int a) const { return spec().local_action(a,size_,canvas_); }
     int native_action(int a) const { return spec().native_action(a,size_,canvas_); }
@@ -68,7 +72,7 @@ public:
     double terminal_draw_probability() const { if(!finished())throw std::runtime_error("State is not terminal");return outcome().draw_probability(); }
     void play(int a) {
         if(!legal(a))throw std::runtime_error("Illegal move: "+std::to_string(a));
-        state_->play(a);last_action_=a;++turn_;
+        state_->play(a);moves_.push_back(a);last_action_=a;++turn_;
     }
 };
 }

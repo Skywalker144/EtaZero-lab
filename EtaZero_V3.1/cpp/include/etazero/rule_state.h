@@ -25,6 +25,10 @@ public:
     // Before a legal move. Game owns the actual previous action (-1 at start).
     // False means this game/transition must not share a bias estimate.
     virtual bool subtree_bias_key(int,int,SubtreeValueBiasKey&) const { return false; }
+    // Go supplies its exact ko-aware source implementation. Other games use their rule symmetry group.
+    virtual std::vector<int> root_symmetry_representatives(const std::vector<int>&) const { return {}; }
+    virtual bool symmetry_history_ok(const std::vector<int>&) const { return true; }
+    virtual std::string pattern_key(int,int,bool) const {return {};}
     virtual std::string identity() const { return {}; }
     virtual std::string graph_identity(int) const { return identity(); }
     virtual std::string fen() const { return {}; }

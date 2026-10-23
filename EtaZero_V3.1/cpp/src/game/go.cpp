@@ -2,6 +2,7 @@
 #include "../../external/katago/neuralnet/nninputs.h"
 #include "../../external/katago/game/graphhash.h"
 #include <mutex>
+#include "../../external/katago/search/localpattern.h"
 namespace etazero {
 namespace {
 class GoState final: public RuleState {
@@ -64,6 +65,21 @@ public:
                   (static_cast<uint64_t>(history_.presumedNextMovePla)<<32) | (atari<<34);
         return true;
     }
+    std::string pattern_key(int action,int symmetry,bool flip) const override {
+        ::Loc loc=location(action);auto pla=history_.presumedNextMovePla;
+        if(loc==::Board::PASS_LOC||loc==::Board::NULL_LOC||board_.wouldBeKoCapture(loc,pla))return {};
+        struct Hasher {
+            LocalPatternHasher local;Hash128 moves[::Board::MAX_ARR_SIZE];
+            Hasher(){Rand rand("PatternBonusTable ZOBRIST STUFF");local.init(9,9,rand);
+                rand.init("Reseed PatternBonusTable zobrist so that zobrists don't change when Board::MAX_ARR_SIZE changes");
+                for(auto& h:moves){auto a=rand.nextUInt64();auto b=rand.nextUInt64();h=Hash128(a,b);}}
+        };
+        static const Hasher hasher;
+        auto hash=hasher.local.getHashWithSym(board_,loc,pla,symmetry,flip);
+        hash^=hasher.moves[SymmetryHelpers::getSymLoc(loc,board_,symmetry)];
+        hash^=::Board::ZOBRIST_SIZE_X_HASH[board_.x_size];hash^=::Board::ZOBRIST_SIZE_Y_HASH[board_.y_size];
+        return hash==Hash128()?std::string():"go:"+hash.toString();
+    }
     const Board& board() const override {
         if(!display_dirty_)return display_;
         auto& out=display_.cells;
@@ -76,6 +92,18 @@ public:
         MiscNNInputParams params;params.playoutDoublingAdvantage=pda;
         NNInputs::fillRowV7(board_,history_,perspective==1?P_BLACK:P_WHITE,params,canvas_,canvas_,false,out.data(),out.data()+spec.planes*canvas_*canvas_);
         return out;
+    }
+    std::vector<int> root_symmetry_representatives(const std::vector<int>& avoid) const override {
+        std::vector<int> avoids(::Board::MAX_ARR_SIZE,0),valid;bool duplicate[::Board::MAX_ARR_SIZE];
+        if(!avoid.empty())for(int y=0;y<board_.y_size;++y)for(int x=0;x<board_.x_size;++x)avoids[Location::getLoc(x,y,board_.x_size)]=avoid[y*canvas_+x];
+        SymmetryHelpers::markDuplicateMoveLocs(board_,history_,nullptr,avoids,duplicate,valid);
+        std::vector<int> result(canvas_*canvas_+1);for(size_t a=0;a<result.size();++a)result[a]=a;
+        for(int y=0;y<board_.y_size;++y)for(int x=0;x<board_.x_size;++x) {
+            auto loc=Location::getLoc(x,y,board_.x_size);if(!duplicate[loc])continue;
+            for(int symmetry:valid){auto mapped=SymmetryHelpers::getSymLoc(loc,board_,symmetry);if(!duplicate[mapped]) {
+                result[y*canvas_+x]=Location::getY(mapped,board_.x_size)*canvas_+Location::getX(mapped,board_.x_size);break;}}
+        }
+        return result;
     }
     std::string identity() const override {
         std::string key=history_.rules.toJsonString();
