@@ -42,12 +42,15 @@ BatchEvaluator::BatchEvaluator(std::unique_ptr<Backend> backend, std::string mod
                                size_t max_batch, int wait_us)
     : BatchEvaluator(single(std::move(backend)), std::move(model), canvas, max_batch, wait_us, 0) {}
 BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, std::string model, int canvas,
-                               size_t max_batch, int wait_us, size_t cache_entries,bool randomize,int symmetry,uint64_t seed)
+                               size_t max_batch, int wait_us, size_t cache_entries,bool randomize,int symmetry,uint64_t seed,int mutex_pool_power_of_two)
     : backends_(std::move(backends)), cache_(cache_entries), model_(std::move(model)),
       randomize_(randomize),symmetry_(symmetry),random_(seed),max_batch_(max_batch),
       input_size_(0), wait_us_(wait_us),canvas_(canvas) {
     if (backends_.empty() || model_.empty() || !max_batch || wait_us < 0 || symmetry<0 || symmetry>=8)
         throw std::runtime_error("Invalid inference service configuration");
+    if(mutex_pool_power_of_two< -1 || mutex_pool_power_of_two>24)throw std::runtime_error("Invalid NN cache mutex pool power");
+    if(mutex_pool_power_of_two<0)cache_.clear();
+    cache_locks_.resize(std::max<size_t>(1,std::min(cache_.size(),size_t(1)<<std::max(0,mutex_pool_power_of_two))));
     for (auto& b : backends_) if (!b) throw std::runtime_error("Null inference backend");
     for(const auto& backend:backends_)if(backend->supports_auxiliary()!=backends_[0]->supports_auxiliary())
         throw std::runtime_error("Inference servers disagree on auxiliary capability");

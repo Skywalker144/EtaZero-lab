@@ -1,16 +1,20 @@
 #pragma once
 #include "algorithm.h"
+#include "timecontrols.h"
 #include <random>
 #include <functional>
 #include <limits>
 #include <unordered_map>
+#include <map>
 #include <unordered_set>
 namespace etazero {
+inline constexpr int64_t SEARCH_CONFIG_LIMIT=int64_t(1)<<50;
 struct SearchSettings {
-    int simulations, threads;
+    int64_t simulations;
+    int threads;
     double c_puct, virtual_loss, noise_fraction, dirichlet_total_concentration;
     bool reuse_tree;
-    int max_visits = 0; // Includes the initial root evaluation and reused visits.
+    int64_t max_visits = 0; // Includes the initial root evaluation and reused visits.
     bool use_fpu = false, shaped_noise = false, policy_target_pruning = false, use_lcb = false;
     double fpu_reduction_max = 0.2, root_fpu_reduction_max = 0, fpu_parent_power = 2;
     double forced_playouts = 0, lcb_stdevs = 5, min_lcb_visit_prop = 0.15;
@@ -23,7 +27,8 @@ struct SearchSettings {
     double nn_policy_temperature = 1, root_policy_temperature = 1, root_policy_temperature_early = 1;
     double temperature_halflife = 19, chosen_move_temperature_only_below_prob = 1;
     bool nn_randomize = false, fpu_parent_weight_by_visited_policy = true;
-    int nn_symmetry = 0, max_playouts = std::numeric_limits<int>::max();
+    int nn_symmetry = 0;
+    int64_t max_playouts = SEARCH_CONFIG_LIMIT;
     double fpu_parent_weight = 0, max_time = 1e20;
     bool graph_search = false;
     int graph_rep_bound = 11;
@@ -34,16 +39,45 @@ struct SearchSettings {
     double noise_prune_utility_scale=0.15, noise_pruning_cap=1e50;
     double subtree_value_bias_factor=0, subtree_value_bias_free_prop=0.8, subtree_value_bias_weight_exponent=0.85;
     int subtree_value_bias_table_num_shards=65536;
+    int node_table_shards_power_of_two=16;
+    double min_playouts_per_thread=0;
+    bool ignore_pre_root_history=false,ignore_all_history=false;
+    double wide_root_noise=0,futile_visits_threshold=0;
+    int64_t visit_cap_contempt=0;
+    int visit_cap_contempt_player=0;
+    bool root_symmetry_pruning=false;
+    double avoid_repeated_pattern_utility=0;
+    std::shared_ptr<const PatternBonusTable> external_patterns;
+    bool use_eval_cache=false;int64_t eval_cache_min_visits=100;
+    int64_t max_visits_pondering=SEARCH_CONFIG_LIMIT,max_playouts_pondering=SEARCH_CONFIG_LIMIT;
+    double max_time_pondering=1e20,lag_buffer=0,tree_reuse_carry_over_time_factor=0;
+    double overallocate_time_factor=1,midgame_time_factor=1,midgame_turn_peak_time=130,endgame_turn_time_decay=100;
+    double human_sl_cpuct_exploration=1,human_sl_cpuct_permanent=0;
+    double human_sl_root_weightless=0,human_sl_root_weightful=0,human_sl_player_weightless=0,human_sl_player_weightful=0,human_sl_opponent_weightless=0,human_sl_opponent_weightful=0;
+    double human_sl_chosen_move_proportion=0,human_sl_chosen_move_pikl_lambda=1e9;
+    bool human_sl_chosen_move_ignore_pass=false;
+    double obvious_moves_time_factor=1,obvious_moves_policy_entropy_tolerance=.30,obvious_moves_policy_surprise_tolerance=.15;
 };
+void validate_search_controls(const SearchSettings&);
+// Root-only source selection, including virtual losses, pruning, forced visits and noise.
+double root_explore_score(double prior,double utility,double weight,int pending,int64_t edge_visits,
+    int64_t child_visits,double total,double max_weight,const struct ValueStats& parent,
+    const SearchSettings&,bool force,bool hint,double remaining,std::mt19937_64& random);
 struct SearchResult;
 struct GumbelSettings;
 struct SearchRun {
-    int max_visits = 0;
+    int64_t max_visits = 0;
     bool training = false, clear_before_search = false, remove_root_noise = false;
     int turn = 0, board_area = 361;
-    int max_playouts = -1; // -1 inherits settings; zero issues no new playouts.
+    int64_t max_playouts = -1; // -1 inherits settings; zero issues no new playouts.
     double max_time = -1; // Seconds, including root inference; -1 inherits settings.
     std::function<bool()> should_stop;
+    std::array<std::vector<int>,2> avoid_until; // black, white; action-indexed exclusive depth.
+    bool avoid_rescale_root=false;
+    const TimeControls* time_controls=nullptr;
+    bool pondering=false;
+    int occupied_points=-1;
+    int search_for_player = 0; // 0 uses the root player; pondering sets our fixed player.
     int hint_action = -1; // Root-only guidance; changes always clear statistics.
     bool collect_root_policy_invalid_mass = false;
     // Interactive diagnostics only. Empty callbacks keep training on its existing path.
@@ -81,6 +115,7 @@ struct RootSelectionDiagnostic { double weight=0, lcb=0, radius=0; bool has_lcb=
 std::vector<double> root_selection_weights(const std::vector<RootChildStats>& children,
                                          const SearchSettings& settings, bool use_lcb, ValueStats parent = {}, bool normalize_output = true,
                                          std::vector<RootSelectionDiagnostic>* diagnostics = nullptr);
+std::vector<double> direct_policy_selection(std::vector<double> policy,const SearchSettings&);
 struct AnalysisCandidate {
     int action=-1;
     double weight=0, utility=0, win_loss=0;
@@ -92,10 +127,11 @@ struct AnalysisCandidate {
 void analysis_policy(SearchResult&,const std::vector<int>&,const std::vector<RootChildStats>&,
                      const SearchSettings&,ValueStats,const GumbelSettings*);
 struct SearchResult {
-    int action = -1, simulations = 0;
+    int action = -1;
+    int64_t simulations = 0;
     int64_t root_visits = 0;
     int64_t initial_visits = 0;
-    int new_playouts = 0; // Includes a fresh root evaluation, unlike simulations (root edges).
+    int64_t new_playouts = 0; // Includes a fresh root evaluation, unlike simulations (root edges).
     double seconds = 0;
     bool stopped_early = false;
     double value = 0, policy_surprise = 0;
@@ -127,8 +163,23 @@ struct SearchNodeSnapshot {
     size_t id;bool root, ready;int pending;std::string identity;
     ValueStats stats;std::vector<SearchEdgeSnapshot> edges;
 };
+void mix_secondary_policy(SearchResult&,const std::vector<double>& human,const std::vector<double>& utilities,
+    const std::vector<bool>& known,const SearchSettings&,int pass,double target_scale=1);
+struct RootFocus {std::vector<int> moves;std::vector<double> weights;double probability=0;};
+class SearchTimeBudget;
 class GameSearch {
+protected:
+    std::shared_ptr<const RootFocus> focus_;
+    std::shared_ptr<const RootFocus> focus_snapshot() const {return std::atomic_load(&focus_);}
 public:
+    // Like KataGo, replacement is safe while workers are searching.
+    void set_root_focus(std::vector<int> moves,std::vector<double> weights,double probability) {
+        if(moves.size()!=weights.size() || !std::isfinite(probability) || probability<0)throw std::runtime_error("Invalid root focus");
+        for(size_t i=0;i<moves.size();++i){if(moves[i]<0 || !std::isfinite(weights[i]) || weights[i]<=0)throw std::runtime_error("Invalid root focus move/weight");weights[i]=std::min(weights[i],1e30);}
+        std::shared_ptr<const RootFocus> focus;
+        if(!moves.empty() && probability>0)focus=std::make_shared<RootFocus>(RootFocus{std::move(moves),std::move(weights),std::min(probability,.99)});
+        std::atomic_store(&focus_,std::move(focus));
+    }
     virtual ~GameSearch() = default;
     virtual SearchResult run(const Game&, double temperature, SearchRun options = {}) = 0;
     virtual void advance(int action) = 0;
@@ -152,20 +203,29 @@ protected:
         double initial_value=0, initial_weight=1, initial_stdev=0;
         bool has_auxiliary=false;
         WDL initial_wdl{0,1,0};
+        std::vector<double> human_policy;
         std::vector<double> prior, search_prior; // Negative entries are illegal.
         std::vector<int> prior_order; // Legal, unexpanded move candidates.
+    };
+    struct CachedEvaluation {
+        float value=0,draw=0,weight=0;
+        struct First {float value=0,weight=0;};
+        std::map<int,First> first_explore;
     };
     struct Node {
         enum Status { EMPTY, EXPANDING, READY, FAILED };
         std::atomic<Status> status{EMPTY};
         size_t id;
-        std::string graph_identity;
+        std::string graph_identity,pattern_key;
+        std::shared_ptr<const CachedEvaluation> cached_evaluation;
         size_t lock_index;
         explicit Node(size_t index) : id(index), lock_index(index%64) {}
         std::shared_ptr<const NodeEvaluation> evaluation;
         std::shared_ptr<const NodeEvaluation> evaluated() const { return std::atomic_load_explicit(&evaluation,std::memory_order_acquire); }
         void publish(std::shared_ptr<const NodeEvaluation> value) { std::atomic_store_explicit(&evaluation,std::move(value),std::memory_order_release); }
         ValueStats stats;
+        int player=1;
+        std::vector<double> capped_distribution; // Move-indexed, immutable once installed under stats_mutex.
         SubtreeValueBias subtree_bias;
         std::mutex stats_mutex, update_mutex;
         std::exception_ptr error;
@@ -187,8 +247,9 @@ protected:
     struct Sync { std::mutex mutex; std::condition_variable changed; };
     std::array<Sync,64> locks_;
     std::atomic<size_t> next_node_{0};
-    struct Visit { Node* parent;Edge* edge;int perspective;bool increment_edge=true; };
+    struct Visit { Node* parent;Edge* edge;int perspective;bool increment_edge=true;bool weightless=false; };
     struct ThreadState {
+        bool counted_playout=true;
         std::unique_ptr<SearchState> state;
         std::vector<Visit> path;
         std::vector<int> candidates;
@@ -198,11 +259,21 @@ protected:
     };
     std::vector<ThreadState> thread_states_;
     Evaluator* evaluator_ = nullptr;
+    int root_player_=1,search_for_player_=1;
+    std::unique_ptr<PatternBonusTable> patterns_;
+    double pattern_bonus(const Node&) const;
+    void prepare_patterns(const SearchState&,const SearchRun&);
+    void mix_human_policy(SearchResult&,const SearchState&,double temperature,bool training);
     SearchSettings settings_;
     std::unique_ptr<SubtreeValueBiasTable> subtree_bias_table_;
     // Table owns all nodes. Edges and root borrow pointers until quiescent mark-and-sweep.
     struct NodeShard { std::mutex mutex;std::unordered_map<std::string,std::unique_ptr<Node>> nodes; };
-    std::array<NodeShard,64> node_table_;
+    std::deque<NodeShard> node_table_;
+    // Published between searches; workers only read immutable entries.
+    std::vector<std::unordered_map<std::string,std::shared_ptr<const CachedEvaluation>>> eval_cache_;
+    std::shared_ptr<const CachedEvaluation> cached_evaluation(const std::string&) const;
+    void record_evaluations();
+    void apply_cached_evaluation(Node&,ValueStats&,int64_t visits) const;
     Node* root_=nullptr;
     std::atomic<uint64_t> graph_hits_{0},graph_catch_ups_{0},graph_cycles_{0};
     std::vector<std::mt19937_64> random_;
@@ -212,31 +283,40 @@ protected:
     std::condition_variable work_changed_;
     uint64_t generation_ = 0;
     int workers_done_ = 0;
+    int active_threads_ = 1;
     bool closing_ = false;
     bool cleaning_ = false;
     std::vector<Node*> cleanup_roots_;
-    int budget_ = 0;
+    int64_t budget_ = 0;
     bool remove_root_noise_ = false;
     int root_hint_action_ = -1;
+    int capped_player_=0;
+    std::array<std::vector<int>,2> avoid_until_;
+    std::vector<int> root_representative_;
+    bool move_allowed(int action,int player,int depth) const;
+    bool prepare_restrictions(const SearchState&,const SearchRun&);
     const SearchState* position_ = nullptr;
     int root_symmetries_ = 1;
-    std::atomic<int> issued_{0}, completed_{0};
+    std::atomic<int64_t> issued_{0}, completed_{0};
     std::atomic<bool> failed_{false};
     std::atomic<bool> stopped_{false};
     int fresh_playouts_ = 0;
     double max_time_ = 1e20;
+    double carried_time_=0,current_temperature_=0;
+    std::unique_ptr<SearchTimeBudget> time_budget_;
+    void update_time_budget(double elapsed);
     std::chrono::steady_clock::time_point start_;
     std::function<bool()> should_stop_;
     std::function<void()> report_; // Invoked only by coordinator worker 0.
     std::exception_ptr error_;
-    bool expand(Node& node, const SearchState& state, int worker);
-    void evaluate_node(Node& node,const SearchState& state,int worker,int symmetries,bool skip_cache=false);
+    bool expand(Node& node, const SearchState& state, int worker,int depth=0);
+    void evaluate_node(Node& node,const SearchState& state,int worker,int symmetries,bool skip_cache=false,int depth=0);
     ValueStats snapshot(Node& node);
     std::vector<RootChildStats> child_stats(Node& node,const NodeEvaluation& eval,bool aggregation=false);
     bool prune_root_children(const SearchState& state);
     void recompute(Node& node,int visits_to_add=0); // Serializes updates without holding parent stats during child reads.
     Node* new_node();
-    Node* find_node(const SearchState& state,const SubtreeValueBiasKey* bias_key);
+    Node* find_node(const SearchState& state,const SubtreeValueBiasKey* bias_key,const std::string& pattern_key={});
     void prepare_subtree_bias(const SearchState& state);
     bool catch_up(Edge& edge,Node& child,int worker);
     size_t node_count() const;
@@ -244,7 +324,7 @@ protected:
     void collect_nodes(Node* keep); // Only after all search workers are quiescent.
     template<bool ForcedRoot=false,bool GumbelInterior=false>
     void simulation(int worker,int root_move=-1,const GumbelSettings* gumbel=nullptr);
-    int gumbel_selection(Node&,const GumbelSettings&);
+    int gumbel_selection(Node&,const GumbelSettings&,int depth);
     void simulate_many(int worker);
     void worker_loop(int worker);
     SearchResult analysis_snapshot(int actions,const GumbelSettings* gumbel=nullptr);

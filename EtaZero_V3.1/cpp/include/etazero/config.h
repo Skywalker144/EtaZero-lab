@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <cstdint>
 namespace etazero {
 inline std::string trim(std::string s) {
     auto start = s.find_first_not_of(" \t\r\n"), end = s.find_last_not_of(" \t\r\n");
@@ -39,6 +40,11 @@ public:
         return it->second;
     }
     int integer(const std::string& k) const { return parse_integer(text(k),k); }
+    int64_t integer64(const std::string& k) const {
+        auto value=text(k);size_t consumed=0;int64_t result=std::stoll(value,&consumed);
+        if(consumed!=value.size())throw std::runtime_error("Invalid int64: "+k);
+        return result;
+    }
     double number(const std::string& k) const { return std::stod(text(k)); }
     bool boolean(const std::string& k) const { return text(k) == "true"; }
     std::vector<std::string> list(const std::string& k) const {

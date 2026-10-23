@@ -7,13 +7,14 @@ struct PlayoutAdvantage { double doublings=0; int player=0; };
 PlayoutAdvantage sample_playout_advantage(double probability,double max_ratio,std::mt19937_64& rng);
 double playout_budget_factor(PlayoutAdvantage advantage,int player);
 struct SelfplaySearchConfig {
-    int full_visits, cheap_visits;
+    int64_t full_visits, cheap_visits;
     double cheap_probability, cheap_target_weight;
     bool clear_before_search, reduce_visits;
     double reduce_threshold;
-    int reduce_lookback, reduced_visits_min;
+    int reduce_lookback;
+    int64_t reduced_visits_min;
     double reduced_visits_weight;
-    int max_playouts=std::numeric_limits<int>::max();
+    int64_t max_playouts=SEARCH_CONFIG_LIMIT;
 };
 struct SelfplaySearchLimits {
     SearchRun search;

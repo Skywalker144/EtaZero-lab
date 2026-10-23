@@ -172,4 +172,67 @@ double child_selection_score(double prior,double value,double weight,int pending
     if(force && prior>0 && weight<std::sqrt(prior*total*s.forced_playouts))return 1e20;
     return value+explore_scaling(total,parent,s)*prior/(1+weight);
 }
+double root_explore_score(double prior,double utility,double weight,int pending,int64_t edge_visits,
+    int64_t child_visits,double total,double max_weight,const ValueStats& parent,
+    const SearchSettings& s,bool force,bool hint,double remaining,std::mt19937_64& random) {
+    double virtual_weight=pending*s.virtual_loss;
+    if(virtual_weight>0)utility+=(-1-utility)*virtual_weight/(virtual_weight+std::max(.25,weight));
+    weight+=virtual_weight;
+    double per_visit=parent.weight/std::max<int64_t>(1,parent.visits);
+    if(s.futile_visits_threshold>0 && child_visits+remaining<
+       s.futile_visits_threshold*max_weight*(edge_visits+1.0)/(weight+per_visit))return -1e40;
+    if(force && prior>0 && weight<std::sqrt(prior*total*s.forced_playouts))return 1e20;
+    if(hint && weight+(weight+per_visit)/(child_visits+1.0)<max_weight*.8)return 1e20;
+    if(s.wide_root_noise>0) {
+        prior=static_cast<float>(std::pow(static_cast<float>(prior),1/(4*s.wide_root_noise+1)));
+        if(std::bernoulli_distribution(.5)(random))utility+=s.wide_root_noise*std::abs(std::normal_distribution<double>()(random));
+    }
+    return utility+explore_scaling(total,parent,s)*prior/(1+weight);
+}
+
+}
+
+namespace etazero {
+void mix_secondary_policy(SearchResult& result,const std::vector<double>& policy,const std::vector<double>& utilities,
+    const std::vector<bool>& known,const SearchSettings& settings,int pass,double target_scale) {
+    double proportion=settings.human_sl_chosen_move_proportion;if(proportion<=0||policy.empty())return;
+    double sum=0,maximum=-1e100;int count=0;
+    for(size_t i=0;i<policy.size();++i)if(known[i] && policy[i]>=0){sum+=utilities[i];maximum=std::max(maximum,utilities[i]);++count;}
+    double average=sum/std::max(1,count);maximum=std::max(maximum,average);
+    auto human=policy;double mass=0,lambda=settings.human_sl_chosen_move_pikl_lambda;
+    for(size_t i=0;i<human.size();++i){double utility=known[i]?utilities[i]:average;
+        human[i]=std::max(0.0,human[i])*(lambda==0?(utility==maximum?1:0):std::exp((utility-maximum)/lambda));mass+=human[i];}
+    if(mass<=0)return;
+    for(auto& p:human)p/=mass;
+    auto mix=[&](std::vector<double>& destination){auto shifted=human;
+        if(settings.human_sl_chosen_move_ignore_pass && pass>=0){double nonpass=1-shifted[pass];
+            if(nonpass<=0)return;
+            for(size_t i=0;i<shifted.size();++i)if(int(i)!=pass)shifted[i]*=(1-destination[pass])/nonpass;
+            shifted[pass]=destination[pass];}
+        for(size_t i=0;i<destination.size();++i)destination[i]+=proportion*(shifted[i]-destination[i]);};
+    mix(result.policy);mix(result.move_policy);auto target=result.policy;
+    for(auto& p:target)p*=target_scale;
+    result.policy_target=quantize_policy(target);
+    result.policy_surprise=0;
+    for(size_t i=0;i<result.policy.size();++i)if(result.policy[i]>0)result.policy_surprise+=result.policy[i]*std::log(result.policy[i]/std::max(1e-100,result.search_policy[i]));
+    result.policy_surprise=std::max(0.0,result.policy_surprise);
+}
+}
+
+namespace etazero {
+void validate_search_controls(const SearchSettings& s) {
+    auto bound=[](double x,double low,double high,const char* key){if(!std::isfinite(x)||x<low||x>high)throw std::runtime_error(std::string("Invalid search control: ")+key);};
+    for(auto cap:{s.simulations,s.max_visits,s.max_playouts})if(cap<0||cap>SEARCH_CONFIG_LIMIT)throw std::runtime_error("Search configuration budget must be in [0, 2^50]");
+    bound(s.c_puct,0,1000,"c_puct");bound(s.root_policy_temperature,.01,100,"root_policy_temperature");bound(s.root_policy_temperature_early,.01,100,"root_policy_temperature_early");
+    bound(s.min_playouts_per_thread,0,1e20,"min_playouts_per_thread");
+    bound(s.max_visits_pondering,1,SEARCH_CONFIG_LIMIT,"max_visits_pondering");bound(s.max_playouts_pondering,1,SEARCH_CONFIG_LIMIT,"max_playouts_pondering");
+    bound(s.max_time_pondering,0,1e20,"max_time_pondering");bound(s.lag_buffer,0,3600,"lag_buffer");
+    bound(s.tree_reuse_carry_over_time_factor,0,1,"tree_reuse_carry_over_time_factor");
+    bound(s.overallocate_time_factor,.01,100,"overallocate_time_factor");bound(s.midgame_time_factor,.01,100,"midgame_time_factor");
+    bound(s.midgame_turn_peak_time,0,1000,"midgame_turn_peak_time");bound(s.endgame_turn_time_decay,0,1000,"endgame_turn_time_decay");
+    bound(s.obvious_moves_time_factor,.01,1,"obvious_moves_time_factor");bound(s.obvious_moves_policy_entropy_tolerance,.001,2,"obvious_moves_policy_entropy_tolerance");bound(s.obvious_moves_policy_surprise_tolerance,.001,2,"obvious_moves_policy_surprise_tolerance");
+    bound(s.human_sl_cpuct_exploration,0,1000,"human_sl_cpuct_exploration");bound(s.human_sl_cpuct_permanent,0,1000,"human_sl_cpuct_permanent");
+    for(double p:{s.human_sl_root_weightless,s.human_sl_root_weightful,s.human_sl_player_weightless,s.human_sl_player_weightful,s.human_sl_opponent_weightless,s.human_sl_opponent_weightful,s.human_sl_chosen_move_proportion})bound(p,0,1,"human_sl_probability");
+    bound(s.human_sl_chosen_move_pikl_lambda,0,1e9,"human_sl_chosen_move_pikl_lambda");bound(s.avoid_repeated_pattern_utility,0,3,"avoid_repeated_pattern_utility");
+}
 }

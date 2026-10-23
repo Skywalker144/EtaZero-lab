@@ -11,7 +11,7 @@ add_custom_command(OUTPUT ${SCHEMA_HEADER}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../python/etazero/schema.py ${SCHEMA_HEADER}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../python/etazero/schema.py ${CMAKE_CURRENT_SOURCE_DIR}/../python/etazero/games.py ${CMAKE_CURRENT_SOURCE_DIR}/../python/etazero/outcomes.py VERBATIM)
 add_library(etazero_go_rules
-    external/katago/game/board.cpp external/katago/game/boardhistory.cpp external/katago/game/rules.cpp external/katago/game/graphhash.cpp
+    external/katago/search/localpattern.cpp external/katago/game/board.cpp external/katago/game/boardhistory.cpp external/katago/game/rules.cpp external/katago/game/graphhash.cpp
     external/katago/neuralnet/nninputs.cpp external/katago/core/global.cpp external/katago/core/hash.cpp
     external/katago/core/rand.cpp external/katago/core/sha2.cpp external/katago/core/md5.cpp
     external/katago/core/bsearch.cpp external/katago/core/test.cpp external/katago/core/timer.cpp)
@@ -28,7 +28,7 @@ set_property(SOURCE src/game/xiangqi.cpp PROPERTY COMPILE_OPTIONS -std=c++20)
 target_include_directories(etazero_core PUBLIC include ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(etazero_core PUBLIC Threads::Threads ZLIB::ZLIB etazero_go_rules etazero_xiangqi_rules)
 target_compile_options(etazero_core PRIVATE -Wall -Wextra -Wpedantic)
-target_sources(etazero_core PRIVATE src/search/analysis.cpp)
+target_sources(etazero_core PRIVATE src/search/analysis.cpp src/search/timecontrols.cpp src/search/time_budget.cpp src/search/pattern_bonus.cpp)
 add_library(etazero_muzero src/muzero/batcher.cpp src/muzero/search.cpp src/muzero/gumbel_search.cpp)
 target_link_libraries(etazero_muzero PUBLIC etazero_core)
 add_executable(rules_replay tools/rules_replay.cpp)
@@ -55,6 +55,10 @@ if(ETAZERO_WITH_TORCH)
 endif()
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(alignment_search_test tests/alignment_search_test.cpp)
+    target_link_libraries(alignment_search_test PRIVATE etazero_core)
+    add_test(NAME alignment_search COMMAND alignment_search_test)
+    set_tests_properties(alignment_search PROPERTIES TIMEOUT 30)
     add_executable(game_state_test tests/game_state_test.cpp)
     target_link_libraries(game_state_test PRIVATE etazero_core)
     add_test(NAME game_state COMMAND game_state_test)

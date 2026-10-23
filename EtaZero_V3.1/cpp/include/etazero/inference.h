@@ -27,6 +27,7 @@ class Evaluator {
 protected:
     GameSpec spec_=game_spec(GameKind::GOMOKU);
 public:
+    std::shared_ptr<Evaluator> secondary;
     GameSpec spec() const { return spec_; }
     virtual ~Evaluator() = default;
     virtual Evaluation evaluate(const std::vector<float>& observation) = 0;
@@ -78,7 +79,7 @@ class BatchEvaluator final : public InferenceService {
     std::vector<std::unique_ptr<Backend>> backends_;
     struct CacheEntry { std::string key; std::shared_ptr<const Evaluation> output; };
     std::vector<CacheEntry> cache_;
-    std::array<std::mutex, 64> cache_locks_;
+    std::deque<std::mutex> cache_locks_;
     std::array<std::vector<int>, 12> mappings_;
     std::string model_;
     bool randomize_;
@@ -100,7 +101,7 @@ public:
                    size_t max_batch, int wait_us);
     BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, std::string model, int canvas,
                    size_t max_batch, int wait_us, size_t cache_entries,
-                   bool randomize=false, int symmetry=0, uint64_t seed=0);
+                   bool randomize=false, int symmetry=0, uint64_t seed=0,int mutex_pool_power_of_two=16);
     ~BatchEvaluator() override;
     Evaluation evaluate(const std::vector<float>& observation) override;
     Evaluation evaluate_symmetry(const std::vector<float>& observation, int symmetry,
