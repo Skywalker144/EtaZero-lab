@@ -177,10 +177,11 @@ def update(model, optimizer, optimization, device):
     hidden = model.representation(obs, globals)
     total = torch.zeros((), device=device)
     for step in range(3):
-        p, v, td, error = model.prediction(hidden)
+        p, v, td, error, future, variance = model.prediction.training_outputs(hidden)
         loss = losses(p, v, td, error, obs, policy, policy, torch.ones(2, device=device),
                       target, target[:, None].expand(-1, 3, -1), torch.ones(2, device=device), 8., False,
-                      torch.zeros_like(policy), policy)[0]
+                      torch.zeros_like(policy), policy, future_logits=future, raw_variance_time=variance,
+                      future_target=torch.zeros_like(future), variance_target=torch.zeros_like(variance))[0]
         total = total + scale_gradient(loss, 1. if step == 0 else .5)
         if step < 2:
             if step:

@@ -254,7 +254,8 @@ def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
                                           'soft_opponent_policy_loss','value_loss')]
         assert all(np.isfinite(components)) and min(components)>0
         components += [event[key] for key in ('td_value_long_loss','td_value_mid_loss','td_value_short_loss',
-                                              'long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')]
+                                              'long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss',
+                                              'future_position_loss','variance_time_loss')]
         assert all(np.isfinite(components))
         assert sum(components)==pytest.approx(event['loss'],rel=2e-6)
     assert max(e["max_batch"] for e in events if e["event"]=="inference")>1

@@ -49,9 +49,11 @@ def test_basic_loss_hand_calculation_and_auxiliary_independence():
             self.value = torch.nn.Parameter(torch.zeros(2, 3))
             self.td = torch.nn.Parameter(torch.full((2, 3, 3), float('nan')))
             self.error = torch.nn.Parameter(torch.full((2,), float('nan')))
+            from types import SimpleNamespace
+            self.prediction = SimpleNamespace(training_outputs=self.predict)
 
-        def prediction(self, hidden):
-            return self.policy, self.value, self.td, self.error
+        def predict(self, hidden):
+            return self.policy, self.value, self.td, self.error, None, None
 
     model = Prediction()
     f = TrainingForward(model, load_config(CONFIGS / 'raw_muzero'))

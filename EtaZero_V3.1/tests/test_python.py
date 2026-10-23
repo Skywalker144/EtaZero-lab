@@ -51,7 +51,7 @@ def winning_record(rule=0):
     a['q_values']=(a['visits']>0).astype(np.int16)*8000
     a['opponent_policies']=np.concatenate((a['policies'][1:],np.ones((1,canvas*canvas),np.int16)))
     a['opponent_policy_weights']=np.r_[np.ones(t-1,np.float32),np.zeros(1,np.float32)]
-    a["simulations"]=np.ones(t,np.int32);a["temperatures"]=np.ones(t,np.float32)
+    a["simulations"]=np.ones(t,np.int64);a["temperatures"]=np.ones(t,np.float32)
     a["rewards"]=np.zeros(t,np.float32);a["rewards"][-1]=1
     a["game_offsets"]=np.array([0,t],np.int64);a["observation_offsets"]=np.array([0,t+1],np.int64)
     for key,value in (("game_ids",0),("seeds",7),("sizes",size),("rules",rule),("winners",1),("reasons",1)):
@@ -67,6 +67,7 @@ def winning_record(rule=0):
     for key in ("opening_moves","balanced_moves","policy_moves","opening_attempts","opening_status","start_values","initial_position_moves","initial_position_kind"):
         a[key]=np.zeros(1,dtype=RAW_DTYPES[key])
     a["hint_actions"]=np.array([-1],dtype=RAW_DTYPES["hint_actions"])
+    a['training_weights']=np.ones(1,np.float32)
     m={"canvas":canvas,"rows":t,"row_begin":0,"plies":t,"games":1,"opening_failures":[""],"run_id":"test","attempt_id":str(rule),
        "worker_id":0,"iteration_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
     a["metadata"]=np.frombuffer(json.dumps(m).encode(),np.uint8)
@@ -807,7 +808,7 @@ def test_shuffle_fixed_output_file_count_even_when_empty(tmp_path,config):
 
 
 @pytest.mark.parametrize('section,key,value',[
-    ('search','full_search_visits',1),('search','full_search_visits',2**31),
+    ('search','full_search_visits',1),('search','full_search_visits',2**50+1),
     ('search','cheap_search_visits',1000),('search','cheap_search_probs',1),
     ('lcb','min_visit_prop_for_lcb',1.1),('fpu','fpu_parent_weight_by_visited_policy_pow',-1),
     ('surprise_weighting','policy_surprise_data_weight',1),('dirichlet_noise','dirichlet_total_concentration',0),
@@ -817,8 +818,8 @@ def test_shuffle_fixed_output_file_count_even_when_empty(tmp_path,config):
     ('temperature','temperature_only_below_prob',1.1),('value_weighting','value_weight_exponent',-0.1),
     ('fpu','fpu_loss_prop',1.1),('puct','c_puct_stdev_scale',1.1),
     ('reduce_visits','reduce_visits_threshold',1),('reduce_visits','reduce_visits_threshold',-0.1),
-    ('reduce_visits','reduce_visits_threshold_lookback',0),('reduce_visits','reduce_visits_threshold_lookback',1001),
-    ('reduce_visits','reduced_visits_min',1),('reduce_visits','reduced_visits_min',10),
+    ('reduce_visits','reduce_visits_threshold_lookback',-1),('reduce_visits','reduce_visits_threshold_lookback',1001),
+    ('reduce_visits','reduced_visits_min',0),('reduce_visits','reduced_visits_min',10),
     ('reduce_visits','reduced_visits_weight',1.1)])
 def test_search_enhancement_validation(config,section,key,value):
     config[section][key]=value
@@ -926,7 +927,7 @@ def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatc
 
 def test_graph_configuration_bounds_and_environment_override(config):
     from etazero.engine_config import load_engine_config,validate_engine_config
-    assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0,graph_search_rep_bound=11)
+    assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0,graph_search_rep_bound=11,node_table_shards_power_of_two=16,use_eval_cache=False,eval_cache_min_visits=100)
     for match in (False,True):
         group='match' if match else 'analysis';prefix='MATCH_' if match else 'ANALYSIS_'
         for leak in (0,0.5,1):

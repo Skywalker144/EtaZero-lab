@@ -167,7 +167,7 @@ def test_unroll_gradient_boundaries_and_side_mask():
     model = Model(); forward = Forward(model, small_config())
     targets = [torch.ones(2, 4)] * 8
     inputs = [torch.ones(2, 1), torch.ones(2, 1), *targets,
-              torch.zeros(2, 3), torch.ones(2, 4), torch.arange(2)]
+              None, None, None, torch.zeros(2, 3), torch.ones(2, 4), torch.arange(2)]
     (value,), step_losses = forward(*inputs); value.backward()
     assert step_losses.tolist() == [10,30,90,270]
     assert not step_losses.requires_grad

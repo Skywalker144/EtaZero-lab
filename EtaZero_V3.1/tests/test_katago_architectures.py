@@ -111,7 +111,7 @@ def test_intermediate_loss_source_default_weighting_and_repvgg_gradient_scale():
     td = value[:, None].expand(-1, 3, -1)
     args = (policy, policy, torch.ones(2), value, td, torch.ones(2))
     model.eval()
-    manual = [losses(*head, obs, *args, 0.6, False)
+    manual = [losses(*head[:4], obs, *args, 0.6, False)
               for head in model.training_outputs(obs, globals)]
     actual = TrainingForward(model, 0.6, False)(obs, globals, *args)
     for i, output in enumerate(actual):
@@ -125,7 +125,9 @@ def test_intermediate_loss_source_default_weighting_and_repvgg_gradient_scale():
 
 def test_batch_renorm_schedule_and_metadata_default():
     model = KataGoNet('b2c16-brng-meta', 6)
-    model.prepare_brenorm(10, dict(avg_momentum=.01, target_rmax=3., target_dmax=2., adjustment_scale=10.))
+    from etazero.brenorm import BoundsSchedule
+    schedule = BoundsSchedule(model, dict(avg_momentum=.01, target_rmax=3., target_dmax=2., adjustment_scale=10.))
+    schedule.update(10)
     from etazero._vendor.katago.model_pytorch import NormMask
     for norm in (module for module in model.modules() if isinstance(module, NormMask)):
         assert norm.rmax == pytest.approx(3 - 2 / torch.e)

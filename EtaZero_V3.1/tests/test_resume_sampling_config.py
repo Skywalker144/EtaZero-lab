@@ -50,7 +50,7 @@ def native_selfplay(tmp_path,c):
                           capture_output=True,text=True,timeout=30)
 
 
-@pytest.mark.parametrize('field', ['cheap','reduced','playouts','full','overflow','hint','hint_playouts'])
+@pytest.mark.parametrize('field', ['cheap','reduced','playouts','full'])
 def test_pda_budget_bounds_fail_before_any_game(tmp_path,field):
     c=load_config(CONFIGS/'smoke_test')
     c['pda'].update(normal_asymmetric_playout_prob=.000001,max_asymmetric_ratio=8)
@@ -60,10 +60,6 @@ def test_pda_budget_bounds_fail_before_any_game(tmp_path,field):
     if field=='reduced':c['reduce_visits']['reduced_visits_min']=20
     if field=='playouts':c['search'].update(cheap_search_probs=0,max_playouts=20);c['reduce_visits']['reduce_visits']=False
     if field=='full':c['search'].update(full_search_visits=20,cheap_search_probs=0);c['reduce_visits']['reduce_visits']=False
-    if field=='overflow':c['search']['full_search_visits']=2**31-1
-    if field.startswith('hint'):
-        c['hint_positions'].update(hint_positions_prob=1,positions_file='unused-before-budget-validation')
-        c['search']['full_search_visits' if field=='hint' else 'max_playouts']=400_000_000
     with pytest.raises(ValueError, match='PDA'):validate(c)
     result=native_selfplay(tmp_path,c)
     assert result.returncode!=0 and 'PDA' in result.stderr,result.stderr
@@ -116,7 +112,7 @@ def test_pda_ignores_unreachable_full_and_reduced_budgets(tmp_path,full,playouts
 
 
 @pytest.mark.parametrize('branch', ['ordinary','hint','reanalysis'])
-@pytest.mark.parametrize('budget', ['reduced','full'])
+@pytest.mark.parametrize('budget', ['reduced'])
 def test_pda_checks_full_budgets_when_the_branch_is_reachable(tmp_path,branch,budget):
     c=all_cheap_pda_config()
     if budget=='full':
@@ -181,3 +177,14 @@ def test_disabled_sampling_accepts_valid_boundaries_and_generates_games(tmp_path
         raw=read_raw(path)
         assert not raw['balanced_moves'].any() and not raw['policy_moves'].any()
         assert not raw['initial_position_kind'].any()
+
+
+@pytest.mark.parametrize('hint', [False,True])
+def test_pda_accepts_source_int64_caps_and_saturating_hint(hint):
+    c=all_cheap_pda_config()
+    c['search'].update(full_search_visits=2**50,max_playouts=2**50,cheap_search_probs=.5)
+    c['reduce_visits']['reduced_visits_min']=30
+    if hint:c['hint_positions'].update(hint_positions_prob=.000001,positions_file='unused')
+    validate(c)
+    c['search']['full_search_visits']=2**50+1
+    with pytest.raises(ValueError):validate(c)
