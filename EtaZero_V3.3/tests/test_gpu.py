@@ -13,17 +13,17 @@ import numpy as np
 import pytest
 import torch
 from etazero.config import ROOT, load_config, write_native
-from etazero.data import read_raw, metadata, game_row_ranges
-from etazero.analysis import analyze
+from etazero.data.targets import read_raw, metadata, game_row_ranges
+from etazero.evaluation.analysis import analyze
 from etazero.engine_config import load_engine_config
-from etazero.export import example_inputs, export_model, verify_export
-from etazero.network import make_network, inference_network
-from etazero._vendor.katago.model_pytorch import NormMask
-from etazero.optimization import Optimization, inference_weights
-from etazero.runtime import run_training
+from etazero.models.export import example_inputs, export_model, verify_export
+from etazero.models.network import make_network, inference_network
+from etazero.models.katago.model_pytorch import NormMask
+from etazero.train.optimization import Optimization, inference_weights
+from etazero.run.runtime import run_training
 from etazero.schema import GLOBALS
 from etazero.storage import load_json, save_json, sha256
-from etazero.training import initialize, load_checkpoint, train_iteration, optimizer_for, commit_checkpoint, restore_rng
+from etazero.train.learner import initialize, load_checkpoint, train_iteration, optimizer_for, commit_checkpoint, restore_rng
 
 pytestmark=pytest.mark.skipif(os.environ.get("ETAZERO_GPU_TESTS")!="1",reason="Enable ETAZERO_GPU_TESTS=1 with host CUDA access")
 BINARY=ROOT/"build"/"etazero"
@@ -245,6 +245,25 @@ def test_resume_norm_sampling_identity_and_disabled_sampling_pipeline(tmp_path,g
     assert resumed['checkpoint']['total_steps']>state['checkpoint']['total_steps']
 
 
+def test_depthwise_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config):
+    c=copy.deepcopy(gpu_config)
+    c['network'].update(architecture='b6c384h6nbttflrs-dwc',channels=384,blocks=6)
+    # The pinned binary exporter rejects depthwise FFNs. Explicitly exercise
+    # CUDA learning with the supported TorchScript/CPU selfplay backend.
+    c['devices']['selfplay']='cpu'
+    c['inference']['inference_precision']='float32'
+    c['training'].update(compile=True,amp='float16',train_steps=2)
+    state=run_training(tmp_path,c,BINARY,max_iteration=2)
+    assert_training_budget(tmp_path,state,c)
+    saved=load_checkpoint(tmp_path,state['checkpoint'],c)
+    initial=load_checkpoint(tmp_path,load_json(tmp_path/'.internal/iterations/000001/plan.json')['input_checkpoint'],c)
+    depthwise=[key for key in saved['model'] if 'ffn_dwconv.weight' in key]
+    assert depthwise and any(not torch.equal(saved['model'][key],initial['model'][key]) for key in depthwise)
+    info=load_json(tmp_path/Path(state['model']['path']).parent/'manifest.json')
+    assert verify_export(tmp_path,info,c['network']['canvas'])==info
+    assert run_training(tmp_path,c,BINARY,resume=True,max_iteration=2)==state
+
+
 def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
     root,state=pipeline
     assert_training_budget(root,state,gpu_config)
@@ -337,7 +356,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
             return grad
         model.network.blocks[0].blockstack[0].q_proj.weight.register_hook(record)
         return model
-    monkeypatch.setattr('etazero.training.make_network',instrumented)
+    monkeypatch.setattr('etazero.train.learner.make_network',instrumented)
     c=copy.deepcopy(gpu_config)
     c['network'].update(architecture='transformer',canvas=15,channels=192,blocks=5,predict_q_values=predict_q_values)
     c['environment'].update(sizes='11,15',size_weights='1,1')
@@ -369,7 +388,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
     if predict_q_values:
         assert all(e['q_winloss_loss']>0 for e in updates)
         assert not torch.equal(saved['model']['network.policy_head.conv2p.weight'][6],initial['model']['network.policy_head.conv2p.weight'][6])
-        from etazero.data import read_raw,training_view
+        from etazero.data.targets import read_raw, training_view
         for shard in (root/'selfplay').rglob('*.npz'):
             raw=read_raw(shard);view=training_view(raw)
             assert raw['q_visits'].max()>0
@@ -399,7 +418,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
 
 
 def test_checkpoint_retention_resume_history_and_old_model(tmp_path,gpu_config):
-    from etazero.plotting import run_history, plot_run
+    from etazero.evaluation.plotting import run_history, plot_run
     c=copy.deepcopy(gpu_config)
     c['training'].update(checkpoint_keep=2,replay_ratio=1000)
     state=run_training(tmp_path,c,BINARY,max_iteration=3)
@@ -431,8 +450,8 @@ def test_checkpoint_retention_resume_history_and_old_model(tmp_path,gpu_config):
 
 
 def test_resume_finishes_cleanup_after_round_commit(tmp_path,gpu_config,monkeypatch):
-    import etazero.runtime as runtime
-    from etazero.plotting import run_history
+    import etazero.run.runtime as runtime
+    from etazero.evaluation.plotting import run_history
     c=copy.deepcopy(gpu_config);c['training']['checkpoint_keep']=1
     prune=runtime.prune_checkpoints
     def interrupted(root,keep):
@@ -505,7 +524,7 @@ def test_native_parity_all_sizes_rules_and_match(pipeline,gpu_config):
             np.testing.assert_allclose(native["raw_logits"],p[0,0].cpu(),rtol=2e-4,atol=2e-5)
             np.testing.assert_allclose(native["raw_wdl"],v[0].float().softmax(0).cpu(),rtol=2e-4,atol=2e-5)
     model_b=root/load_json(root/".internal/iterations"/"000001"/"status.json")["model"]["path"]
-    from etazero.arena import single_match
+    from etazero.evaluation.arena import single_match
     config=load_engine_config(CONFIGS / 'smoke_test',match=True)
     config['match'].update(board_size=5,rule='renju')
     _,games=single_match(config,BINARY,root/state['model']['path'],model_b,root/'match',games=4)
@@ -589,7 +608,7 @@ def test_single_d4_root_only_and_inference_precision(tmp_path,pipeline,gpu_confi
 
 
 def test_match_same_bot_clear_and_different_bot_reuse(tmp_path,pipeline):
-    from etazero.arena import single_match
+    from etazero.evaluation.arena import single_match
     root,state=pipeline;a=root/state['model']['path']
     b=root/load_json(root/'.internal/iterations/000001/status.json')['commit']['model']['path']
     config=load_engine_config(CONFIGS / 'smoke_test',True)
@@ -783,7 +802,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeyp
         model=original(config)
         model.network.policy_head.register_forward_hook(lambda *a:forwards.append(1))
         return model
-    monkeypatch.setattr("etazero.training.make_network",instrumented)
+    monkeypatch.setattr("etazero.train.learner.make_network",instrumented)
     result,done=train_iteration(tmp_path,c,plan,base,lambda event,**fields:events.append((event,fields)))
     assert autograd_config.donated_buffer==donation_before
     assert done and result["total_steps"]==2
@@ -804,7 +823,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeyp
 @pytest.mark.parametrize('compiled', [False, True])
 @pytest.mark.parametrize('training', [False, True])
 def test_learner_autocast_heads_are_fp32(gpu_config, amp, compiled, training):
-    from etazero.network import TrainingForward
+    from etazero.models.network import TrainingForward
     c=copy.deepcopy(gpu_config)
     model=make_network(c).cuda().train(training)
     with torch.no_grad():model.network.value_head.linear_valuehead.bias[0]=1e5
@@ -864,7 +883,7 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
             return grad
         model.network.conv_spatial.weight.register_hook(overflow_once)
         return model
-    monkeypatch.setattr('etazero.training.make_network',instrumented)
+    monkeypatch.setattr('etazero.train.learner.make_network',instrumented)
     events=[]
     def log(event,**fields):
         if event=='update': events.append(fields)
@@ -910,7 +929,7 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
 
 @pytest.mark.parametrize("phase",["shuffle","export","after_publish"])
 def test_stage_failure_recovery(tmp_path,gpu_config,monkeypatch,phase):
-    import etazero.runtime as runtime
+    import etazero.run.runtime as runtime
     c=copy.deepcopy(gpu_config);c["training"]["replay_ratio"]=1000
     with monkeypatch.context() as patch:
         if phase=="shuffle":
@@ -1108,7 +1127,7 @@ def assert_compiled_partial_resume(tmp_path,root,c):
     # layout and dynamic MuZero unroll compilation settings.
     from torch._inductor import config as compiler_config
     from unittest.mock import patch
-    from etazero import training as learner
+    from etazero.train import learner as learner
     # Production and deterministic audit modes have different global guards.
     # Retain the cache within the full/partial/resumed comparison itself.
     torch._dynamo.reset()
@@ -1246,7 +1265,7 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
         model=make_network(c).cuda().eval()
         with torch.no_grad():
             if architecture=='transformer':
-                from etazero.network import init_weights
+                from etazero.models.network import init_weights
                 for block in model.network.blocks:
                     init_weights(block.normactconvq.conv.weight,0.3,activation='relu')
                 for layer in model.modules():
@@ -1294,7 +1313,7 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
                 layer.running_mean.uniform_(-.3,.3);layer.running_std.uniform_(.5,1.5)
                 layer.gamma.uniform_(-.2,.2);layer.beta.uniform_(-.1,.1)
         if architecture=='transformer':
-            from etazero.network import init_weights
+            from etazero.models.network import init_weights
             for block in model.network.blocks:
                 init_weights(block.normactconvq.conv.weight,.3,activation='relu')
     scripted=torch.jit.script(inference_network(model))
@@ -1320,7 +1339,7 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
 
 
 def test_persistent_native_protocol_and_signal(tmp_path,pipeline,gpu_config):
-    from etazero.native import NativeWorker
+    from etazero.run.native import NativeWorker
     root,state=pipeline;model=state['model'];config=root/'config/effective.cfg'
     command=[str(BINARY),'worker','--config',str(config),'--device','cuda:0',
              '--run-id','protocol','--config-id','test','--source-id','test','--worker','0']
@@ -1356,7 +1375,7 @@ def test_persistent_native_protocol_and_signal(tmp_path,pipeline,gpu_config):
 
 
 def test_snapshot_retention_and_restore(tmp_path,gpu_config):
-    from etazero.reader import BatchReader
+    from etazero.data.reader import BatchReader
     c=copy.deepcopy(gpu_config);c['shuffle']['snapshot_keep']=1;c['training']['replay_ratio']=1000
     state=run_training(tmp_path,c,BINARY,max_iteration=3)
     statuses=[load_json(tmp_path/'.internal/iterations'/f'{i:06d}'/'status.json') for i in range(1,4)]
@@ -1375,8 +1394,8 @@ def test_snapshot_retention_and_restore(tmp_path,gpu_config):
 
 
 def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeypatch):
-    import etazero.runtime as runtime
-    from etazero.data import Catalog, metadata, training_view
+    import etazero.run.runtime as runtime
+    from etazero.data.targets import Catalog, metadata, training_view
     c=copy.deepcopy(gpu_config)
     c['selfplay']['bootstrap_games']=2
     c['replay']['min_rows']=150
@@ -1449,8 +1468,8 @@ def test_bootstrap_backfill_balance_and_replay_reset(tmp_path,gpu_config,monkeyp
 
 
 def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
-    from etazero.experiment import experiment_plan, run_experiment
-    from etazero.plotting import run_history
+    from etazero.run.experiment import experiment_plan, run_experiment
+    from etazero.evaluation.plotting import run_history
 
     umbrella = tmp_path/'umbrella'; umbrella.mkdir()
     (umbrella/'exp.cfg').write_text('[experiment]\nmax_iteration = 2\nmax_hours = 0\narm_gpus = 0\nshared_init = true\n')
@@ -1512,7 +1531,7 @@ def test_autoexp_real_cuda_shared_weights_queue_resume_and_plots(tmp_path):
 
 
 def test_autoexp_archived_muzero_architecture_and_scheduler_changes(tmp_path):
-    from etazero.experiment import experiment_plan, run_experiment, write_arm_config
+    from etazero.run.experiment import experiment_plan, run_experiment, write_arm_config
     from test_muzero_pipeline import small_config
     torch.set_num_threads(1)
     directory = tmp_path/'umbrella'; arm = directory/'a'
@@ -1580,7 +1599,7 @@ def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     (arm/'train.cfg.local').write_text('[training]\ntrain_steps = 200\ncheckpoint_every = 20\n'
                                      '[replay]\nmin_rows = 2048\nkeep_target_rows = all\n'
                                      '[shuffle]\nbucket_rows = 2048\ntraining_shard_rows = 2048\n')
-    command = [sys.executable, '-m', 'etazero.experiment', '--config-dir', str(umbrella),
+    command = [sys.executable, '-m', 'etazero.run.experiment', '--config-dir', str(umbrella),
                '--work-dir', str(work), '--binary', str(BINARY)]
     env = {**os.environ, 'PYTHONPATH': str(ROOT/'python')}
     log = tmp_path/'runner.log'
@@ -1611,13 +1630,13 @@ def test_autoexp_signal_and_real_cuda_learner_restore(tmp_path):
     assert state['iteration'] == 2 and state['checkpoint']['total_steps'] == 200
     assert not (root/old['path']).exists()
     assert old['id'] not in {r['id'] for r in load_json(root/'.internal/checkpoints.json')}
-    from etazero.plotting import run_history
+    from etazero.evaluation.plotting import run_history
     assert run_history(root)[-1]['steps'] == 200
     assert (root/'training.png').is_file()
 
 
 def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
-    from etazero.experiment import experiment_plan, run_experiment
+    from etazero.run.experiment import experiment_plan, run_experiment
     umbrella = tmp_path/'umbrella'; arm = umbrella/'a'; arm.mkdir(parents=True)
     root = tmp_path/'run'
     (umbrella/'exp.cfg').write_text(f'[experiment]\nmax_iteration = 0\nmax_hours = {1/3600}\narm_gpus = 0\nshared_init = false\nautoelo = false\n')
@@ -1639,9 +1658,9 @@ def test_autoexp_cumulative_time_budget_and_iteration_extension(tmp_path):
 
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch,algorithm):
-    import etazero.runtime as runtime
-    from etazero.compiler import compilation_seconds
-    from etazero.experiment import arm_progress
+    import etazero.run.runtime as runtime
+    from etazero.train.compiler import compilation_seconds
+    from etazero.run.experiment import arm_progress
     if algorithm=='muzero':
         from test_muzero_pipeline import small_config
         c=small_config()
@@ -1698,7 +1717,7 @@ def test_compiler_timing_and_sigint_stage_resume(tmp_path,gpu_config,monkeypatch
 
 
 def test_compiler_timer_covers_lazy_backward_and_recompile(gpu_config):
-    from etazero.compiler import WorkTimer,compilation_seconds
+    from etazero.train.compiler import WorkTimer, compilation_seconds
     from torch._dynamo.utils import calculate_time_spent
     from torch._inductor import config as inductor_config
     # Cold compilation makes lazy backward observable even on a warm machine.
@@ -1726,8 +1745,8 @@ def test_compiler_timer_covers_lazy_backward_and_recompile(gpu_config):
 
 
 def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monkeypatch):
-    from etazero.arena import single_match, PairStore
-    from etazero.elo import write_ratings
+    from etazero.evaluation.arena import single_match, PairStore
+    from etazero.evaluation.elo import write_ratings
     root,state=pipeline
     ec=load_engine_config(CONFIGS / 'smoke_test')
     _,result=analyze(ec,BINARY,root,size=5,rule='renju',moves='0,6')
@@ -1773,7 +1792,7 @@ def test_eval_100_visits_and_arena_resume_elo(tmp_path,pipeline,gpu_config,monke
 
 
 def test_mixed_rule_openings_and_training_feature_dropout(tmp_path,pipeline,gpu_config):
-    from etazero.data import training_view
+    from etazero.data.targets import training_view
     from etazero.schema import unpack_observations
     root,state=pipeline
     c=copy.deepcopy(gpu_config)
@@ -2035,8 +2054,8 @@ def test_auxiliary_outputs_train_export_native_cuda(tmp_path,pipeline,gpu_config
 
 @pytest.mark.parametrize('batch_size,steps,k', [(5,2,2),(11,1,6)])
 def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config,batch_size,steps,k):
-    from etazero.data import metadata,training_view
-    from etazero.shuffle import build_snapshot
+    from etazero.data.targets import metadata, training_view
+    from etazero.data.shuffle import build_snapshot
     from etazero.storage import save_json
     c=copy.deepcopy(gpu_config)
     c['replay'].update(min_rows=11,keep_target_rows='all')
@@ -2048,7 +2067,7 @@ def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config,ba
     root=tmp_path/'run';directory=root/'selfplay/worker'
     subprocess.run([str(ROOT/'build/record_contract_test'),str(directory)],check=True,capture_output=True,text=True)
     path=next(directory.glob('*.npz'));raw=read_raw(path);view=training_view(raw)
-    assert not view['full_game_weight'][-2:].any()
+    assert not view['value_aux_weight'][-2:].any()
     snapshot=build_snapshot(root,1,[{'path':str(path.relative_to(root)), 'sha256':sha256(path),'metadata':metadata(raw)}],c)
     initial=initialize(root,c)
     before=load_checkpoint(root,initial,c)
@@ -2063,7 +2082,7 @@ def test_native_side_supervision_cuda_training_and_export(tmp_path,gpu_config,ba
     write_native(c,root/'config/effective.cfg')
     info=export_model(root,c,reference)
     assert verify_export(root,info,c['network']['canvas'])==info
-    save_json(root/'side_validation.json',{'rows':len(view['value']), 'side_rows':int((view['full_game_weight']==0).sum()),
+    save_json(root/'side_validation.json',{'rows':len(view['value']), 'side_rows':int((view['value_aux_weight']==0).sum()),
                                         'checkpoint':reference,'export':info,'events':events})
 
 
@@ -2256,18 +2275,22 @@ class PdaCudaModel(torch.nn.Module):
     def metadata(self) -> tuple[int,str]:
         return self.canvas,'alphazero'
 
+    @torch.jit.export
+    def game_name(self) -> str:
+        return "gomoku"
+
     def forward(self,x,globals):
         advantage=globals[:,5].float()
         ordinary=self.grid[None].expand(x.size(0),-1)+advantage[:,None]*self.grid[None]
-        value=torch.stack((advantage*.2,advantage*0,-advantage*.2),1)
+        value=torch.stack((advantage*.2,advantage*0,-advantage*.2,torch.full_like(advantage,-10000)),1)
         return ordinary,value,ordinary.flip(1),torch.full_like(advantage,.5)
 
 
 @pytest.mark.parametrize('predict_q_values',[False,True])
 @pytest.mark.parametrize('direct',[False,True])
 def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,predict_q_values):
-    from etazero.data import metadata,training_view
-    from etazero.shuffle import build_snapshot
+    from etazero.data.targets import metadata, training_view
+    from etazero.data.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config)
     if predict_q_values:c['network'].update(architecture='transformer',channels=192,blocks=5,predict_q_values=True)
     c['environment'].update(sizes='5',size_weights='1',rules='renju',rule_weights='1')
@@ -2302,7 +2325,7 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
              '--model',str(model),'--model-id','conditional','--device','cuda:0','--size','5','--rule','renju','--moves',moves],
              text=True,capture_output=True,check=True,timeout=30)
         value=json.loads(output.stdout);half=.5*d*(-1 if moves else 1)
-        logits=np.array([.2*half,0,-.2*half]);expected=np.exp(logits);expected/=expected.sum()
+        logits=np.array([.2*half,0,-.2*half,-10000]);expected=np.exp(logits);expected/=expected.sum()
         np.testing.assert_allclose(value['raw_wdl'],expected,rtol=0,atol=8e-8)
         np.testing.assert_allclose(value['wdl'],expected,rtol=0,atol=8e-8)
         evaluations.append({'doublings':d,'moves':moves,'native':value})
@@ -2326,7 +2349,7 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
         for game_index,(lo,hi) in enumerate(zip(raw['game_offsets'][:-1],raw['game_offsets'][1:])):
             offset=raw['observation_offsets'][game_index]
             half=raw['globals'][offset:offset+hi-lo,5].astype(np.float64)
-            logits=np.stack((.2*half,np.zeros_like(half),-.2*half),1)
+            logits=np.stack((.2*half,np.zeros_like(half),-.2*half,np.full_like(half,-10000)),1)
             expected=np.exp(logits);expected/=expected.sum(1,keepdims=True)
             np.testing.assert_allclose(raw['network_wdl'][lo:hi],expected,rtol=0,atol=2e-7)
         reanalyzed+=int(raw['reanalyzed'].sum());side_count+=len(raw['side_players']);main_count+=len(raw['actions'])
@@ -2337,10 +2360,12 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
             game=int(np.searchsorted(raw['game_offsets'][1:],turn,side='right'))
             obs_index=int(raw['observation_offsets'][game]+turn-raw['game_offsets'][game])
             d=2*float(raw['globals'][obs_index,5]);factor=2*(2**d)/(1+2**d)
-            assert raw['reanalysis_original_visits'][turn]==int(np.floor(30*factor+.5))
+            # Source PUCT stops on completed counts; parallel in-flight work
+            # can finish beyond the requested cap.
+            assert raw['reanalysis_original_visits'][turn]>=int(np.floor(30*factor+.5))
             sample=np.searchsorted(raw['sample_indices'],turn)
             if sample<len(raw['sample_indices']) and raw['sample_indices'][sample]==turn:
-                assert raw['visits'][sample].sum()+1==int(np.floor(40*factor+.5))
+                assert raw['visits'][sample].sum()+1>=int(np.floor(40*factor+.5))
                 assert raw['opponent_policy_weights'][sample]==0
                 assert raw['q_visits'][sample].max()>0
         assert (raw['side_q_visits'].max(1)>0).all()
@@ -2349,15 +2374,20 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
         np.testing.assert_allclose(raw['side_wdl'].sum(1),1,rtol=0,atol=2e-7)
         # Outcome-disabled reanalysis suppresses auxiliary complete-game
         # supervision, while unreanalyzed main rows keep it after repetition.
-        game_gates=[]
+        game_gates=[];finished=[]
         for gi,(lo,hi) in enumerate(zip(raw['game_offsets'][:-1],raw['game_offsets'][1:])):
             main_gate=np.repeat(1-raw['reanalyzed'][lo:hi],raw['row_repeats'][lo:hi]).astype(np.float32)
             gated_main_rows+=int((main_gate==0).sum())
             side_rows=int(raw['side_row_repeats'][raw['side_game_indices']==gi].sum())
             game_gates.extend((main_gate,np.zeros(side_rows,np.float32)))
+            finished.extend((np.ones(len(main_gate),np.float32),np.zeros(side_rows,np.float32)))
         all_gates=np.concatenate(game_gates);m=metadata(raw)
-        np.testing.assert_array_equal(view['full_game_weight'],all_gates[m['row_begin']:m['row_begin']+m['rows']])
-        expected_gate_counts+=np.bincount(view['full_game_weight'].astype(np.int64),minlength=2)
+        np.testing.assert_array_equal(view['value_aux_weight'],all_gates[m['row_begin']:m['row_begin']+m['rows']])
+        np.testing.assert_array_equal(view['future_position_weight'],view['value_aux_weight'])
+        np.testing.assert_array_equal(raw['globalTargetsNC'][:,27],view['value_aux_weight'])
+        np.testing.assert_array_equal(raw['globalTargetsNC'][:,33],view['future_position_weight'])
+        np.testing.assert_array_equal(raw['globalTargetsNC'][:,62],np.concatenate(finished)[m['row_begin']:m['row_begin']+m['rows']])
+        expected_gate_counts+=np.bincount(view['value_aux_weight'].astype(np.int64),minlength=2)
         assert np.isfinite(view['td_value']).all()
         entries.append({'path':str(path.relative_to(root)), 'sha256':sha256(path),'metadata':metadata(raw)})
     assert reanalyzed>0 and side_count>0 and main_count>0
@@ -2366,16 +2396,18 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
     snapshot=build_snapshot(root,1,entries,c)
     manifest=load_json(root/'snapshots'/snapshot/'manifest.json')
     actual_gate_counts=np.zeros(2,np.int64)
+    from etazero.data.reader import load_file
     for file in manifest['files']:
-        with np.load(root/'snapshots'/snapshot/'data'/file['path'],allow_pickle=False) as batch:
-            actual_gate_counts+=np.bincount(batch['full_game_weight'].astype(np.int64),minlength=2)
+        batch=load_file(root/'snapshots'/snapshot/'data'/file['path'],file['rows'],manifest)
+        actual_gate_counts+=np.bincount(batch['value_aux_weight'].astype(np.int64),minlength=2)
+        np.testing.assert_array_equal(batch['future_position_weight'],batch['value_aux_weight'])
     np.testing.assert_array_equal(actual_gate_counts,expected_gate_counts)
-    initial=initialize(root,c);original=load_checkpoint(root,initial,c)['model']['linear_global.weight'].clone()
+    initial=initialize(root,c);original=load_checkpoint(root,initial,c)['model']['network.linear_global.weight'].clone()
     events=[]
     reference,done=train_iteration(root,c,{'iteration':1,'snapshot_id':snapshot,'train_steps':2,'batch_size':8},initial,
                                    lambda event,**fields:events.append({'event':event,**fields}))
     assert done and reference['total_samples']==16 and reference['optimizer_steps']==2
-    learned=load_checkpoint(root,reference,c)['model']['linear_global.weight']
+    learned=load_checkpoint(root,reference,c)['model']['network.linear_global.weight']
     assert learned.shape[1]==len(GLOBALS) and not torch.equal(learned[:,4:6],original[:,4:6])
     write_native(c,root/'config/effective.cfg');info=export_model(root,c,reference)
     assert verify_export(root,info,c['network']['canvas'])==info and all(np.isfinite(e['loss']) for e in events if e['event']=='update')
@@ -2387,8 +2419,8 @@ def test_pda_side_reanalysis_cuda_and_real_training(tmp_path,gpu_config,direct,p
 
 @pytest.mark.parametrize('kind',['early','late','hint'])
 def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind):
-    from etazero.data import metadata,training_view
-    from etazero.shuffle import build_snapshot
+    from etazero.data.targets import metadata, training_view
+    from etazero.data.shuffle import build_snapshot
     from etazero.config import validate
     c=copy.deepcopy(gpu_config)
     c['environment'].update(sizes='5',size_weights='1',rules='renju',rule_weights='1')
@@ -2415,7 +2447,7 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
          '--device','cuda:0','--games','6','--output',str(directory),'--run-id','forks','--attempt-id',kind,'--config-id',kind,
          '--source-id','test','--iteration','2','--worker','0','--seed','734'],text=True,capture_output=True,timeout=120)
     (root/'stdout.log').write_text(result.stdout);(root/'stderr.log').write_text(result.stderr);assert result.returncode==0,result.stderr
-    from etazero.data import game_row_ranges
+    from etazero.data.targets import game_row_ranges
     entries=[];seen=[];games=[]
     for path in directory.glob('*.npz'):
         raw=read_raw(path);view=training_view(raw);assert np.isfinite(view['td_value']).all()
@@ -2447,7 +2479,7 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
     if kind=='hint':assert 1 in seen
     if kind=='early':
         # The worker's shared pool survives round requests and evaluator release/model changes.
-        from etazero.native import NativeWorker
+        from etazero.run.native import NativeWorker
         worker=NativeWorker([str(BINARY),'worker','--config',str(root/'effective.cfg'),'--device','cuda:0',
              '--run-id','worker-fork','--config-id',kind,'--source-id','test','--worker','0'],root/'worker.stderr')
         tags=[]
@@ -2480,7 +2512,7 @@ def test_hint_game_fork_cuda_actual_prefix_and_training(tmp_path,gpu_config,kind
     ('nbt','bfloat16',True),('transformer','bfloat16',True)])
 def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_config,architecture,amp,compile_enabled):
     from test_replay import holdout_entries
-    from etazero.shuffle import build_snapshot
+    from etazero.data.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config);c['training'].update(skip_validation=False,d4_augmentation=False,max_validation_samples=8,
                                                     train_steps=4,amp=amp,compile=compile_enabled)
     if architecture=='transformer':c['network'].update(architecture='transformer',channels=192,blocks=5,predict_q_values=True)
@@ -2509,7 +2541,7 @@ def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_
 
 def test_plain_reader_insufficient_snapshot_fails_before_cuda_update(tmp_path,gpu_config):
     from test_replay import holdout_entries
-    from etazero.shuffle import build_snapshot
+    from etazero.data.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config);c['training'].update(train_steps=100)
     c['plain_optimizer']=dict(learning_rate=.002,weight_decay=.0007)
     # Include both train and holdout files before testing the learner's quota.
@@ -2524,8 +2556,8 @@ def test_plain_reader_insufficient_snapshot_fails_before_cuda_update(tmp_path,gp
 
 @pytest.mark.parametrize('compiled', [False, True])
 def test_source_reader_cuda_short_games_credit_and_completed_round_resume(tmp_path,gpu_config,monkeypatch,compiled):
-    from etazero.data import Catalog
-    from etazero.plotting import run_history
+    from etazero.data.targets import Catalog
+    from etazero.evaluation.plotting import run_history
     c=copy.deepcopy(gpu_config)
     c['writer']['research_records']=False
     c['replay'].update(min_rows=64,keep_target_rows='all')
@@ -2576,8 +2608,8 @@ def test_source_reader_cuda_short_games_credit_and_completed_round_resume(tmp_pa
 
 
 def test_zero_step_cuda_round_keeps_model_and_fractional_credit(tmp_path,gpu_config,monkeypatch):
-    from etazero.data import Catalog
-    from etazero.plotting import run_history
+    from etazero.data.targets import Catalog
+    from etazero.evaluation.plotting import run_history
     c=copy.deepcopy(gpu_config);c['training'].update(replay_ratio=.001,skip_validation=True)
     estimate=Catalog.previous_rows_per_game
     monkeypatch.setattr(Catalog,'previous_rows_per_game',lambda self,i:1e9 if i>=2 else estimate(self,i))
@@ -2597,7 +2629,7 @@ def test_zero_step_cuda_round_keeps_model_and_fractional_credit(tmp_path,gpu_con
 
 
 def test_shortened_cuda_controller_budget_survives_learner_interruption(tmp_path,gpu_config,monkeypatch):
-    import etazero.runtime as runtime
+    import etazero.run.runtime as runtime
     c=copy.deepcopy(gpu_config)
     c['replay'].update(min_rows=64,keep_target_rows='all')
     c['training'].update(train_steps=32,skip_validation=True,replay_ratio=1)
@@ -2635,7 +2667,7 @@ def test_shortened_cuda_controller_budget_survives_learner_interruption(tmp_path
 @pytest.mark.parametrize('stop_at',[2,3])
 def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config,monkeypatch,compiled,stop_at):
     from test_replay import holdout_entries
-    from etazero.shuffle import build_snapshot
+    from etazero.data.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config);c['training'].update(amp='float16',compile=compiled,train_steps=7,sub_epochs=3)
     c['optimizer'].update(lookahead_k=3,swa_period_samples=16,norm_only_at_print=False,lookahead_print=True)
     # Include the full fixture instead of selecting only its newest holdout files.
@@ -2656,7 +2688,7 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
                 injection['remaining']-=1;return torch.full_like(grad,float('inf'))
             return grad
         model.network.conv_spatial.weight.register_hook(overflow);return model
-    monkeypatch.setattr('etazero.training.make_network',instrumented)
+    monkeypatch.setattr('etazero.train.learner.make_network',instrumented)
     plan=dict(iteration=1,snapshot_id=snapshot,train_steps=7,batch_size=8)
     full_events=[];resumed_events=[]
     deterministic=torch.are_deterministic_algorithms_enabled();torch.use_deterministic_algorithms(True)
@@ -2694,7 +2726,7 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
 
 
 def test_native_worker_same_id_different_model_path_clears_cuda_cache(tmp_path,gpu_config):
-    from etazero.native import NativeWorker
+    from etazero.run.native import NativeWorker
     c=copy.deepcopy(gpu_config);c['inference']['inference_precision']='float32'
     c['opening']['probability']=0;c['policy_init']['policy_init']=False
     c['side_positions']['side_position_prob']=0;c['game_forks'].update(early_fork_game_prob=0,fork_game_prob=0)
@@ -2733,11 +2765,11 @@ def recovery_parent(tmp_path_factory,gpu_config):
 @pytest.mark.parametrize('boundary',['selfplay_finish','shuffle_finish','checkpoint_payload','learner_pointer',
                                       'export_stage','export_rename','metrics','round_commit','state_commit','publication'])
 def test_controller_transaction_boundaries_real_cuda(tmp_path,recovery_parent,gpu_config,monkeypatch,boundary):
-    import etazero.runtime as runtime
-    import etazero.training as training
-    import etazero.export as exporting
-    from etazero.data import Catalog
-    from etazero.plotting import run_history
+    import etazero.run.runtime as runtime
+    import etazero.train.learner as training
+    import etazero.models.export as exporting
+    from etazero.data.targets import Catalog
+    from etazero.evaluation.plotting import run_history
     parent,base=recovery_parent;root=tmp_path/'run';shutil.copytree(parent,root)
     preserved={p:sha256(p) for name,pattern in [('selfplay','*.npz'),('models','model.pt'),('checkpoints','*.pt')]
                for p in (root/name).rglob(pattern)}
@@ -2861,8 +2893,8 @@ def test_committed_artifact_corruption_rejected_before_cuda_workers(tmp_path,rec
 
 def test_native_final_row_shards_cuda_training_and_export(tmp_path,gpu_config):
     from etazero.config import validate
-    from etazero.data import Catalog,metadata,training_view
-    from etazero.shuffle import build_snapshot
+    from etazero.data.targets import Catalog, metadata, training_view
+    from etazero.data.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config)
     c['environment'].update(sizes='5',size_weights='1',rules='renju',rule_weights='1')
     c['opening']['probability']=0;c['policy_init']['policy_init']=False
@@ -2917,9 +2949,9 @@ def test_native_final_row_shards_cuda_training_and_export(tmp_path,gpu_config):
 @pytest.mark.parametrize('interrupt', [False, True])
 def test_missing_summary_preserves_commit_and_elo(tmp_path, recovery_parent, gpu_config, monkeypatch, interrupt):
     import warnings
-    import etazero.runtime as runtime
-    from etazero.arena import discover_players
-    from etazero.plotting import run_history
+    import etazero.run.runtime as runtime
+    from etazero.evaluation.arena import discover_players
+    from etazero.evaluation.plotting import run_history
     parent, _ = recovery_parent
     root = tmp_path/'run'
     shutil.copytree(parent, root)
@@ -2970,16 +3002,16 @@ def test_missing_summary_preserves_commit_and_elo(tmp_path, recovery_parent, gpu
 
 def test_observation_failures_do_not_block_completed_training(tmp_path, gpu_config, monkeypatch):
     import warnings
-    import etazero.compiler as compiler
-    from etazero.arena import discover_players
-    from etazero.runtime import Journal
+    import etazero.train.compiler as compiler
+    from etazero.evaluation.arena import discover_players
+    from etazero.run.runtime import Journal
     c = copy.deepcopy(gpu_config)
     # Exercise an unavailable compiler counter while real CUDA training proceeds.
-    monkeypatch.setattr('etazero.runtime.compilation_enabled', lambda _: True)
+    monkeypatch.setattr('etazero.run.runtime.compilation_enabled', lambda _: True)
     monkeypatch.setattr(compiler, 'compilation_seconds', lambda: float('nan'))
     def missing_metrics(*args, **kwargs):
         raise ValueError('injected missing update events')
-    monkeypatch.setattr('etazero.plotting.round_history', missing_metrics)
+    monkeypatch.setattr('etazero.evaluation.plotting.round_history', missing_metrics)
     original = Journal.__call__
     def missing_log(self, event, **fields):
         if event == 'update':
@@ -3003,7 +3035,7 @@ def test_observation_failures_do_not_block_completed_training(tmp_path, gpu_conf
 
 
 def test_rng_restore_uses_only_the_learner_device(monkeypatch):
-    from etazero.training import rng_state
+    from etazero.train.learner import rng_state
     torch.cuda.init()
     state = rng_state(torch.device('cuda:0'))
     expected = torch.rand(8, device='cuda:0')

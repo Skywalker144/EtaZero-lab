@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import torch
 from etazero.games import SPECS
-from etazero.muzero.network import NetworkConfig,MuZeroNet
-from etazero.cuda_export import export_source
+from etazero.models.muzero.network import NetworkConfig, MuZeroNet
+from etazero.models.cuda_export import export_source
 
 @pytest.fixture(autouse=True)
 def full_precision_reference():

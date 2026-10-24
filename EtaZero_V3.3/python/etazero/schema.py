@@ -1,8 +1,12 @@
 """Shared trajectory fields and legacy Gomoku/Hex features; game layouts live in games.py."""
 import json
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
-    from .games import RULE_GAMES, SPECS
-    from .outcomes import REASONS, generate_cpp as outcome_cpp
+    from etazero.games import RULE_GAMES, SPECS
+    from etazero.outcomes import REASONS, generate_cpp as outcome_cpp
 except ImportError:
     from games import RULE_GAMES, SPECS
     from outcomes import REASONS, generate_cpp as outcome_cpp
@@ -53,7 +57,7 @@ CONTRACT = {"planes": PLANES, "globals": GLOBALS,
             "optional_training_policy_head": Q_POLICY_HEAD,
             "q_targets": "pure current-player W-L; float32 stochastic rounding times 32000 on each final repeated row; int16 visits=min(child NODE visits,32000), stored once per sampled main/side position; no Go score Q; reanalysis replaces both",
             "opponent_policy": "next actual turn search, independent of its row repeat; final turn uniform placeholder and weight zero",
-            "reanalysis": "postgame cheap-only full searches replace policy/search/NN and target weights, preserving actual moves/outcome; reanalyzed rows without outcome targets suppress opponent/error/default optimistic supervision via full_game_weight=0; main value/TD and Q remain enabled; disabled optimistic branch retains fixed 0.5 weights",
+            "reanalysis": "postgame cheap-only full searches replace policy/search/NN and target weights, preserving actual moves/outcome; reanalyzed rows without outcome targets suppress opponent/error/variance/default optimistic and future-position supervision via independent target weights; main value/TD and Q remain enabled; disabled optimistic branch retains fixed 0.5 weights",
             "pda": "nonzero doubling advantage activates flag; signed at each side-to-move, retained by main rows; side rows zero both PDA globals",
             "sampling": "KataGo surprise weights stochastically rounded once per game; repeat rows in training view"}
 
@@ -75,7 +79,7 @@ def unpack_observations(packed, canvas):
 def generate_header(path):
     from pathlib import Path
     try:
-        from .games import generate_cpp
+        from etazero.games import generate_cpp
     except ImportError:
         from games import generate_cpp
     names = ", ".join(json.dumps(x) for x in RULES)

@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 import pytest
-from etazero import compiler
+from etazero.train import compiler
 
 
 def test_muon_kernel_compilation_is_counted_with_eager_network(monkeypatch):

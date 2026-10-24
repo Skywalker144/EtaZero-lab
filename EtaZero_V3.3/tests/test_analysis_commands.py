@@ -9,11 +9,11 @@ import sys
 import pytest
 import torch
 from config_samples import CONFIGS
-from etazero.analysis import analyze
+from etazero.evaluation.analysis import analyze
 from etazero.config import ROOT, load_config, write_native
 from etazero.engine_config import load_engine_config
-from etazero.export import export_model
-from etazero.training import initialize
+from etazero.models.export import export_model
+from etazero.train.learner import initialize
 
 pytestmark=pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS')!='1',reason='Host CUDA required')
 

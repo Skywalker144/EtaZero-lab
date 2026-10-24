@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'python'))
 
 from etazero.config import fingerprint, load_config, validate, write_native
-from etazero.native import NativeWorker
-from etazero.runtime import provenance, source_snapshot, verify_build
+from etazero.run.native import NativeWorker
+from etazero.run.runtime import provenance, source_snapshot, verify_build
 
 
 def candidate(text):

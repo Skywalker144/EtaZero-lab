@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from etazero.config import ROOT
 from etazero.engine_config import load_engine_config, load_match_opening_config, load_match_hex_opening_config
 from etazero.build import verify_build
-from etazero.analysis import model_info
+from etazero.evaluation.analysis import model_info
 from etazero.storage import load_json
 from .app import App, Conflict
 

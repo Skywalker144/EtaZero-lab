@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from etazero.elo import fit_ratings
+from etazero.evaluation.elo import fit_ratings
 
 
 class EloTests(unittest.TestCase):

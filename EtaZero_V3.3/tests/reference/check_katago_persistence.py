@@ -13,11 +13,11 @@ import tempfile
 from types import SimpleNamespace
 import torch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'python'))
-from etazero.config import ROOT,load_config
-from etazero.network import make_network
-from etazero.optimization import Optimization,optimizer_for
-from etazero.training import commit_checkpoint,load_checkpoint
-from etazero.training_metrics import TrainingMetrics
+from etazero.config import ROOT, load_config
+from etazero.models.network import make_network
+from etazero.train.optimization import Optimization, optimizer_for
+from etazero.train.learner import commit_checkpoint, load_checkpoint
+from etazero.train.training_metrics import TrainingMetrics
 
 
 def check():

@@ -11,12 +11,11 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.muzero.network import (NetworkConfig, MuZeroNet, inference_network,
-                                    normalize_hidden_state, scale_gradient)
-from etazero.muzero.optimization import parameter_groups, optimizer_for
-from etazero.network import losses
-from etazero._vendor.katago.model_pytorch import PolicyHead,ValueHead
-from etazero.optimization import Optimization
+from etazero.models.muzero.network import NetworkConfig, MuZeroNet, inference_network, normalize_hidden_state, scale_gradient
+from etazero.train.muzero.optimization import parameter_groups, optimizer_for
+from etazero.models.network import losses
+from etazero.models.katago.model_pytorch import PolicyHead, ValueHead
+from etazero.train.optimization import Optimization
 from etazero.schema import GLOBALS
 
 

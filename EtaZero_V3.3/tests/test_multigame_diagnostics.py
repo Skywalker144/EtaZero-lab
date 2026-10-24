@@ -9,7 +9,7 @@ from config_samples import CONFIGS
 from etazero.config import write_native
 from etazero.engine_config import load_engine_config
 from etazero.games import XIANGQI_INDEX, spec_for_rule
-from etazero.network import make_network, inference_network
+from etazero.models.network import make_network, inference_network
 from etazero.symmetry import augment_batch
 from test_multigame import ROOT, BINARY, small_config
 

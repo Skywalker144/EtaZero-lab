@@ -16,7 +16,7 @@ def test_go_profile_defaults_overrides_and_page_reload(tmp_path):
         pytest.skip('Build native engine first')
     import torch
     from playwright.sync_api import sync_playwright
-    from etazero.network import make_network, inference_network
+    from etazero.models.network import make_network, inference_network
 
     # A small real Go network keeps this test independent of published runs.
     torch.set_num_threads(1)

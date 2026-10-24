@@ -9,15 +9,15 @@ import numpy as np
 import pytest
 import torch
 
-from etazero.runtime import run_training
-from etazero.brenorm import BoundsSchedule
-from etazero.data import full_trajectory_auxiliary, training_view
+from etazero.run.runtime import run_training
+from etazero.train.brenorm import BoundsSchedule
+from etazero.data.targets import full_trajectory_auxiliary, training_view
 from etazero.games import SPECS
-from etazero.lr_schedule import effective_scale
-from etazero.network import continuation_losses, make_network
+from etazero.train.lr_schedule import effective_scale
+from etazero.models.network import continuation_losses, make_network
 from etazero.schema import unpack_observations
 from etazero.symmetry import mask_history
-from etazero.training import training_forward, forward_batch
+from etazero.train.learner import training_forward, forward_batch
 from test_python import winning_record
 from etazero.config import load_config
 from config_samples import CONFIGS
@@ -151,7 +151,7 @@ def test_real_targets_reach_heads_and_backpropagate(algorithm,no_result,device):
         a['winners'][:]=0;a['reasons'][:]=Reason.NO_RESULT;a['search_wdl'][:]=[0,0,0,1]
     if algorithm == 'muzero':
         from test_muzero_pipeline import small_config
-        from etazero.muzero.data import prepare_batch
+        from etazero.data.muzero import prepare_batch
         import random
         c=small_config()
         m.update(algorithm='muzero',unroll_steps=3)
@@ -197,7 +197,7 @@ def test_learning_rate_source_boundaries_and_sqrt_cycle():
 @pytest.mark.parametrize('kind', ['normuon','aurora'])
 @pytest.mark.parametrize('polar', [False,True])
 def test_optional_muon_kernels_restore_next_update(kind,polar,monkeypatch):
-    from etazero.muon import Muon
+    from etazero.train.muon import Muon
     monkeypatch.setenv('KATAGO_MUON_BATCHED_NS','0')
     torch.set_num_threads(1)
     p=torch.nn.Parameter(torch.randn(4,3,2,2))
@@ -213,8 +213,8 @@ def test_optional_muon_kernels_restore_next_update(kind,polar,monkeypatch):
 
 
 def test_attention_bound_hinge_and_gradient_matches_norm_bound():
-    from etazero.attention_penalty import configure,metrics
-    from etazero.transformer import Attention
+    from etazero.train.attention_penalty import configure, metrics
+    from etazero.models.transformer import Attention
     torch.set_num_threads(1)
     model=Attention(2)
     x=torch.randn(4,96,2,2);mask=torch.ones(4,1,2,2)
@@ -235,13 +235,13 @@ def test_attention_bound_hinge_and_gradient_matches_norm_bound():
 
 
 def test_attention_penalty_requires_an_attention_trunk():
-    from etazero.attention_penalty import configure
+    from etazero.train.attention_penalty import configure
     with pytest.raises(ValueError,match='attention layers'):
         configure(torch.nn.Linear(3,3),dict(cap=3,batch_fraction=1))
 
 
 def test_muon_auxiliary_lr_and_decay_floor_resume():
-    from etazero.optimization import optimizer_for,optimization_for,group_settings
+    from etazero.train.optimization import optimizer_for, optimization_for, group_settings
     from test_muon import muon_config
     c=muon_config();c['optimizer'].update(kind='normuon',wd_floor_frac=.5,muon_adam_lr_factor=.3)
     model=make_network(c);optimizer=optimizer_for(model,c);controller=optimization_for(model,c,optimizer)
@@ -255,8 +255,8 @@ def test_muon_auxiliary_lr_and_decay_floor_resume():
 
 @pytest.mark.parametrize('architecture', ['transformer','b7c96h6kv3qk32v16tflrs-fson-silu'])
 def test_attention_training_metrics_and_export(architecture):
-    from etazero.export import export_model,example_inputs
-    from etazero.network import inference_network
+    from etazero.models.export import export_model, example_inputs
+    from etazero.models.network import inference_network
     c=load_config(CONFIGS/'smoke_test');c['network'].update(architecture=architecture,channels=192 if architecture=='transformer' else 96,blocks=5 if architecture=='transformer' else 14)
     c['attention_penalty'].update(cap=0,batch_fraction=.5)
     a,m=winning_record(1);batch=training_view(a);batch['obs']=unpack_observations(batch['obs'],m['canvas']).astype(np.float32)
@@ -274,7 +274,7 @@ def test_external_start_and_per_game_loss_weight_reach_reader(tmp_path,monkeypat
     import test_resume_sampling_config as sampling_tests
     monkeypatch.setattr(sampling_tests,"ROOT",Path(__file__).resolve().parents[1])
     from test_resume_sampling_config import sampling_config,native_selfplay
-    from etazero.data import read_raw
+    from etazero.data.targets import read_raw
     c=sampling_config(False);c['environment'].update(sizes='5',size_weights='1',rules='freestyle',rule_weights='1')
     c['parallelism'].update(game_threads=1,search_threads=1)
     path=tmp_path/'starts.startpos';path.write_text('opening 5 freestyle 1 0.3 2 0 1\n')
@@ -292,8 +292,8 @@ def test_external_start_and_per_game_loss_weight_reach_reader(tmp_path,monkeypat
 @pytest.mark.skipif(__import__('os').environ.get('ETAZERO_GPU_TESTS')!='1',reason='Host CUDA required')
 @pytest.mark.parametrize('kind,architecture', [('normuon','b2c16-brn'),('aurora','transformer')])
 def test_cuda_optional_training_controls_and_resume(tmp_path,kind,architecture):
-    from etazero.runtime import run_training
-    from etazero.training import load_checkpoint
+    from etazero.run.runtime import run_training
+    from etazero.train.learner import load_checkpoint
     from etazero.storage import load_json
     from etazero.config import validate
     torch.set_num_threads(1)
@@ -318,7 +318,7 @@ def test_cuda_optional_training_controls_and_resume(tmp_path,kind,architecture):
 @pytest.mark.parametrize('device',['cpu',pytest.param('cuda:0',marks=pytest.mark.skipif(__import__('os').environ.get('ETAZERO_GPU_TESTS')!='1',reason='Host CUDA required'))])
 def test_native_secondary_model_clock_and_constraints(tmp_path,algorithm,device):
     import subprocess
-    from etazero.network import inference_network
+    from etazero.models.network import inference_network
     from etazero.engine_config import load_engine_config
     from etazero.config import write_native
     from test_muzero_pipeline import small_config

@@ -2,8 +2,8 @@ import itertools
 import json
 from pathlib import Path
 
-from etazero.arena import PairStore
-from etazero.gatekeeper import decision_from_points
+from etazero.evaluation.arena import PairStore
+from etazero.evaluation.gatekeeper import decision_from_points
 
 
 def test_source_clinch_never_changes_with_remaining_results():
@@ -36,7 +36,7 @@ def test_independent_openings_round_colors_and_resume(tmp_path):
 
 def test_cancel_before_match_launch_does_not_publish_a_decision(tmp_path, monkeypatch):
     import pytest
-    from etazero import gatekeeper
+    from etazero.evaluation import gatekeeper
     monkeypatch.setattr(gatekeeper, 'load_engine_config', lambda *a, **kw: {'match': {'seed': 17}})
     monkeypatch.setattr(gatekeeper, 'native_config', lambda *a: {})
     # execute_pair returns before launching native when cancellation wins the race.

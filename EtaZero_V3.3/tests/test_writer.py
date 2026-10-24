@@ -5,7 +5,7 @@ import subprocess
 import numpy as np
 import pytest
 from etazero.config import ROOT
-from etazero.data import Catalog,metadata,read_raw,training_view
+from etazero.data.targets import Catalog, metadata, read_raw, training_view
 from etazero.storage import save_npz
 
 
@@ -34,7 +34,7 @@ def test_native_final_row_shards_preserve_all_targets_and_catalog(tmp_path,limit
     # Include a split inside one repeated main position, the zero-repeat next
     # search supplying opponent supervision, and split repeated side positions.
     assert len(fragments)>1 and expected['opponent_policy_weight'][7:9].all()
-    assert not expected['full_game_weight'][-5:].any()
+    assert not expected['value_aux_weight'][-5:].any()
     assert np.unique(expected['q_values'][:7]).size>=3
     catalog=Catalog(tmp_path,'test','config')
     try:

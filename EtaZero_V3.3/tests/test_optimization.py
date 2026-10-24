@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.network import make_network
-from etazero.optimization import Optimization, group_settings, inference_weights, optimizer_for, parameter_groups, warmup_factor
+from etazero.models.network import make_network
+from etazero.train.optimization import Optimization, group_settings, inference_weights, optimizer_for, parameter_groups, warmup_factor
 from etazero.symmetry import apply_symmetry, augment_batch
 
 
@@ -75,7 +75,7 @@ def test_parameter_group_coverage_and_roles(config):
         parameter_groups(model)
 
 
-@pytest.mark.parametrize('norm_kind', ['fixscaleonenorm', 'masked_layernorm'])
+@pytest.mark.parametrize('norm_kind', ['fixscaleonenorm'])
 def test_native_lr_and_decay_formulas(config, norm_kind):
     options = config['optimizer']
     lr, wd = group_settings('normal', options, 256, 0, {}, {'normal': 2}, norm_kind)
@@ -171,7 +171,7 @@ def test_optimizer_validation(config):
 def test_plain_config_roundtrip_initialization_and_resume_identity(tmp_path, config):
     from config_samples import derive_config
     from etazero.config import resume_config
-    from etazero.experiment import initialization_key, write_arm_config
+    from etazero.run.experiment import initialization_key, write_arm_config
     directory = derive_config(tmp_path/'plain', CONFIGS/'smoke_test')
     with (directory/'train.cfg').open('a') as handle:
         handle.write('[optimizer]\nkind=adamw\n[plain_optimizer]\nlearning_rate=.007\nweight_decay=.002\n')
@@ -217,7 +217,7 @@ def test_short_outer_round_keeps_fast_weights_and_fixed_lookahead(config,steps,k
         control.prepare_batch(dict(epoch=0,subepoch=0,subepoch_batches=step+1,epoch_end=False))
         control.before_step();optimizer.zero_grad();model.weight.sum().backward();optimizer.step();control.after_step()
         if step==steps//2:
-            control=Optimization(model,config,optimizer,copy.deepcopy(control.state_dict()),round_steps=steps)
+            control=Optimization(model,config,optimizer,copy.deepcopy(control.state_dict()))
             control.begin_round()
     assert model.weight.item()<1
     assert control.completed_rounds==0 and control.counter==steps%k

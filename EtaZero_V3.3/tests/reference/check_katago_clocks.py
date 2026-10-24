@@ -1,11 +1,10 @@
 """Run pinned train.py LR/Lookahead/SWA/reset blocks unchanged, on scalar weights."""
-import argparse,ast,copy,hashlib,itertools,json,subprocess,sys,logging
+import argparse, ast, copy, hashlib, itertools, json, subprocess, sys, logging
 from pathlib import Path
 import torch
 from torch.optim.swa_utils import AveragedModel
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'python'));sys.path.insert(0,str(ROOT/'tests'))
 from etazero.config import load_config
-from etazero.training import subepoch_ends
 from test_optimization import small_optimization
 
 
@@ -40,7 +39,7 @@ def main():
                 lookahead_k=k if alpha<1 else None,lookahead_alpha=alpha,lookahead_cache=slow,optimizer=source_optimizer,
                 swa_model=source_swa,swa_scale=8,swa_period_samples=period,batch_size=8,world_size=1,raw_model=original)
         def update(log_if):source_calls.append((ns['batch_count_this_epoch'],ns['train_state']['global_step_samples']));return 0,0
-        ns['update_and_return_lr_and_wd']=update;exec(reset_code,ns);ends=subepoch_ends(steps,nsegments)
+        ns['update_and_return_lr_and_wd']=update;exec(reset_code,ns);ends=[(i+1)*steps//nsegments for i in range(nsegments)]
         for step in range(steps):
             if step in ends[:-1]:o.begin_subepoch();exec(reset_code,ns)
             successful=step%4!=1

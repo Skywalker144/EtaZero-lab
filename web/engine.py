@@ -10,7 +10,7 @@ import tempfile
 from typing import Any
 
 from etazero.config import write_native
-from etazero.analysis import model_info
+from etazero.evaluation.analysis import model_info
 
 
 class Engine:

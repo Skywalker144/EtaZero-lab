@@ -44,3 +44,41 @@ def test_gtp_analysis_and_genmove_defaults_are_separate(tmp_path):
     assert gtp['gtp_default_time_control'] and 'gtp_default_time_control' not in analysis
     path.write_text(path.read_text()+'maxVisits=100\n')
     assert 'gtp_default_time_control' not in load_engine_config(path,environ={},gtp=True)['analysis']
+
+
+@pytest.mark.parametrize('power,entries', [(-1,0),(0,1),(20,1<<20),(48,1<<48)])
+def test_source_cache_exponent_and_analysis_thread_alias(tmp_path,power,entries):
+    path=tmp_path/'source.cfg'
+    path.write_text(f'numSearchThreadsPerAnalysisThread=3\nnnCacheSizePowerOfTwo={power}\n')
+    c=load_engine_config(path,environ={})['analysis']
+    assert c['search_threads']==3 and c['cache_entries']==entries
+    path.write_text(path.read_text()+'numSearchThreads=2\n')
+    with pytest.raises(ValueError,match='Duplicate'):load_engine_config(path,environ={})
+
+
+@pytest.mark.parametrize('value', ['-2','49','1.5','nan'])
+def test_source_cache_exponent_rejects_invalid_values(tmp_path,value):
+    path=tmp_path/'source.cfg';path.write_text(f'numSearchThreads=1\nnnCacheSizePowerOfTwo={value}\n')
+    with pytest.raises(ValueError,match='[Cc]ache'):load_engine_config(path,environ={})
+
+
+def test_source_inference_defaults_follow_execution_mode(tmp_path):
+    path=tmp_path/'source.cfg';path.write_text('numSearchThreads=1\n')
+    analysis=load_engine_config(path,environ={})['analysis']
+    gtp=load_engine_config(path,environ={},gtp=True)['analysis']
+    assert (analysis['cache_entries'],analysis['nn_mutex_pool_power_of_two'])==(1<<23,17)
+    assert (gtp['cache_entries'],gtp['nn_mutex_pool_power_of_two'])==(1<<20,16)
+    # Match requires an opening profile, independently of its engine defaults.
+    from etazero.engine_config import _load_profile
+    path.write_text('numSearchThreads=1\ngames=2\ngameThreads=1\n')
+    c=_load_profile(path,True,{},groups=('match',))['match']
+    assert (c['cache_entries'],c['nn_mutex_pool_power_of_two'])==(1<<21,17)
+
+
+def test_source_thread_aliases_conflict_across_includes(tmp_path):
+    parent=tmp_path/'parent.cfg';parent.write_text('numSearchThreads=2\n')
+    path=tmp_path/'source.cfg';path.write_text('@include parent.cfg\nnumSearchThreadsPerAnalysisThread=3\n')
+    with pytest.raises(ValueError,match='Duplicate source aliases'):
+        load_engine_config(path,environ={})
+    path.write_text('@include parent.cfg\nnumSearchThreads=3\n')
+    assert load_engine_config(path,environ={})['analysis']['search_threads']==3

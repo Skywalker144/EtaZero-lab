@@ -8,10 +8,11 @@ from test_multigame_diagnostics import cpu_model
 from test_multigame import BINARY
 
 
-def source_process(tmp_path,algorithm='alphazero'):
+def source_process(tmp_path,algorithm='alphazero',human=False,prune=False):
     _,model,config,profile=cpu_model(tmp_path,'go',algorithm,5,6)
     profile['analysis'].update(reuse_tree=False,num_analysis_threads=2,search_threads=3,
-                               min_playouts_per_thread=0,root_symmetry_pruning=False)
+                               min_playouts_per_thread=0,root_symmetry_pruning=prune)
+    if human:profile['analysis'].update(human_model=str(model),human_sl_profile='',search_threads=1)
     # Keep the model configuration, replacing only the engine fields.
     text=config.read_text();start=text.index('[analysis]')
     native=tmp_path/'engine.cfg';write_native(profile,native)
@@ -35,6 +36,7 @@ def test_source_requests_setup_turns_and_control(tmp_path,algorithm):
     assert p.returncode==0,err
     replies=[json.loads(x) for x in out.splitlines()]
     assert len(replies)==5 and not any('error' in x for x in replies),replies
+    assert next(x for x in replies if x['id']=='v')['version']=='EtaZero_V3.3'
     reports=[x for x in replies if x['id']=='board']
     assert {x['turnNumber'] for x in reports}=={0,2}
     for report in reports:
@@ -231,3 +233,33 @@ def test_gtp_streaming_controls_and_benchmark(tmp_path):
     finally:
         signal.alarm(0);signal.signal(signal.SIGALRM,previous)
         if p.poll() is None:p.kill();p.wait()
+
+
+def test_gtp_reports_current_version(tmp_path):
+    p=gtp_process(tmp_path)
+    try:
+        assert gtp_command(p,'version')=='= 3.3'
+        assert gtp_command(p,'quit')=='='
+        assert p.wait(timeout=10)==0
+    finally:
+        if p.poll() is None:p.kill();p.wait()
+
+
+@pytest.mark.parametrize('algorithm',['alphazero','muzero'])
+@pytest.mark.parametrize('prune',[False,True])
+def test_human_prior_is_independent_of_include_policy_and_uses_reported_move(tmp_path,algorithm,prune):
+    p=source_process(tmp_path,algorithm,human=True,prune=prune)
+    request=dict(boardXSize=5,boardYSize=5,rules='chinese',moves=[],maxVisits=24)
+    queries=[dict(request,id=str(flag),includePolicy=flag) for flag in (True,False)]
+    out,err=p.communicate(''.join(json.dumps(q)+'\n' for q in queries),timeout=45)
+    assert p.returncode==0,err
+    reports={row['id']:row for row in map(json.loads,out.splitlines())}
+    policy=reports['True']['humanPolicy']
+    assert 'humanPolicy' not in reports['False']
+    for report in reports.values():
+        assert report['moveInfos']
+        for move in report['moveInfos']:
+            vertex=move['move']
+            index=25 if vertex=='pass' else (5-int(vertex[1:]))*5+'ABCDEFGHJKLMNOPQRST'.index(vertex[0])
+            assert move['humanPrior']==pytest.approx(max(0,policy[index]))
+    if prune:assert any('isSymmetryOf' in move for move in reports['True']['moveInfos'])

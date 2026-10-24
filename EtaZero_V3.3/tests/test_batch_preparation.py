@@ -11,10 +11,10 @@ import torch
 
 from config_samples import CONFIGS
 from etazero.config import load_config
-from etazero.muzero.data import prepare_batch
-from etazero.network import make_network
-from etazero.optimization import optimizer_for, optimization_for
-from etazero.reader import CudaBatchPrefetcher
+from etazero.data.muzero import prepare_batch
+from etazero.models.network import make_network
+from etazero.train.optimization import optimizer_for, optimization_for
+from etazero.data.reader import CudaBatchPrefetcher
 from etazero.schema import GLOBALS, HEX_GLOBAL, HEX_WHITE_GLOBAL
 from etazero.symmetry import augment_batch
 
@@ -89,7 +89,7 @@ def test_muzero_preparation_preserves_draws_weights_and_side_order(absorbing_mod
 @pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
 def test_optimizer_defers_norms_to_schedule_initialization(monkeypatch, algorithm):
     from test_muzero_pipeline import small_config
-    import etazero.optimization as optimization
+    import etazero.train.optimization as optimization
     c = small_config() if algorithm == 'muzero' else load_config(CONFIGS/'smoke_test')
     model = make_network(c)
     with monkeypatch.context() as patch:

@@ -17,7 +17,7 @@ def main():
     assert subprocess.check_output(['git','-C',reference['root'],'rev-parse','HEAD'],text=True).strip()==reference['commit']
     function=body(source.read_text(),'static int16_t clampToRadius32000(')
     code=r'''
-#include "etazero/record.h"
+#include "dataio/record.h"
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -50,12 +50,12 @@ int main(){size_t count=0;double worst=0;
     build=ROOT/'build';zlib=re.search(r'^ZLIB_LIBRARY_RELEASE:FILEPATH=(.+)$',(build/'CMakeCache.txt').read_text(),re.M).group(1)
     with tempfile.TemporaryDirectory(prefix='etazero_q_reference_') as temp:
         directory=Path(temp);cpp=directory/'q.cpp';cpp.write_text(code)
-        subprocess.run(['c++','-std=c++17','-O2','-I'+str(ROOT/'cpp/include'),'-I'+str(build/'generated'),str(cpp),
-                        str(build/'libetazero_core.a'),str(build/'libetazero_go_rules.a'),str(build/'libetazero_xiangqi_rules.a'),
+        subprocess.run(['c++','-std=c++17','-O2','-I'+str(ROOT/'cpp'),'-I'+str(build/'generated'),str(cpp),
+                        str(build/'libetazero_dataio.a'),str(build/'libetazero_search_common.a'),str(build/'libetazero_neuralnet.a'),str(build/'libetazero_game.a'),str(build/'libetazero_sgf.a'),str(build/'libetazero_go_features.a'),str(build/'libetazero_go_rules.a'),str(build/'libetazero_base.a'),str(build/'libetazero_xiangqi_rules.a'),
                         '-Wl,--gc-sections',zlib,'-pthread','-o',str(directory/'q')],check=True)
         cases,worst=subprocess.check_output([str(directory/'q')],text=True).split()
     result={'status':'verified','source_commit':reference['commit'],'source_sha256':reference['sha256']['cpp/dataio/trainingwrite.cpp'],
-            'native_library_sha256':hashlib.sha256((build/'libetazero_core.a').read_bytes()).hexdigest(),
+            'native_library_sha256':hashlib.sha256((build/'libetazero_dataio.a').read_bytes()).hexdigest(),
             'quantization_cases':int(cases),'max_distance_to_unclamped_scaled_value':float(worst),
             'scope':'Unmodified source float32 clampToRadius32000, fixed identical Bernoulli RNG shim; positive/negative fractions, zero, caps, adjacent float32 endpoints, independent repeats. Production core linked, not copied.',
             'adaptation':'Seed streams differ from Go writer (score quantization omitted); no source RNG-sequence equivalence claim.'}

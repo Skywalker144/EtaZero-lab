@@ -8,8 +8,8 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import ROOT, load_config
-from etazero.network import make_network, inference_network, MaskedBatchNorm
-from etazero.runtime import run_training
+from etazero.models.network import make_network, inference_network, MaskedBatchNorm
+from etazero.run.runtime import run_training
 
 pytestmark=pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS')!='1',reason='Host CUDA required')
 

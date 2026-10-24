@@ -7,11 +7,11 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import ROOT, load_config, validate
-from etazero.katago_configs import BASE_NAMES, resolve
-from etazero.katago_network import KataGoNet, inference_network
-from etazero.runtime import run_training
+from etazero.models.katago_configs import BASE_NAMES, resolve
+from etazero.models.katago_network import KataGoNet, inference_network
+from etazero.run.runtime import run_training
 from etazero.storage import sha256
-from etazero.training import load_checkpoint
+from etazero.train.learner import load_checkpoint
 
 pytestmark = pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA required')
 

@@ -11,12 +11,12 @@ import hashlib
 import numpy as np
 import pytest
 import torch
-from etazero.config import ROOT,validate
-from etazero.network import q_winloss_loss,losses,make_network
-from etazero.data import validate_raw,training_view
-from etazero.reader import BatchReader
-from etazero.shuffle import build_snapshot
-from etazero.storage import save_npz,sha256
+from etazero.config import ROOT, validate
+from etazero.models.network import q_winloss_loss, losses, make_network
+from etazero.data.targets import validate_raw, training_view
+from etazero.data.reader import BatchReader
+from etazero.data.shuffle import build_snapshot
+from etazero.storage import save_npz, sha256
 from etazero.symmetry import augment_batch
 from test_python import winning_record,compact_search,config
 
@@ -100,7 +100,7 @@ def test_q_per_repeat_values_survive_shuffle_reader_and_resume(tmp_path,config):
     actual=Counter()
     for item in manifest['files']:
         with np.load(snapshot/'data'/item['path']) as data:
-            from etazero.source_data import decode_view
+            from etazero.data.source_data import decode_view
             view_data=decode_view(data,manifest['targets'])
             actual.update(zip(map(bytes,view_data['q_values']),map(bytes,view_data['q_visits'])))
     assert expected==actual
@@ -131,7 +131,7 @@ def test_q_configuration_and_head_contract(config):
 
 def test_native_writer_independently_quantizes_repeats_and_caps(tmp_path):
     import subprocess
-    from etazero.data import read_raw
+    from etazero.data.targets import read_raw
     subprocess.run([str(ROOT/'build/record_contract_test'),str(tmp_path/'raw'),'q','fraction'],check=True)
     data=read_raw(next((tmp_path/'raw').glob('*.npz')))
     assert data['q_visits'][0,0]==32000
@@ -142,5 +142,5 @@ def test_native_writer_independently_quantizes_repeats_and_caps(tmp_path):
     assert set(data['side_q_values'][:,action])=={-8001,-8000}
     assert data['side_q_values'].shape==(64,36)
     view=training_view(data)
-    assert not view['full_game_weight'][-64:].any()
+    assert not view['value_aux_weight'][-64:].any()
     np.testing.assert_array_equal(view['q_values'][-64:],data['side_q_values']/np.float32(32000))

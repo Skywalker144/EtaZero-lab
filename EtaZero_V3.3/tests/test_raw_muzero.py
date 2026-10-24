@@ -11,12 +11,12 @@ import torch
 
 from etazero.config import ROOT, load_config, validate
 from etazero.engine_config import load_engine_config
-from etazero.muzero.training import TrainingForward
-from etazero.optimization import optimizer_for, optimization_for, inference_weights
+from etazero.train.muzero.training import TrainingForward
+from etazero.train.optimization import optimizer_for, optimization_for, inference_weights
 
 
 def test_raw_profile_and_shuffle_budget():
-    from etazero.shuffle import resource_plan
+    from etazero.data.shuffle import resource_plan
     c = load_config(CONFIGS / 'raw_muzero')
     assert c['training']['d4_augmentation'] and c['symmetry']['nn_randomize']
     assert not c['fpu']['use_fpu'] and not c['lcb']['use_lcb']
@@ -62,7 +62,8 @@ def test_basic_loss_hand_calculation_and_auxiliary_independence():
     policy = torch.tensor([[[1., 0, 0, 0]], [[0., 1, 0, 0]]])
     value = torch.tensor([[[1., 0, 0]], [[0., 0, 1]]])
     ignored = torch.full((2, 1), float('nan'))
-    targets = (policy, ignored, ignored, value, ignored, ignored, ignored, ignored)
+    targets = (policy, ignored, ignored, value, ignored, ignored, ignored, ignored,
+               ignored, ignored, torch.ones(2,1), torch.ones(2,1))
     parts = f.components(None, obs, targets, 0, torch.tensor([1., .5]))
     assert parts[1].item() == pytest.approx((math.log(4) + .5*math.log(2))/2)
     assert parts[5].item() == pytest.approx(.75*math.log(3))
@@ -127,9 +128,9 @@ def small_raw_config():
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
 def test_raw_cuda_pipeline_and_resume(tmp_path):
-    from etazero.runtime import run_training
-    from etazero.training import load_checkpoint
-    from etazero.data import read_raw
+    from etazero.run.runtime import run_training
+    from etazero.train.learner import load_checkpoint
+    from etazero.data.targets import read_raw
     from test_gpu import assert_compiled_partial_resume
     from test_muzero_pipeline import assert_diagnostics
     torch.set_num_threads(1)

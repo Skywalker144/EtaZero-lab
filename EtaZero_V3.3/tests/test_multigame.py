@@ -9,10 +9,10 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import load_config, validate
-from etazero.runtime import run_training
+from etazero.run.runtime import run_training
 from etazero.games import XIANGQI_MOVES, XIANGQI_INDEX, spec_for_config
 from etazero.schema import unpack_observations
-from etazero.data import read_raw, training_view, metadata
+from etazero.data.targets import read_raw, training_view, metadata
 from etazero.symmetry import augment_batch
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -116,7 +116,7 @@ def records(tmp_path_factory):
 
 @pytest.mark.parametrize('rule',['go','xiangqi'])
 def test_side_globals_audit_rejects_pda_and_nonfinite(records,rule):
-    from etazero.data import validate_raw
+    from etazero.data.targets import validate_raw
     a=read_raw(next((records/(rule+'-az')).glob('*.npz')))
     assert len(a['side_globals']) > 0
     original=a['side_globals'].copy()
@@ -130,13 +130,13 @@ def test_side_globals_audit_rejects_pda_and_nonfinite(records,rule):
 @pytest.mark.parametrize('rule',['go','xiangqi'])
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 def test_native_rules_records_unroll_and_loss(records,rule,algorithm):
-    from etazero.network import make_network
-    from etazero.training import training_forward,forward_batch
-    from etazero.muzero.data import prepare_batch
+    from etazero.models.network import make_network
+    from etazero.train.learner import training_forward, forward_batch
+    from etazero.data.muzero import prepare_batch
     if algorithm=="muzero":
-        from etazero.muzero.optimization import parameter_groups
+        from etazero.train.muzero.optimization import parameter_groups
     else:
-        from etazero.optimization import parameter_groups
+        from etazero.train.optimization import parameter_groups
     c=small_config(rule,algorithm);spec=spec_for_config(c);canvas=c['network']['canvas']
     paths=list((records/(rule+('-mz' if algorithm=='muzero' else '-az'))).glob('*.npz'))
     a=read_raw(paths[0]);v=training_view(a)
@@ -157,9 +157,9 @@ def test_native_rules_records_unroll_and_loss(records,rule,algorithm):
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 def test_evicted_replay_restores_identical_arrays(records,tmp_path,rule,algorithm):
     import shutil
-    from etazero.shuffle import build_snapshot,prune_derived,restore_snapshot
+    from etazero.data.shuffle import build_snapshot, prune_derived, restore_snapshot
     from etazero.storage import sha256
-    from etazero.data import game_weight_statistics
+    from etazero.data.targets import game_weight_statistics
     source=records/(rule+('-mz' if algorithm=='muzero' else '-az'))
     shutil.copytree(source,tmp_path/'selfplay')
     entries=[]
@@ -178,7 +178,7 @@ def test_evicted_replay_restores_identical_arrays(records,tmp_path,rule,algorith
     ('alphazero','plain',128,10),('alphazero','transformer',192,5),
     ('alphazero','b1c6nbt-ih',6,1),('muzero','resnet',24,1)])
 def test_backbone_export_preserves_game_actions(rule,algorithm,architecture,channels,blocks):
-    from etazero.network import make_network,inference_network
+    from etazero.models.network import make_network, inference_network
     torch.set_num_threads(1)
     c=small_config(rule,algorithm);c['network'].update(architecture=architecture,channels=channels,blocks=blocks)
     validate(c);spec=spec_for_config(c);canvas=c['network']['canvas']
@@ -200,7 +200,7 @@ def test_backbone_export_preserves_game_actions(rule,algorithm,architecture,chan
 @pytest.mark.parametrize('reanalyze',[False,True])
 def test_cpu_training_reanalysis_and_history(tmp_path,rule,reanalyze):
     if not BINARY.exists():pytest.skip('Build native engine first')
-    from etazero.training import load_checkpoint
+    from etazero.train.learner import load_checkpoint
     torch.set_num_threads(1)
     c=small_config(rule,'alphazero')
     c['devices'].update(train='cpu',selfplay='cpu')
@@ -229,11 +229,11 @@ def test_cpu_training_reanalysis_and_history(tmp_path,rule,reanalyze):
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 @pytest.mark.parametrize('compiled',[False,True])
 def test_cuda_training_resume_evaluation_and_web(tmp_path,rule,algorithm,compiled):
-    from etazero.runtime import run_training
-    from etazero.training import load_checkpoint
+    from etazero.run.runtime import run_training
+    from etazero.train.learner import load_checkpoint
     from etazero.storage import load_json
     from etazero.engine_config import load_engine_config
-    from etazero.analysis import analyze
+    from etazero.evaluation.analysis import analyze
     from web.engine import Engine
     from test_gpu import assert_compiled_partial_resume
     torch.set_num_threads(1)
@@ -313,10 +313,10 @@ def browser_moves(binary, model, profile, rule, size, artifact_dir=None):
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 def test_native_match_and_completed_resume(tmp_path,rule,algorithm):
     if not BINARY.exists():pytest.skip('Build native engine first')
-    from etazero.training import initialize
-    from etazero.export import export_model
+    from etazero.train.learner import initialize
+    from etazero.models.export import export_model
     from etazero.engine_config import load_engine_config
-    from etazero.arena import single_match
+    from etazero.evaluation.arena import single_match
     torch.set_num_threads(1)
     c=small_config(rule,algorithm);c['devices'].update(train='cpu',selfplay='cpu')
     c['training']['amp']='off';c['inference']['inference_precision']='float32'

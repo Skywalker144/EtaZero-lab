@@ -7,13 +7,13 @@ import time
 
 import pytest
 
-from etazero.arena import Player, PairStore, build_schedule, discover_players, execute_pair, execute_arena, identity, run_arena
-from etazero.autoelo import autoelo_plan, load_elo_config, load_elo_profile, publish_latest
-from etazero.autoelo import run_autoelo
-from etazero.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pairs
+from etazero.evaluation.arena import Player, PairStore, build_schedule, discover_players, execute_pair, execute_arena, identity, run_arena
+from etazero.evaluation.autoelo import autoelo_plan, load_elo_config, load_elo_profile, publish_latest
+from etazero.evaluation.autoelo import run_autoelo
+from etazero.evaluation.elo_cache import pair_identity, pair_seed, prepare_pairs, retain_pairs
 from etazero.config import ROOT, load_config
 from etazero.engine_config import load_engine_config
-from etazero.experiment import experiment_plan, run_experiment, Scheduler
+from etazero.run.experiment import experiment_plan, run_experiment, Scheduler
 
 from etazero.storage import load_json, save_json
 
@@ -152,7 +152,7 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
     data = tmp_path/'data'
     for arm in ('b', 'c'):
         history(data/arm, list(range(1, 17)))
-    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    monkeypatch.setattr('etazero.evaluation.autoelo.verify_build', lambda _: 'binary')
     calls = []
     def native(output, manifest, binary, samples, workers, env, estimate_first_player_advantage=False):
         assert 'CUDA_VISIBLE_DEVICES' not in env
@@ -161,14 +161,14 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
             calls.extend((pair['id'], task['id']) for task in
                          PairStore(directory, manifest['games_per_pair']).tasks(pair_seed(manifest, pair)))
             complete_fake_pair(manifest, pair, directory)
-        from etazero.elo import write_ratings
+        from etazero.evaluation.elo import write_ratings
         return write_ratings(output, samples)
-    monkeypatch.setattr('etazero.autoelo.run_arena', native)
+    monkeypatch.setattr('etazero.evaluation.autoelo.run_arena', native)
     # The test native still publishes the same snapshot contract as run_arena.
     def publish_and_run(output, manifest, *args):
         save_json(output/'manifest.json', manifest)
         return native(output, manifest, *args)
-    monkeypatch.setattr('etazero.autoelo.run_arena', publish_and_run)
+    monkeypatch.setattr('etazero.evaluation.autoelo.run_arena', publish_and_run)
     def run(**overrides):
         plan = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides=overrides)
         calls.clear()
@@ -254,7 +254,7 @@ def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_pat
 
 def test_unchanged_cache_merge_reads_each_record_once_and_writes_nothing(tmp_path, monkeypatch):
     from collections import Counter
-    from etazero.elo_cache import merge_pair
+    from etazero.evaluation.elo_cache import merge_pair
     manifest = {'config': {'match': {'seed': 1}}, 'games_per_pair': 4}
     pair = {'id': identity(('a', 'b'))}
     source, destination = tmp_path/'source', tmp_path/'destination'
@@ -304,7 +304,7 @@ def test_rebuild_and_loader_concurrency_do_not_change_session(tmp_path):
                           overrides={'model_load_workers': '1', 'max_loaded_models': '2'})
     assert first['output'] == second['output']
     assert first['manifest']['execution'] != second['manifest']['execution']
-    from etazero.arena import save_manifest
+    from etazero.evaluation.arena import save_manifest
     save_manifest(tmp_path/'manifest.json', first['manifest'])
     save_manifest(tmp_path/'manifest.json', second['manifest'])
 
@@ -320,7 +320,7 @@ def test_arena_deduplicates_paths_and_uses_config_seed_independent_of_schedule(t
                 'config': {'match': {'seed': 37, 'device': 'cpu', 'board_size': 5, 'rule': 'freestyle'}},
                 'pairs': [{'id': identity(pair), 'players': list(pair)}
                           for pair in [('a', 'b'), ('alias', 'b')]]}
-    monkeypatch.setattr('etazero.arena.model_info', lambda p: (Path(p), {'id': 'same-export-label'}))
+    monkeypatch.setattr('etazero.evaluation.arena.model_info', lambda p: (Path(p), {'id': 'same-export-label'}))
     for order in (0, 1):
         manifest['pairs'].reverse()
         output = tmp_path/str(order)
@@ -328,7 +328,7 @@ def test_arena_deduplicates_paths_and_uses_config_seed_independent_of_schedule(t
         def complete(*args):
             for pair in manifest['pairs']:
                 complete_fake_pair(manifest, pair, output/'pairs'/pair['id'])
-        monkeypatch.setattr('etazero.arena._run_native', complete)
+        monkeypatch.setattr('etazero.evaluation.arena._run_native', complete)
         execute_arena(Path('/unused'), tmp_path/'cfg', output, manifest, 2, threading.Event())
         models = [shlex.split(row) for row in (output/'models.txt').read_text().splitlines()]
         assert len(models) == 2
@@ -344,7 +344,7 @@ def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_pat
     data = tmp_path/'data'
     for arm in ('a','b'):
         history(data/arm, list(range(1,9)))
-    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    monkeypatch.setattr('etazero.evaluation.autoelo.verify_build', lambda _: 'binary')
     plan = autoelo_plan(config, tmp_path/'binary', data=data, environ={})
     base, output = Path(plan['base']), Path(plan['output'])
     previous = base/'previous'; previous.mkdir(parents=True)
@@ -357,7 +357,7 @@ def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_pat
         store.accept(dict(type='opening',id=0,generator=task['generator'],seed=task['seed'],moves=[12],value=0))
         store.accept(dict(type='game',id=0,opening_id=0,black_a=task['generator']==0,winner=0,moves=[12,13],seconds=1))
         raise RuntimeError('interrupted native')
-    monkeypatch.setattr('etazero.autoelo.run_arena', fail)
+    monkeypatch.setattr('etazero.evaluation.autoelo.run_arena', fail)
     with pytest.raises(RuntimeError,match='interrupted native'):
         run_autoelo(plan,tmp_path/'binary')
     assert load_json(output/'status.json')['status'] == 'failed'
@@ -366,9 +366,9 @@ def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_pat
     def recover(output, manifest, binary, samples, *_):
         for pair in manifest['pairs']:
             complete_fake_pair(manifest,pair,output/'pairs'/pair['id'])
-        from etazero.elo import write_ratings
+        from etazero.evaluation.elo import write_ratings
         return write_ratings(output,samples)
-    monkeypatch.setattr('etazero.autoelo.run_arena',recover)
+    monkeypatch.setattr('etazero.evaluation.autoelo.run_arena',recover)
     run_autoelo(plan,tmp_path/'binary')
     assert (base/'latest').resolve() == output
     performance = load_json(Path(load_json(output/'status.json')['performance']))
@@ -434,7 +434,7 @@ def test_resolved_elo_profile_survives_config_and_environment_changes(tmp_path, 
     (config/'match.cfg').unlink()
     (config/'elo.cfg').write_text('Changed after planning.\n')
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-changed')
-    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    monkeypatch.setattr('etazero.evaluation.autoelo.verify_build', lambda _: 'binary')
     data = tmp_path/'data'
     history(data/'a', [10, 20])
     history(data/'b', [10, 20])
@@ -454,7 +454,7 @@ def test_independent_elo_discovers_config_arms_without_scheduler_settings(tmp_pa
     for name in ('a', 'b'):
         derive_config(directory/name, CONFIGS/'smoke_test', f'run_dir={tmp_path/name}\n')
         history(tmp_path/name, [10, 20])
-    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
+    monkeypatch.setattr('etazero.evaluation.autoelo.verify_build', lambda _: 'binary')
     plan = autoelo_plan(directory, tmp_path/'binary', environ={})
     assert plan['summary']['players_per_arm'] == {'a': 2, 'b': 2}
 
@@ -469,7 +469,7 @@ def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(
     history(data/'a', [10, 20, 30])
     history(data/'b', [12, 24, 36], 'muzero')
     binary = tmp_path/'binary'; binary.write_bytes(b'test')
-    monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary-checksum')
+    monkeypatch.setattr('etazero.evaluation.autoelo.verify_build', lambda _: 'binary-checksum')
     plan = autoelo_plan(config, binary, data=data, environ={})
     overridden = autoelo_plan(config, binary, data=data, environ={}, overrides={'game_threads': '7'})
     assert overridden['manifest']['config']['match']['game_threads'] == 7
@@ -491,14 +491,14 @@ def test_plan_is_read_only_preserves_identity_and_ignores_untrained_config_arms(
 def test_shared_arena_never_fits_partial_results(tmp_path, monkeypatch):
     manifest = {'players': [], 'config': {'match': {'seed': 1}}, 'games_per_pair': 4,
                 'pairs': [{'id': identity(i), 'players': []} for i in range(2)]}
-    monkeypatch.setattr('etazero.arena.native_config', lambda *_: {})
+    monkeypatch.setattr('etazero.evaluation.arena.native_config', lambda *_: {})
     calls = []
     def execute(binary, config, output, manifest, limit, cancel, environ):
         assert limit == 3
         calls.append(cancel)
         raise RuntimeError('native failed')
-    monkeypatch.setattr('etazero.arena.execute_arena', execute)
-    monkeypatch.setattr('etazero.elo.write_ratings', lambda *_: calls.append(True))
+    monkeypatch.setattr('etazero.evaluation.arena.execute_arena', execute)
+    monkeypatch.setattr('etazero.evaluation.elo.write_ratings', lambda *_: calls.append(True))
     with pytest.raises(RuntimeError, match='native failed'):
         run_arena(tmp_path, manifest, Path('/unused'), 10, max_loaded_models=3)
     assert len(calls) == 1 and calls[0].is_set()
@@ -551,7 +551,7 @@ print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
         bar = tqdm(*args, **(kwargs | {'disable': False, 'file': io.StringIO()}))
         bars.append(bar)
         return bar
-    monkeypatch.setattr('etazero.arena.tqdm', record_progress)
+    monkeypatch.setattr('etazero.evaluation.arena.tqdm', record_progress)
     execute_arena(binary, tmp_path/'cfg', output, manifest, 3, threading.Event())
     assert [shlex.split(line) for line in (output/'models.txt').read_text().splitlines()] == models
     progress = next(bar for bar in bars if bar.desc == 'Arena games')
@@ -566,14 +566,14 @@ print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
 
 
 def test_model_inspection_deduplicates_checks_and_rejects_changed_files(tmp_path, monkeypatch):
-    from etazero.arena import inspect_models
+    from etazero.evaluation.arena import inspect_models
     calls = []
     def inspect(path):
         calls.append(path)
         if path.name == 'changed':
             raise ValueError('changed model')
         return path, {'id': path.name}
-    monkeypatch.setattr('etazero.arena.model_info', inspect)
+    monkeypatch.setattr('etazero.evaluation.arena.model_info', inspect)
     paths = [tmp_path/'a', tmp_path/'b', tmp_path/'a']
     assert list(inspect_models(paths)) == paths[:2]
     assert sorted(calls) == paths[:2]
@@ -584,7 +584,7 @@ def test_model_inspection_deduplicates_checks_and_rejects_changed_files(tmp_path
 def test_autoelo_import_does_not_initialize_training_or_torch():
     import subprocess
     subprocess.run([sys.executable, '-c',
-                    "import sys, etazero.autoelo; assert 'torch' not in sys.modules"], check=True)
+                    "import sys, etazero.evaluation.autoelo; assert 'torch' not in sys.modules"], check=True)
 
 
 def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path, monkeypatch):
@@ -602,7 +602,7 @@ def test_cancellation_stops_a_child_blocked_on_stdout_and_keeps_opening(tmp_path
         original(event)
         cancel.set()
     store.accept = accept
-    monkeypatch.setattr('etazero.arena.model_info', lambda path: (Path(path), {'id':str(path)}))
+    monkeypatch.setattr('etazero.evaluation.arena.model_info', lambda path: (Path(path), {'id':str(path)}))
     players = tuple(Player(name, name, 1, 1, name) for name in ('a', 'b'))
     started = time.monotonic()
     with pytest.raises(RuntimeError, match='Match exited'):
@@ -623,7 +623,7 @@ def test_shared_arena_cancellation_flushes_an_opening(tmp_path, monkeypatch):
         f'print(json.dumps(dict(type="opening",pair="{pair_id}",id=0,generator=0,seed=1,moves=[12],value=0)),flush=True)\n'
         'time.sleep(5)\n')
     binary.chmod(0o755)
-    monkeypatch.setattr('etazero.arena.model_info', lambda p: (Path(p), {'id': str(p)}))
+    monkeypatch.setattr('etazero.evaluation.arena.model_info', lambda p: (Path(p), {'id': str(p)}))
     cancel = threading.Event()
     original = PairStore.accept
     def accept(self, event):
@@ -662,7 +662,7 @@ def test_autoexp_invokes_elo_only_after_success_and_keeps_actual_arm_paths(tmp_p
     match_profile(directory, '[match]\nboard_size=5\nvisits=17\n')
     plan = experiment_plan(directory, environ={}, work_dir=tmp_path/'controller')
     binary = tmp_path/'binary'; binary.write_bytes(b'binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: 'hash')
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: 'hash')
     def train(scheduler):
         (directory/'match.cfg').write_text('Changed during training.\n')
         (directory/'elo.cfg').write_text('Changed during training.\n')
@@ -676,15 +676,15 @@ def test_autoexp_invokes_elo_only_after_success_and_keeps_actual_arm_paths(tmp_p
         assert profile['config']['match']['visits'] == 17
         calls.append(([arm['run_dir'] for arm in arms], profile['cuda_visible_devices']))
         return {'summary': {}, 'output': str(tmp_path/'elo')}
-    monkeypatch.setattr('etazero.autoelo.autoelo_plan', elo_plan)
-    monkeypatch.setattr('etazero.autoelo.run_autoelo', lambda *_: None)
+    monkeypatch.setattr('etazero.evaluation.autoelo.autoelo_plan', elo_plan)
+    monkeypatch.setattr('etazero.evaluation.autoelo.run_autoelo', lambda *_: None)
     assert run_experiment(plan, binary) == code
     assert calls == ([([str(tmp_path/'custom-output'), str(tmp_path/'another-output')], '2')]
                      if code == 0 else [])
     assert load_json(tmp_path/'controller/.internal/plan.json')['elo'] == plan['elo']
     if code == 0:
         assert load_json(tmp_path/'controller/.internal/elo_status.json')['status'] == 'complete'
-        monkeypatch.setattr('etazero.autoelo.run_autoelo', lambda *_: (_ for _ in ()).throw(RuntimeError('elo failed')))
+        monkeypatch.setattr('etazero.evaluation.autoelo.run_autoelo', lambda *_: (_ for _ in ()).throw(RuntimeError('elo failed')))
         with pytest.raises(RuntimeError, match='elo failed'):
             run_experiment(plan, binary)
         status = load_json(tmp_path/'controller/.internal/elo_status.json')

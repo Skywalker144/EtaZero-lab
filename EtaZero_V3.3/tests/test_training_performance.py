@@ -7,7 +7,7 @@ import torch
 from config_samples import CONFIGS
 from etazero.config import load_config, resume_config, validate
 from etazero.storage import load_json
-from etazero.training import finish_optimizer_step, initialize, load_checkpoint, train_iteration
+from etazero.train.learner import finish_optimizer_step, initialize, load_checkpoint, train_iteration
 from test_replay import id_snapshot
 
 pytestmark = pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
@@ -87,7 +87,7 @@ def prepare(root, c):
 
 
 def test_sparse_logs_tail_checkpoint_and_resume_keep_every_batch(tmp_path, monkeypatch):
-    import etazero.training as training
+    import etazero.train.learner as training
     c = learner_config()
     dirs = [tmp_path/'full', tmp_path/'resume']
     plans = [prepare(root, c) for root in dirs]
@@ -126,7 +126,7 @@ def test_sparse_logs_tail_checkpoint_and_resume_keep_every_batch(tmp_path, monke
 
 @pytest.mark.parametrize('failure', ['nan_loss', 'inf_loss', 'inf_grad', 'norm_overflow', 'bad_wdl'])
 def test_fatal_batch_never_publishes_checkpoint_or_continues(tmp_path, monkeypatch, failure):
-    import etazero.training as training
+    import etazero.train.learner as training
     c = learner_config()
     if failure == 'norm_overflow':
         c['training']['amp'] = 'float16'

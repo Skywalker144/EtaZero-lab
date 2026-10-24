@@ -10,10 +10,8 @@ import numpy as np
 import pytest
 import torch
 from etazero.config import ROOT, load_config
-from etazero.experiment import (experiment_plan, initialization_key, prepare_initializations,
-                                arm_progress, write_arm_config, run_experiment, Scheduler)
-from etazero.plotting import (run_history, round_history, training_figure, loss_figure, performance_figure,
-                             journal_events, METRICS)
+from etazero.run.experiment import experiment_plan, initialization_key, prepare_initializations, arm_progress, write_arm_config, run_experiment, Scheduler
+from etazero.evaluation.plotting import run_history, round_history, training_figure, loss_figure, performance_figure, journal_events, METRICS
 from etazero.storage import save_json, load_json, sha256
 
 
@@ -97,7 +95,7 @@ def test_scheduler_rejects_evaluation_sections(tmp_path, section):
 
 
 def test_evaluation_is_resolved_before_training_and_dry_run_reuses_plan(tmp_path, monkeypatch, capsys):
-    from etazero import experiment
+    from etazero.run import experiment
     directory = umbrella(tmp_path)
     (directory/'match.cfg').write_text(f'@include "{CONFIGS / "baseline/match.cfg"}"\n'
                                       '[match]\nboard_size=5\nvisits=17\n')
@@ -184,12 +182,12 @@ def test_experiment_initializes_and_schedules_all_arms(tmp_path, monkeypatch):
     directory = umbrella(tmp_path)
     work = tmp_path/'work'
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: None)
     initialized, started = [], []
     def initialize(work, arms):
         initialized.append([arm['name'] for arm in arms])
         return {}
-    monkeypatch.setattr('etazero.experiment.prepare_initializations', initialize)
+    monkeypatch.setattr('etazero.run.experiment.prepare_initializations', initialize)
     monkeypatch.setattr(Scheduler, 'start', lambda self, arm, slot, gpu: started.append(arm['name']))
     plan = experiment_plan(directory, environ={}, work_dir=work)
     assert run_experiment(plan, binary) == 0
@@ -199,7 +197,7 @@ def test_experiment_initializes_and_schedules_all_arms(tmp_path, monkeypatch):
 
 def journal(root, events):
     # Synthetic per-batch fixtures are serialized as the current accumulated format.
-    from etazero.training_metrics import TrainingMetrics
+    from etazero.train.training_metrics import TrainingMetrics
     seen = {}
     for event in events:
         if event['event'] != 'update':
@@ -346,7 +344,7 @@ def test_experiment_adds_arms_skips_complete_and_resumes_pending(tmp_path, monke
         env.update(MAX_ITERS='0', MAX_TIME_HOURS=str(10/3600))
     work = tmp_path/'work'
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: None)
     started = []
 
     def finish_arm(scheduler, arm, slot, gpu):
@@ -404,7 +402,7 @@ def test_experiment_uses_current_plan_and_ignores_old_identity(tmp_path, monkeyp
     directory = umbrella(tmp_path)
     work = tmp_path/'work'
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: None)
     calls = []
     monkeypatch.setattr(Scheduler, 'run', lambda _: calls.append(True) or 0)
     plan = experiment_plan(directory, environ={}, work_dir=work)
@@ -439,7 +437,7 @@ def test_experiment_accepts_execution_changes(tmp_path, monkeypatch):
     directory = umbrella(tmp_path)
     binary = tmp_path/'binary'
     binary.write_bytes(b'test binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: None)
     monkeypatch.setattr(Scheduler, 'run', lambda _: 0)
     plan = experiment_plan(directory, environ={}, work_dir=tmp_path/'work')
     assert run_experiment(plan, binary) == 0
@@ -454,7 +452,7 @@ def test_experiment_restarts_archived_arm_with_new_architecture(tmp_path, monkey
     directory = umbrella(tmp_path)
     work = tmp_path/'work'
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: None)
     started = []
 
     def finish_arm(scheduler, arm, slot, gpu):
@@ -498,8 +496,8 @@ def test_existing_runs_resume_without_scheduler_initialization(tmp_path, monkeyp
                   'weights_initialization': {'path': str(tmp_path/'old_work/initial.pt'), 'sha256': 'old'}})
         save_json(root/'.internal/state.json', {'iteration': 2, 'elapsed_seconds': 5})
     binary = tmp_path/'binary'; binary.write_bytes(b'test binary')
-    monkeypatch.setattr('etazero.runtime.verify_build', lambda _: None)
-    monkeypatch.setattr('etazero.experiment.prepare_initializations',
+    monkeypatch.setattr('etazero.run.runtime.verify_build', lambda _: None)
+    monkeypatch.setattr('etazero.run.experiment.prepare_initializations',
                         lambda work, arms: {} if not arms else pytest.fail('Existing runs requested initialization'))
     started = []
 
@@ -531,7 +529,7 @@ def test_scheduler_failure_interrupts_other_running_arms(tmp_path, monkeypatch):
         process = actual_popen([sys.executable, '-c', code], **kwargs)
         processes.append(process)
         return process
-    monkeypatch.setattr('etazero.experiment.subprocess.Popen', popen)
+    monkeypatch.setattr('etazero.run.experiment.subprocess.Popen', popen)
     with pytest.raises(RuntimeError, match='Experiment a'):
         scheduler.run()
     assert len(processes) == 2 and all(p.poll() is not None for p in processes)

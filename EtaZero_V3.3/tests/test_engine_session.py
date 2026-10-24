@@ -7,7 +7,7 @@ from threading import Thread
 import time
 
 import pytest
-from etazero.analysis import model_info
+from etazero.evaluation.analysis import model_info
 from etazero.config import ROOT, write_native
 from etazero.engine_config import load_engine_config
 from test_analysis_commands import model_and_profiles

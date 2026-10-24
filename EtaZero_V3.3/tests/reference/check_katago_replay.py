@@ -15,8 +15,8 @@ import torch
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'python'));sys.path.insert(0,str(ROOT/'tests'))
 from etazero.config import load_config
-from etazero.shuffle import desired_window,_groups,resource_plan,validation_file
-from etazero.reader import BatchReader
+from etazero.data.shuffle import desired_window, _groups, resource_plan, validation_file
+from etazero.data.reader import BatchReader
 from test_replay import id_snapshot
 from replay_order import repeat_order
 

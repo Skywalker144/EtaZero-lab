@@ -6,7 +6,7 @@ import shutil
 import pytest
 
 from etazero.config import ROOT, fingerprint, load_config
-from etazero.experiment import experiment_plan, write_arm_config
+from etazero.run.experiment import experiment_plan, write_arm_config
 
 
 @pytest.fixture

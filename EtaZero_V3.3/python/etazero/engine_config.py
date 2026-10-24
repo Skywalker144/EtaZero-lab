@@ -6,10 +6,10 @@ is flattened once for native consumers and provenance; no training files are rea
 import math
 import os
 from pathlib import Path
-from .config import PATTERN_DEFAULTS, resolve_pattern_corpora, HUMAN_SL_DEFAULTS, TIME_CONTROL_DEFAULTS, ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_game_symmetry
-from .schema import RULES
-from .config_files import read_config_file
-from .config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_search_combination
+from etazero.config import PATTERN_DEFAULTS, resolve_pattern_corpora, HUMAN_SL_DEFAULTS, TIME_CONTROL_DEFAULTS, ROOT, boolean, FIELDS, SEARCH_PARAMETERS, validate_search_parameters, validate_hex_opening, validate_game_symmetry
+from etazero.schema import RULES
+from etazero.config_files import read_config_file
+from etazero.config import GUMBEL_FIELDS, GUMBEL_DEFAULTS, validate_gumbel, validate_search_combination
 
 ENGINE_FIELDS = dict(go_rules=str, komi=float, playout_doubling_advantage=float,playout_doubling_advantage_player=str,seed=int, board_size=int, rule=str, device=str, cpu_threads=int,
               visits=int, search_threads=int, c_puct=float, virtual_loss=float, reuse_tree=boolean,
@@ -29,7 +29,7 @@ RESIGNATION_FIELDS = dict(allow_resignation=boolean,resign_threshold=float,resig
 ENGINE_DEFAULTS = dict(report_analysis_winrates_as='SIDETOMOVE',always_compute_pass_alive_under_suicide_rules='auto',exclude_territory_adjacent_to_atari='auto',analysis_wide_root_noise=.04,analysis_ignore_pre_root_history=False,seed=0,board_size=19,rule='go',device='cuda:0',cpu_threads=1,
     use_non_buggy_lcb=True,root_noise_enabled=False,noise_fraction=.25,dirichlet_total_concentration=10.83,shaped_dirichlet_noise=True,root_desired_per_child_visits_coeff=0,board_width=0,board_height=0,delay_move_scale=0,delay_move_max=1000000,
     visits=2**50,c_puct=1,virtual_loss=3,reuse_tree=True,temperature=.1,temperature_early=.5,
-    max_batch=16,server_threads=1,cache_entries=65536,inference_precision='auto',batch_wait_us=0,
+    max_batch=16,server_threads=1,inference_precision='auto',batch_wait_us=0,
     muzero_queue_capacity=1024,use_fpu=True,fpu_reduction_max=.2,root_fpu_reduction_max=.1,
     fpu_parent_weight_by_visited_policy=True,fpu_parent_weight_by_visited_policy_pow=2,
     fpu_parent_weight=0,fpu_loss_prop=0,root_fpu_loss_prop=0,use_lcb=True,lcb_stdevs=5,
@@ -146,7 +146,8 @@ def _load_profile(source, match, environ, *, groups=None, overrides=None, gtp=Fa
                 elif key == 'eval_cache_min_visits': raw = '100'
                 elif key == 'wide_root_noise': raw = '.04' if group=='analysis' and not gtp else '0'
                 elif key in ('futile_visits_threshold','visit_cap_contempt','visit_cap_contempt_player'): raw = '0'
-                elif key == 'nn_mutex_pool_power_of_two': raw = '17'
+                elif key == 'cache_entries': raw = str(1 << (21 if match else 20 if gtp else 23))
+                elif key == 'nn_mutex_pool_power_of_two': raw = '16' if gtp else '17'
                 elif key in ('ignore_pre_root_history','ignore_all_history'): raw = 'false'
                 elif key == 'go_rules': raw = 'chinese'
                 elif key == 'komi': raw = '7.5'
@@ -203,12 +204,12 @@ def validate_engine_config(config, match=False):
     if any(c[k]!=0 and not 2<=c[k]<=25 for k in ('board_width','board_height')) or (c['rule']!='go' and (c['board_width'] or c['board_height'])):raise ValueError('Rectangular dimensions require Go sizes in [2,25]')
     if c['rule'] not in RULES:
         raise ValueError('Invalid engine rule')
-    from .games import spec_for_rule
+    from etazero.games import spec_for_rule
     spec = spec_for_rule(c['rule'])
     if not spec.subtree_value_bias and c['subtree_value_bias_factor'] != 0:
         raise ValueError(f'{spec.name} does not support subtree value bias; requires subtree_value_bias_factor=0')
     if c['rule']=='go':
-        from .games import validate_go_komi
+        from etazero.games import validate_go_komi
         validate_go_komi(c['komi'])
     if not 1 <= c['visits'] <= 2**50 or any(c[k] < 1 for k in ('cpu_threads','search_threads','max_batch','server_threads','muzero_queue_capacity')) or c['c_puct'] < 0:
         raise ValueError('Engine requires visits >= 1 and positive execution/search sizes')

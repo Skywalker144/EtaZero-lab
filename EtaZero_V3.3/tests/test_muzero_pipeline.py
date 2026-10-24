@@ -10,16 +10,16 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.data import read_raw, metadata, training_view, game_weight_statistics
-from etazero.network import make_network
-from etazero.runtime import run_training
+from etazero.data.targets import read_raw, metadata, training_view, game_weight_statistics
+from etazero.models.network import make_network
+from etazero.run.runtime import run_training
 from etazero.schema import GLOBALS
 from etazero.storage import load_json, sha256
-from etazero.training import load_checkpoint
+from etazero.train.learner import load_checkpoint
 
 
 def assert_diagnostics(root, config):
-    from etazero.plotting import run_history, training_figure
+    from etazero.evaluation.plotting import run_history, training_figure
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
     updates=[e for e in events if e['event']=='update']
     assert updates
@@ -59,7 +59,7 @@ def test_config_inherits_baseline_and_disables_invalid_tree_features(tmp_path):
     base = load_config(CONFIGS / 'baseline')
     assert c['training']['train_steps'] == base['training']['train_steps']
     assert c['value_weighting'] == base['value_weighting']
-    from etazero.experiment import initialization_key, write_arm_config
+    from etazero.run.experiment import initialization_key, write_arm_config
     assert initialization_key(c) != initialization_key(base)
     c['value_weighting']['value_weight_exponent'] = 0
     validate(c)
@@ -113,12 +113,13 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture, kat
     assert all(sha256(p) == digest for p, digest in files.items())
     manifest = load_json(root/Path(state['model']['path']).parent/'manifest.json')
     assert manifest['algorithm'] == 'muzero'
-    assert manifest['normalization'] == ('masked_layernorm' if architecture == 'resnet' else 'precomputed_inv_std')
+    # Both source regular and NBT trunks use fson, including their exported inverse std.
+    assert manifest['normalization'] == 'precomputed_inv_std'
     # Same start rows, absorbing-action RNG, optimizer and normalization state
     # must lead to the identical next updates after a mid-round interruption.
     from test_gpu import assert_compiled_partial_resume
     assert_compiled_partial_resume(tmp_path, root, c)
-    from etazero.analysis import analyze
+    from etazero.evaluation.analysis import analyze
     from etazero.engine_config import load_engine_config
     evaluation = load_engine_config(CONFIGS / 'muzero')
     evaluation['analysis'].update(visits=12, search_threads=2)
@@ -128,7 +129,7 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture, kat
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
 def test_cuda_main_losses_export_ignores_auxiliary_search_settings(tmp_path):
-    from etazero.analysis import analyze
+    from etazero.evaluation.analysis import analyze
     from etazero.engine_config import load_engine_config
     c=small_config();c['training']['compile']=False
     c['muzero_training']={'auxiliary_losses':False,'katago_optimizer':True,
@@ -152,7 +153,7 @@ def test_cuda_main_losses_export_ignores_auxiliary_search_settings(tmp_path):
 
 
 def test_unroll_gradient_boundaries_and_side_mask():
-    from etazero.muzero.training import TrainingForward
+    from etazero.train.muzero.training import TrainingForward
     class Model(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -169,7 +170,8 @@ def test_unroll_gradient_boundaries_and_side_mask():
     model = Model(); forward = Forward(model, small_config())
     targets = [torch.ones(2, 4)] * 8
     inputs = [torch.ones(2, 1), torch.ones(2, 1), *targets,
-              None, None, None, torch.zeros(2, 3), torch.ones(2, 4), torch.arange(2)]
+              None, None, None, *([torch.ones(2,4)] * 4),
+              torch.zeros(2, 3), torch.ones(2, 4), torch.arange(2)]
     (value,), step_losses = forward(*inputs); value.backward()
     assert step_losses.tolist() == [10,30,90,270]
     assert not step_losses.requires_grad
@@ -190,7 +192,7 @@ def test_unroll_gradient_boundaries_and_side_mask():
 
 @pytest.mark.parametrize('symmetry', range(8))
 def test_sequence_d4_actions_match_all_spatial_targets(symmetry):
-    from etazero.muzero.training import augment_batch
+    from etazero.train.muzero.training import augment_batch
     from etazero.symmetry import apply_symmetry
     actions = torch.tensor([[0,7,14], [35,28,21]])
     obs = torch.zeros(2, 5, 6, 6); obs[:, 0, :5, :5] = 1
@@ -205,8 +207,8 @@ def test_sequence_d4_actions_match_all_spatial_targets(symmetry):
 @pytest.mark.parametrize('unroll_steps', [3, 40])
 def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path, unroll_steps):
     from etazero.config import write_native
-    from etazero.shuffle import build_snapshot
-    from etazero.reader import BatchReader
+    from etazero.data.shuffle import build_snapshot
+    from etazero.data.reader import BatchReader
     c = small_config(); c['training']['batch_size'] = 4
     c['unroll']['steps'] = unroll_steps; validate(c)
     c['writer'].update(shard_rows=8, first_file_min_random_proportion=.15)
@@ -277,7 +279,7 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path, 
     assert original == {p.name:sha256(p) for p in (snapshot/'data').glob('*.npz')}
     # Exercise the shared validation consumer with sequence targets and side rows.
     from etazero.storage import save_json
-    from etazero.training import training_forward, validate_epoch
+    from etazero.train.learner import training_forward, validate_epoch
     manifest=load_json(snapshot/'manifest.json')
     manifest['validation_files']=manifest['files'][:1]
     manifest['validation_rows']=sum(f['rows'] for f in manifest['validation_files'])
@@ -297,10 +299,10 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path, 
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')
 @pytest.mark.parametrize('amp', ['float16', 'bfloat16'])
 def test_cuda_amp_pipeline_and_mixed_match(tmp_path, amp):
-    from etazero.arena import single_match
+    from etazero.evaluation.arena import single_match
     from etazero.engine_config import load_engine_config
-    from etazero.export import export_model
-    from etazero.training import initialize
+    from etazero.models.export import export_model
+    from etazero.train.learner import initialize
     from etazero.config import write_native
     torch.set_num_threads(1)
     c=small_config(); c['training']['amp']=amp

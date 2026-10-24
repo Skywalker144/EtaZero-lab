@@ -5,8 +5,8 @@ import subprocess
 import pytest
 from config_samples import CONFIGS
 from etazero.config import ROOT, load_config, resume_config, validate, write_native
-from etazero.data import read_raw
-from etazero.training import initialize, load_checkpoint
+from etazero.data.targets import read_raw
+from etazero.train.learner import initialize, load_checkpoint
 
 
 @pytest.mark.parametrize('lookahead_print', [False, True])

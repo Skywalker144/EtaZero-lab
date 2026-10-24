@@ -1,8 +1,8 @@
 """Physical-coordinate records -> model coordinates and game-valid augmentation."""
 from functools import lru_cache
 import torch
-from .schema import HEX_GLOBAL, HEX_WHITE_GLOBAL
-from .games import XIANGQI_MOVES, XIANGQI_INDEX, SPECS
+from etazero.schema import HEX_GLOBAL, HEX_WHITE_GLOBAL
+from etazero.games import XIANGQI_MOVES, XIANGQI_INDEX, SPECS
 
 
 def apply_symmetry(tensor, symmetry):

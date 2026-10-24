@@ -24,9 +24,9 @@ def main():
         build = Path(directory)
         subprocess.run([sys.executable, str(ROOT/'python/etazero/schema.py'), str(build/'etazero/schema.h')], check=True)
         finder = source/'cpp/forbiddenPoint'
-        subprocess.run(['g++', '-std=c++17', '-O2', '-I', str(finder), '-I', str(ROOT/'cpp/include'), '-I', str(build),
+        subprocess.run(['g++', '-std=c++17', '-O2', '-I', str(finder), '-I', str(ROOT/'cpp'), '-I', str(build),
                         str(ROOT/'cpp/tests/rules_reference.cpp'), str(finder/'ForbiddenPointFinder.cpp'),
-                        str(ROOT/'cpp/src/game/gomoku.cpp'), '-o', str(build/'rules_oracle')], check=True)
+                        str(ROOT/'cpp/game/gomoku.cpp'), '-o', str(build/'rules_oracle')], check=True)
         result = json.loads(subprocess.check_output([str(build/'rules_oracle')], text=True, timeout=120))
     result.update(commit=COMMIT, source_sha256={path: hashlib.sha256((source/path).read_bytes()).hexdigest()
                   for path in ('cpp/forbiddenPoint/ForbiddenPointFinder.cpp','cpp/forbiddenPoint/ForbiddenPointFinder.h')},

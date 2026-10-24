@@ -2,11 +2,52 @@
 import pytest
 import torch
 from etazero.config import load_config, validate
-from etazero.katago_configs import BASE_NAMES, resolve
-from etazero.katago_network import KataGoNet, inference_network, ExportComplexDepthwiseConv2d
-from etazero.network import TrainingForward, make_network, losses
-from etazero.optimization import optimizer_for
+from etazero.models.katago_configs import BASE_NAMES, resolve
+from etazero.models.katago_network import KataGoNet, inference_network, ExportComplexDepthwiseConv2d
+from etazero.models.network import TrainingForward, make_network, losses
+from etazero.train.optimization import optimizer_for
 from config_samples import CONFIGS
+
+
+@pytest.mark.parametrize('compiled',[False,True])
+def test_depthwise_ffn_sequence_matches_spatial_values_and_gradients(compiled):
+    import copy
+    import os
+    from etazero.models.katago.model_pytorch import TransformerFFNBlock
+    if compiled and os.environ.get('ETAZERO_GPU_TESTS')!='1':
+        pytest.skip('Requires host CUDA for compiled AMP')
+    device='cuda' if compiled else 'cpu'
+    torch.manual_seed(173)
+    config=resolve('b6c384h6nbttflrs-dwc')
+    spatial=TransformerFFNBlock('test',384,config,'relu',True).to(device)
+    sequence=copy.deepcopy(spatial)
+    run=torch.compile(sequence,fullgraph=True) if compiled else sequence
+    x=torch.randn(2,384,5,5,device=device,requires_grad=True)
+    y=x.detach().flatten(2).transpose(1,2).contiguous().requires_grad_()
+    mask=torch.ones(2,1,5,5,device=device);mask[0,:,4,:]=0;mask[1,:,:,4]=0
+    count=mask.sum((1,2,3),keepdim=True)
+    with torch.autocast(device,dtype=torch.float16,enabled=compiled):
+        expected=spatial(x,mask,count,count.sum(),None)
+        actual=run(y,mask.flatten(2).transpose(1,2),count,count.sum(),None)
+    rtol,atol=(2e-2,2e-3) if compiled else (1e-5,1e-6)
+    torch.testing.assert_close(actual,expected.flatten(2).transpose(1,2),rtol=rtol,atol=atol)
+    actual.float().square().sum().backward();expected.float().square().sum().backward()
+    torch.testing.assert_close(y.grad,x.grad.flatten(2).transpose(1,2),rtol=rtol,atol=atol)
+    for (name,a),(other,b) in zip(sequence.named_parameters(),spatial.named_parameters()):
+        assert name==other
+        torch.testing.assert_close(a.grad,b.grad,rtol=rtol,atol=atol,msg=name)
+
+
+def test_depthwise_preset_trains_in_default_sequence_layout():
+    torch.manual_seed(73)
+    model=KataGoNet('b6c384h6nbttflrs-dwc',5)
+    assert model.network.transformer_seq_layout
+    model.network.use_flex_attention=False
+    obs=torch.randn(2,5,5,5);obs[:,0]=1;obs[0,0,4,:]=0
+    outputs=model.training_outputs(obs,torch.randn(2,8))
+    sum(t.clamp(-100,100).square().mean() for head in outputs for t in head).backward()
+    weights=[p for name,p in model.named_parameters() if 'ffn_dwconv.weight' in name]
+    assert weights and all(p.grad is not None and torch.isfinite(p.grad).all() for p in weights)
 
 
 @pytest.mark.parametrize('name', BASE_NAMES)
@@ -126,10 +167,10 @@ def test_intermediate_loss_source_default_weighting_and_repvgg_gradient_scale():
 
 def test_batch_renorm_schedule_and_missing_metadata_rejected():
     model = KataGoNet('b2c16-brng-meta', 6)
-    from etazero.brenorm import BoundsSchedule
+    from etazero.train.brenorm import BoundsSchedule
     schedule = BoundsSchedule(model, dict(avg_momentum=.01, target_rmax=3., target_dmax=2., adjustment_scale=10.))
     schedule.update(10)
-    from etazero._vendor.katago.model_pytorch import NormMask
+    from etazero.models.katago.model_pytorch import NormMask
     for norm in (module for module in model.modules() if isinstance(module, NormMask)):
         assert norm.rmax == pytest.approx(3 - 2 / torch.e)
         assert norm.dmax == pytest.approx(2 - 2 / torch.e)
@@ -169,7 +210,7 @@ def test_source_grouped_rmsnorm_dimension_constraint_is_not_changed():
 
 @pytest.mark.parametrize('dilation', [1, 3])
 def test_complex_depthwise_export_preserves_source_convolution_and_rng(dilation):
-    from etazero._vendor.katago.model_pytorch import ComplexDepthwiseConv2d
+    from etazero.models.katago.model_pytorch import ComplexDepthwiseConv2d
     torch.set_num_threads(2)
     source = ComplexDepthwiseConv2d(3, dilation=dilation).double()
     source.initialize('relu')
@@ -192,8 +233,8 @@ def test_complex_depthwise_export_preserves_source_convolution_and_rng(dilation)
 
 
 def test_source_cuda_rejects_unloadable_tiny_training_preset(tmp_path):
-    from etazero.cuda_export import export_source
-    from etazero.katago_network import KataGoNet
+    from etazero.models.cuda_export import export_source
+    from etazero.models.katago_network import KataGoNet
     model=KataGoNet('b1c6nbt-brn',6).eval()
     with pytest.raises(ValueError,match='positive trunk, mid, regular and gpool'):
         export_source(model.network,tmp_path/'model.bin','tiny')

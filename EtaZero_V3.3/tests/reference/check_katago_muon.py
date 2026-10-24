@@ -23,8 +23,8 @@ def main():
     args = parser.parse_args()
     os.environ['KATAGO_MUON_BATCHED_NS'] = '0'
     import torch
-    from etazero.muon import Muon
-    from etazero.optimization import group_settings
+    from etazero.train.muon import Muon
+    from etazero.train.optimization import group_settings
     torch.set_num_threads(1)
     reference = json.loads((ROOT/'reference_sources.json').read_text())['KataGoMuon']
     source = Path(reference['root'])

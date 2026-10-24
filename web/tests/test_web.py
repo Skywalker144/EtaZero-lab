@@ -14,7 +14,7 @@ from threading import Thread, Event
 
 from etazero.engine_config import load_engine_config, load_match_opening_config
 from etazero.config import ROOT, write_native
-from etazero.analysis import model_info
+from etazero.evaluation.analysis import model_info
 from web.engine import Engine
 from web.app import App, Conflict
 from web.server import discover_catalog, discover_models, make_server
@@ -449,7 +449,7 @@ class WebTests(unittest.TestCase):
 
     def test_network_planes_match_published_model(self):
         import torch
-        from etazero.export import example_inputs
+        from etazero.models.export import example_inputs
 
         model, info = model_info(MODEL)
         device = self.config['analysis']['device']

@@ -5,7 +5,7 @@ import pytest
 from config_samples import CONFIGS, derive_config
 from etazero.config import ROOT, load_config, validate
 from etazero.engine_config import load_engine_config
-from etazero.runtime import run_training
+from etazero.run.runtime import run_training
 
 
 def test_subtree_bias_resolves_through_training_and_engine_profiles(tmp_path):

@@ -6,7 +6,7 @@ from pathlib import Path
 import random
 import numpy as np
 import pytest
-from etazero.source_reader import SourceBatchReader
+from etazero.data.source_reader import SourceBatchReader
 from test_replay import id_snapshot
 
 

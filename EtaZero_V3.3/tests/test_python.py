@@ -1,6 +1,6 @@
 from etazero.schema import GLOBALS
-from etazero.source_data import decode_view
-from etazero.data import TRAIN_TARGETS
+from etazero.data.source_data import decode_view
+from etazero.data.targets import TRAIN_TARGETS
 from config_samples import CONFIGS, derive_config
 from collections import Counter
 import copy
@@ -14,12 +14,12 @@ import numpy as np
 import pytest
 import torch
 from etazero.config import ROOT, load_config, validate
-from etazero.data import read_raw, training_view, validate_raw, Catalog
-from etazero.export import example_inputs
-from etazero.network import MaskedBatchNorm, make_network, base_losses as losses, inference_network
-from etazero.reader import BatchReader
+from etazero.data.targets import read_raw, training_view, validate_raw, Catalog
+from etazero.models.export import example_inputs
+from etazero.models.network import MaskedBatchNorm, make_network, base_losses as losses, inference_network
+from etazero.data.reader import BatchReader
 from etazero.schema import RAW_DTYPES, pack_observations, unpack_observations
-from etazero.shuffle import view_key, build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
+from etazero.data.shuffle import view_key, build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
 from etazero.storage import save_npz, save_json, sha256
 
 
@@ -86,8 +86,8 @@ def winning_record(rule=0):
 
 def source_fields(a):
     """Complete a hand-built trajectory with the current on-disk fields."""
-    from etazero.data import alphazero_training_view
-    from etazero.source_data import encode_view
+    from etazero.data.targets import alphazero_training_view
+    from etazero.data.source_data import encode_view
     a.update(encode_view(alphazero_training_view(a)))
     return a
 
@@ -141,7 +141,7 @@ def test_script_config_environment_and_explicit_override(tmp_path):
 
 
 def test_auto_resume_rejects_unknown_data_and_weights(tmp_path,config):
-    from etazero.runtime import run_training
+    from etazero.run.runtime import run_training
     unrelated=tmp_path/"game.npz";unrelated.write_bytes(b"preserve existing data")
     with pytest.raises(ValueError,match="empty output directory"):
         run_training(tmp_path,config,tmp_path/"missing_binary")
@@ -155,7 +155,7 @@ def test_auto_resume_rejects_unknown_data_and_weights(tmp_path,config):
 
 
 def test_source_identity_excludes_sibling_run_data(tmp_path,monkeypatch):
-    from etazero import runtime
+    from etazero.run import runtime
     source=tmp_path/"version";source.mkdir()
     (source/"code.py").write_text('print("source")\n')
     for name in ("AGENTS.md","RULES.md"):
@@ -478,8 +478,8 @@ def test_partition_distribution_and_conservation():
 
 
 def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
-    import etazero.shuffle as shuffle
-    from etazero.data import training_targets
+    import etazero.data.shuffle as shuffle
+    from etazero.data.targets import training_targets
     targets=training_targets(config)
     a,m=winning_record();path=tmp_path/'selfplay'/'a.npz';save_npz(path,a)
     entries=[{'path':str(path.relative_to(tmp_path)),'sha256':sha256(path),'metadata':m}]
@@ -526,7 +526,7 @@ def test_catalog_indexed_window_and_incremental_scan(tmp_path):
 
 
 def test_journal_barrier_and_failure(tmp_path,monkeypatch):
-    from etazero.runtime import Journal
+    from etazero.run.runtime import Journal
     journal=Journal(tmp_path)
     for step in range(100):
         journal('update',step=step)
@@ -555,8 +555,8 @@ def test_journal_barrier_and_failure(tmp_path,monkeypatch):
 
 
 def test_journal_has_no_fsync_barriers(tmp_path, monkeypatch):
-    from etazero.runtime import Journal
-    monkeypatch.setattr('etazero.runtime.os.fsync', lambda _: pytest.fail('Observational log must not fsync'))
+    from etazero.run.runtime import Journal
+    monkeypatch.setattr('etazero.run.runtime.os.fsync', lambda _: pytest.fail('Observational log must not fsync'))
     journal = Journal(tmp_path)
     journal('update', step=1)
     journal.flush()
@@ -627,7 +627,7 @@ def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
 
 
 def test_cold_start_quota_hand_values(config):
-    from etazero.runtime import iteration_plan
+    from etazero.run.runtime import iteration_plan
     config['training'].update(train_steps=1000,batch_size=128,replay_ratio=8)
     config['replay']['min_rows']=10000
     state={'iteration':0,'model':None,'checkpoint':{'id':'initial'},'target_rows':0,'replay_origin_rows':None,'replay_rows':0,'train_credit':0}
@@ -653,7 +653,7 @@ def test_opening_config_validation(config,section,key,value):
 
 
 def test_iteration_one_backfills_actual_shortfall(config):
-    from etazero.runtime import Controller
+    from etazero.run.runtime import Controller
     config['replay']['min_rows']=50
     class VariableLengthCatalog:
         rows=10;games=1
@@ -680,7 +680,7 @@ def test_iteration_one_backfills_actual_shortfall(config):
 
 
 def test_adamw_decoupled_decay_and_config(config):
-    from etazero.training import optimizer_for
+    from etazero.train.learner import optimizer_for
     c=copy.deepcopy(config);c['optimizer']['kind']='adamw'
     model=make_network(c)
     with torch.no_grad(): model.network.conv_spatial.weight.fill_(2.)
@@ -797,7 +797,7 @@ def test_temp_compression_preserves_snapshot_bytes(tmp_path,config,waves):
         manifest=json.loads((tmp_path/'snapshots'/identity/'manifest.json').read_text())
         results.append(manifest['files'])
     assert results[0]==results[1]
-    from etazero.data import training_targets
+    from etazero.data.targets import training_targets
     cache=tmp_path/'.internal/training_views'/(view_key(entry,training_targets(config))+'.npz')
     with zipfile.ZipFile(cache) as archive:
         assert all(item.compress_type==zipfile.ZIP_DEFLATED for item in archive.infolist())
@@ -944,7 +944,7 @@ def test_policy_init_loaded_defaults_and_explicit_match_mean(tmp_path,monkeypatc
 
 
 def test_graph_configuration_bounds_and_environment_override(config):
-    from etazero.engine_config import load_engine_config,validate_engine_config
+    from etazero.engine_config import load_engine_config, validate_engine_config
     assert load_config(CONFIGS / 'baseline')['graph_search']==dict(use_graph_search=True,graph_search_catch_up_leak_prob=0,graph_search_rep_bound=11,node_table_shards_power_of_two=16,use_eval_cache=False,eval_cache_min_visits=100)
     for match in (False,True):
         group='match' if match else 'analysis';prefix='MATCH_' if match else 'ANALYSIS_'
@@ -963,7 +963,7 @@ def test_graph_configuration_bounds_and_environment_override(config):
 
 
 def test_search_correction_samples_and_bounds(config):
-    from etazero.engine_config import load_engine_config,validate_engine_config
+    from etazero.engine_config import load_engine_config, validate_engine_config
     assert config['uncertainty']==dict(use_uncertainty=False,uncertainty_coeff=.25,uncertainty_exponent=1,uncertainty_max_weight=8)
     assert config['optimistic_policy']==dict(policy_optimism=0,root_policy_optimism=0)
     assert config['noise_pruning']==dict(use_noise_pruning=False,noise_prune_utility_scale=.15,noise_pruning_cap=1e50)

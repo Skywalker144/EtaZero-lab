@@ -9,7 +9,7 @@ import warnings
 
 import pytest
 
-from etazero.native import NativeWorker
+from etazero.run.native import NativeWorker
 
 
 WORKER = '''

@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 import pytest
 from etazero.config import ROOT, load_config, validate
-from etazero.plotting import run_history
+from etazero.evaluation.plotting import run_history
 from etazero.storage import load_json, save_json, sha256
-from etazero.training import prune_checkpoints
+from etazero.train.learner import prune_checkpoints
 
 
 @pytest.fixture

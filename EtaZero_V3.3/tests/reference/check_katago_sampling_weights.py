@@ -45,7 +45,7 @@ int main(){double alpha,beta;int reanalyze,count;std::cout.precision(17);
  }}
 '''.replace('__KL_BODY__',kl).replace('WEIGHTS',weights)
     native=r'''
-#include "etazero/record.h"
+#include "dataio/record.h"
 #include <iostream>
 using namespace etazero;
 int main(){double alpha,beta;int reanalyze,count;std::cout.precision(17);
@@ -69,14 +69,14 @@ int main(){double alpha,beta;int reanalyze,count;std::cout.precision(17);
     for alpha,beta,reanalyze,template,pair in itertools.product((0,.5), (0,.1,.5),(0,1),templates,pairs):
         row=f'{alpha} {beta} {reanalyze} {len(template)}\n'
         row+='\n'.join(' '.join(map(str,(*step,*pair[0],*pair[1]))) for step in template);rows.append(row)
-    library=a.build/'libetazero_core.a'
+    library=a.build/'libetazero_dataio.a'
     zlib=re.search(r'^ZLIB_LIBRARY_RELEASE:FILEPATH=(.+)$',(a.build/'CMakeCache.txt').read_text(),re.M).group(1)
     assert Path(zlib).is_file()
     with tempfile.TemporaryDirectory(prefix='etazero_weight_reference_') as temp:
         path=Path(temp);(path/'oracle.cpp').write_text(oracle);(path/'native.cpp').write_text(native)
         subprocess.run(['c++','-std=c++17','-O2',str(path/'oracle.cpp'),'-o',str(path/'oracle')],check=True)
-        subprocess.run(['c++','-std=c++17','-O2','-Wl,--gc-sections','-I'+str(ROOT/'cpp/include'),'-I'+str(a.build/'generated'),
-                        str(path/'native.cpp'),str(library),str(a.build/'libetazero_go_rules.a'),str(a.build/'libetazero_xiangqi_rules.a'),zlib,'-pthread','-o',str(path/'native')],check=True)
+        subprocess.run(['c++','-std=c++17','-O2','-Wl,--gc-sections','-I'+str(ROOT/'cpp'),'-I'+str(a.build/'generated'),
+                        str(path/'native.cpp'),str(library),str(a.build/'libetazero_search_common.a'),str(a.build/'libetazero_neuralnet.a'),str(a.build/'libetazero_game.a'),str(a.build/'libetazero_sgf.a'),str(a.build/'libetazero_go_features.a'),str(a.build/'libetazero_go_rules.a'),str(a.build/'libetazero_base.a'),str(a.build/'libetazero_xiangqi_rules.a'),zlib,'-pthread','-o',str(path/'native')],check=True)
         query='\n'.join(rows)+'\n';actual=subprocess.check_output([str(path/'native')],input=query,text=True).splitlines()
         expected=subprocess.check_output([str(path/'oracle')],input=query,text=True).splitlines();assert len(actual)==len(expected)==len(rows)
         worst=0

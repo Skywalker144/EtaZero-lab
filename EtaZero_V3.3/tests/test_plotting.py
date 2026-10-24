@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 
-from etazero.plotting import METRICS, loss_figure, training_figure
-from etazero.plotting import run_history, performance_figure
+from etazero.evaluation.plotting import METRICS, loss_figure, training_figure
+from etazero.evaluation.plotting import run_history, performance_figure
 from etazero.storage import save_json
 
 

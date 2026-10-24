@@ -6,10 +6,10 @@ import subprocess
 import numpy as np
 import pytest
 import torch
-from etazero.katago_network import KataGoNet
-from etazero.muzero.network import NetworkConfig,MuZeroNet
-from etazero.network import inference_network
-from etazero.cuda_export import export_source
+from etazero.models.katago_network import KataGoNet
+from etazero.models.muzero.network import NetworkConfig, MuZeroNet
+from etazero.models.network import inference_network
+from etazero.models.cuda_export import export_source
 
 ROOT=Path(__file__).resolve().parents[1]
 

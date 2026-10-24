@@ -5,7 +5,7 @@ if __package__ in (None, ''):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from etazero.config_files import SOURCE_KEYS
 from etazero.engine_config import ENGINE_FIELDS
-from etazero.config import SEARCH_PARAMETERS,SOURCE_SEARCH_BOUNDS,boolean
+from etazero.config import SEARCH_PARAMETERS, SOURCE_SEARCH_BOUNDS, boolean
 fields=set(SEARCH_PARAMETERS)|set('visits search_threads c_puct virtual_loss reuse_tree temperature temperature_early use_fpu fpu_reduction_max root_fpu_reduction_max fpu_parent_weight_by_visited_policy_pow use_lcb lcb_stdevs min_visit_prop_for_lcb policy_target_pruning'.split())
 fields|={'playout_doubling_advantage','playout_doubling_advantage_player','root_noise_enabled','noise_fraction','dirichlet_total_concentration','shaped_dirichlet_noise','root_desired_per_child_visits_coeff'}
 fields-=set('human_model human_sl_profile pattern_corpora'.split())

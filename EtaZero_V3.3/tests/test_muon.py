@@ -6,9 +6,9 @@ import torch
 
 from config_samples import CONFIGS
 from etazero.config import load_config, validate
-from etazero.muon import Muon
-from etazero.network import make_network
-from etazero.optimization import group_settings, optimization_for, optimizer_for
+from etazero.train.muon import Muon
+from etazero.models.network import make_network
+from etazero.train.optimization import group_settings, optimization_for, optimizer_for
 
 
 def muon_config(algorithm='alphazero', architecture='nbt', plain=False):

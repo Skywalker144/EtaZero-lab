@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 
 from etazero.config import ROOT
-from etazero.data import Catalog, metadata, read_raw, validate_raw
-from etazero.plotting import METRICS, training_figure
-from etazero.runtime import run_training
+from etazero.data.targets import Catalog, metadata, read_raw, validate_raw
+from etazero.evaluation.plotting import METRICS, training_figure
+from etazero.run.runtime import run_training
 from etazero.storage import save_npz, sha256
 from test_muzero_pipeline import small_config
 from test_python import compact_search, winning_record
@@ -109,7 +109,7 @@ def test_invalid_game_measurements_are_rejected(total, count):
 def test_cuda_pipeline_skips_optional_diagnostics_and_resumes(tmp_path):
     import torch
     from etazero.config import validate
-    from etazero.plotting import run_history
+    from etazero.evaluation.plotting import run_history
     torch.set_num_threads(1)
     config = small_config()
     config['inference']['inference_precision'] = 'float16'

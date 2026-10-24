@@ -11,12 +11,12 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import ROOT, load_config, resume_config, validate
-from etazero.data import Catalog, open_raw, read_raw, validate_raw, training_view, training_targets, TRAIN_TARGETS
-from etazero.muzero.data import replay_weight_mean
-from etazero.reader import BatchReader
-from etazero.runtime import Controller, run_training
+from etazero.data.targets import Catalog, open_raw, read_raw, validate_raw, training_view, training_targets, TRAIN_TARGETS
+from etazero.data.muzero import replay_weight_mean
+from etazero.data.reader import BatchReader
+from etazero.run.runtime import Controller, run_training
 from etazero.storage import load_json, save_npz, sha256
-from etazero.training import load_checkpoint
+from etazero.train.learner import load_checkpoint
 from test_python import winning_record
 from test_replay import id_snapshot
 
@@ -46,7 +46,7 @@ def test_catalog_materializes_each_npz_member_once(tmp_path, monkeypatch):
 
 
 def test_catalog_holdout_reuses_game_spans_without_reopening_raw(tmp_path, monkeypatch):
-    from etazero.shuffle import split_sources, build_snapshot
+    from etazero.data.shuffle import split_sources, build_snapshot
     from test_replay import holdout_entries
     entries = holdout_entries(tmp_path, copies=2)
     catalog = Catalog(tmp_path, 'test', 'config')
@@ -64,7 +64,7 @@ def test_catalog_holdout_reuses_game_spans_without_reopening_raw(tmp_path, monke
     class SerialPool:
         map = staticmethod(map)
     before = build_snapshot(tmp_path, 1, uncatalogued, config, pool=SerialPool())
-    monkeypatch.setattr('etazero.shuffle.open_raw', lambda _: pytest.fail('Holdout must reuse catalog spans'))
+    monkeypatch.setattr('etazero.data.shuffle.open_raw', lambda _: pytest.fail('Holdout must reuse catalog spans'))
     for _ in range(2):
         actual = split_sources(tmp_path, indexed)
         for want, got in zip(expected, actual):
@@ -78,7 +78,7 @@ def test_catalog_holdout_reuses_game_spans_without_reopening_raw(tmp_path, monke
 
 
 def test_muzero_shares_full_trajectory_td_between_root_and_unroll(monkeypatch):
-    import etazero.data as data
+    import etazero.data.targets as data
     raw, meta = winning_record()
     meta.update(algorithm='muzero', unroll_steps=3)
     raw['metadata'] = np.frombuffer(json.dumps(meta).encode(), np.uint8)
@@ -208,9 +208,9 @@ def test_disabled_options_and_superlinear_window_are_valid():
 @pytest.mark.parametrize('algorithm', ['alphazero', 'muzero', 'raw_muzero'])
 def test_inactive_targets_preserve_rows_actions_losses_and_gradients(algorithm):
     from etazero.schema import unpack_observations
-    from etazero.muzero.data import prepare_batch
-    from etazero.training import training_forward, forward_batch, augment_training_batch
-    from etazero.network import make_network
+    from etazero.data.muzero import prepare_batch
+    from etazero.train.learner import training_forward, forward_batch, augment_training_batch
+    from etazero.models.network import make_network
     import random
     from test_muzero_pipeline import small_config
     from test_raw_muzero import small_raw_config
@@ -226,7 +226,7 @@ def test_inactive_targets_preserve_rows_actions_losses_and_gradients(algorithm):
     full=training_view(raw);lean=training_view(raw,training_targets(c))
     assert 'q_values' not in lean and 'q_visits' not in lean
     if algorithm=='raw_muzero':
-        assert not {'td_value','opponent_policy','full_game_weight'} & lean.keys()
+        assert not {'td_value','opponent_policy','value_aux_weight'} & lean.keys()
     for key in lean:
         np.testing.assert_array_equal(lean[key],full[key])
     # Absorbing action draws, D4, forward targets and backward gradients all
@@ -255,7 +255,7 @@ def test_inactive_targets_preserve_rows_actions_losses_and_gradients(algorithm):
 
 
 def test_indexed_replay_selection_matches_full_history(tmp_path):
-    from etazero.shuffle import window_sources,desired_window
+    from etazero.data.shuffle import window_sources, desired_window
     c=load_config(CONFIGS/'smoke_test')
     c['replay'].update(min_rows=9,max_rows=18,taper_exponent=1,expand_per_row=1)
     catalog=Catalog(tmp_path,'test','config');models={}
@@ -297,7 +297,7 @@ def test_multiple_rounds_plot_after_each_commit_and_on_resume(tmp_path,monkeypat
 @HOST_CUDA
 @pytest.mark.parametrize('algorithm', ['alphazero', 'plain_alphazero', 'muzero'])
 def test_controller_resumes_saved_batch_without_repeating_selfplay(tmp_path, monkeypatch, algorithm):
-    import etazero.training as training
+    import etazero.train.learner as training
     from test_muzero_pipeline import small_config
     torch.set_num_threads(1)
     c = small_config() if algorithm == 'muzero' else load_config(CONFIGS/'smoke_test')
@@ -314,7 +314,7 @@ def test_controller_resumes_saved_batch_without_repeating_selfplay(tmp_path, mon
     with monkeypatch.context() as patch:
         def stop_before_learner(*args, **kwargs):
             raise RuntimeError('fixed snapshot ready')
-        patch.setattr('etazero.runtime.train_iteration', stop_before_learner)
+        patch.setattr('etazero.run.runtime.train_iteration', stop_before_learner)
         with pytest.raises(RuntimeError, match='fixed snapshot ready'):
             run_training(parent, c, ROOT/'build/etazero', max_iteration=2)
     roots = [tmp_path/'continuous', tmp_path/'resumed']
@@ -374,7 +374,7 @@ def test_controller_resumes_saved_batch_without_repeating_selfplay(tmp_path, mon
 
 @HOST_CUDA
 def test_plot_failure_cannot_undo_training_commit(tmp_path, monkeypatch):
-    import etazero.plotting as plotting
+    import etazero.evaluation.plotting as plotting
     torch.set_num_threads(1)
     c = load_config(CONFIGS/'smoke_test')
     def fail(*a, **k):

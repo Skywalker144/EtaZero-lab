@@ -10,7 +10,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'python'))
-from etazero.muzero.network import normalize_hidden_state, scale_gradient
+from etazero.models.muzero.network import normalize_hidden_state, scale_gradient
 
 
 def main():

@@ -8,10 +8,10 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import ROOT, GUMBEL_DEFAULTS, load_config, validate, write_native
-from etazero.data import read_raw, metadata, training_view
+from etazero.data.targets import read_raw, metadata, training_view
 from etazero.engine_config import load_engine_config, validate_engine_config
-from etazero.runtime import run_training
-from etazero.training import load_checkpoint
+from etazero.run.runtime import run_training
+from etazero.train.learner import load_checkpoint
 from etazero.storage import sha256
 
 
@@ -73,7 +73,7 @@ def test_illegal_dense_target_is_rejected():
     a,m=winning_record(0);m.update(root_search_algo='gumbel',nonroot_search_algo='puct')
     a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
     a['policies'][0,5]=1 # padded point, despite allowing unvisited legal actions
-    from etazero.data import validate_raw
+    from etazero.data.targets import validate_raw
     with pytest.raises(ValueError,match='occupied/padded'):
         validate_raw(a)
 
@@ -116,7 +116,7 @@ def test_cuda_pipeline_resume_analysis_and_match(tmp_path,algorithm,nonroot):
     if nonroot=='gumbel':
         from test_gpu import assert_compiled_partial_resume
         assert_compiled_partial_resume(tmp_path/'partial_resume',root,c)
-    from etazero.analysis import analyze
+    from etazero.evaluation.analysis import analyze
     evaluation=load_engine_config(CONFIGS/'muzero' if algorithm=='muzero' else CONFIGS/'baseline')
     evaluation['analysis'].update(root_search_algo='gumbel',nonroot_search_algo=nonroot,reuse_tree=False,
                                   use_graph_search=False,root_num_symmetries_to_sample=1,
@@ -124,7 +124,7 @@ def test_cuda_pipeline_resume_analysis_and_match(tmp_path,algorithm,nonroot):
     _, result=analyze(evaluation,ROOT/'build/etazero',root,moves='0,6')
     assert result['result']['root_visits']==12 and result['result']['action'] not in (0,6)
     if nonroot=='gumbel':
-        from etazero.arena import single_match
+        from etazero.evaluation.arena import single_match
         match=load_engine_config(CONFIGS/'muzero' if algorithm=='muzero' else CONFIGS/'baseline',match=True)
         match['match'].update(root_search_algo='gumbel',nonroot_search_algo=nonroot,reuse_tree=False,
                               use_graph_search=False,root_num_symmetries_to_sample=1,visits=7,

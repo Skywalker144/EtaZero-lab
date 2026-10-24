@@ -5,8 +5,8 @@ import subprocess
 import numpy as np
 import pytest
 import torch
-from etazero.katago_network import KataGoNet
-from etazero.cuda_export import export_source
+from etazero.models.katago_network import KataGoNet
+from etazero.models.cuda_export import export_source
 from etazero.games import SPECS
 
 pytestmark = pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='Host CUDA acceptance')

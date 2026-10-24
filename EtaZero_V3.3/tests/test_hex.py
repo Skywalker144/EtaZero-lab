@@ -12,7 +12,7 @@ from etazero.config import ROOT, load_config, validate, validate_hex_opening
 from etazero.engine_config import load_engine_config
 from etazero.schema import GLOBALS, HEX_GLOBAL, HEX_WHITE_GLOBAL
 from etazero.symmetry import augment_batch
-from etazero.runtime import run_training
+from etazero.run.runtime import run_training
 
 
 def hex_config(algorithm='alphazero'):
@@ -91,12 +91,12 @@ def test_match_hex_parameters_are_independent(tmp_path):
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS')!='1',reason='Requires host CUDA')
 @pytest.mark.parametrize('algorithm',('alphazero','muzero'))
 def test_hex_cuda_training_resume_analysis_match_and_web(tmp_path,algorithm):
-    from etazero.runtime import run_training
-    from etazero.data import read_raw,metadata
-    from etazero.storage import load_json,sha256
-    from etazero.analysis import analyze
-    from etazero.arena import single_match
-    from etazero.export import example_inputs
+    from etazero.run.runtime import run_training
+    from etazero.data.targets import read_raw, metadata
+    from etazero.storage import load_json, sha256
+    from etazero.evaluation.analysis import analyze
+    from etazero.evaluation.arena import single_match
+    from etazero.models.export import example_inputs
     from web.engine import Engine
     assert torch.cuda.is_available()
     torch.set_num_threads(1)

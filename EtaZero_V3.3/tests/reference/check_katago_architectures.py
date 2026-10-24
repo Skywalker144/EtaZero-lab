@@ -16,8 +16,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'python'))
-from etazero.katago_configs import BASE_NAMES, resolve
-from etazero.katago_network import KataGoNet
+from etazero.models.katago_configs import BASE_NAMES, resolve
+from etazero.models.katago_network import KataGoNet
 from etazero.schema import GLOBALS, PLANES
 
 
@@ -38,6 +38,10 @@ def load_source():
 
 def original_model(mp, config, canvas, device):
     model = mp.Model(copy.deepcopy(config), canvas)
+    if config.get("transformer_ffn_depthwise_conv", False):
+        # Fixed source only implements depthwise FFN in NCHW. Compare EtaZero
+        # default NSC execution with that independent source calculation.
+        model.transformer_seq_layout = False
     kernel = 1 if config['initial_conv_1x1'] else 3
     model.conv_spatial = torch.nn.Conv2d(len(PLANES), config['trunk_num_channels'], kernel,
                                         padding=kernel//2, bias=False)

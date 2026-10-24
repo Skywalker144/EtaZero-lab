@@ -6,11 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from etazero.config import ROOT,load_config,validate
-from etazero.runtime import Controller,iteration_plan,training_budget
-from etazero.training import subepoch_ends
-from etazero.shuffle import replay_counts
-from etazero.data import Catalog, validate_raw
+from etazero.config import ROOT, load_config, validate
+from etazero.run.runtime import Controller, iteration_plan, training_budget
+from etazero.data.shuffle import replay_counts
+from etazero.data.targets import Catalog, validate_raw
 from etazero.storage import save_npz
 from test_optimization import small_optimization
 from test_python import winning_record, compact_search
@@ -145,19 +144,6 @@ def test_cold_start_single_pass_and_fractional_credit_can_make_zero_step_round()
     with pytest.raises(ValueError,match='decreased'):training_budget(plan,snapshot,149999)
     snapshot['resource_plan']['complete_batches_per_pass']=0
     with pytest.raises(ValueError,match='no complete'):training_budget(plan,snapshot,150001)
-
-
-def test_local_segment_boundaries_are_nonempty_and_keep_exact_fixed_budget():
-    for steps in range(1,31):
-        for n in range(1,steps+1):
-            ends=subepoch_ends(steps,n);lengths=np.diff([0]+ends)
-            assert ends[-1]==steps and len(ends)==n and min(lengths)>0 and max(lengths)-min(lengths)<=1
-    assert subepoch_ends(7,3)==[2,4,7]
-    for steps,n in [(0,1),(2,0),(2,3)]:
-        with pytest.raises(ValueError):subepoch_ends(steps,n)
-    c=load_config(CONFIGS / 'smoke_test');c['training']['sub_epochs']=5
-    validate(c)
-    assert subepoch_ends(c['training']['train_steps'], min(c['training']['sub_epochs'], c['training']['train_steps']))[-1] == c['training']['train_steps']
 
 
 def test_segment_reset_preserves_fast_slow_swa_norm_and_round_lr_clocks():

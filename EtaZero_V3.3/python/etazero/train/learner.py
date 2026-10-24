@@ -1,0 +1,452 @@
+"""Fixed-size learner updates, immutable checkpoints and exact data/RNG restoration."""
+import contextlib
+import gc
+import math
+from pathlib import Path
+import random
+import uuid
+import warnings
+import numpy as np
+import torch
+from etazero.config import resume_config
+from etazero.models.network import make_network, TrainingForward
+from etazero.train.optimization import optimization_for, optimizer_for
+from etazero.data.reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
+from etazero.data.source_reader import SourceBatchReader
+from etazero.storage import atomic_write, load_json, save_json, sync_directory
+from etazero.symmetry import augment_batch
+from etazero.train.training_metrics import TrainingMetrics
+from etazero.games import SPECS, spec_for_config
+
+
+def model_identity(config):
+    fields = {'network_config': config['network']}
+    from etazero.games import spec_for_config, layout_metadata
+    if spec_for_config(config).name in ('go','xiangqi'): fields['game_layout'] = layout_metadata(config)
+    if config['agent']['algorithm'] == 'muzero':
+        fields.update(algorithm='muzero', muzero_config=config['muzero'])
+    return fields
+
+
+def check_model_identity(saved, config):
+    expected = model_identity(config)
+    if (saved.get('algorithm', 'alphazero') != config['agent']['algorithm'] or
+            any(saved.get(key) != value for key, value in expected.items())):
+        raise ValueError('Model algorithm/network configuration mismatch')
+
+
+def training_forward(model, config):
+    if config["agent"]["algorithm"] == "muzero":
+        from etazero.train.attention_penalty import configure
+        configure(model, config.get("attention_penalty", {}))
+    if config['agent']['algorithm'] == 'muzero':
+        from etazero.train.muzero.training import TrainingForward as MuZeroForward
+        return MuZeroForward(model, config)
+    return TrainingForward(model, config['training']['soft_policy_weight_scale'], config['training']['disable_optimistic_policy'], config.get('losses'), config.get('attention_penalty'))
+
+
+def forward_batch(forward, tensors):
+    keys = ('obs', 'globals', 'policy', 'opponent_policy', 'opponent_policy_weight',
+            'value', 'td_value', 'value_aux_weight', 'q_values', 'q_visits', 'future_positions', 'variance_time', 'training_weight',
+            'policy_weight', 'value_weight', 'td_value_weight', 'future_position_weight')
+    if 'actions' in tensors:
+        keys += ('actions', 'step_weights', 'recurrent_indices')
+        return forward(*(tensors.get(key) for key in keys))
+    return forward(*(tensors.get(key) for key in keys)), None
+
+
+def augment_training_batch(tensors, symmetry, spec=SPECS['gomoku']):
+    if 'actions' in tensors:
+        from etazero.train.muzero.training import augment_batch as muzero_augment
+        return muzero_augment(tensors, symmetry, spec)
+    return augment_batch(tensors, symmetry, spec)
+
+
+def device_check(device):
+    d = torch.device(device)
+    if d.type == "cuda":
+        if not torch.cuda.is_available() or d.index >= torch.cuda.device_count():
+            raise RuntimeError(f"Requested CUDA device is unavailable: {device}")
+        torch.empty(1, device=d)
+    return d
+
+
+def rng_state(device):
+    device = torch.device(device)
+    return {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state(device) if device.type == 'cuda' else None}
+
+
+def restore_rng(state, device):
+    random.setstate(state["python"]); np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state(state["cuda"].cpu(), device)
+
+
+def load_checkpoint(run_dir, reference, config, device="cpu"):
+    path = Path(run_dir)/reference["path"]
+    value = torch.load(path, map_location=device, weights_only=False)
+    if (value["resume_config"] != resume_config(config) or
+            value["id"] != reference["id"] or value["network_config"] != config["network"]):
+        raise ValueError("Checkpoint identity/configuration mismatch")
+    check_model_identity(value, config)
+    return value
+
+
+def commit_checkpoint(run_dir, config, model, optimizer, scaler, iteration, step, total_steps,
+                      reader_state, optimization, training_metrics=None):
+    identity = f"iteration_{iteration:06d}_step_{step:08d}_{uuid.uuid4().hex}"
+    path = Path("checkpoints")/(identity+".pt")
+    value = {"id": identity, "resume_config": resume_config(config),
+             **model_identity(config), "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+             "optimization": optimization.state_dict(), "scaler": scaler.state_dict(), "rng": rng_state(next(model.parameters()).device), "reader": reader_state,
+             "iteration": iteration, "step": step, "total_steps": total_steps,
+             "training_metrics": TrainingMetrics().state if training_metrics is None else training_metrics.state,
+             "total_samples": optimization.consumed_samples, "optimizer_steps": optimization.optimizer_steps,
+             "source_id":load_json(Path(run_dir)/".internal/session.json")["source_id"] if (Path(run_dir)/".internal/session.json").exists() else None}
+    atomic_write(Path(run_dir)/path, lambda p: torch.save(value,p), immutable=True, durable=True)
+    reference = {"id": identity, "path": str(path), "iteration": iteration, "step": step, "total_steps": total_steps, "total_samples": value["total_samples"], "optimizer_steps": value["optimizer_steps"]}
+    index_path = Path(run_dir)/'.internal/checkpoints.json'
+    index = load_json(index_path) if index_path.exists() else []
+    save_json(index_path, index + [reference])
+    return reference
+
+
+def prune_checkpoints(run_dir, keep):
+    """Prune registered completed-round payloads using the bounded live index."""
+    if keep < 1:
+        raise ValueError("checkpoint_keep must be positive")
+    root = Path(run_dir)
+    state = load_json(root/'.internal/state.json')
+    if state['checkpoint'] is None:
+        return []
+    index_path = root/'.internal/checkpoints.json'
+    index = load_json(index_path)
+    if state['checkpoint'] not in index:
+        raise ValueError('Committed checkpoint is absent from the live index')
+    latest = {}
+    for reference in index:
+        relative = Path(reference['path'])
+        if (relative.parent != Path('checkpoints') or relative.suffix != '.pt'
+                or relative.stem != reference['id']):
+            raise ValueError(f'Invalid checkpoint path: {relative}')
+        if reference['iteration'] < state['iteration']:
+            latest[reference['iteration']] = reference
+    # The authority is the final checkpoint selected by state, even if a
+    # previous process saved another payload before dying at a pointer write.
+    latest[state['checkpoint']['iteration']] = state['checkpoint']
+    retained = {r['id'] for _,r in sorted(latest.items(),reverse=True)[:keep]}
+    retained.update(r['id'] for r in index if r['iteration'] >= state['iteration'])
+    for reference in index:
+        if reference['id'] in retained and not (root/reference['path']).is_file():
+            raise FileNotFoundError(f"Retained checkpoint is missing: {reference['path']}")
+    removed = []
+    for reference in index:
+        if reference['id'] not in retained:
+            path = root/reference['path']
+            if path.exists():
+                path.unlink(); removed.append(reference['path'])
+    if removed:
+        sync_directory(root/'checkpoints')
+    save_json(index_path, [r for r in index if r['id'] in retained])
+    return removed
+
+
+def configure_training_numerics(config, device):
+    if device.type == 'cuda':
+        # train.py enables cuDNN autotuning; TF32 matmul is a separate opt-in.
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision('high' if config['training']['use_tf32_matmul'] else 'highest')
+
+
+def initialize(run_dir, config, weights=None):
+    seed = config["run"]["seed"]
+    random.seed(seed); np.random.seed(seed % 2**32); torch.manual_seed(seed)
+    device = device_check(config["devices"]["train"])
+    configure_training_numerics(config, device)
+    model = make_network(config).to(device)
+    if config['optimizer'].get('wd_floor_frac', 0):
+        from etazero.train.muon import initialization_rms
+        model.initial_rms = initialization_rms(model)
+    if weights:
+        source = torch.load(weights, map_location=device, weights_only=False)
+        if source["network_config"] != config["network"]:
+            raise ValueError("Imported weights do not match the network configuration")
+        check_model_identity(source, config)
+        model.load_state_dict(source["model"], strict=True)
+    optimizer = optimizer_for(model,config)
+    optimization = optimization_for(model, config, optimizer)
+    scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
+    reference = commit_checkpoint(run_dir,config,model,optimizer,scaler,0,0,0,None,optimization)
+    del optimization,model,optimizer,scaler
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return reference
+
+
+LOSS_NAMES=('loss','policy_loss','opponent_policy_loss','soft_policy_loss',
+            'soft_opponent_policy_loss','value_loss','td_value_long_loss','td_value_mid_loss',
+            'td_value_short_loss','long_optimistic_policy_loss','short_optimistic_policy_loss','shortterm_value_error_loss')
+
+
+def loss_names(model):
+    return (LOSS_NAMES + (('q_winloss_loss',) if model.predict_q_values else ()) +
+            (('future_position_loss', 'variance_time_loss') if getattr(model, 'auxiliary_losses', True) else ()) +
+            (('attention_logit_penalty', 'attention_logit_bound_max') if getattr(model, 'has_attention_penalty', False) else ()))
+
+
+def finish_optimizer_step(parameters, optimizer, scaler, grad_norm, cap, packed, loss_count):
+    """Launch the update before the single diagnostic transfer; fail before publishing state.
+
+    GradScaler has already recorded elementwise overflow in unscale_. Clipping an
+    overflowing gradient does not change its skip decision. A fatal loss/norm may
+    contaminate this in-memory update, so callers MUST abort without checkpointing.
+    The packed tensor snapshots the pre-update scale, which update() mutates.
+    """
+    torch.nn.utils.clip_grads_with_norm_(parameters, cap, grad_norm)
+    scaler.step(optimizer)
+    scaler.update()
+    values = packed.tolist()
+    if not all(math.isfinite(v) for v in values[:loss_count]):
+        raise FloatingPointError('Nonfinite loss')
+    scale_before, found_inf = values[-2:] if scaler.is_enabled() else (1., 0.)
+    if scale_before <= 0 or not math.isfinite(scale_before):
+        raise FloatingPointError('Invalid AMP loss scale')
+    skipped = found_inf != 0
+    if not math.isfinite(values[loss_count]):
+        if not scaler.is_enabled():
+            raise FloatingPointError('Nonfinite gradients')
+        if not skipped:
+            raise FloatingPointError('Nonfinite gradient norm despite finite unscaled gradients')
+    return values, skipped
+
+
+def validate_epoch(snapshot,model,forward,config,iteration,device,log):
+    """Raw model, per-file full batches, source random D4 and post-batch cap."""
+    if config['training']['skip_validation']:return
+    manifest=load_json(Path(snapshot)/'manifest.json')
+    batch_size=config['training']['batch_size']
+    usable=sum(f['rows']//batch_size*batch_size for f in manifest['validation_files'])
+    if not usable:
+        log('validation',iteration=iteration,samples=0,batches=0,reason='no_complete_validation_batch')
+        return
+    spec=spec_for_config(config)
+    reader=BatchReader(snapshot,batch_size,config['training']['prefetch_depth'],
+                       config['run']['seed']+iteration,split='validation',
+                       shuffle_files=config['training']['randomize_validation_files'])
+    # Independent stream keeps validation from changing the learner's next RNG
+    # state. The source promises uniform D4, not a shared seeded draw sequence.
+    symmetries=random.Random((config['run']['seed']+iteration)^0x56414c)
+    amp=config['training']['amp'];maximum=config['training']['max_validation_samples']
+    names=loss_names(model)
+    sums=[0.0]*len(names);samples=batches=0;draws=[0]*8;step_sums=None
+    was_training=model.training
+    try:
+        model.eval()
+        with torch.no_grad():
+            while True:
+                try:batch=reader.next()
+                except StopIteration:break
+                tensors={k:torch.from_numpy(a).to(device=device,dtype=torch.int64 if k in ('actions','recurrent_indices') else torch.float32)
+                         for k,a in batch.items()}
+                symmetry=symmetries.randrange(8);draws[symmetry]+=1
+                tensors=augment_training_batch(tensors,symmetry,spec) # Always on for validation.
+                context=torch.autocast('cuda',dtype=torch.float16 if amp=='float16' else torch.bfloat16) if amp!='off' else contextlib.nullcontext()
+                with context:
+                    components,step_losses=forward_batch(forward,tensors)
+                values=torch.stack(components).tolist()
+                if not all(math.isfinite(v) for v in values):raise FloatingPointError('Nonfinite validation loss')
+                sums=[a+v*batch_size for a,v in zip(sums,values)]
+                if step_losses is not None:
+                    measured=step_losses.tolist()
+                    if not all(math.isfinite(v) for v in measured):raise FloatingPointError('Nonfinite validation step loss')
+                    if step_sums is None:step_sums=[0.0]*len(measured)
+                    step_sums=[a+v*batch_size for a,v in zip(step_sums,measured)]
+                samples+=batch_size;batches+=1
+                if maximum and samples>maximum:break
+        log('validation',iteration=iteration,samples=samples,batches=batches,model='raw',
+            symmetry_counts=draws,**dict(zip(names,(v/samples for v in sums))),
+            **({'step_losses':[v/samples for v in step_sums]} if step_sums is not None else {}))
+    finally:
+        model.train(was_training);reader.close()
+
+
+def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
+    root, iteration = Path(run_dir), plan["iteration"]
+    spec = spec_for_config(config)
+    progress_path = root/".internal/iterations"/f"{iteration:06d}"/"learner.json"
+    progress = load_json(progress_path) if progress_path.exists() else None
+    if progress and progress['snapshot_id'] != plan['snapshot_id']:
+        raise ValueError('Learner checkpoint snapshot differs from the iteration plan')
+    reference = progress["checkpoint"] if progress else base
+    device = device_check(config["devices"]["train"])
+    configure_training_numerics(config, device)
+    checkpoint = load_checkpoint(root,reference,config,device)
+    if progress and (checkpoint["iteration"] != iteration or checkpoint["step"] > plan["train_steps"]):
+        raise ValueError("Learner checkpoint belongs to a different iteration or exceeds its budget")
+    model = make_network(config).to(device); model.load_state_dict(checkpoint["model"],strict=True); model.train()
+    forward=training_forward(model,config)
+    if config['training']['compile']:
+        if hasattr(model, 'prepare_compile'):
+            model.prepare_compile()
+        from torch._inductor import config as compiler_config
+        compiler_config.compile_threads=config['run']['cpu_threads']
+        torch._dynamo.config.fail_on_recompile_limit_hit=True
+        muzero = config['agent']['algorithm'] == 'muzero'
+        forward=torch.compile(forward,fullgraph=not muzero,dynamic=muzero)
+    optimizer = optimizer_for(model,config); optimizer.load_state_dict(checkpoint["optimizer"])
+    optimization = optimization_for(model, config, optimizer, checkpoint['optimization'])
+    scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
+    scaler.load_state_dict(checkpoint["scaler"])
+    restore_rng(checkpoint["rng"], device)
+    step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
+    reader = SourceBatchReader(root/"snapshots"/plan["snapshot_id"], plan["batch_size"],
+                               config["training"]["prefetch_depth"], config["run"]["seed"],
+                               config['training']['train_steps'], config['training']['sub_epochs'],
+                               checkpoint['reader'], max_batches=plan['train_steps']-step)
+    round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
+    del checkpoint
+    if round_metrics.state['steps'] != step:
+        warnings.warn('Metric counters differ from the learner cursor; round metrics are incomplete', RuntimeWarning)
+        round_metrics.state['incomplete'] = True
+    window_metrics = TrainingMetrics()
+    last_fields = {}
+
+    def flush_metrics():
+        nonlocal window_metrics
+        if window_metrics.state['steps']:
+            log('update', **last_fields, **window_metrics.summary(), round_metrics=round_metrics.summary())
+            window_metrics = TrainingMetrics()
+
+    if not progress:
+        optimization.begin_round()
+    if optimization.consumed_samples != total * plan["batch_size"]:
+        raise ValueError("Learner consumption counters differ from optimization state")
+    amp = config["training"]["amp"]
+    if device.type != "cuda" and amp != "off":
+        raise ValueError("AMP training requires a CUDA device")
+    unsaved = False
+    consumed_state = reader.state()
+    prepared=BatchPrefetcher(reader,config['training']['prefetch_depth'])
+    prefetch = None
+    parameters=list(model.parameters())
+    try:
+        if device.type=='cuda' and config['training']['cuda_prefetch']:
+            prefetch=CudaBatchPrefetcher(prepared,device)
+        while step < plan["train_steps"] and not stopping():
+            if prefetch:
+                tensors,consumed_state = prefetch.next(prefetch_next=step+1<plan["train_steps"])
+            else:
+                batch,consumed_state = prepared.next();tensors = {}
+                for key,array in batch.items():
+                    tensor = torch.from_numpy(array).to(dtype=torch.int64 if key in ('actions','recurrent_indices') else torch.float32)
+                    if device.type == "cuda":
+                        tensor = tensor.pin_memory()
+                    tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
+            optimization.prepare_batch(consumed_state)
+            if optimization.subepoch_batches==0:
+                log('subepoch_start',iteration=iteration,subepoch=optimization.subepoch,
+                    consumed_step=step,end_step=step+consumed_state['subepoch_steps'],
+                    lookahead_counter=optimization.counter,lookahead_k=getattr(optimization,'lookahead_k',None))
+            symmetry = int(torch.randint(8, ()).item()) if config['training']['d4_augmentation'] else 0
+            # White Hex canonicalization also applies when augmentation is off.
+            tensors = augment_training_batch(tensors, symmetry, spec)
+            optimization.before_step()
+            learning_rates = {g["group_name"]: g["lr"] for g in optimizer.param_groups}
+            weight_decays = {g["group_name"]: g["weight_decay"] for g in optimizer.param_groups}
+            context = torch.autocast("cuda",dtype=torch.float16 if amp=="float16" else torch.bfloat16) if amp!="off" else contextlib.nullcontext()
+            with context:
+                components,step_losses=forward_batch(forward,tensors)
+            loss,pl,opl,spl,sopl,vl=components[:6]
+            optimizer.zero_grad(set_to_none=True)
+            backward_loss = loss
+            if getattr(model, 'has_attention_penalty', False):
+                backward_loss = backward_loss + config['attention_penalty']['coefficient'] * components[-2]
+            scaler.scale(backward_loss * optimization.backward_scale).backward()
+            scaler.unscale_(optimizer)
+            if hasattr(model, 'scale_repvgg_gradients'):
+                model.scale_repvgg_gradients()
+            grad_norm = torch.nn.utils.get_total_norm([p.grad for p in parameters if p.grad is not None])
+            # Losses, norms and unroll diagnostics share one device-to-host
+            # transfer. Reuse these values for both checks and journal metrics.
+            diagnostics_tensors = [] if step_losses is None else list(step_losses.unbind())
+            # Reuse GradScaler's unscale check rather than synchronizing twice
+            # through get_scale(). These accessors are verified by CUDA tests.
+            amp_status = ([scaler._get_scale_async(),
+                           sum(scaler._found_inf_per_device(optimizer).values())]
+                          if scaler.is_enabled() else [])
+            packed = torch.stack([x.detach() for x in components] +
+                                 [grad_norm / optimization.backward_scale] +
+                                 diagnostics_tensors + amp_status)
+            cap = optimization.gradient_cap(config['training']['gradient_clip'])
+            try:
+                values, skipped = finish_optimizer_step(parameters, optimizer, scaler, grad_norm,
+                                                         cap, packed, len(components))
+                diagnostic_end = len(values)-len(amp_status)
+                # Unroll losses must be finite even when GradScaler skips gradients.
+                start = len(components)+1
+                if not all(math.isfinite(v) for v in values[start:diagnostic_end]):
+                    raise FloatingPointError('Nonfinite unroll loss')
+            except FloatingPointError as error:
+                log('training_failure', iteration=iteration, step=step+1, reason=str(error))
+                if hasattr(log, 'flush'):
+                    log.flush()
+                raise FloatingPointError(f'{error} at iteration {iteration}, step {step+1}') from error
+            scale_before = values[-2] if amp_status else 1.
+            if skipped:
+                log("amp_overflow", iteration=iteration, step=step+1,
+                    scale_before=scale_before, scale_after=scaler.get_scale(), skipped=True,
+                    grad_norm=values[len(components)])
+            optimization.after_step(successful=not skipped)
+            step += 1; total += 1
+            unsaved = True
+            diagnostics={}
+            if step_losses is not None:
+                start=len(components)+1
+                diagnostics={'step_losses':values[start:start+len(diagnostics_tensors)]}
+            measured_losses = dict(zip(loss_names(model), values))
+            measured_norm = values[len(components)]
+            clipped = measured_norm * optimization.backward_scale > cap
+            for accumulator in (round_metrics, window_metrics):
+                accumulator.add(measured_losses, measured_norm, skipped, clipped, **diagnostics)
+            last_fields = dict(iteration=iteration,step=step,total_steps=total,
+                optimizer_steps=optimization.optimizer_steps,total_samples=optimization.consumed_samples,
+                subepoch=optimization.subepoch,subepoch_batches=optimization.subepoch_batches,
+                amp_skipped=skipped,symmetry=symmetry,learning_rates=learning_rates,weight_decays=weight_decays,
+                lookahead_counter=optimization.counter,swa_samples=optimization.swa_count)
+            checkpoint_every = config['training']['checkpoint_every']
+            save_due = (bool(checkpoint_every and step % checkpoint_every == 0)
+                        or step == plan['train_steps'] or stopping())
+            if step % config['training']['log_every'] == 0 or save_due:
+                flush_metrics()
+            del loss,pl,opl,spl,sopl,vl,components,tensors,step_losses
+            if consumed_state['epoch_end']:
+                validate_epoch(reader.snapshot,model,forward,config,iteration,device,log)
+            if save_due:
+                reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization,round_metrics)
+                log("checkpoint",iteration=iteration,checkpoint=reference)
+                if hasattr(log,'flush'):
+                    log.flush()
+                save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
+                unsaved = False
+        # Commit consumed batches, including scaler skips, at a normal stop.
+        if unsaved:
+            flush_metrics()
+            reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization,round_metrics)
+            log("checkpoint",iteration=iteration,checkpoint=reference)
+            if hasattr(log,'flush'):
+                log.flush()
+            save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
+        return reference, step == plan["train_steps"]
+    finally:
+        try:
+            if prefetch:
+                prefetch.close()
+        finally:
+            prepared.close();reader.close()
+        del optimization,forward,model,optimizer,scaler
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()

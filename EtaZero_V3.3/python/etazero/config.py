@@ -1,6 +1,6 @@
 """Strict, directory-based INI configuration. Native consumers receive resolved values."""
 import configparser
-from .config_files import read_config_file
+from etazero.config_files import read_config_file
 import hashlib
 import json
 import math
@@ -358,7 +358,7 @@ def load_config(directory, run_dir=None):
         config[section] = {}
         for key, convert in fields.items():
             if section == 'network' and key in ('channels', 'blocks') and (section, key) not in values:
-                from .katago_configs import is_preset, resolve
+                from etazero.models.katago_configs import is_preset, resolve
                 architecture = values.get(('network', 'architecture'), '')
                 if values.get(('agent', 'algorithm')) == 'alphazero' and is_preset(architecture):
                     preset = resolve(architecture)
@@ -480,7 +480,7 @@ NUMERIC_MINIMUMS = {
 }
 
 def validate(c):
-    from .schema import RULES
+    from etazero.schema import RULES
     gate = c['gatekeeper']
     if not 0 <= gate['games'] <= 2**24 or not math.isfinite(gate['required_candidate_win_prop']) or not 0 <= gate['required_candidate_win_prop'] <= 1:
         raise ValueError('Invalid gatekeeper game count or required win proportion')
@@ -503,7 +503,7 @@ def validate(c):
         if c['patterns']['avoid_repeated_pattern_utility'] or c['patterns']['pattern_corpora']!='[]': raise ValueError('Pattern bonuses require real-board AlphaZero search')
         if c['subtree_value_bias']['subtree_value_bias_factor'] != 0:
             raise ValueError('MuZero latent search requires subtree_value_bias_factor=0')
-        from .muzero.network import network_config
+        from etazero.models.muzero.network import network_config
         network_config(c)
         if c['unroll']['steps'] < 1 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
             raise ValueError('MuZero unroll.steps must be positive, hidden_gradient_scale in [0,1]')
@@ -537,9 +537,9 @@ def validate(c):
                     raise ValueError(f'{section}.{key} must be {"nonnegative" if allow_zero else "positive"}')
     env, net = c["environment"], c["network"]
     # MuZero ResNet keeps the NBT head width rules; the AZ presets are unchanged.
-    from .katago_configs import is_preset, resolve, validate_dimensions
+    from etazero.models.katago_configs import is_preset, resolve, validate_dimensions
     if a['algorithm'] == 'alphazero':
-        from .katago_configs import source_architecture
+        from etazero.models.katago_configs import source_architecture
         net['architecture'] = source_architecture(net['architecture'], net.get('channels'), net.get('blocks'))
     named = a['algorithm'] == 'alphazero' and is_preset(net['architecture'])
     if named:
@@ -572,7 +572,7 @@ def validate(c):
         raise ValueError("Sizes must be unique, in [5, canvas], with canvas <= 25")
     if not rules or len(set(rules)) != len(rules) or any(x not in RULES for x in rules):
         raise ValueError("Invalid rule distribution")
-    from .games import spec_for_config, spec_for_rule
+    from etazero.games import spec_for_config, spec_for_rule
     spec = spec_for_config(c)
     if not spec.subtree_value_bias and c['subtree_value_bias']['subtree_value_bias_factor'] != 0:
         raise ValueError(f'{spec.name} does not support subtree value bias; requires subtree_value_bias_factor=0')
@@ -580,7 +580,7 @@ def validate(c):
         if sizes != [10] or net['canvas'] != 10:
             raise ValueError('Xiangqi requires sizes=10 and canvas=10 (9 files, 10 ranks)')
     if 'go' in c:
-        from .games import validate_go_komi
+        from etazero.games import validate_go_komi
         validate_go_komi(c['go']['komi'])
     for label, entries in (("size", sizes), ("rule", rules)):
         weights = csv(env[label + "_weights"], float)
@@ -661,7 +661,7 @@ def validate(c):
     for key, value in c.get('losses', {}).items():
         if not math.isfinite(value) or value < (-1 if key.endswith('head_scale') else 0):
             raise ValueError(f'Invalid losses.{key}')
-    from .katago_configs import is_preset, resolve
+    from etazero.models.katago_configs import is_preset, resolve
     has_intermediate = (c['agent']['algorithm'] == 'alphazero' and
                         is_preset(c['network']['architecture']) and
                         resolve(c['network']['architecture']).get('has_intermediate_head', False))
@@ -678,7 +678,7 @@ def validate(c):
         raise ValueError('Invalid Muon optimizer options')
     if o['wd_floor_frac'] > 0 and o['kind'] not in ('muon','normuon','aurora'):
         raise ValueError('Weight-decay floors require a Muon-family optimizer')
-    from .lr_schedule import validate as validate_lr_schedule
+    from etazero.train.lr_schedule import validate as validate_lr_schedule
     validate_lr_schedule(c['lr_schedule'])
     if c['lr_schedule']['mode']!='constant' and ('plain_optimizer' in c or not c.get('muzero_training',{}).get('katago_optimizer',True)):
         raise ValueError('Fixed plain optimizer does not use the KataGo learning-rate schedule')
@@ -736,7 +736,7 @@ def native_text(config):
 
 
 def write_native(config, path):
-    from .storage import atomic_write
+    from etazero.storage import atomic_write
     atomic_write(path,lambda p:p.write_text(native_text(config)))
 
 

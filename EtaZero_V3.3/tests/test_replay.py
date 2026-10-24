@@ -8,16 +8,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from etazero.config import ROOT,load_config,validate
-from etazero.data import Catalog,training_view
-from etazero.reader import BatchReader,BatchPrefetcher
+from etazero.config import ROOT, load_config, validate
+from etazero.data.targets import Catalog, training_view
+from etazero.data.reader import BatchReader, BatchPrefetcher
 
-from etazero.shuffle import build_snapshot,desired_window,window_sources,_groups,resource_plan,prune_derived,restore_snapshot
-from etazero.storage import save_npz,save_json,sha256
-from etazero.network import make_network,TrainingForward
-from etazero.training import validate_epoch
+from etazero.data.shuffle import build_snapshot, desired_window, window_sources, _groups, resource_plan, prune_derived, restore_snapshot
+from etazero.storage import save_npz, save_json, sha256
+from etazero.models.network import make_network, TrainingForward
+from etazero.train.learner import validate_epoch
 from test_python import winning_record, source_fields
-from etazero.source_data import encode_view,decode_view
+from etazero.data.source_data import encode_view, decode_view
 
 
 @pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
@@ -25,7 +25,7 @@ def test_file_holdout_partitions_complete_source_shards_with_side_rows(tmp_path,
     from collections import Counter
     import subprocess
     from etazero.config import write_native
-    from etazero.data import read_raw, metadata, game_row_ranges, game_identity, game_weight_statistics, training_targets
+    from etazero.data.targets import read_raw, metadata, game_row_ranges, game_identity, game_weight_statistics, training_targets
     from test_muzero_pipeline import small_config
     c=small_config() if algorithm=='muzero' else load_config(CONFIGS/'smoke_test')
     c['training']['skip_validation']=False
@@ -41,7 +41,7 @@ def test_file_holdout_partitions_complete_source_shards_with_side_rows(tmp_path,
                     '--games','4','--output',str(tmp_path/'selfplay'),'--run-id','test','--attempt-id','test',
                     '--config-id','test','--source-id','test','--iteration','1','--worker','0','--seed','734'],
                    check=True,capture_output=True,text=True,timeout=60)
-    from etazero.source_data import source_view
+    from etazero.data.source_data import source_view
     entries=[];files={};targets=training_targets(c);side_rows=0
     def fingerprints(view):
         return Counter(tuple(view[key][i].tobytes() for key in sorted(view)) for i in range(len(view['globalTargetsNC'])))
@@ -52,7 +52,7 @@ def test_file_holdout_partitions_complete_source_shards_with_side_rows(tmp_path,
         side_rows+=len(raw['side_players'])
     assert side_rows and len(files)>4
     held_out=sorted(files)[0]
-    monkeypatch.setattr('etazero.shuffle.validation_file',lambda path:path==held_out)
+    monkeypatch.setattr('etazero.data.shuffle.validation_file',lambda path:path==held_out)
     expected=[Counter(),Counter()]
     for path,rows in files.items():expected[path==held_out].update(rows)
     snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,entries,c)
@@ -272,7 +272,7 @@ def test_validation_raw_eval_d4_cap_and_training_state_unchanged(tmp_path):
 
 
 def test_scatter_row_ids_pairing_rounding_and_independent_wave_streams(tmp_path):
-    from etazero.shuffle import _scatter,_merge_bucket
+    from etazero.data.shuffle import _scatter, _merge_bucket
     source=tmp_path/'input.npz';ids=np.arange(12,dtype=np.float32)
     save_npz(source,dict(globalTargetsNC=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
     # Source round tie: 12*0.375=4.5 rounds to 4 (ties-to-even).
@@ -296,8 +296,8 @@ def test_scatter_row_ids_pairing_rounding_and_independent_wave_streams(tmp_path)
 
 @pytest.mark.parametrize('waves',[1,3])
 def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves):
-    from etazero.data import TRAIN_POLICY_TARGETS,training_targets
-    from etazero.shuffle import view_key
+    from etazero.data.targets import TRAIN_POLICY_TARGETS, training_targets
+    from etazero.data.shuffle import view_key
     c=load_config(CONFIGS/'smoke_test')
     c['shuffle'].update(group_rows=9,bucket_rows=8,training_shard_rows=8,waves=waves)
     c['replay'].update(min_rows=9,keep_target_rows='all')
@@ -340,7 +340,7 @@ def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves)
 
 
 def test_holdout_is_basename_stable_across_directories():
-    from etazero.shuffle import validation_file
+    from etazero.data.shuffle import validation_file
     # Concrete prior regression: full-path hash selected validation for this name.
     old='/tmp/pytest-of-sky/pytest-60/test_shuffle_conservation_and_1/selfplay/0.npz'
     assert not validation_file(old)

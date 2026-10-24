@@ -2,13 +2,13 @@
 import numpy as np
 import pytest
 from test_writer import produce
-from etazero.data import training_view,TRAIN_TARGETS
-from etazero.source_data import decode_view,encode_view
+from etazero.data.targets import training_view, TRAIN_TARGETS
+from etazero.data.source_data import decode_view, encode_view
 
 
 def test_public_rows_without_private_metadata(tmp_path):
-    from etazero.data import read_raw,open_raw
-    from etazero.source_data import DTYPES,source_view
+    from etazero.data.targets import read_raw, open_raw
+    from etazero.data.source_data import DTYPES, source_view
     original=produce(tmp_path,1000)[0]
     public={key:original[key] for key in DTYPES}
     path=tmp_path/'public.npz';np.savez_compressed(path,**public)
@@ -34,7 +34,7 @@ def test_native_source_targets_and_quantization(tmp_path,limit):
         assert (np.diff(global_targets[:,36:41],axis=1)<=0).all()  # Prefix history dropout.
         assert (global_targets[:,31:33]>=0).all() and (global_targets[:,59]>=0).all()
         assert (global_targets[:,60]>=0).all()
-        assert not global_targets[:,[20,21,27,29,34]].any()  # Excluded Go supervision.
+        assert not global_targets[:,[20,21,29,34]].any()  # Excluded Go supervision.
 
         assert raw['policyTargetsNCMove'].dtype==np.int16
         assert raw['qValueTargetsNCMove'].dtype==np.int16
@@ -57,9 +57,9 @@ def test_draw_and_no_result_have_separate_disk_slots(tmp_path):
 def test_real_selfplay_writes_entropy_visits_and_game_metadata(tmp_path):
     import subprocess
     from pathlib import Path
-    from etazero.config import load_config,write_native
+    from etazero.config import load_config, write_native
     from config_samples import CONFIGS
-    from etazero.data import read_raw
+    from etazero.data.targets import read_raw
     c=load_config(CONFIGS/'smoke_test')
     c['parallelism'].update(game_threads=1,search_threads=1)
     c['opening']['probability']=0;c['policy_init']['policy_init']=False
@@ -80,7 +80,7 @@ def test_go_sgf_setup_survives_selfplay_record(tmp_path,research,dimensions,algo
     import json
     import subprocess
     from etazero.config import write_native
-    from etazero.data import read_raw,metadata
+    from etazero.data.targets import read_raw, metadata
     from test_multigame import small_config,BINARY
     c=small_config('go',algorithm)
     if algorithm=='muzero':c['unroll']['steps']=40

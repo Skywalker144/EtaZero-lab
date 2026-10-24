@@ -7,8 +7,8 @@ import sys
 import time
 import signal
 import pytest
-from etazero.export import verify_export
-from etazero.runtime import recover_iteration, run_training
+from etazero.models.export import verify_export
+from etazero.run.runtime import recover_iteration, run_training
 
 from etazero.storage import save_json, sha256
 
@@ -16,7 +16,7 @@ from etazero.storage import save_json, sha256
 def test_shuffle_workers_exit_when_controller_is_killed(tmp_path):
     script=tmp_path/'controller.py'
     script.write_text("""import os,sys
-from etazero.shuffle import shuffle_pool
+from etazero.data.shuffle import shuffle_pool
 if __name__ == '__main__':
     pool=shuffle_pool(1)
     print(pool.submit(os.getpid).result(timeout=20),flush=True)
@@ -45,7 +45,7 @@ if __name__ == '__main__':
 
 def test_shuffle_parent_death_race_exits_before_work():
     result=subprocess.run([sys.executable,'-c',
-                           'import os; from etazero.shuffle import _follow_parent; _follow_parent(os.getppid()+1)'],timeout=20)
+                           'import os; from etazero.data.shuffle import _follow_parent; _follow_parent(os.getppid()+1)'],timeout=20)
     assert result.returncode == -signal.SIGKILL
 
 

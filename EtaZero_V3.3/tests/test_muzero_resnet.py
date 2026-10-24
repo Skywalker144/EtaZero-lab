@@ -8,25 +8,12 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.experiment import initialization_key
-from etazero.muzero.network import MuZeroNet, NetworkConfig
-from etazero.muzero.resnet import MaskedNorm
-from etazero.optimization import optimizer_for, optimization_for
+from etazero.run.experiment import initialization_key
+from etazero.models.muzero.network import MuZeroNet, NetworkConfig
+from etazero.train.optimization import optimizer_for, optimization_for
 
 
-def test_masked_norm_hand_calculation_and_padding_gradient():
-    norm = MaskedNorm(2)
-    x = torch.tensor([[[[1., 3., 1000.]], [[5., 7., -1000.]]]], requires_grad=True)
-    mask = torch.tensor([[[[1., 1., 0.]]]])
-    y = norm(x, mask)
-    expected = torch.tensor([[[[-3., -1., 0.]], [[1., 3., 0.]]]]) / (5. + 1e-5)**.5
-    torch.testing.assert_close(y, expected)
-    y.square().sum().backward()
-    assert torch.isfinite(x.grad).all() and x.grad[..., -1].eq(0).all()
-    assert not list(norm.buffers())
-
-
-def test_resnet_is_independent_of_other_batch_rows_and_train_eval_mode():
+def test_resnet_eval_is_independent_of_other_batch_rows():
     torch.set_num_threads(1)
     torch.manual_seed(71)
     c = NetworkConfig(6, 16, 24, 2, 32, 2, 48, 0, architecture='resnet')

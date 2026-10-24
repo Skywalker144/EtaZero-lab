@@ -3,8 +3,8 @@ from pathlib import Path
 import re
 import json
 
-# Only spelling changes are listed here. Section namespaces disambiguate the
-# independent learner, selfplay and analysis settings; they do not change values.
+# Source spellings map to EtaZero fields; the cache exponent is converted below.
+# Sections disambiguate independent learner, selfplay and analysis profiles.
 SOURCE_KEYS = {
     'reportAnalysisWinratesAs':'report_analysis_winrates_as','analysisPVLen':'analysis_pv_len','alwaysComputePassAliveUnderSuicideRules':'always_compute_pass_alive_under_suicide_rules','excludeTerritoryAdjacentToAtari':'exclude_territory_adjacent_to_atari',
     'analysisWideRootNoise':'analysis_wide_root_noise','analysisIgnorePreRootHistory':'analysis_ignore_pre_root_history',
@@ -12,6 +12,7 @@ SOURCE_KEYS = {
     'rootDirichletNoiseWeight':'noise_fraction','rootDirichletNoiseTotalConcentration':'dirichlet_total_concentration',
     'numAnalysisThreads': 'num_analysis_threads',
     'maxVisits': 'visits', 'numSearchThreads': 'search_threads',
+    'numSearchThreadsPerAnalysisThread': 'search_threads',
     'cpuctExploration': 'c_puct', 'cpuctExplorationLog': 'c_puct_log',
     'cpuctExplorationBase': 'c_puct_base', 'cpuctUtilityStdevPrior': 'c_puct_stdev_prior',
     'cpuctUtilityStdevPriorWeight': 'c_puct_stdev_prior_weight', 'cpuctUtilityStdevScale': 'c_puct_stdev_scale',
@@ -24,7 +25,8 @@ SOURCE_KEYS = {
     'chosenMoveTemperatureOnlyBelowProb': 'temperature_only_below_prob',
     'nnMaxBatchSize': 'max_batch', 'numNNServerThreadsPerModel': 'server_threads',
     'nnRandomize': 'nn_randomize', 'nnRandomizeSymmetries': 'nn_randomize',
-    'nnCacheSize': 'cache_entries', 'nnMutexPoolSizePowerOfTwo': 'nn_mutex_pool_power_of_two',
+    'nnCacheSize': 'cache_entries', 'nnCacheSizePowerOfTwo': 'cache_entries',
+    'nnMutexPoolSizePowerOfTwo': 'nn_mutex_pool_power_of_two',
     'subtreeValueBiasTableNumShards': 'subtree_value_bias_table_num_shards',
     'playoutDoublingAdvantagePla': 'playout_doubling_advantage_player',
     'visitCapContemptPla': 'visit_cap_contempt_player',
@@ -70,7 +72,7 @@ def _value(raw, location, *, allow_empty=False):
 
 
 def read_config_file(path, fields, *, local_only=(), section_aliases=None, ancestors=(),
-                     keys_override=False, includes_override=True):
+                     keys_override=False, includes_override=True, _source_spellings=None):
     """Read in source order; duplicate local keys are errors unless enabled.
 
     Flat common keys use KataGo names. Sections and empty section values are
@@ -78,6 +80,7 @@ def read_config_file(path, fields, *, local_only=(), section_aliases=None, ances
     fields fail at this public boundary rather than silently disabling a feature.
     """
     section_aliases = section_aliases or {}
+    source_spellings = {} if _source_spellings is None else _source_spellings
     path = Path(path).resolve()
     if path in ancestors:
         raise ValueError('Configuration include cycle: ' + ' -> '.join(map(str, (*ancestors, path))))
@@ -94,7 +97,8 @@ def read_config_file(path, fields, *, local_only=(), section_aliases=None, ances
             filename = _value(match[1],location).strip("'")
             included = read_config_file(path.parent / filename, fields, local_only=local_only,
                 section_aliases=section_aliases, ancestors=(*ancestors, path),
-                keys_override=keys_override, includes_override=includes_override)
+                keys_override=keys_override, includes_override=includes_override,
+                _source_spellings=source_spellings)
             for key in local_only:
                 included.pop(key, None)
             if not includes_override and values.keys() & included.keys():
@@ -169,6 +173,20 @@ def read_config_file(path, fields, *, local_only=(), section_aliases=None, ances
             raise ValueError(f'Duplicate configuration key: {location}: {name}')
         if target in values and not includes_override:
             raise ValueError(f'Duplicate configuration key across files: {location}: {name}')
-        values[target] = _value(raw, location, allow_empty=section is not None)
+        if name in ('numSearchThreads', 'numSearchThreadsPerAnalysisThread'):
+            previous = source_spellings.get(target)
+            if previous is not None and previous != name:
+                raise ValueError(f'Duplicate source aliases: {location}: {previous}, {name}')
+            source_spellings[target] = name
+        value = _value(raw, location, allow_empty=section is not None)
+        if name == 'nnCacheSizePowerOfTwo':
+            try:
+                power = int(value)
+            except ValueError as error:
+                raise ValueError(f'Invalid cache exponent: {location}') from error
+            if not -1 <= power <= 48:
+                raise ValueError(f'Cache exponent must be in [-1,48]: {location}')
+            value = str(0 if power == -1 else 1 << power)
+        values[target] = value
         seen.add(local_key)
     return values

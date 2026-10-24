@@ -8,8 +8,8 @@ import math
 import numpy as np
 import pytest
 import torch
-from etazero.data import trajectory_td_targets, training_view, validate_raw
-from etazero.network import auxiliary_losses, error_variance, make_network, inference_network, TrainingForward
+from etazero.data.targets import trajectory_td_targets, training_view, validate_raw
+from etazero.models.network import auxiliary_losses, error_variance, make_network, inference_network, TrainingForward
 from etazero.schema import RAW_DTYPES, pack_observations
 from test_python import winning_record, config, source_fields
 
@@ -95,7 +95,7 @@ def test_side_has_own_search_value_and_no_complete_game_targets():
     for key in full: np.testing.assert_array_equal(view[key][:-2],full[key])
     np.testing.assert_array_equal(view['value'][-2:],np.repeat(a['side_wdl'],2,axis=0))
     np.testing.assert_array_equal(view['td_value'][-2:],np.tile(a['side_wdl'][:,None],(2,3,1)))
-    assert not view['full_game_weight'][-2:].any() and not view['opponent_policy_weight'][-2:].any()
+    assert not view['value_aux_weight'][-2:].any() and not view['opponent_policy_weight'][-2:].any()
     assert view['globals'][-2:,3].tolist()==[1,0]
     assert (view['opponent_policy'][-2:]==1).all()
     # Corrupting the parent outcome never supplies a label to side positions.
@@ -104,7 +104,7 @@ def test_side_has_own_search_value_and_no_complete_game_targets():
 
 
 def test_all_heads_and_inference_contract():
-    from etazero.config import ROOT,load_config
+    from etazero.config import ROOT, load_config
     c=load_config(CONFIGS / 'smoke_test')
     model=make_network(c)
     obs=torch.zeros(2,5,6,6);obs[:,0,:5,:5]=1
@@ -128,18 +128,18 @@ def test_all_heads_and_inference_contract():
 
 def test_native_side_writer_catalog_shuffle_reader_roundtrip(tmp_path):
     import subprocess
-    from etazero.config import ROOT,load_config
-    from etazero.data import read_raw,Catalog
-    from etazero.reader import BatchReader
-    from etazero.shuffle import build_snapshot
-    from etazero.storage import save_json,sha256
+    from etazero.config import ROOT, load_config
+    from etazero.data.targets import read_raw, Catalog
+    from etazero.data.reader import BatchReader
+    from etazero.data.shuffle import build_snapshot
+    from etazero.storage import save_json, sha256
     binary=Path(__file__).resolve().parents[1]/'build/record_contract_test'
     if not binary.exists(): pytest.skip('Build C++ record_contract_test first')
     directory=tmp_path/'selfplay/worker'
     subprocess.run([str(binary),str(directory)],check=True,capture_output=True,text=True)
     raw=read_raw(next(directory.glob('*.npz')));view=training_view(raw)
     assert len(view['value'])==11 and raw['policies'].dtype==np.int16
-    assert not view['full_game_weight'][-2:].any()
+    assert not view['value_aux_weight'][-2:].any()
     catalog=Catalog(tmp_path,'test','config')
     try:
         catalog.scan({1:'model'})
@@ -153,8 +153,8 @@ def test_native_side_writer_catalog_shuffle_reader_roundtrip(tmp_path):
     reader=BatchReader(tmp_path/'snapshots'/info,11,1,1)
     try: batch=reader.next()
     finally: reader.close()
-    assert sorted(batch['full_game_weight'].tolist())==[0.,0.]+[1.]*9
-    side=batch['full_game_weight']==0
+    assert sorted(batch['value_aux_weight'].tolist())==[0.,0.]+[1.]*9
+    side=batch['value_aux_weight']==0
     np.testing.assert_allclose(batch['value'][side],[[.2,.3,.5,0]]*2)
     np.testing.assert_allclose(batch['td_value'][side],[[[.2,.3,.5,0]]*3]*2)
 
@@ -162,7 +162,7 @@ def test_native_side_writer_catalog_shuffle_reader_roundtrip(tmp_path):
 def test_native_empty_side_arrays_keep_valid_zip_crc(tmp_path):
     import subprocess
     from etazero.config import ROOT
-    from etazero.data import read_raw
+    from etazero.data.targets import read_raw
     binary=Path(__file__).resolve().parents[1]/'build/record_contract_test'
     if not binary.exists(): pytest.skip('Build C++ record_contract_test first')
     directory=tmp_path/'worker'
@@ -174,13 +174,13 @@ def test_native_empty_side_arrays_keep_valid_zip_crc(tmp_path):
 @pytest.mark.parametrize('symmetry',range(8))
 def test_auxiliary_scalars_and_policy_quantization_survive_d4(symmetry):
     from etazero.schema import unpack_observations
-    from etazero.symmetry import augment_batch,apply_symmetry
+    from etazero.symmetry import augment_batch, apply_symmetry
     raw,_=winning_record()
     view=training_view(raw)
     view['obs']=unpack_observations(view['obs'],6)
     batch={k:torch.from_numpy(v).float() for k,v in view.items()}
     transformed=augment_batch(batch,symmetry)
-    for key in ('value','td_value','full_game_weight','opponent_policy_weight','globals'):
+    for key in ('value','td_value','value_aux_weight','opponent_policy_weight','globals'):
         torch.testing.assert_close(transformed[key],batch[key],rtol=0,atol=0)
     for key in ('policy','opponent_policy'):
         torch.testing.assert_close(transformed[key],apply_symmetry(batch[key].reshape(-1,6,6),symmetry).flatten(1),rtol=0,atol=0)
@@ -213,7 +213,7 @@ def test_pda_globals_and_reanalysis_outcome_gate(use_outcome,compact):
     view=training_view(a)
     turns=[0,2,2,2,3,4,5,6,7,8] if compact else list(range(9))
     expected_gate=[1,int(use_outcome),int(use_outcome),int(use_outcome),1,1,1,1,1,1] if compact else [1,1,int(use_outcome),1,1,1,1,1,1]
-    np.testing.assert_array_equal(view['full_game_weight'],expected_gate)
+    np.testing.assert_array_equal(view['value_aux_weight'],expected_gate)
     np.testing.assert_array_equal(view['globals'][:,4],1)
     np.testing.assert_array_equal(view['globals'][:,5],a['globals'][turns,5])
     assert view['opponent_policy_weight'][2]==int(use_outcome)
@@ -231,7 +231,7 @@ def test_pda_globals_and_reanalysis_outcome_gate(use_outcome,compact):
 @pytest.mark.parametrize('use_outcome',[False,True])
 @pytest.mark.parametrize('disable',[False,True])
 def test_reanalysis_outcome_gate_reaches_loss_gradients(use_outcome,disable):
-    from etazero.network import losses
+    from etazero.models.network import losses
     from etazero.schema import unpack_observations
     a,m=winning_record(2)
     a['cheap_search'][2]=a['reanalyzed'][2]=1
@@ -249,7 +249,7 @@ def test_reanalysis_outcome_gate_reaches_loss_gradients(use_outcome,disable):
     error=torch.zeros(9,requires_grad=True)
     result=losses(policy,value,td,error,obs,batch['policy'],batch['opponent_policy'],
                   batch['opponent_policy_weight'],batch['value'],batch['td_value'],
-                  batch['full_game_weight'],8,disable,batch['q_values'],batch['q_visits'])
+                  batch['value_aux_weight'],8,disable,batch['q_values'],batch['q_visits'])
     result[0].backward()
     # Check the row's actual parameter gradients, rather than just its flag.
     assert value.grad[2].abs().sum()>0 and td.grad[2].abs().sum()>0
@@ -267,7 +267,7 @@ def test_reanalysis_outcome_gate_reaches_loss_gradients(use_outcome,disable):
 
 
 def test_sampling_configuration_source_defaults_and_reanalysis_required_parameters(tmp_path,config):
-    from etazero.config import load_config,ROOT,validate
+    from etazero.config import load_config, ROOT, validate
     assert load_config(CONFIGS / 'baseline')['pda']==dict(normal_asymmetric_playout_prob=.01,max_asymmetric_ratio=8)
     assert config['pda']['normal_asymmetric_playout_prob']==0
     # Project sampling rates are intentional experiment settings, independent
@@ -305,7 +305,7 @@ def test_hint_and_fork_raw_prefix_contract():
 
 
 def test_hint_game_fork_defaults_bounds_and_input_identity(tmp_path):
-    from etazero.config import load_config,validate,fingerprint
+    from etazero.config import load_config, validate, fingerprint
     baseline=load_config(CONFIGS / 'baseline')
     assert baseline['hint_positions']['hint_positions_prob']==0
     assert baseline['game_forks']==dict(early_fork_game_prob=.04,fork_game_prob=.01,

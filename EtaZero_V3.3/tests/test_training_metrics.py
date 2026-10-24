@@ -1,7 +1,7 @@
 import math
 import pytest
-from etazero.training_metrics import TrainingMetrics
-from etazero.plotting import round_history
+from etazero.train.training_metrics import TrainingMetrics
+from etazero.evaluation.plotting import round_history
 from etazero.storage import save_json
 
 

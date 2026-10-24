@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 import torch
-from etazero.data import trajectory_td_targets
-from etazero.reader import BatchReader
+from etazero.data.targets import trajectory_td_targets
+from etazero.data.reader import BatchReader
 from etazero.storage import sha256
 from test_replay import id_snapshot
 
@@ -46,8 +46,8 @@ def test_reader_resume_preserves_targets_without_scanning_or_repair(tmp_path, sp
     try:
         batch = resumed.next()
         assert batch['globals'][:, 5].tolist() == [4, 5, 6, 7]
-        from etazero.source_data import decode_view
-        from etazero.data import TRAIN_TARGETS
+        from etazero.data.source_data import decode_view
+        from etazero.data.targets import TRAIN_TARGETS
         np.testing.assert_array_equal(batch['td_value'], decode_view(arrays,TRAIN_TARGETS)['td_value'][4:8])
         assert resumed.state()['offset'] == 8
     finally:

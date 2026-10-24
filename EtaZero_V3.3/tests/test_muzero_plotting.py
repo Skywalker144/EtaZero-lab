@@ -2,7 +2,7 @@
 import json
 import numpy as np
 
-from etazero.plotting import METRICS, round_history, training_figure
+from etazero.evaluation.plotting import METRICS, round_history, training_figure
 from etazero.storage import save_json
 
 

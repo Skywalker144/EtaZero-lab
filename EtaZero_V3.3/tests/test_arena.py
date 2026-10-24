@@ -6,8 +6,8 @@ import shutil
 import pytest
 from etazero.config import ROOT, fingerprint, load_config
 from etazero.engine_config import load_engine_config
-from etazero.arena import Player, build_schedule, discover_players, PairStore, save_manifest
-from etazero.runtime import recover_iteration
+from etazero.evaluation.arena import Player, build_schedule, discover_players, PairStore, save_manifest
+from etazero.run.runtime import recover_iteration
 from etazero.storage import save_json, load_json
 
 
@@ -39,7 +39,7 @@ def test_eval_profiles_are_independent(tmp_path,monkeypatch):
 
 
 def test_match_model_layout_is_required():
-    from etazero.arena import validate_match_models
+    from etazero.evaluation.arena import validate_match_models
     config = load_engine_config(CONFIGS/'baseline', True, environ={})
     with pytest.raises(ValueError, match='metadata is missing game'):
         validate_match_models(config, [{'canvas': 15, 'algorithm': 'alphazero'}])
