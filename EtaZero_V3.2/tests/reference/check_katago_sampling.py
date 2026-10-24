@@ -93,13 +93,21 @@ int main(int argc,char**){std::cout.precision(17);
         for name,rows,native_arg,ref_arg in [('pda',budgets,'--oracle',None),('value_surprise',surprises,'--surprise','--surprise')]:
             query='\n'.join(rows)+'\n'
             expected=subprocess.check_output([str(path/'oracle')]+([ref_arg] if ref_arg else []),input=query,text=True).splitlines()
-            actual=subprocess.check_output([str(a.binary),native_arg],input=query,text=True).splitlines()
+            native_query=query
+            if name=='value_surprise':
+                lines=[]
+                for row in rows:
+                    header,*entries=row.splitlines();lines.append(header)
+                    for entry in entries:
+                        player,*values=entry.split();lines.append(' '.join([player,*values[:3],'0',*values[3:],'0']))
+                native_query='\n'.join(lines)+'\n'
+            actual=subprocess.check_output([str(a.binary),native_arg],input=native_query,text=True).splitlines()
             assert len(actual)==len(expected)==len(rows)
             for i,(one,two) in enumerate(zip(actual,expected)):
                 av,bv=list(map(float,one.split())),list(map(float,two.split()));assert len(av)==len(bv)
                 assert all(math.isclose(x,y,rel_tol=1e-12,abs_tol=1e-14) for x,y in zip(av,bv)),(name,i,rows[i],one,two)
     result={'status':'passed','cases':{'pda_budget_input':len(budgets),'value_surprise':len(surprises)},'source_commit':manifest['commit'],'source_sha256':hashes,
-            'scope':'PDA signed input, explicit finite visits/playouts, direct/smoothed fixed-perspective WDL; no Go komi/handicap/score; EtaZero int32 max is unlimited; no source RNG/scheduling equivalence claim'}
+            'scope':'PDA signed input, explicit finite visits/playouts, direct/smoothed fixed-perspective scalar KL with the neutral channel mapped to D and added NR zero; no Go komi/handicap/score; EtaZero int32 max is unlimited; no source RNG/scheduling equivalence claim'}
     if a.output:assert not a.output.exists();a.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result,indent=2))
 

@@ -52,7 +52,7 @@ int main(){double alpha,beta;int reanalyze,count;std::cout.precision(17);
  while(std::cin>>alpha>>beta>>reanalyze>>count){FinishedGame game{};game.size=5;std::mt19937_64 rng(7);
   for(int i=0;i<count;++i){Step step{};float weight;int cheap,redone;step.player=1;
    std::cin>>weight>>step.policy_surprise>>cheap>>redone;
-   for(auto& x:step.network_wdl)std::cin>>x;for(auto& x:step.search_wdl)std::cin>>x;
+   for(int j=0;j<3;++j)std::cin>>step.network_wdl[j];for(int j=0;j<3;++j)std::cin>>step.search_wdl[j];
    step.target_weight=weight;step.cheap_search=cheap;step.reanalyzed=redone;game.steps.push_back(step);}
   apply_training_weights(game,alpha,beta,rng,true,reanalyze);
   for(const auto& step:game.steps)std::cout<<float(step.target_weight)<<' ';std::cout<<'\n';
@@ -75,8 +75,8 @@ int main(){double alpha,beta;int reanalyze,count;std::cout.precision(17);
     with tempfile.TemporaryDirectory(prefix='etazero_weight_reference_') as temp:
         path=Path(temp);(path/'oracle.cpp').write_text(oracle);(path/'native.cpp').write_text(native)
         subprocess.run(['c++','-std=c++17','-O2',str(path/'oracle.cpp'),'-o',str(path/'oracle')],check=True)
-        subprocess.run(['c++','-std=c++17','-O2','-I'+str(ROOT/'cpp/include'),'-I'+str(a.build/'generated'),
-                        str(path/'native.cpp'),str(library),zlib,'-pthread','-o',str(path/'native')],check=True)
+        subprocess.run(['c++','-std=c++17','-O2','-Wl,--gc-sections','-I'+str(ROOT/'cpp/include'),'-I'+str(a.build/'generated'),
+                        str(path/'native.cpp'),str(library),str(a.build/'libetazero_go_rules.a'),str(a.build/'libetazero_xiangqi_rules.a'),zlib,'-pthread','-o',str(path/'native')],check=True)
         query='\n'.join(rows)+'\n';actual=subprocess.check_output([str(path/'native')],input=query,text=True).splitlines()
         expected=subprocess.check_output([str(path/'oracle')],input=query,text=True).splitlines();assert len(actual)==len(expected)==len(rows)
         worst=0

@@ -61,7 +61,7 @@ def main():
     result=dict(status='verified',source_commit=ref['commit'],source_sha256=hashlib.sha256(data).hexdigest(),step_cases=cases,
                 source_lines=dict(lr=lr.lineno,lookahead=lookahead.lineno,swa=swa.lineno,subepoch_reset=reset.lineno,epoch_finish=finish.lineno),
                 scope='Unmodified AST LR/WD refresh, Lookahead, SWA, segment-reset and end-of-epoch blocks; scalar fast/slow/SWA states, source float32 operation order, skips, 200M boundary and reset clock ordering.',
-                adaptations='Local fixed budget splits into floor boundaries, not source probabilistic file-selection budgets. Successful step schedule supplied identically; actual CUDA GradScaler skips separately tested. Local epoch-end counter normalized to zero; source resets it at the next segment. No training bucket.')
+                adaptations='This scalar oracle injects fixed subepoch boundaries; production whole-file stochastic selection and epoch partition invariance are covered by test_source_reader.py and test_optimizer_epoch_clock.py. Successful step schedule supplied identically; actual CUDA GradScaler skips separately tested. Local epoch-end counter normalized to zero; source resets it at the next segment. No training bucket.')
     assert not args.output.exists();args.output.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
 
 if __name__=='__main__':main()

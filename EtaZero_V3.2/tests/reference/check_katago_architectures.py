@@ -1,8 +1,8 @@
 """Compare every handwritten architecture and generated name with fixed KataGo.
 
 Use --all-configs for the exhaustive name/config comparison. Architecture
-checks use the full original source model, adapted only at its game input
-projection. No reduced-width or reduced-depth substitutes are constructed.
+checks use the full original source model, adapted at its game input
+projection and four-outcome output dimensions. No reduced-width or reduced-depth substitutes are constructed.
 """
 import argparse
 import copy
@@ -42,12 +42,15 @@ def original_model(mp, config, canvas, device):
     model.conv_spatial = torch.nn.Conv2d(len(PLANES), config['trunk_num_channels'], kernel,
                                         padding=kernel//2, bias=False)
     model.linear_global = torch.nn.Linear(len(GLOBALS), config['trunk_num_channels'], bias=False)
-    model.transformer_seq_layout = False
-    model.transformer_skip_redundant_masks = False
-    model.use_flex_attention = False
-    for module in model.modules():
-        if isinstance(module, mp.NormMask):
-            module.skip_mask = False
+    # Accepted game-output adaptation; all trunk tensors still come from source.
+    heads = (model.value_head,) + ((model.intermediate_value_head,) if model.has_intermediate_head else ())
+    for head in heads:
+        hidden = head.linear_valuehead.in_features
+        head.linear_valuehead = torch.nn.Linear(hidden, 4)
+        head.linear_miscvaluehead = torch.nn.Linear(hidden, 12)
+        head.linear_moremiscvaluehead = torch.nn.Linear(hidden, 9)
+    if device == 'cpu':
+        model.use_flex_attention = False
     model.initialize()
     model.set_brenorm_params(0.001, 1.0, 0.0)
     return model.to(device)
@@ -58,6 +61,8 @@ def check_architecture(name, mc, mp, device, backward):
     config = resolve(name)
     assert config == mc.config_of_name[name]
     eta = KataGoNet(name, 5).to(device)
+    if device == 'cpu':
+        eta.network.use_flex_attention = False
     torch.manual_seed(853)
     ref = original_model(mp, eta.source_config, 5, device)
     assert {key: value.shape for key, value in eta.network.state_dict().items()} == {
@@ -82,12 +87,16 @@ def check_architecture(name, mc, mp, device, backward):
     globals = torch.randn(2, len(GLOBALS), device=device)
     eta_obs = obs.clone().requires_grad_(backward)
     ref_obs = obs.clone().requires_grad_(backward)
-    actual = eta.forward_all(eta_obs, globals)
-    metadata = obs.new_zeros((2, 192)) if ref.metadata_encoder is not None else None
+    metadata = torch.randn(2, 192, device=device) if ref.metadata_encoder is not None else None
+    actual = eta.select_outputs(eta.source_outputs(eta_obs, globals, metadata)[0], eta_obs[:,0:1])
     outputs = ref(ref_obs * ref_obs[:, 0:1], globals, input_meta=metadata)[0]
     p, v, misc, more = outputs[:4]
-    expected = (p[:, :6, :-1] * ref_obs[:, 0:1].flatten(2), v[:, [0, 2, 1]],
-                torch.stack((misc[:, [4, 6, 5]], misc[:, [7, 9, 8]], more[:, [2, 4, 3]]), 1), more[:, 0])
+    nr = torch.full_like(v[:, 0], -10000)
+    expected = (p[:, :6, :-1] * ref_obs[:, 0:1].flatten(2),
+                torch.stack((v[:,0],v[:,3],v[:,1],nr),1),
+                torch.stack((torch.stack((misc[:,4],misc[:,10],misc[:,5],nr),1),
+                             torch.stack((misc[:,7],misc[:,11],misc[:,8],nr),1),
+                             torch.stack((more[:,2],more[:,8],more[:,3],nr),1)),1), more[:,0])
     max_forward = max((a-b).abs().max().item() for a,b in zip(actual, expected))
     for a, b in zip(actual, expected):
         torch.testing.assert_close(a, b, rtol=3e-5, atol=3e-6)

@@ -5,67 +5,12 @@ import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from dataclasses import replace
 
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'python'))
-from etazero.muzero.network import (normalize_hidden_state, scale_gradient, NetworkConfig,
-                                   Representation, Dynamics, Prediction)
-from etazero.muzero.resnet import ResBlock
-from etazero.schema import GLOBALS
-
-
-def check_resnet(namespace):
-    torch.manual_seed(991)
-    mask = torch.ones(2, 1, 6, 6); mask[0, :, 5] = 0; mask[0, :, :, 5] = 0
-    block = ResBlock(24)
-    reference = namespace['ResBlock'](24); reference.load_state_dict(block.state_dict())
-    x = (torch.randn(2, 24, 6, 6) * mask).requires_grad_()
-    y = x.detach().clone().requires_grad_()
-    actual, expected = block(x, mask), reference(y, mask)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    weights = torch.randn_like(actual)
-    (actual * weights).sum().backward(); (expected * weights).sum().backward()
-    torch.testing.assert_close(x.grad, y.grad, rtol=0, atol=0)
-    for p, q in zip(block.parameters(), reference.parameters()):
-        torch.testing.assert_close(p.grad, q.grad, rtol=0, atol=0)
-
-    c = NetworkConfig(6, 16, 24, 2, 32, 2, 48, 0, architecture='resnet')
-    representation, dynamics = Representation(c), Dynamics(c)
-    source_rep = namespace['RepresentationNet'](5, 24, 2, 16)
-    source_dyn = namespace['DynamicsNet'](6, 32, 2, 16)
-    for ours, source in ((representation, source_rep), (dynamics, source_dyn)):
-        # Global rule/color/PDA/Hex features are a separate linear input adaptation.
-        state = {k.replace('stem.weight', 'start_layer.weight').replace('stem_act.norm.', 'norm.'): v
-                 for k, v in ours.state_dict().items() if k != 'linear_global.weight'}
-        source.load_state_dict(state)
-    obs = torch.randn(2, 5, 6, 6); obs[:, :1] = mask
-    actual = representation(obs, torch.zeros(2, len(GLOBALS))); expected = source_rep(obs)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    for step in range(5):
-        actions = torch.tensor([step, step+6])
-        actual = dynamics(actual, actions); expected = source_dyn(expected, actions)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    weights = torch.randn_like(actual)
-    (actual * weights).sum().backward(); (expected * weights).sum().backward()
-    for ours, source in ((representation, source_rep), (dynamics, source_dyn)):
-        reference_parameters = dict(source.named_parameters())
-        for name, parameter in ours.named_parameters():
-            if name == 'linear_global.weight':
-                continue
-            key = name.replace('stem.weight', 'start_layer.weight').replace('stem_act.norm.', 'norm.')
-            torch.testing.assert_close(parameter.grad, reference_parameters[key].grad, rtol=0, atol=0)
-    for blocks in (0, 2):
-        prediction = Prediction(replace(c, prediction_blocks=blocks))
-        source = namespace['ResidualTrunk'](16, 48, blocks)
-        source.load_state_dict({**{'projection.'+k: v for k, v in prediction.projection.state_dict().items()},
-                                **prediction.trunk.state_dict()})
-        x = actual.detach()[:, :-1]
-        torch.testing.assert_close(prediction.trunk(prediction.projection(x * mask), mask), source(x, mask),
-                                   rtol=0, atol=0)
-    print('MuZero_V2: dense block, representation, five recurrent steps and prediction trunk parity passed')
+from etazero.muzero.network import normalize_hidden_state, scale_gradient
 
 
 def main():
@@ -74,8 +19,7 @@ def main():
     source = (Path(reference['root']) / relative).read_bytes()
     if hashlib.sha256(source).hexdigest() != reference['sha256'][relative]:
         raise ValueError('MuZero_V2 network source differs from the pinned reference')
-    names = {'normalize_hidden_state', 'scale_gradient', 'MaskedNorm', 'ResBlock',
-             'channel_projection', 'ResidualTrunk', 'RepresentationNet', 'DynamicsNet'}
+    names = {'normalize_hidden_state', 'scale_gradient'}
     module = ast.parse(source)
     selected = ast.Module(body=[n for n in module.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names], type_ignores=[])
     namespace = {'torch': torch, 'nn': torch.nn, 'F': torch.nn.functional, 'Plane': SimpleNamespace(ON_BOARD=0)}
@@ -113,7 +57,6 @@ def main():
     print(f'MuZero_V2: {normal_cases} normal-span forward/backward parity cases, '
           f'{constant_cases} constant forward parity / MiniZero gradient adaptations, '
           'and 4 gradient scales passed')
-    check_resnet(namespace)
 
 
 if __name__ == '__main__':

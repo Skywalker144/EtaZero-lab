@@ -51,7 +51,8 @@ int main(){size_t count=0;double worst=0;
     with tempfile.TemporaryDirectory(prefix='etazero_q_reference_') as temp:
         directory=Path(temp);cpp=directory/'q.cpp';cpp.write_text(code)
         subprocess.run(['c++','-std=c++17','-O2','-I'+str(ROOT/'cpp/include'),'-I'+str(build/'generated'),str(cpp),
-                        str(build/'libetazero_core.a'),zlib,'-pthread','-o',str(directory/'q')],check=True)
+                        str(build/'libetazero_core.a'),str(build/'libetazero_go_rules.a'),str(build/'libetazero_xiangqi_rules.a'),
+                        '-Wl,--gc-sections',zlib,'-pthread','-o',str(directory/'q')],check=True)
         cases,worst=subprocess.check_output([str(directory/'q')],text=True).split()
     result={'status':'verified','source_commit':reference['commit'],'source_sha256':reference['sha256']['cpp/dataio/trainingwrite.cpp'],
             'native_library_sha256':hashlib.sha256((build/'libetazero_core.a').read_bytes()).hexdigest(),
