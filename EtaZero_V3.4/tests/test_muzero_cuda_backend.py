@@ -45,8 +45,8 @@ def test_cuda_latents_initial_recurrent_and_parent_reuse(tmp_path,game,architect
             if step:
                 action=area if game=='go' and step==3 else 0 if step==4 else step-1
                 h=m.dynamics(root if step==4 else h,torch.full((batch,),action,device='cuda',dtype=torch.long))
-            p,v,_,e=m.prediction(h)
-            expected=torch.cat((h.flatten(1),p[:,0].float(),v.float().softmax(1),p[:,5].float(),.5*torch.nn.functional.softplus(e.float()[:,None]*.5)),1).cpu().numpy()
+            p,v,_,e,_,variance=m.prediction.training_outputs(h)
+            expected=torch.cat((h.flatten(1),p[:,0].float(),v.float().softmax(1),p[:,5].float(),.5*torch.nn.functional.softplus(e.float()[:,None]*.5),40*torch.nn.functional.softplus(variance.float()[:,None])),1).cpu().numpy()
             valid=np.ones_like(expected,dtype=bool)
             offset=17*area
             if game!='xiangqi':

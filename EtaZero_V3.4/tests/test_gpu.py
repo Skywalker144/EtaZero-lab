@@ -17,7 +17,7 @@ from etazero.data.targets import read_raw, metadata, game_row_ranges
 from etazero.evaluation.analysis import analyze
 from etazero.engine_config import load_engine_config
 from etazero.models.export import example_inputs, export_model, verify_export
-from etazero.models.network import make_network, inference_network
+from etazero.models.factory import make_network, inference_network
 from etazero.models.katago.model_pytorch import NormMask
 from etazero.train.optimization import Optimization, inference_weights
 from etazero.run.runtime import run_training
@@ -823,7 +823,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeyp
 @pytest.mark.parametrize('compiled', [False, True])
 @pytest.mark.parametrize('training', [False, True])
 def test_learner_autocast_heads_are_fp32(gpu_config, amp, compiled, training):
-    from etazero.models.network import TrainingForward
+    from etazero.train.training import TrainingForward
     c=copy.deepcopy(gpu_config)
     model=make_network(c).cuda().train(training)
     with torch.no_grad():model.network.value_head.linear_valuehead.bias[0]=1e5
@@ -1265,12 +1265,12 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
         model=make_network(c).cuda().eval()
         with torch.no_grad():
             if architecture=='transformer':
-                from etazero.models.network import init_weights
+                from etazero.models.katago.model_pytorch import init_weights
                 for block in model.network.blocks:
-                    init_weights(block.normactconvq.conv.weight,0.3,activation='relu')
+                    init_weights(block.normactconvq.conv.weight,'relu',0.3)
                 for layer in model.modules():
                     if isinstance(layer,torch.nn.RMSNorm):
-                        layer.gamma.uniform_(0.5,1.5)
+                        layer.weight.uniform_(0.5,1.5)
             for layer in model.modules():
                 if isinstance(layer,NormMask) and hasattr(layer,'running_mean'):
                     layer.running_mean.uniform_(-2,2);layer.running_std.uniform_(0.3,2)
@@ -1301,7 +1301,7 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
 
 @pytest.mark.parametrize('precision',['float32','float16'])
 @pytest.mark.parametrize('architecture,predict_q_values',[('nbt',False),('plain',False),('transformer',False),('transformer',True)])
-def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_config,precision,architecture,predict_q_values):
+def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_config,precision,architecture,predict_q_values,native_reference_precision):
     c=copy.deepcopy(gpu_config)
     c['network'].update(architecture=architecture,canvas=6,channels=128 if architecture=='plain' else 192,
                         blocks=10 if architecture=='plain' else 5,predict_q_values=predict_q_values)
@@ -1313,9 +1313,9 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
                 layer.running_mean.uniform_(-.3,.3);layer.running_std.uniform_(.5,1.5)
                 layer.gamma.uniform_(-.2,.2);layer.beta.uniform_(-.1,.1)
         if architecture=='transformer':
-            from etazero.models.network import init_weights
+            from etazero.models.katago.model_pytorch import init_weights
             for block in model.network.blocks:
-                init_weights(block.normactconvq.conv.weight,.3,activation='relu')
+                init_weights(block.normactconvq.conv.weight,'relu',.3)
     scripted=torch.jit.script(inference_network(model))
     path=tmp_path/'model.pt';scripted.save(str(path))
     result=subprocess.run([str(ROOT/'build/inference_probe'),str(path),'cuda:0',precision],
@@ -1332,8 +1332,8 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
             indices=[(turn+i)%5 for i in range(n)]
             # Compare the profiled TorchScript path used by Graph capture.
             for _ in range(3):scripted(spatial[indices],globals[indices])
-            logits,values,optimistic,error=scripted(spatial[indices],globals[indices])
-            expected=torch.cat((logits.float(),values.float().softmax(1),optimistic.float(),error.float().unsqueeze(1)),1).cpu().numpy()
+            logits,values,optimistic,error,variance=scripted(spatial[indices],globals[indices])
+            expected=torch.cat((logits.float(),values.float().softmax(1),optimistic.float(),error.float().unsqueeze(1),variance.float().unsqueeze(1)),1).cpu().numpy()
             tolerance=3e-3 if precision=='float16' else 3e-5
             np.testing.assert_allclose(actual[turn],expected,rtol=tolerance,atol=tolerance)
 

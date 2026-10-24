@@ -12,7 +12,8 @@ import numpy as np
 import pytest
 import torch
 from etazero.config import ROOT, validate
-from etazero.models.network import q_winloss_loss, losses, make_network
+from etazero.train.losses import q_winloss_loss, losses
+from etazero.models.factory import make_network
 from etazero.data.targets import validate_raw, training_view
 from etazero.data.reader import BatchReader
 from etazero.data.shuffle import build_snapshot

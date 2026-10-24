@@ -11,7 +11,7 @@ from config_samples import CONFIGS
 from etazero.config import ROOT, load_config, write_native
 from etazero.engine_config import load_engine_config
 from etazero.models.export import example_inputs
-from etazero.models.network import make_network, inference_network
+from etazero.models.factory import make_network, inference_network
 
 
 @pytest.mark.parametrize('architecture,channels,blocks', [

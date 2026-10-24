@@ -13,7 +13,7 @@ import torch
 from etazero.config import ROOT, load_config, validate
 from etazero.models.muzero.network import NetworkConfig, MuZeroNet, inference_network, normalize_hidden_state, scale_gradient
 from etazero.train.muzero.optimization import parameter_groups, optimizer_for
-from etazero.models.network import losses
+from etazero.train.losses import losses
 from etazero.models.katago.model_pytorch import PolicyHead, ValueHead
 from etazero.train.optimization import Optimization
 from etazero.schema import GLOBALS
@@ -227,7 +227,7 @@ def test_component_update_state_restore_next_update(tmp_path, dimensions, kind, 
 @pytest.mark.parametrize('device,precision', [('cpu', 'float32'), ('cuda:0', 'float32'), ('cuda:0', 'float16')])
 @pytest.mark.parametrize('architecture', ['nbt', 'resnet'])
 @pytest.mark.parametrize('auxiliary', [False, True])
-def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precision, architecture, auxiliary):
+def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precision, architecture, auxiliary, native_reference_precision):
     if device.startswith('cuda') and os.environ.get('ETAZERO_GPU_TESTS') != '1':
         pytest.skip('Enable ETAZERO_GPU_TESTS=1 with host CUDA access')
     binary = ROOT / 'build/muzero_inference_probe'
@@ -286,9 +286,9 @@ def multistep_predictions(model, device, precision, *, profiled=False):
         for step in range(5):
             if step==4:
                 prediction=predict(model.recurrent,initial[0],torch.tensor([1,7],device=device))
-            hidden,policy,value,optimistic,stdev=prediction
+            hidden,policy,value,optimistic,stdev,variance=prediction
             outputs.append(dict(latent=hidden.flatten(1),policy=policy.float(),
-                                wdl=value.float().softmax(1),optimistic=optimistic.float(),stdev=stdev))
+                                wdl=value.float().softmax(1),optimistic=optimistic.float(),stdev=stdev,variance_time=variance))
             if step<3:
                 prediction=predict(model.recurrent,hidden,torch.tensor([step+1,step+7],device=device))
     return outputs

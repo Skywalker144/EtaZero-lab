@@ -130,7 +130,7 @@ def test_side_globals_audit_rejects_pda_and_nonfinite(records,rule):
 @pytest.mark.parametrize('rule',['go','xiangqi'])
 @pytest.mark.parametrize('algorithm',['alphazero','muzero'])
 def test_native_rules_records_unroll_and_loss(records,rule,algorithm):
-    from etazero.models.network import make_network
+    from etazero.models.factory import make_network
     from etazero.train.learner import training_forward, forward_batch
     from etazero.data.muzero import prepare_batch
     if algorithm=="muzero":
@@ -178,7 +178,7 @@ def test_evicted_replay_restores_identical_arrays(records,tmp_path,rule,algorith
     ('alphazero','plain',128,10),('alphazero','transformer',192,5),
     ('alphazero','b1c6nbt-ih',6,1),('muzero','resnet',24,1)])
 def test_backbone_export_preserves_game_actions(rule,algorithm,architecture,channels,blocks):
-    from etazero.models.network import make_network, inference_network
+    from etazero.models.factory import make_network, inference_network
     torch.set_num_threads(1)
     c=small_config(rule,algorithm);c['network'].update(architecture=architecture,channels=channels,blocks=blocks)
     validate(c);spec=spec_for_config(c);canvas=c['network']['canvas']

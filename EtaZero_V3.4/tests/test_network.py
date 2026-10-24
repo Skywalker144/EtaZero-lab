@@ -4,7 +4,7 @@ import pytest
 import torch
 from config_samples import CONFIGS
 from etazero.config import load_config, validate
-from etazero.models.network import make_network
+from etazero.models.factory import make_network
 from etazero.models.katago_configs import resolve
 from etazero.models.katago import model_pytorch as source
 from etazero.train.optimization import parameter_groups

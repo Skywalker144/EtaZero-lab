@@ -4,7 +4,7 @@ import pytest
 import torch
 from etazero.outcomes import Reason, terminal_wdl
 from etazero.data.targets import trajectory_td_targets, training_view
-from etazero.models.network import base_losses, losses
+from etazero.train.losses import base_losses, losses
 from test_python import winning_record
 
 

@@ -63,8 +63,8 @@ def test_every_handwritten_architecture_native_cuda_graph(tmp_path, name, precis
                 indices += [indices[0]] * (bucket - count)
                 for _ in range(3):
                     scripted(spatial[indices], globals[indices])
-                logits, values, optimistic, error = scripted(spatial[indices], globals[indices])
-                expected = torch.cat((logits.float(), values.float().softmax(1), optimistic.float(), error.float()[:, None]), 1)
+                logits, values, optimistic, error, variance = scripted(spatial[indices], globals[indices])
+                expected = torch.cat((logits.float(), values.float().softmax(1), optimistic.float(), error.float()[:, None], variance.float()[:, None]), 1)
                 rtol, atol = (3e-3, 3e-3) if precision == 'float16' else (1e-3, 1e-4)
                 np.testing.assert_allclose(actual[turn], expected[:count].cpu().numpy(), rtol=rtol, atol=atol)
     finally:

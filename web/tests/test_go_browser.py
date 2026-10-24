@@ -16,13 +16,13 @@ def test_go_profile_defaults_overrides_and_page_reload(tmp_path):
         pytest.skip('Build native engine first')
     import torch
     from playwright.sync_api import sync_playwright
-    from etazero.models.network import make_network, inference_network
+    from etazero.models.factory import make_network, inference_network
 
     # A small real Go network keeps this test independent of published runs.
     torch.set_num_threads(1)
     config = load_config(ROOT / 'tests/fixtures/configs/smoke_test', run_dir=tmp_path / 'network')
     config['environment'].update(sizes='5', size_weights='1', rules='go', rule_weights='1')
-    config['network'].update(canvas=5, channels=24, blocks=1)
+    config['network'].update(canvas=5)
     model = tmp_path / 'japanese/models/iteration_000001/model.pt'
     model.parent.mkdir(parents=True)
     torch.jit.script(inference_network(make_network(config).eval())).save(str(model))

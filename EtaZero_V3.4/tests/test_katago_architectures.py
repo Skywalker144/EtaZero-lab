@@ -4,7 +4,9 @@ import torch
 from etazero.config import load_config, validate
 from etazero.models.katago_configs import BASE_NAMES, resolve
 from etazero.models.katago_network import KataGoNet, inference_network, ExportComplexDepthwiseConv2d
-from etazero.models.network import TrainingForward, make_network, losses
+from etazero.train.training import TrainingForward
+from etazero.models.factory import make_network
+from etazero.train.losses import losses
 from etazero.train.optimization import optimizer_for
 from config_samples import CONFIGS
 
@@ -126,9 +128,10 @@ def test_real_training_heads_and_variable_batch_export(name):
     assert scripted.metadata() == model.metadata()
     for count in (1, 2, 5):
         inputs = obs[:1].expand(count, -1, -1, -1).contiguous(), globals[:1].expand(count, -1).contiguous()
-        outputs = model.forward_all(*inputs)
+        outputs = model.training_outputs(*inputs)[0]
         actual = scripted(*inputs)
-        expected = outputs[0][:, 0], outputs[1], outputs[0][:, 5], 0.5 * torch.nn.functional.softplus(outputs[3] * 0.5)
+        expected = outputs[0][:, 0], outputs[1], outputs[0][:, 5], 0.5 * torch.nn.functional.softplus(outputs[3] * 0.5), 40 * torch.nn.functional.softplus(outputs[5])
+        assert len(actual) == len(expected)
         for a, b in zip(actual, expected):
             torch.testing.assert_close(a, b, rtol=3e-5, atol=3e-6)
 

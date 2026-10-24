@@ -16,7 +16,9 @@ import torch
 from etazero.config import ROOT, load_config, validate
 from etazero.data.targets import read_raw, training_view, validate_raw, Catalog
 from etazero.models.export import example_inputs
-from etazero.models.network import MaskedBatchNorm, make_network, base_losses as losses, inference_network
+from etazero.models.katago.model_pytorch import NormMask
+from etazero.models.factory import make_network, inference_network
+from etazero.train.losses import base_losses as losses
 from etazero.data.reader import BatchReader
 from etazero.schema import RAW_DTYPES, pack_observations, unpack_observations
 from etazero.data.shuffle import view_key, build_snapshot, desired_window, resource_plan, partition_rows, prune_derived, restore_snapshot
@@ -189,10 +191,10 @@ def test_combination_errors(config,algorithm,root,nonroot,message):
 
 
 def test_masked_statistics_and_training_policy_domain(config):
-    bn=MaskedBatchNorm(1)
+    bn=NormMask(1,dict(norm_kind='bnorm',bnorm_epsilon=.0001,bnorm_running_avg_momentum=.001),False)
     x=torch.tensor([[[[1.,3.],[1000.,1000.]]]])
     mask=torch.tensor([[[[1.,1.],[0.,0.]]]])
-    result=bn(x,mask)
+    result=bn(x,mask,mask.sum((2,3),keepdim=True),mask.sum())
     torch.testing.assert_close(result[0,0,0],torch.tensor([-1.,1.])/math.sqrt(1.0001))
     assert result[0,0,1].eq(0).all()
     torch.testing.assert_close(bn.running_mean,torch.tensor([0.002]))
@@ -581,7 +583,6 @@ def test_inference_normalization_keeps_mask_and_model_state(config):
             torch.testing.assert_close(a,b,rtol=2e-4,atol=2e-5)
     for key,value in model.state_dict().items():
         torch.testing.assert_close(value,original[key],rtol=0,atol=0)
-    assert not any(isinstance(layer,MaskedBatchNorm) for layer in folded.modules())
 
 
 def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
