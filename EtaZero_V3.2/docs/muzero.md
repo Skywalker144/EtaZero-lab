@@ -20,26 +20,26 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 ## 网络与推理
 
-[网络](../python/etazero/muzero/network.py) 的 `network.architecture` 支持 `nbt` 和 `resnet`。NBT 使用 EtaZero NBT block、Mish 与 fson，每段拥有独立参数和归一化统计；[稠密主干](../python/etazero/muzero/resnet.py) 采用 MuZero_V2 的两层全宽 3×3 残差块、逐样本 masked normalization 与 SiLU。`network.channels/blocks` 配置 representation，`muzero.dynamics_*` 和 `muzero.prediction_*` 分别配置另两段；`muzero.latent_channels` 配置潜在宽度。两种主干都保留 EtaZero heads，不是 MuZero_V2 整套网络的逐层复刻。ResNet 的归一化对每个样本的所有通道和有效格点进行 FP32 归约，不维护 BatchNorm 统计，卷积保留来源的默认初始化；prediction 不额外加入末端归一化。ResNet 也支持 KataGo 优化模式，采用相同的归一化主干分组 LR/WD 策略；逐样本归一化的缩放与偏置分别进入 `normal_gamma` 和 `noreg`，heads 使用输出组，前向归一化与初始化保持 ResNet 定义。这是 EtaZero 对 KataGo 优化策略的适配，KataGo 来源本身不提供该 ResNet 主干。相同通道数与块数不保证相同参数量或计算量。
+[网络](../python/etazero/muzero/network.py) 使用独立 representation、dynamics、prediction；`nbt` 与 `resnet` 分别采用来源 NBT 与 regular 卷积块及 fson/Mish。三段宽度和深度、latent 投影按 MuZero 配置保留，其归一化、初始化、池化与输出头来自 [source_components.py](../python/etazero/muzero/source_components.py)。每段拥有独立参数和统计；没有另行使用逐样本 MaskedNorm 的私有主干。
 
-ResNet 的 `MaskedNorm` 在通道与有效空间位置上共同计算每样本的均值、方差，采用每通道可学习缩放和偏置；其统计方式接近单组 GroupNorm，并排除棋盘 padding。它不是 BatchNorm，也不是具有逐位置仿射参数的 `nn.LayerNorm([C,H,W])`。representation/dynamics 的入口和残差块采用该归一化与 SiLU；共享的 policy/value heads 仍采用 Mish 与 bias mask。
+主干归一化完全遵循选用的来源组件。训练态的 BatchNorm 可依赖同一批内其他样本；推理态使用保存的 running statistics。latent min/max 是另外的 MuZero 状态归一化，不能与主干归一化混为一谈。
 
 - representation 按棋类接收 5／8、22／19 或 113／8 的空间／全局特征；布局以 [games.py](../python/etazero/games.py) 为准。
 - latent 是 FP32 `[B,C+1,H,W]`：前 C 通道按每样本的有效格点与全部通道做 min/max 归一化，常量特征归零；末通道保留有效棋盘 mask。采用 MiniZero 的极小跨度保护：当 `max-min < 1e-5` 时，分母为 `max-min+1e-5`，否则使用原跨度。输出保持在 `[0,1]` 内，极小跨度时最大值可小于 1；该规则同时用于 representation、dynamics、训练和导出推理。FP16 推理仍在 FP32 做归一化。
 - dynamics 只接收 latent 和 int64 `[B]` 动作。Gomoku／Hex 为单 one-hot，Go pass 为全零动作平面（普通着法仍 one-hot），象棋为起点和终点两张 one-hot；不接收未来观测、占用、禁手或真实终局。
-- prediction 复用完整 EtaZero heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero 两种主干均支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
+- prediction 复用按四结果和棋类动作适配的来源 heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero 两种主干均支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
 
-WDL 均表示该 latent 步当前玩家视角。棋类适配无 reward head、无 reward loss，搜索折扣为 1，相邻边翻转价值符号、交换 W/L。训练 heads 和 loss 为 FP32；NBT 导出副本把三段末端 BatchNorm 转为预计算归一化，ResNet 保留逐样本动态归一化。`initial(obs, globals)` / `recurrent(latent, action)` 返回 latent、普通策略 logits、WDL logits、short optimistic logits 和误差标准差。模型元数据独立标识算法与 latent 宽度，导入权重校验架构及完整三段配置。
+价值头为当前 latent 玩家视角的 W/D/L/NR，非围棋屏蔽 NR。该棋类适配没有 reward head 或 reward loss，折扣为 1，相邻边只交换 W/L；latent、mask 和训练 heads 的关键归约保持 FP32。initial/recurrent 返回 latent、普通/optimistic policy、价值 logits 和误差标准差。
 
-[逐展开推理测试](../tests/test_muzero_network.py) 使用固定种子，覆盖根预测、三次 recurrent 和旧父 latent 的再次展开，并区分两种数值要求：native 与已序列化、完成 JIT profiling 的 TorchScript 模型比较，FP32 使用 `rtol=2e-4, atol=2e-5`；eager 与优化后的 TorchScript 分别展开，FP32 使用 `rtol=2e-4, atol=2e-4`，容纳融合运算舍入经 latent min/max 归一化传播的误差。FP16 两类比较均使用 `rtol=atol=3e-3`。这些是固定样例的工程验收阈值，不承诺所有输入或多次展开逐位相等；native 对照仍检查 latent、policy、WDL、optimistic 和 stdev 全部输出。
+[原生 CUDA 对照](../tests/test_muzero_cuda_backend.py) 比较 PyTorch 与三个 CUDA 组件的根、连续展开和旧父 latent 再次使用，覆盖四棋类、FP16/FP32 与不同 batch。测试检查 latent、policy、四类概率、optimistic 和 stdev；误差阈值仅适用于已测样例。参考 TorchScript 路径另由 [组件测试](../tests/test_muzero_network.py) 覆盖。
 
 [推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
-[MuZero 后端](../cpp/src/muzero/torch_backend.cpp) 为各服务建立独立 CUDA stream，复用 pinned observation、global 和 action 输入缓冲区。同一 worker 的服务共享一次模型加载、精度转换和 JIT 准备，各自持有 CUDA Graph；轮间把共享模型移回 CPU，换代时复用执行结构并更新权重与归一化统计。节点 latent 使用独立分配与 foreach 批量复制，避免单个存活节点保留整批 latent。一次预测回传完成该 stream 上此前的节点复制，结果交给搜索线程后可安全读取和复用父节点。模型加载时核对算法、画布与 latent 宽度；运行时保留输入边界和输出形状检查，不额外归约 latent 有限性、回传 mask 或校验 heads 的实际精度。数值与 mask 正确性由独立开发测试验证。上述执行路径独立于 AlphaZero 的后端、组批队列和搜索实现。
+[原生 CUDA 后端](../cpp/src/muzero/cuda_backend.cpp) 加载 representation.bin、dynamics.bin、model.bin 三个来源格式组件。latent 位于 GPU，每个节点持有独立存储；动作编码、父状态打包、masked min/max 都由 CUDA 内核完成，事件保证不同组件 stream 的依赖。CPU 仅接收搜索需要的预测输出，诊断接口才显式取回 latent。
 
-CUDA 服务在加载时为 initial 与 recurrent 准备 batch 为 1、2、4 等二次幂及 `max_batch` 的独立 CUDA Graph，运行时选择能容纳请求的最小 bucket。NBT 的推理归一化使用固定统计，ResNet 按样本归一化；不足 bucket 的部分重复一个有效输入，丢弃额外输出，不增加搜索节点或训练目标。recurrent 通过 foreach 将父 latent 直接组装到 graph 输入，避免中间拼接分配。各 graph 保留自己的输入、输出和内存池；节点复制完成后才允许下一次重放，父节点不会引用可被覆盖的 graph 输出。准备和模型加载的耗时进入实际轮次墙钟；固定模型短测通过预热排除这一启动成本。
+原生 CUDA 使用实际 batch，无二次幂补齐。initial/recurrent 队列保留各自组批和后端归属，父节点在多次 recurrent 及不同批量之后仍可复用。生产路径不依赖 TorchScript CUDA Graph；CPU 和显式 `.pt` 模型使用参考后端。
 
-FP16 后端在加载时将 Conv2d / Linear 的权重与 bias 转为 autocast 原本使用的 FP16 值，避免每次前向重复转换矩阵。归一化参数、统计、mask 和 latent 保持 FP32；导出文件与 learner 权重保持原有存储精度。
+原生 CUDA FP16 的卷积、归一化与 attention 执行采用来源后端的数值策略；latent min/max 保持 FP32。严格 FP32 对照显式关闭 TF32，以区分浮点路径差异。实际训练、发布与推理各自记录精度，不承诺逐位跨后端一致。
 
 ## 搜索与子树加权开关
 
@@ -121,7 +121,7 @@ conda run -n pytorch python tests/reference/check_muzero_network.py
 ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests/test_muzero_network.py tests/test_muzero_pipeline.py
 ```
 
-测试覆盖 normalization、手算梯度边界、潜在树视角与访问预算、无真实树内规则、固定 D4、缓存/后端归属、并发失败、完整序列分片、cheap/side/reanalysis/吸收态、reader 与 learner 恢复，以及真实 CUDA 训练与 Python/TorchScript/LibTorch initial/recurrent 对照。初始预测与连续 recurrent 预测的数值对照在独立测试中执行，每轮导出不执行数值校验。短测试说明执行链路和所测算法性质成立，不代表训练收敛、吞吐或棋力收益已验证。
+测试覆盖 normalization、手算梯度边界、潜在树视角与访问预算、无真实树内规则、固定 D4、缓存/后端归属、并发失败、完整序列分片、cheap/side/reanalysis/吸收态、reader 与 learner 恢复，以及真实 CUDA 训练与 PyTorch／专用 CUDA initial/recurrent 对照，以及显式 TorchScript 参考路径。初始预测与连续 recurrent 预测的数值对照在独立测试中执行，每轮导出不执行数值校验。短测试说明执行链路和所测算法性质成立，不代表训练收敛、吞吐或棋力收益已验证。
 
 MuZero 回放权重均值按选中训练分片涉及的不同完整棋局的真实可训练主局位置统计，排除开局、不按重复起点加权。catalog 入库时保存逐局总权重与位置数；shuffle 按棋局身份去重聚合，不再重读整个窗口。
 

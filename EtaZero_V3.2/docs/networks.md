@@ -2,7 +2,7 @@
 
 AlphaZero 的 `network.architecture` 可直接填写固定 KataGo 来源的网络名称。名称与架构来自 [手写预设](../python/etazero/_vendor/katago/modelconfigs.py)；[解析器](../python/etazero/katago_configs.py) 按来源相同的阶段和约束解析后缀，不在启动时展开整张派生配置表。来源版本及文件校验值见 [reference_sources.json](../reference_sources.json)。
 
-输入／输出适配取决于 `environment.rules`：Go 保留来源 22／19 输入和 pass head；象棋采用 113／8 输入及 50 位移通道 gather 2086 动作；其余棋类保留原有布局。主干结构不因棋类更换。六项 policy、纯 WDL、TD 和误差目标共用；Go 的分数／所有权 head 不进入目标。native 读取导出的 `game_name()`，依据共享的 [棋类定义](../python/etazero/games.py) 分配输入和动作缓冲。
+输入／输出适配取决于 `environment.rules`：Go 保留来源 22／19 输入和 pass head；象棋采用 113／8 输入及 50 位移通道 gather 2086 动作；其余棋类保留原有布局。主干结构不因棋类更换。六项 policy、纯 WDL、TD 和误差目标共用；Go 的分数／所有权 head 不进入目标。native 读取模型 manifest（`.pt` 使用 `game_name()`），依据共享的 [棋类定义](../python/etazero/games.py) 分配输入和动作缓冲。
 
 ## 选择网络
 
@@ -38,17 +38,17 @@ PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b
 | 输出头 | `ih`、`bnh`、`rnh`、`rsnh`、`rgnh` |
 | 元数据编码器 | `meta` |
 
-`bnh` 只适用于来源允许的 batch-normalization 配置。名称存在于派生表不保证任意维度组合都可实例化，例如分组 spatial RMSNorm 的通道数仍须满足其分组约束；不会通过改变通道数或归一化来绕过来源约束。实验预设名称本身带有 `qkn`、`ireg16`、`dwc` 等字段时，按最长手写名称优先匹配。
+`bnh` 只适用于来源允许的 batch-normalization 配置。名称存在于派生表不保证任意维度组合都可实例化，例如分组 spatial RMSNorm 的通道数仍须满足其分组约束；不会通过改变通道数或归一化来绕过来源约束。原生导出同时受固定来源 exporter 支持范围约束，例如 grouped spatial RMSNorm 的导出仍会明确拒绝；不能由训练模型可构造推定所有实验结构都能原生推理。实验预设名称本身带有 `qkn`、`ireg16`、`dwc` 等字段时，按最长手写名称优先匹配。
 
 ## 架构与棋类适配
 
-[适配器](../python/etazero/katago_network.py) 保留来源全部主干、归一化、初始化、共享 GAB/TAB 模块及输出头。输入投影按棋类采用 5／8、22／19 或 113／8 的空间／全局特征；padding 在投影前按有效棋盘 mask 清零。来源三分类 head 从头按 EtaZero 的 W/D/L 语义训练，并调整通道顺序；这不是原生 KataGo no-result 标签或预训练权重的语义转换。Go 保留 pass，Gomoku／Hex 去除 pass，象棋替换为固定走法 head。训练选取六项 policy、主 WDL、三个 TD WDL 和短期价值误差；v17 的 `predict_q_values=true` 额外监督逐动作纯 W−L Q。来源的 score、ownership、seki 等输出仍在训练模型中保留，EtaZero 不为它们构造监督；Go pass 则参与所有对应策略损失。导出图只保留搜索所需输出。
+[适配器](../python/etazero/katago_network.py) 保留固定来源的主干、归一化、初始化、attention/GAB/TAB 与参数分组。输入按棋类适配，Go 保留 pass，象棋使用 2086 动作 gather。主价值头及三个 TD 头公开顺序为 W/D/L/NR；来源文件保留 W/L/NR 位置，新增 draw 输出。非围棋屏蔽 NR；围棋在非简单劫且非数目规则下同样屏蔽 NR，屏蔽发生在推理 softmax 前，其余 W/D/L 重新归一化。MuZero 从真实根输入保存规则条件，后续 latent 推理沿用该条件。普通和棋不拆成半胜半负。六项策略、价值、短期误差、future-position、variance-time 和可选 v17 纯 W−L Q 进入监督；score、ownership、seki 不进入监督。
 
 `ih` 的两组头使用来源缺省的 0.5/0.5 loss 权重；`bnh` 使用主头 0.2、BN 头 0.8，推理读取主头。各头均参与其对应 loss，checkpoint 与 SWA 保存完整参数和统计。
 
-`meta` 保留来源的 192 维编码器。EtaZero 对局没有 SGF/玩家元数据，游戏链路显式使用全零元数据向量。Python 的 `source_outputs(obs, globals, metadata=...)` 可输入真实的 192 维向量；此接口不意味着自对弈 writer 已有玩家元数据。元数据编码器的缺省激活与主干一致。
+`meta` 保留来源的 192 维编码器，但普通 RL 配置必须选择无 metadata 的预设。HumanSL 第二模型通过 `human_sl_profile` 生成来源 SGFMetadata，包含实际执色、等级和棋盘面积，并进入缓存身份；缺少必要 metadata 时明确报错，不填零向量。
 
-保留的 `nbt`、`plain`、`transformer` 是 EtaZero 原有架构入口；它们的缩放规则或固定小预设不代表完整 KataGo 预设。精确选择来源架构时使用来源名称。MuZero 的 representation/dynamics/prediction 仍使用其独立 `nbt` 或 `resnet` 配置，不把 AlphaZero 的来源模型当成 MuZero 网络。
+AlphaZero 的 `nbt`、`plain`、`transformer` 仅是固定来源名称的别名，分别解析为 `b5c192nbt-fson-mish`、`b10c128-fson-mish` 和 `b5c192h3nbttfrs`。不允许按别名任意缩放主干。MuZero 的三段宽度、深度和 latent 投影是必要的算法适配；其卷积块、归一化、初始化、池化、heads 与参数角色复用来源组件。
 
 ## 训练与推理
 
@@ -58,19 +58,19 @@ PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b
 
 Frequency-mixing TAB 的复数 depthwise 卷积在导出副本中预先拼装为来源所用的两个实数 depthwise `Conv2d`，保留原有卷积拆分及实部/虚部输出运算。固定权重不再在推理时拼接，避免 TorchScript TensorExpr 对 AMP 与拼接的输出 stride 重写问题；训练参数和计算保持来源实现。
 
-Batch renorm 默认保持来源初始界限 `rmax=1,dmax=0`，EMA momentum 为 0.001。需要随样本数调整界限时，在 `train.cfg` 显式设置 `[brenorm]` 的 `avg_momentum`、`target_rmax`、`target_dmax`、`adjustment_scale`。界限在轮开始及每 500 batch 按来源增量指数公式更新；模型保存 running/renorm statistics，优化状态保存当前界限和上次更新时间，续训不重新开始调整。
+Batch renorm 的参数与初始界限以配置为准。界限在优化器 epoch 开始及该 epoch 每 500 个已消费 batch 更新，epoch 由完整文件选择决定，独立于外层产样轮次。保存统计、当前界限和更新时间，恢复不重启递推。
 
-执行采用来源公开的 NCHW/SDPA 路径并保留显式 mask。单图编译按来源要求关闭 fused RoPE/QKV attention 路径；支持形状的 CUDA AMP SwiGLU 保留来源融合内核。导出关闭训练融合内核，以固定 canvas 的 tensor trace 封装成 TorchScript，并保留动态 batch 和输入设备；C++ 使用已有 LibTorch/CUDA Graph 后端。此执行选择不代表与来源默认 NHWC/flex attention 的性能或浮点运算顺序完全等价。
+训练保留来源的布局、flex attention、适用的融合内核和 FP32 heads；单图编译按来源关闭 fused RoPE/QKV。CUDA 开启 cuDNN benchmark，TF32 matmul 由 `training.use_tf32_matmul` 显式控制。CPU 参考导出关闭训练融合路径并生成 TorchScript；生产 CUDA 导出来源二进制，由专用 CUDA/cuDNN 后端执行，不经过 LibTorch 前向。
 
 ## 检查入口
 
 ### 原生推理测速
 
-[推理测速脚本](../scripts/benchmark_inference.py) 为所选 KataGo 名称生成同一随机种子初始化的模型，通过生产 `TorchBackend` 在同一进程中交替测量。先按 README 构建；将 `ARCH_A`、`ARCH_B` 设为需要比较的完整架构名称，在本版本目录运行：
+[推理测速脚本](../scripts/benchmark_inference.py) 对相同种子和权重支持 `--backends cuda torchscript`，在同进程中交替比较专用 CUDA/cuDNN 与 LibTorch/CUDA Graph。可同时比较命名架构，先按 README 构建：
 
 ```bash
 conda run --no-capture-output -n pytorch python scripts/benchmark_inference.py \
-  --architectures "$ARCH_A" "$ARCH_B" --canvas 15 --precision float16 \
+  --backends cuda torchscript --architectures "$ARCH_A" "$ARCH_B" --canvas 15 --precision float16 \
   --batches 1 4 16 64 --output data/my_inference_benchmark
 ```
 
@@ -78,7 +78,7 @@ conda run --no-capture-output -n pytorch python scripts/benchmark_inference.py \
 
 `--game gomoku|hex|go|xiangqi` 指定命名预设的棋类；未提供时取配置中的棋类，无配置时使用 Gomoku。与配置同时使用须一致，象棋要求 `--canvas 10`。输入由该棋类的规则状态生成固定两手合法前缀，生成过程在计时外；不同棋类的输入和动作维度不同，比较时应固定棋类。
 
-每组先预热，再按 `--repeats` 重复计时，交替模型顺序与 batch 遍历方向。耗时包含 CPU 输入打包、H2D、CUDA Graph 重放、同步 D2H 和结果构造；加载、图捕获与预热单列，不计入吞吐。结果不包含组批排队、缓存和搜索，也不直接等于自对弈速度。非图桶大小的 batch 会补到下一个桶，原始记录和汇总均记录 `graph_batch`。
+每组预热后按 repeats 交替执行。耗时含输入打包、H2D、前向、同步 D2H 和结果构造，不含模型加载、预热、排队、缓存与搜索。原生 CUDA 使用实际 batch；TorchScript 路径补到图 bucket，`executed_batch` 记录实际执行批量。局部吞吐不能直接换算成整轮训练加速。
 
 测速须在可访问宿主 CUDA 的环境执行。输出目录必须不存在，保留源码快照、架构配置、种子、模型与二进制哈希、构建配置、软硬件信息、逐轮 `raw.jsonl` 及 `summary.json/csv`。汇总采用各轮平均 batch 延迟与吞吐的中位数，并列吞吐范围；这不是单次请求的尾延迟统计。
 
