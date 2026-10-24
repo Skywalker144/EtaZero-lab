@@ -16,6 +16,7 @@ struct SearchSettings {
     bool reuse_tree;
     int64_t max_visits = 0; // Includes the initial root evaluation and reused visits.
     bool use_fpu = false, shaped_noise = false, policy_target_pruning = false, use_lcb = false;
+    bool use_non_buggy_lcb = true;
     double fpu_reduction_max = 0.2, root_fpu_reduction_max = 0, fpu_parent_power = 2;
     double forced_playouts = 0, lcb_stdevs = 5, min_lcb_visit_prop = 0.15;
     double value_weight_exponent = 0.5;
@@ -48,6 +49,7 @@ struct SearchSettings {
     bool root_symmetry_pruning=false;
     double avoid_repeated_pattern_utility=0;
     std::shared_ptr<const PatternBonusTable> external_patterns;
+    std::shared_ptr<Evaluator> human_evaluator;
     bool use_eval_cache=false;int64_t eval_cache_min_visits=100;
     int64_t max_visits_pondering=SEARCH_CONFIG_LIMIT,max_playouts_pondering=SEARCH_CONFIG_LIMIT;
     double max_time_pondering=1e20,lag_buffer=0,tree_reuse_carry_over_time_factor=0;
@@ -82,6 +84,7 @@ struct SearchRun {
     bool collect_root_policy_invalid_mass = false;
     // Interactive diagnostics only. Empty callbacks keep training on its existing path.
     bool collect_analysis = false;
+    int analysis_pv_length = 32;
     double report_interval = 0.25;
     std::function<void(const SearchResult&)> on_report;
 };
@@ -91,11 +94,13 @@ struct RootChildStats {
     int64_t visits;
     double weight, weight_sq, draw_sum=0;
     double win_loss_sum=value_sum; // Pure W-L; value_sum/value_sq_sum are search utility.
+    double no_result_sum=0;
 };
 struct ValueStats {
     int64_t visits=0;
     double value=0, value_sq=0, draw=1, weight=0, weight_sq=0;
     double win_loss=value; // Utility may be biased; training/report WDL never uses it.
+    double no_result=0;
 };
 double temperature_at_turn(double early,double late,double halflife,int turn,int board_area);
 std::vector<double> policy_temperature_distribution(const std::vector<double>& weights,double temperature);
@@ -103,6 +108,7 @@ std::vector<double> temperature_distribution(const std::vector<double>& weights,
 double value_weight_cdf(double z);
 ValueStats aggregate_values(const WDL& initial,const std::vector<RootChildStats>& children,const SearchSettings& settings,bool noisy_root,double initial_weight=1,SubtreeValueBias* bias=nullptr);
 double mixed_policy_logit(double ordinary,double optimistic,double optimism);
+std::vector<double> source_policy_probabilities(const Evaluation&,const std::vector<int>& actions,double temperature,double optimism);
 double uncertainty_weight(double stdev,bool supported,const SearchSettings& settings);
 std::vector<double> noise_pruned_weights(const std::vector<RootChildStats>& children,const SearchSettings& settings);
 double explore_scaling(double total_child_weight,const ValueStats& parent,const SearchSettings& settings);
@@ -122,7 +128,9 @@ struct AnalysisCandidate {
     WDL wdl{0,1,0};
     bool has_value=false;
     RootSelectionDiagnostic selection;
+    int64_t node_visits=0;double node_weight=0;
     std::vector<int> pv;
+    std::vector<int64_t> pv_visits,pv_edge_visits;
 };
 void analysis_policy(SearchResult&,const std::vector<int>&,const std::vector<RootChildStats>&,
                      const SearchSettings&,ValueStats,const GumbelSettings*);
@@ -134,12 +142,17 @@ struct SearchResult {
     int64_t new_playouts = 0; // Includes a fresh root evaluation, unlike simulations (root edges).
     double seconds = 0;
     bool stopped_early = false;
-    double value = 0, policy_surprise = 0;
+    double value = 0, utility = 0, policy_surprise = 0;
+    double pruned_value=0, pruned_utility=0;
+    WDL pruned_wdl{0,1,0};
     double root_policy_invalid_mass = std::numeric_limits<double>::quiet_NaN();
+    double network_variance_time=-1;
     double network_sample_weight=0, network_value_stdev=0, search_weight=0, search_weight_sq=0;
     WDL network_wdl{0,1,0}, search_wdl{0,1,0};
-    std::vector<double> network_policy, search_policy;
+    std::vector<double> network_policy, search_policy, human_policy;
     std::vector<double> move_policy;
+    // Source surprise/entropy use LCB selection with direct HumanSL moves.
+    std::vector<double> statistics_policy;
     std::vector<double> policy;
     std::vector<int16_t> policy_target;
     uint64_t graph_hits = 0, graph_catch_ups = 0, graph_cycles = 0;
@@ -153,7 +166,7 @@ struct SearchResult {
     bool gumbel=false;
 };
 // Reported WDL probabilities, with KataGo's floating-point boundary handling.
-WDL wdl_from_value(double value, double draw);
+WDL wdl_from_value(double value, double draw, double no_result=0);
 std::vector<int16_t> quantize_policy(const std::vector<double>& weights);
 struct SearchEdgeSnapshot {
     int action, perspective, pending;
@@ -170,6 +183,7 @@ class SearchTimeBudget;
 class GameSearch {
 protected:
     std::shared_ptr<const RootFocus> focus_;
+    int analysis_pv_length_=32;
     std::shared_ptr<const RootFocus> focus_snapshot() const {return std::atomic_load(&focus_);}
 public:
     // Like KataGo, replacement is safe while workers are searching.
@@ -181,11 +195,17 @@ public:
         std::atomic_store(&focus_,std::move(focus));
     }
     virtual ~GameSearch() = default;
+    virtual void set_external_patterns(std::shared_ptr<const PatternBonusTable>) {throw std::runtime_error("Pattern history requires AlphaZero");}
     virtual SearchResult run(const Game&, double temperature, SearchRun options = {}) = 0;
     virtual void advance(int action) = 0;
     virtual void reset(uint64_t seed) = 0;
+    virtual SearchResult inspect(const Game&,const std::vector<int>&) {throw std::runtime_error("Search inspection unavailable");}
 };
 class Search : public GameSearch {
+    std::shared_ptr<Evaluator> human_evaluator() const {auto e=settings_.human_evaluator?settings_.human_evaluator:evaluator_?evaluator_->secondary:nullptr;return e&&e->available()?e:nullptr;}
+public:
+    SearchResult inspect(const Game&,const std::vector<int>&) override;
+    void set_external_patterns(std::shared_ptr<const PatternBonusTable> table) override {settings_.external_patterns=std::move(table);}
 protected:
     struct Node;
     struct Edge {
@@ -200,7 +220,7 @@ protected:
     // Published as one immutable snapshot, including the history-specific mask.
     // Go can replace it while other paths still read the previous evaluation.
     struct NodeEvaluation {
-        double initial_value=0, initial_weight=1, initial_stdev=0;
+        double initial_value=0, initial_weight=1, initial_stdev=0,initial_variance_time=-1;
         bool has_auxiliary=false;
         WDL initial_wdl{0,1,0};
         std::vector<double> human_policy;
@@ -211,6 +231,7 @@ protected:
         float value=0,draw=0,weight=0;
         struct First {float value=0,weight=0;};
         std::map<int,First> first_explore;
+        double no_result=0;
     };
     struct Node {
         enum Status { EMPTY, EXPANDING, READY, FAILED };
@@ -228,6 +249,7 @@ protected:
         std::vector<double> capped_distribution; // Move-indexed, immutable once installed under stats_mutex.
         SubtreeValueBias subtree_bias;
         std::mutex stats_mutex, update_mutex;
+        std::atomic<int> dirty_count{0};
         std::exception_ptr error;
         std::unique_ptr<Move[]> moves;
         size_t move_count=0;
@@ -309,12 +331,14 @@ protected:
     std::function<bool()> should_stop_;
     std::function<void()> report_; // Invoked only by coordinator worker 0.
     std::exception_ptr error_;
-    bool expand(Node& node, const SearchState& state, int worker,int depth=0);
+    enum class Expansion { Ready, Expanded, Contended };
+    Expansion expand(Node& node, const SearchState& state, int worker,int depth=0);
     void evaluate_node(Node& node,const SearchState& state,int worker,int symmetries,bool skip_cache=false,int depth=0);
     ValueStats snapshot(Node& node);
     std::vector<RootChildStats> child_stats(Node& node,const NodeEvaluation& eval,bool aggregation=false);
     bool prune_root_children(const SearchState& state);
     void recompute(Node& node,int visits_to_add=0); // Serializes updates without holding parent stats during child reads.
+    void update_after_playout(Node& node);
     Node* new_node();
     Node* find_node(const SearchState& state,const SubtreeValueBiasKey* bias_key,const std::string& pattern_key={});
     void prepare_subtree_bias(const SearchState& state);

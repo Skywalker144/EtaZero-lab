@@ -77,7 +77,7 @@ std::vector<double> root_selection_weights(const std::vector<RootChildStats>& ch
             double factor=(radius[i]+excess)/(radius[i]+0.20*excess);
             adjusted=std::max(adjusted,factor*factor*weights[i]);
         }
-        weights[candidate]=adjusted;
+        if(s.use_non_buggy_lcb||candidate>0)weights[candidate]=adjusted;
     }
     double maximum=*std::max_element(weights.begin(),weights.end());
     double cutoff=std::min(s.chosen_move_prune,maximum/64),subtract=std::min(s.chosen_move_subtract,maximum/64);
@@ -138,8 +138,9 @@ Search::Node* Search::find_node(const SearchState& state,const SubtreeValueBiasK
 }
 std::shared_ptr<const Search::CachedEvaluation> Search::cached_evaluation(const std::string& identity) const {
     if(eval_cache_.empty())return nullptr;
-    const auto& shard=eval_cache_[std::hash<std::string>{}(identity)%eval_cache_.size()];
-    auto found=shard.find(identity);return found==shard.end()?nullptr:found->second;
+    const auto key=identity+char(capped_player_+1);
+    const auto& shard=eval_cache_[std::hash<std::string>{}(key)%eval_cache_.size()];
+    auto found=shard.find(key);return found==shard.end()?nullptr:found->second;
 }
 void Search::apply_cached_evaluation(Node& node,ValueStats& stats,int64_t visits) const {
     const auto& entry=node.cached_evaluation;
@@ -148,7 +149,7 @@ void Search::apply_cached_evaluation(Node& node,ValueStats& stats,int64_t visits
     if(weight>settings_.eval_cache_min_visits)weight=std::sqrt(settings_.eval_cache_min_visits*weight);
     double ratio=visits/weight,fraction=1/(1+3*ratio*(1+2*ratio*ratio)),old=stats.value;
     stats.value+=fraction*(entry->value-stats.value);stats.win_loss+=fraction*(entry->value-stats.win_loss);
-    stats.draw+=fraction*(entry->draw-stats.draw);
+    stats.draw+=fraction*(entry->draw-stats.draw);stats.no_result+=fraction*(entry->no_result-stats.no_result);
     stats.value_sq+=stats.value*stats.value-old*old;
 }
 void Search::record_evaluations() {
@@ -169,8 +170,8 @@ void Search::record_evaluations() {
             if(child_weight>=first.weight)first={float(edge.perspective.load()*child_stats.win_loss),child_weight};
         }
         // Pure WDL search has no special root passing utility to exclude here.
-        replacement->value=stats.win_loss;replacement->draw=stats.draw;replacement->weight=weight;
-        eval_cache_[std::hash<std::string>{}(node->graph_identity)%eval_cache_.size()][node->graph_identity]=std::move(replacement);
+        replacement->value=stats.win_loss;replacement->draw=stats.draw;replacement->no_result=stats.no_result;replacement->weight=weight;
+        eval_cache_[std::hash<std::string>{}(node->graph_identity+char(capped_player_+1))%eval_cache_.size()][node->graph_identity+char(capped_player_+1)]=std::move(replacement);
     }
 }
 double Search::pattern_bonus(const Node& node) const {
@@ -315,7 +316,7 @@ void Search::set_evaluator(Evaluator& evaluator) {
 }
 void Search::evaluate_node(Node& node,const SearchState& state,int worker,int symmetries,bool skip_cache,int depth) {
     const int actions=state.actions(),symmetry_count=state.symmetry_count();
-    const bool need_human=evaluator_ && evaluator_->secondary && (&node==root_ || settings_.human_sl_player_weightless>0 || settings_.human_sl_player_weightful>0 || settings_.human_sl_opponent_weightless>0 || settings_.human_sl_opponent_weightful>0);
+    const bool need_human=evaluator_ && human_evaluator() && (&node==root_ || settings_.human_sl_player_weightless>0 || settings_.human_sl_player_weightful>0 || settings_.human_sl_opponent_weightless>0 || settings_.human_sl_opponent_weightful>0);
     if(symmetries>symmetry_count)throw std::runtime_error("Root symmetry count exceeds state support");
     auto& legal=thread_states_[worker].legal_actions;legal.clear();
     for(int a=0;a<actions;++a)if(state.legal(a))legal.push_back(a);
@@ -330,7 +331,7 @@ void Search::evaluate_node(Node& node,const SearchState& state,int worker,int sy
     if(full_domain)eval->prior_order=legal;
     else {eval->prior_order.resize(node.move_count);std::iota(eval->prior_order.begin(),eval->prior_order.end(),0);}
     std::vector<int> symmetry_indices(symmetry_count);std::iota(symmetry_indices.begin(),symmetry_indices.end(),0);
-    std::vector<double> policy(actions,0);WDL averaged{0,0,0};double stdev=0;
+    std::vector<double> policy(actions,0);WDL averaged{0,0,0};double stdev=0,variance_time=0;bool has_variance_time=true;
     bool auxiliary=false;double optimism=&node==root_?settings_.root_policy_optimism:settings_.policy_optimism;
     for(int i=0;i<symmetries;++i) {
         if(symmetries>1)std::swap(symmetry_indices[i],symmetry_indices[std::uniform_int_distribution<int>(i,symmetry_count-1)(random_[worker])]);
@@ -346,36 +347,30 @@ void Search::evaluate_node(Node& node,const SearchState& state,int worker,int sy
         if(output.logits.size()!=policy.size())throw std::runtime_error("Bad leaf policy shape");
         if(i==0)auxiliary=output.has_auxiliary;
         if(auxiliary!=output.has_auxiliary)throw std::runtime_error("D4 auxiliary capabilities disagree");
+        if(output.variance_time<0)has_variance_time=false;else variance_time+=output.variance_time;
         if(auxiliary) {
             if(output.optimistic_logits.size()!=policy.size() || !std::isfinite(output.shortterm_value_stdev) || output.shortterm_value_stdev<0)
                 throw std::runtime_error("Invalid auxiliary leaf output");
-            stdev+=output.shortterm_value_stdev/symmetries;
-            for(size_t a=0;a<output.logits.size();++a) {
-                if(!std::isfinite(output.optimistic_logits[a]))throw std::runtime_error("Nonfinite optimistic policy");
-                // Fixed source v15/v17 backend mixes short-optimistic and ordinary LOGITS before Tnn/softmax.
-                output.logits[a]=mixed_policy_logit(output.logits[a],output.optimistic_logits[a],optimism);
-            }
+            stdev=symmetries==1?output.shortterm_value_stdev:
+                static_cast<float>(static_cast<float>(stdev)+static_cast<float>(output.shortterm_value_stdev));
         }
         double mass=0;
-        for(int j=0;j<3;++j) {
+        for(int j=0;j<4;++j) {
             double p=output.wdl[j];if(!std::isfinite(p)||p<0||p>1)throw std::runtime_error("Invalid leaf WDL");
-            mass+=p;averaged[j]+=p/symmetries;
+            mass+=p;averaged[j]=symmetries==1?p:
+                static_cast<float>(static_cast<float>(averaged[j])+static_cast<float>(p));
         }
         if(std::abs(mass-1)>1e-5)throw std::runtime_error("Unnormalized leaf WDL");
-        double maximum=-std::numeric_limits<double>::infinity(),sum=0;
-        for(int j:eval->prior_order) {
-            int a=node.moves[j].action;
-            if(!std::isfinite(output.logits[a]))throw std::runtime_error("Nonfinite leaf policy");
-            maximum=std::max(maximum,output.logits[a]);
-        }
-        std::vector<double> probabilities(actions,0);
-        for(int j:eval->prior_order) {
-            int a=node.moves[j].action;
-            probabilities[a]=std::exp((output.logits[a]-maximum)/settings_.nn_policy_temperature);sum+=probabilities[a];
-        }
-        if(!std::isfinite(sum)||sum<=0)throw std::runtime_error("No valid leaf policy");
-        for(int a=0;a<actions;++a)policy[a]+=probabilities[a]/sum/symmetries;
+        std::vector<int> legal;for(int j:eval->prior_order)legal.push_back(node.moves[j].action);
+        auto probabilities=source_policy_probabilities(output,legal,settings_.nn_policy_temperature,optimism);
+        for(int a=0;a<actions;++a)policy[a]=static_cast<float>(policy[a]+probabilities[a]);
     }
+    // NNOutput's ensemble accumulates FP32 fields, then divides once in FP32.
+    if(symmetries>1) {
+        for(auto& p:averaged)p=static_cast<float>(p)/static_cast<float>(symmetries);
+        stdev=static_cast<float>(stdev)/static_cast<float>(symmetries);
+    }
+    for(auto& p:policy)p=static_cast<float>(p/static_cast<float>(symmetries));
     if(need_human) {
         eval->human_policy.assign(node.move_count,-1);
         for(int index:eval->prior_order)eval->human_policy[index]=0;
@@ -383,25 +378,22 @@ void Search::evaluate_node(Node& node,const SearchState& state,int worker,int sy
         for(int i=0;i<symmetries;++i) {
             if(symmetries>1)std::swap(symmetry_indices[i],symmetry_indices[std::uniform_int_distribution<int>(i,symmetry_count-1)(random_[worker])]);
             int symmetry=symmetries>1?symmetry_indices[i]:settings_.nn_symmetry;
-            auto output=state.evaluate_with(*evaluator_->secondary,{symmetry,skip_cache||symmetries>1,settings_.nn_policy_temperature,symmetries==1&&settings_.nn_randomize,optimism,settings_.ignore_all_history?0:settings_.ignore_pre_root_history?depth:-1});
+            auto output=state.evaluate_with(*human_evaluator(),{symmetry,skip_cache||symmetries>1,settings_.nn_policy_temperature,symmetries==1&&settings_.nn_randomize,optimism,settings_.ignore_all_history?0:settings_.ignore_pre_root_history?depth:-1});
             if(output.logits.size()!=size_t(actions))throw std::runtime_error("Secondary policy action shape mismatch");
-            double maximum=-std::numeric_limits<double>::infinity();
-            for(int index:eval->prior_order){int action=node.moves[index].action;
-                if(output.has_auxiliary)output.logits[action]=mixed_policy_logit(output.logits[action],output.optimistic_logits.at(action),optimism);
-                if(!std::isfinite(output.logits[action]))throw std::runtime_error("Nonfinite secondary policy");
-                maximum=std::max(maximum,output.logits[action]);}
-            double sum=0;for(int index:eval->prior_order){int action=node.moves[index].action;output.logits[action]=std::exp((output.logits[action]-maximum)/settings_.nn_policy_temperature);sum+=output.logits[action];}
-            for(int index:eval->prior_order)eval->human_policy[index]+=output.logits[node.moves[index].action]/sum/symmetries;
+            std::vector<int> legal;for(int index:eval->prior_order)legal.push_back(node.moves[index].action);
+            auto probabilities=source_policy_probabilities(output,legal,settings_.nn_policy_temperature,optimism);
+            for(int index:eval->prior_order)eval->human_policy[index]=static_cast<float>(eval->human_policy[index]+probabilities[node.moves[index].action]);
         }
     }
+    for(auto& p:eval->human_policy)if(p>=0)p=static_cast<float>(p/static_cast<float>(symmetries));
     for(int i:eval->prior_order)eval->search_prior[i]=eval->prior[i]=policy[node.moves[i].action];
     std::sort(eval->prior_order.begin(),eval->prior_order.end(),[&](int a,int b){return eval->prior[a]!=eval->prior[b]?eval->prior[a]>eval->prior[b]:node.moves[a].action<node.moves[b].action;});
-    eval->initial_wdl=averaged;eval->initial_value=averaged[0]-averaged[2];eval->initial_stdev=stdev;eval->has_auxiliary=auxiliary;
+    eval->initial_wdl=averaged;eval->initial_value=averaged[0]-averaged[2];eval->initial_stdev=stdev;eval->initial_variance_time=has_variance_time?variance_time/symmetries:-1;eval->has_auxiliary=auxiliary;
     eval->initial_weight=uncertainty_weight(stdev,auxiliary,settings_);
     {
         std::lock_guard<std::mutex> lock(node.stats_mutex);
         if(node.stats.visits==0) {
-            ValueStats initial{1,eval->initial_value,eval->initial_value*eval->initial_value,averaged[1],eval->initial_weight,eval->initial_weight*eval->initial_weight,eval->initial_value};
+            ValueStats initial{1,eval->initial_value,eval->initial_value*eval->initial_value,averaged[1],eval->initial_weight,eval->initial_weight*eval->initial_weight,eval->initial_value,eval->initial_wdl[3]};
             apply_cached_evaluation(node,initial,1);
             initial.value=node.subtree_bias.apply(initial.value,settings_.subtree_value_bias_factor)+pattern_bonus(node);
             initial.value_sq=initial.value*initial.value;node.stats=initial;
@@ -423,7 +415,7 @@ std::vector<RootChildStats> Search::child_stats(Node& node,const NodeEvaluation&
         double scale=double(n)/stats.visits,weight=stats.weight*scale;
         double perspective=edge.perspective.load();
         children.push_back({eval.search_prior[edge.move_index],weight*perspective*stats.value,
-                            weight*stats.value_sq,n,weight,stats.weight_sq*scale*(aggregation?scale:1),weight*stats.draw,weight*perspective*stats.win_loss});
+                            weight*stats.value_sq,n,weight,stats.weight_sq*scale*(aggregation?scale:1),weight*stats.draw,weight*perspective*stats.win_loss,weight*stats.no_result});
     }
     return children;
 }
@@ -452,24 +444,39 @@ void Search::recompute(Node& node,int visits_to_add) {
     if(!distribution.empty())node.capped_distribution=std::move(distribution);
     result.visits=node.stats.visits+visits_to_add;node.stats=result;
 }
-bool Search::expand(Node& node,const SearchState& state,int worker,int depth) {
+void Search::update_after_playout(Node& node) {
+    // The first completing thread owns recomputation. Other completions join
+    // its next aggregate instead of blocking all ancestors on the same lock.
+    if(node.dirty_count.fetch_add(1,std::memory_order_acq_rel)>0)return;
+    int completed=1;
+    try {
+        for(;;) {
+            recompute(node,completed);
+            int remaining=node.dirty_count.fetch_sub(completed,std::memory_order_acq_rel)-completed;
+            if(remaining==0)return;
+            completed=remaining;
+        }
+    } catch(...) {node.dirty_count.store(0,std::memory_order_release);throw;}
+}
+Search::Expansion Search::expand(Node& node,const SearchState& state,int worker,int depth) {
     auto status=node.status.load(std::memory_order_acquire);
-    if(status==Node::READY)return false;
+    if(status==Node::READY)return Expansion::Ready;
+    if(status==Node::EXPANDING)return Expansion::Contended;
     auto& sync=locks_[node.lock_index];std::unique_lock<std::mutex> lock(sync.mutex);
-    sync.changed.wait(lock,[&]{return node.status.load(std::memory_order_acquire)!=Node::EXPANDING;});
     status=node.status.load(std::memory_order_acquire);
     if(status==Node::FAILED)std::rethrow_exception(node.error);
-    if(status==Node::READY)return false;
+    if(status==Node::READY)return Expansion::Ready;
+    if(status==Node::EXPANDING)return Expansion::Contended;
     node.player=state.player();
     node.status.store(Node::EXPANDING,std::memory_order_release);lock.unlock();
     try {
         evaluate_node(node,state,worker,&node==root_?root_symmetries_:1,false,depth);
         lock.lock();
-        node.status.store(Node::READY,std::memory_order_release);lock.unlock();sync.changed.notify_all();return true;
+        node.status.store(Node::READY,std::memory_order_release);return Expansion::Expanded;
     } catch(...) {
         if(!lock.owns_lock())lock.lock();
         node.error=std::current_exception();node.status.store(Node::FAILED,std::memory_order_release);
-        lock.unlock();sync.changed.notify_all();throw;
+        throw;
     }
 }
 Search::Edge& Search::child_edge(Node& node,int move_index) {
@@ -546,11 +553,15 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
                 value=state.terminal_value();draw=state.terminal_draw_probability();
                 if(!std::isfinite(value) || std::abs(value)>1)throw std::runtime_error("Invalid terminal value");
                 std::lock_guard<std::mutex> lock(node->stats_mutex);
-                auto& stats=node->stats;++stats.visits;stats.win_loss=value;stats.value=value+pattern_bonus(*node);stats.value_sq=stats.value*stats.value;stats.draw=draw;
+                auto& stats=node->stats;++stats.visits;stats.win_loss=value;stats.value=value+pattern_bonus(*node);stats.value_sq=stats.value*stats.value;stats.draw=draw;stats.no_result=state.terminal_no_result_probability();
                 double terminal_weight=settings_.use_uncertainty && root_->evaluated()->has_auxiliary?settings_.uncertainty_max_weight:1;
                 stats.weight=stats.visits*terminal_weight;stats.weight_sq=stats.visits*terminal_weight*terminal_weight;break;
             }
-            if(expand(*node,state,worker,scratch.path.size())){auto eval=node->evaluated();value=eval->initial_value;draw=eval->initial_wdl[1];break;}
+            auto expansion=expand(*node,state,worker,scratch.path.size());
+            if(expansion==Expansion::Contended) {
+                release();scratch.counted_playout=false;std::this_thread::yield();return;
+            }
+            if(expansion==Expansion::Expanded){auto eval=node->evaluated();value=eval->initial_value;draw=eval->initial_wdl[1];break;}
             auto eval=node->evaluated();
             int choice=-1;bool weightless=false;
             if(node==root_)if(auto focus=focus_snapshot();focus && std::uniform_real_distribution<double>()(random_[worker])<focus->probability) {
@@ -572,7 +583,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
                     if(node==root_)choice=root_move;
                     else if constexpr(GumbelInterior){
                         bool capped;{std::lock_guard<std::mutex> lock(node->stats_mutex);capped=!node->capped_distribution.empty();}
-                        double probability=state.player()==root_player_?settings_.human_sl_player_weightless+settings_.human_sl_player_weightful:settings_.human_sl_opponent_weightless+settings_.human_sl_opponent_weightful;
+                        double probability=state.player()==root_->player?settings_.human_sl_player_weightless+settings_.human_sl_player_weightful:settings_.human_sl_opponent_weightless+settings_.human_sl_opponent_weightful;
                         if(!capped&&!eval->human_policy.empty()&&probability>0)human_draw=std::uniform_real_distribution<double>()(random_[worker]);
                         if(!capped&&(human_draw<0||human_draw>=probability))choice=gumbel_selection(*node,*gumbel,path.size());
                     }
@@ -583,8 +594,8 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             {std::lock_guard<std::mutex> lock(node->stats_mutex);capped=node->capped_distribution;}
             bool use_human=false;
             if(capped.empty() && !eval->human_policy.empty()) {
-                double weightless_probability=node==root_?settings_.human_sl_root_weightless:state.player()==root_player_?settings_.human_sl_player_weightless:settings_.human_sl_opponent_weightless;
-                double weightful_probability=node==root_?settings_.human_sl_root_weightful:state.player()==root_player_?settings_.human_sl_player_weightful:settings_.human_sl_opponent_weightful;
+                double weightless_probability=node==root_?settings_.human_sl_root_weightless:state.player()==root_->player?settings_.human_sl_player_weightless:settings_.human_sl_opponent_weightless;
+                double weightful_probability=node==root_?settings_.human_sl_root_weightful:state.player()==root_->player?settings_.human_sl_player_weightful:settings_.human_sl_opponent_weightful;
                 if(weightless_probability+weightful_probability>0){double r=human_draw>=0?human_draw:std::uniform_real_distribution<double>()(random_[worker]);
                     use_human=r<weightless_probability+weightful_probability;if(r<weightless_probability)weightless=true;}
             }
@@ -672,11 +683,11 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             if(!candidates.empty())choice=candidates.front();
             }
             if(choice<0) {
-                ValueStats sample{1,eval->initial_value,eval->initial_value*eval->initial_value,eval->initial_wdl[1],eval->initial_weight,eval->initial_weight*eval->initial_weight,eval->initial_value};
+                ValueStats sample{1,eval->initial_value,eval->initial_value*eval->initial_value,eval->initial_wdl[1],eval->initial_weight,eval->initial_weight*eval->initial_weight,eval->initial_value,eval->initial_wdl[3]};
                 apply_cached_evaluation(*node,sample,1);sample.value=node->subtree_bias.apply(sample.value,settings_.subtree_value_bias_factor)+pattern_bonus(*node);sample.value_sq=sample.value*sample.value;
                 std::lock_guard<std::mutex> lock(node->stats_mutex);auto& s=node->stats;double total=s.weight+sample.weight;
                 s.value=(s.value*s.weight+sample.value*sample.weight)/total;s.value_sq=(s.value_sq*s.weight+sample.value_sq*sample.weight)/total;
-                s.draw=(s.draw*s.weight+sample.draw*sample.weight)/total;s.win_loss=(s.win_loss*s.weight+sample.win_loss*sample.weight)/total;
+                s.draw=(s.draw*s.weight+sample.draw*sample.weight)/total;s.no_result=(s.no_result*s.weight+sample.no_result*sample.weight)/total;s.win_loss=(s.win_loss*s.weight+sample.win_loss*sample.weight)/total;
                 s.weight=total;s.weight_sq+=sample.weight_sq;++s.visits;++node->visits;value=s.value;draw=s.draw;break;
             }
             if(settings_.graph_search && state.graph_approximates_history() && !state.legal(node->moves[choice].action)) {
@@ -719,11 +730,11 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
             auto p=path.back();value=p.perspective*value;update_ancestors&=!p.weightless;
             if(!std::isfinite(value))throw std::runtime_error("Nonfinite search backup");
             if(update_ancestors){if(p.increment_edge)++p.edge->n;
-                ++p.parent->visits;recompute(*p.parent,1);}
+                ++p.parent->visits;update_after_playout(*p.parent);}
             --p.edge->pending;--p.edge->child.load()->pending;path.pop_back();
         }
         scratch.counted_playout=count_playout;
-        if(count_playout)++completed_;else if constexpr(!ForcedRoot)--issued_;
+        if(count_playout)++completed_;
     } catch(...){release();throw;}
 }
 // Only Gumbel search uses these instantiations. The PUCT specialization has no strategy dispatch.
@@ -769,9 +780,9 @@ void Search::simulate_many(int worker) {
             std::chrono::duration<double>(std::chrono::steady_clock::now()-start_).count()>=time_budget_->limit())) {
             stopped_=true;break;
         }
-        int64_t issued=issued_.load();
-        do {if(issued>=budget_)break;} while(!issued_.compare_exchange_weak(issued,issued+1));
-        if(issued>=budget_)break;
+        // KataGo stops against completed playouts; already running workers may
+        // finish after the cap. Gumbel retains its separate sequential-halving allocation.
+        if(completed_.load()>=budget_)break;
         simulation(worker);
         if(worker==0 && report_)report_();
     }}
@@ -794,6 +805,7 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     AlphaZeroState state(game,*evaluator_);return run(state,temperature,options);
 }
 SearchResult Search::run(const SearchState& state,double temperature,SearchRun options) {
+    analysis_pv_length_=options.analysis_pv_length;
     if(temperature<0 || !std::isfinite(temperature))throw std::runtime_error("Invalid search temperature");
     if(options.max_visits<0 || options.max_playouts<-1 || options.max_time<-1 || !std::isfinite(options.max_time))
         throw std::runtime_error("Invalid search caps");
@@ -803,14 +815,22 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     int capped=settings_.visit_cap_contempt==0?0:settings_.visit_cap_contempt_player;
     if(settings_.visit_cap_contempt>0 && capped==0)capped=-(options.search_for_player?options.search_for_player:state.player());
     bool cap_changed=capped!=capped_player_;capped_player_=capped;
+    int serving_player=options.search_for_player?options.search_for_player:state.player();
+    bool serving_changed=serving_player!=search_for_player_ &&
+        (settings_.avoid_repeated_pattern_utility!=0 || settings_.external_patterns ||
+         (evaluator_ && human_evaluator() &&
+          (settings_.human_sl_player_weightless!=settings_.human_sl_opponent_weightless ||
+           settings_.human_sl_player_weightful!=settings_.human_sl_opponent_weightful ||
+           settings_.human_sl_player_weightless!=settings_.human_sl_root_weightless ||
+           settings_.human_sl_player_weightful!=settings_.human_sl_root_weightful)));
     bool restrictions_changed=prepare_restrictions(state,options);
-    bool hint_changed=options.hint_action!=root_hint_action_;root_hint_action_=options.hint_action;
+    bool hint_changed=options.hint_action>=0 && options.hint_action!=root_hint_action_;root_hint_action_=options.hint_action;
     if(settings_.graph_search)state.prepare_graph(settings_.graph_rep_bound);
     std::string identity=settings_.graph_search?state.graph_key():std::string();
     graph_hits_=0;graph_catch_ups_=0;graph_cycles_=0;
     for(auto& thread:thread_states_)thread.illegal_graph_nodes.clear();
     start_=std::chrono::steady_clock::now();
-    if(options.clear_before_search || restrictions_changed || cap_changed || hint_changed || (settings_.graph_search && !root_->graph_identity.empty() && root_->graph_identity!=identity)) {
+    if(options.clear_before_search || restrictions_changed || cap_changed || hint_changed || serving_changed || (settings_.graph_search && !root_->graph_identity.empty() && root_->graph_identity!=identity)) {
         carried_time_=0;root_=nullptr;collect_nodes(nullptr);root_=new_node();
     }
     if(settings_.graph_search)root_->graph_identity=identity;
@@ -831,7 +851,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     if(state.terminal()) {
         double value=state.terminal_value();
         if(!std::isfinite(value) || std::abs(value)>1)throw std::runtime_error("Invalid terminal value");
-        result.value=value;result.network_wdl=result.search_wdl=wdl_from_value(value,state.terminal_draw_probability());
+        result.value=value;result.network_wdl=result.search_wdl=wdl_from_value(value,state.terminal_draw_probability(),state.terminal_no_result_probability());
         return result; // EtaZero keeps rule-terminal roots final; no KataGo forceNonTerminal root mode.
     }
     if(result.initial_visits==0 && (playout_cap==0 || (options.should_stop && options.should_stop()))) {
@@ -839,7 +859,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     }
     remove_root_noise_=options.remove_root_noise;
     root_symmetries_=remove_root_noise_?1:settings_.root_symmetries;
-    bool fresh=expand(*root_,state,0);
+    bool fresh=expand(*root_,state,0)==Expansion::Expanded;
     fresh_playouts_=fresh?1:0;
     bool changed_legality=false;
     if(!fresh && settings_.graph_search && state.graph_approximates_history()) {
@@ -847,7 +867,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
         for(size_t i=0;i<root_->move_count;++i)
             changed_legality|=(eval->prior[i]>=0)!=state.legal(root_->moves[i].action);
     }
-    if(!fresh && (changed_legality || (evaluator_&&evaluator_->secondary&&root_->evaluated()->human_policy.empty()) || root_symmetries_>1 || settings_.root_policy_optimism!=settings_.policy_optimism ||
+    if(!fresh && (changed_legality || (evaluator_&&human_evaluator()&&root_->evaluated()->human_policy.empty()) || root_symmetries_>1 || settings_.root_policy_optimism!=settings_.policy_optimism ||
                   (settings_.ignore_pre_root_history && !settings_.ignore_all_history)))
         evaluate_node(*root_,state,0,root_symmetries_,changed_legality);
     int64_t cap=options.max_visits?options.max_visits:(options.pondering?settings_.max_visits_pondering:settings_.max_visits);
@@ -875,7 +895,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
         if(!std::isfinite(sum))throw std::runtime_error("Invalid Dirichlet draw");
     }
     for(size_t i=0;i<legal_indices.size();++i)
-        root_eval->search_prior[legal_indices[i]]=(1-fraction)*policy[i]+fraction*noise[i]/sum;
+        root_eval->search_prior[legal_indices[i]]=static_cast<float>((1-fraction)*policy[i]+fraction*noise[i]/sum);
     if(options.avoid_rescale_root && !avoid_until_[state.player()==1?0:1].empty()) {
         const auto& avoid=avoid_until_[state.player()==1?0:1];double mass=0;
         for(int i:legal_indices)if(avoid[root_->moves[i].action]<=0)mass+=root_eval->search_prior[i];
@@ -912,8 +932,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     carried_time_+=std::chrono::duration<double>(std::chrono::steady_clock::now()-actual_search_start).count();
     record_evaluations();
     report_={};
-    if(options.collect_analysis)result.analysis=analysis_snapshot(state.actions()).analysis;
-    if(!stopped_ && completed_!=budget_)throw std::runtime_error("Search budget mismatch");
+    if(options.collect_analysis){auto report=analysis_snapshot(state.actions());result.analysis=std::move(report.analysis);result.human_policy=std::move(report.human_policy);result.pruned_value=report.pruned_value;result.pruned_utility=report.pruned_utility;result.pruned_wdl=report.pruned_wdl;}
     result.simulations=completed_;result.new_playouts=completed_+fresh_playouts_;result.root_visits=root_->visits.load()+1;
     result.graph_hits=graph_hits_.load();result.graph_catch_ups=graph_catch_ups_.load();
     result.graph_cycles=graph_cycles_.load();result.graph_nodes=node_count();
@@ -941,9 +960,9 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
     }
     if(actions.size()!=stats.size())throw std::runtime_error("Root child stats are incomplete");
     if(total>root_->visits.load())throw std::runtime_error("Search has inconsistent completed root visits");
-    result.network_wdl=root_eval->initial_wdl;result.network_sample_weight=root_eval->initial_weight;result.network_value_stdev=root_eval->initial_stdev;
-    auto parent=snapshot(*root_);result.value=parent.win_loss;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
-    result.search_wdl=wdl_from_value(parent.win_loss,parent.draw);
+    result.network_wdl=root_eval->initial_wdl;result.network_sample_weight=root_eval->initial_weight;result.network_value_stdev=root_eval->initial_stdev;result.network_variance_time=root_eval->initial_variance_time;
+    auto parent=snapshot(*root_);result.value=parent.win_loss;result.utility=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
+    result.search_wdl=wdl_from_value(parent.win_loss,parent.draw,parent.no_result);
     if(total==0) {
         result.policy=result.search_policy;
         bool allocated=std::any_of(result.q_visits.begin(),result.q_visits.end(),[](auto n){return n>0;});
