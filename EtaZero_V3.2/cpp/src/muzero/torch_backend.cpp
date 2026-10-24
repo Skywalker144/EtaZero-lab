@@ -135,6 +135,7 @@ std::vector<TorchBackend::Output> TorchBackend::initial(const InferenceInputs& i
     auto obs=observation_host_.narrow(0,0,n);
     auto globals=globals_host_.narrow(0,0,n);
     std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
+    std::vector<uint8_t> allow_no_result;
     for(int64_t i=0;i<n;++i) {
         if(!inputs[i] || inputs[i]->size()!=static_cast<size_t>(spatial+global_features_))
             throw std::runtime_error("MuZero observation shape mismatch");
@@ -142,12 +143,12 @@ std::vector<TorchBackend::Output> TorchBackend::initial(const InferenceInputs& i
         auto mask=std::make_shared<std::vector<uint8_t>>(area);int count=0;
         for(int64_t j=0;j<area;++j){(*mask)[j]=input[j];count+=(*mask)[j];}
         if(!count)throw std::runtime_error("MuZero requires a nonempty board mask");
-        masks.push_back(mask);
+        masks.push_back(mask);allow_no_result.push_back(no_result_possible(input,spec_,canvas_));
         std::memcpy(obs.data_ptr<float>()+i*spatial,input.data(),spatial*sizeof(float));
         std::memcpy(globals.data_ptr<float>()+i*global_features_,input.data()+spatial,global_features_*sizeof(float));
     }
     auto result=stream_?replay(initial_graphs_,obs,globals):model_.get_method("initial")({obs,globals});
-    return unpack(result,masks);
+    return unpack(result,masks,allow_no_result);
 }
 std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Action>& inputs) {
     check_batch(inputs.size());c10::InferenceMode inference_guard;
@@ -156,6 +157,7 @@ std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Acti
     AutocastGuard autocast(precision_=="float16");
     std::vector<torch::Tensor> latents;
     std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
+    std::vector<uint8_t> allow_no_result;
     auto actions=actions_host_.narrow(0,0,inputs.size());
     for(size_t i=0;i<inputs.size();++i) {
         const auto& input=inputs[i];
@@ -164,7 +166,7 @@ std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Acti
             throw std::runtime_error("MuZero latent belongs to another backend/model/device");
         if(input.action<0 || input.action>=action_count_ || (input.action<canvas_*canvas_ && spec_.action_layout!=ActionLayout::MOVES && !(*latent->mask_)[input.action]))
             throw std::runtime_error("MuZero recurrent action outside board mask");
-        latents.push_back(latent->tensor_);masks.push_back(latent->mask_);
+        latents.push_back(latent->tensor_);masks.push_back(latent->mask_);allow_no_result.push_back(latent->allow_no_result_);
         actions.data_ptr<int64_t>()[i]=input.action;
     }
     c10::IValue result;
@@ -179,10 +181,10 @@ std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Acti
         captured.input1.copy_(actions_host_.narrow(0,0,batch),true);
         result=graph_outputs(captured,inputs.size());
     } else result=model_.get_method("recurrent")({torch::cat(latents,0),actions});
-    return unpack(result,masks);
+    return unpack(result,masks,allow_no_result);
 }
 std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result,
-    const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks) {
+    const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks,const std::vector<uint8_t>& allow_no_result) {
     auto tuple=result.toTuple();const auto& fields=tuple->elements();
     if(fields.size()!=5)throw std::runtime_error("MuZero requires latent/policy/WDL/optimistic/error outputs");
     auto hidden=fields[0].toTensor(),policy=fields[1].toTensor(),value=fields[2].toTensor();
@@ -191,7 +193,7 @@ std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result
     if(hidden.sizes()!=torch::IntArrayRef({n,latent_channels_+1,canvas_,canvas_}) ||
        hidden.scalar_type()!=torch::kFloat32 || hidden.device()!=policy.device() ||
        policy.sizes()!=torch::IntArrayRef({n,area}) || optimistic.sizes()!=policy.sizes() ||
-       value.sizes()!=torch::IntArrayRef({n,3}) || error.sizes()!=torch::IntArrayRef({n}))
+       value.sizes()!=torch::IntArrayRef({n,4}) || error.sizes()!=torch::IntArrayRef({n}))
         throw std::runtime_error("MuZero output shape/dtype mismatch");
     std::vector<Output> outputs(n);
     std::vector<torch::Tensor> sources,destinations;
@@ -202,20 +204,20 @@ std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result
         // an entire inference batch; foreach copies them in grouped kernels.
         sources.push_back(hidden.narrow(0,i,1));
         state->tensor_=torch::empty_like(sources.back());
-        destinations.push_back(state->tensor_);state->owner_=owner_;state->mask_=masks[i];
+        destinations.push_back(state->tensor_);state->owner_=owner_;state->mask_=masks[i];state->allow_no_result_=allow_no_result[i];
         outputs[i].latent=std::move(state);
     }
     at::_foreach_copy_(destinations,sources);
     // One blocking prediction return completes the preceding node copies on
     // this backend's stream. Numerical/mask parity is checked by development
     // tests, without extra GPU reductions or mask transfers in selfplay.
-    auto cpu=torch::cat({policy.to(torch::kFloat32),torch::softmax(value.to(torch::kFloat32),1),
+    auto cpu=torch::cat({policy.to(torch::kFloat32),value.to(torch::kFloat32),
                         optimistic.to(torch::kFloat32),error.to(torch::kFloat32).unsqueeze(1)},1).to(torch::kCPU).contiguous();
-    const int64_t stride=2*area+4;
+    const int64_t stride=2*area+5;
     for(int64_t i=0;i<n;++i) {
         auto row=cpu.data_ptr<float>()+i*stride;auto& e=outputs[i].evaluation;
-        e.logits.assign(row,row+area);e.wdl={row[area],row[area+1],row[area+2]};
-        e.optimistic_logits.assign(row+area+3,row+2*area+3);e.shortterm_value_stdev=row[2*area+3];e.has_auxiliary=has_auxiliary_;
+        e.logits.assign(row,row+area);e.wdl=outcome_probabilities({row[area],row[area+1],row[area+2],row[area+3]},allow_no_result[i]);
+        e.optimistic_logits.assign(row+area+4,row+2*area+4);e.shortterm_value_stdev=row[2*area+4];e.has_auxiliary=has_auxiliary_;
     }
     return outputs;
 }

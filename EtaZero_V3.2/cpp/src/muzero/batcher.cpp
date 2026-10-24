@@ -1,9 +1,10 @@
 #include "etazero/muzero/inference.h"
+#include "etazero/random_evaluator.h"
+#include "../../external/katago/core/rand.h"
 #include "etazero/schema.h"
 #include "etazero/symmetry.h"
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 
 namespace etazero::muzero {
 std::vector<int> symmetry_mapping(int n,int s) {
@@ -33,7 +34,7 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends,in
      canvas_(canvas),symmetry_(symmetry),randomize_(randomize),random_(seed) {
     if(backends_.empty() || !batch || !capacity || wait<0)throw std::runtime_error("Invalid MuZero service configuration");
     if(mutex_power< -1||mutex_power>24)throw std::runtime_error("Invalid MuZero cache mutex pool power");
-    if(mutex_power<0)cache_.clear();
+    if(mutex_power<0 && !cache_.empty())throw std::runtime_error("Enabled NN cache requires a nonnegative mutex pool power");
     cache_locks_.resize(std::min(cache_.size(),size_t(1)<<std::max(0,mutex_power)));
     for(auto& backend:backends_)backend->initialize();
     spec_=backends_[0]->spec();
@@ -141,19 +142,21 @@ void BatchEvaluator::drain(){std::unique_lock<std::mutex> lock(mutex_);changed_.
 void BatchEvaluator::finish(){{std::lock_guard<std::mutex> lock(mutex_);closing_=true;}changed_.notify_all();for(auto& t:threads_)if(t.joinable())t.join();if(error_)std::rethrow_exception(error_);}
 void BatchEvaluator::reset_stats(){drain();requests=0;batches=0;max_observed_batch=0;submitted=0;cache_hits=0;std::fill(rows_by_server.begin(),rows_by_server.end(),0);}
 
-namespace {uint64_t mix(uint64_t x){x+=0x9e3779b97f4a7c15ULL;x=(x^(x>>30))*0xbf58476d1ce4e5b9ULL;x=(x^(x>>27))*0x94d049bb133111ebULL;return x^(x>>31);}}
+RandomBackend::RandomBackend(int canvas,uint64_t seed,GameSpec spec)
+    :Backend(spec),canvas_(canvas),random_(std::make_unique<Rand>(seed)) {}
+RandomBackend::~RandomBackend()=default;
 InferenceOutput RandomBackend::output(std::shared_ptr<State> state) {
-    std::mt19937_64 rng(state->key);Evaluation e;e.logits.resize(state->mask.size());
-    for(auto& p:e.logits)p=std::uniform_real_distribution<double>(-1,1)(rng);
-    double win=std::uniform_real_distribution<double>(0,1)(rng);e.wdl={win,0,1-win};return {state,std::move(e)};
+    return {state,random_evaluation(*random_,state->mask,state->allow_no_result)};
 }
 std::vector<InferenceOutput> RandomBackend::initial(const InferenceInputs& inputs) {
     std::vector<InferenceOutput> result;
     for(auto input:inputs){if(!input)throw std::runtime_error("Random MuZero null input");
         auto spec=spec_;
         if(input->size()!=static_cast<size_t>(spec.planes*canvas_*canvas_+spec.globals))throw std::runtime_error("Random MuZero observation shape");
-        auto state=std::make_shared<State>();state->key=seed_;state->mask.resize(spec.actions(canvas_),1);
-        for(size_t i=0;i<input->size();++i){uint32_t bits;std::memcpy(&bits,&(*input)[i],sizeof(bits));state->key=mix(state->key^bits);if(spec.kind!=GameKind::XIANGQI && i<static_cast<size_t>(canvas_*canvas_))state->mask[i]=(*input)[i]!=0;}
+        auto state=std::make_shared<State>();state->mask.resize(spec.actions(canvas_),1);
+        state->allow_no_result=no_result_possible(*input,spec,canvas_);
+        if(spec.action_layout!=ActionLayout::MOVES)
+            for(int i=0;i<canvas_*canvas_;++i)state->mask[i]=(*input)[i]!=0;
         result.push_back(output(state));}
     return result;
 }
@@ -161,7 +164,14 @@ std::vector<InferenceOutput> RandomBackend::recurrent(const std::vector<Inferenc
     std::vector<InferenceOutput> result;
     for(const auto& input:inputs){auto parent=std::dynamic_pointer_cast<const State>(input.latent);
         if(!parent||input.action<0||input.action>=static_cast<int>(parent->mask.size())||!parent->mask[input.action])throw std::runtime_error("Invalid random MuZero transition");
-        auto state=std::make_shared<State>(*parent);state->key=mix(parent->key^mix(input.action));result.push_back(output(state));}
+        result.push_back(output(std::make_shared<State>(*parent)));}
     return result;
+}
+}
+
+namespace etazero::muzero {
+void BatchEvaluator::clear_cache() {
+    for(size_t i=0;i<cache_.size();++i){std::lock_guard<std::mutex> lock(cache_locks_[i%cache_locks_.size()]);cache_[i]={};}
+    if(auto* service=dynamic_cast<InferenceService*>(secondary.get()))service->clear_cache();
 }
 }
