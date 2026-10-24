@@ -1,18 +1,24 @@
 #include "etazero/random_evaluator.h"
 #include "etazero/game_spec.h"
+#include "../../external/katago/core/rand.h"
 #include <cmath>
-#include <cstring>
 #include <stdexcept>
 namespace etazero {
-namespace {
-uint64_t mix(uint64_t n) {
-    n += 0x9e3779b97f4a7c15ULL; n = (n^(n>>30))*0xbf58476d1ce4e5b9ULL;
-    n = (n^(n>>27))*0x94d049bb133111ebULL; return n^(n>>31);
+Evaluation random_evaluation(Rand& random,const std::vector<uint8_t>& mask,bool allow_no_result) {
+    Evaluation e;e.logits.resize(mask.size());
+    for(size_t i=0;i<mask.size();++i)if(mask[i])e.logits[i]=static_cast<float>(random.nextGaussian());
+    // nneval.cpp debugSkipNeuralNet, extended with a separate ordinary draw.
+    WDL logits{};for(int i:{0,2,3,1})logits[i]=static_cast<float>(0.20*random.nextGaussian());
+    e.wdl=outcome_probabilities(logits,allow_no_result);
+    e.has_auxiliary=true;e.optimistic_logits=e.logits;e.policy_optimism_allowed=false;
+    // Source v17 postprocessing of raw shorttermWinlossError=0, multiplier=.25.
+    e.shortterm_value_stdev=static_cast<float>(0.5*std::log(2.0));
+    return e;
 }
-}
-RandomBackend::RandomBackend(int canvas,uint64_t seed,GameSpec spec) : Backend(spec),canvas_(canvas),seed_(mix(seed)) {
+RandomBackend::RandomBackend(int canvas,uint64_t seed,GameSpec spec) : Backend(spec),canvas_(canvas),random_(std::make_unique<Rand>(seed)) {
     if (canvas < 5 || canvas > 25) throw std::runtime_error("Invalid random evaluator canvas");
 }
+RandomBackend::~RandomBackend()=default;
 std::vector<Evaluation> RandomBackend::evaluate(const InferenceInputs& inputs) {
     std::vector<Evaluation> result;
     result.reserve(inputs.size());
@@ -20,26 +26,10 @@ std::vector<Evaluation> RandomBackend::evaluate(const InferenceInputs& inputs) {
         auto spec=spec_;
         if (observation->size() != static_cast<size_t>(spec.planes*canvas_*canvas_ + spec.globals))
             throw std::runtime_error("Random observation shape mismatch");
-        uint64_t key = seed_;
-        const size_t spatial = spec.planes*canvas_*canvas_;
-        for (size_t i=0;i<spatial;++i) {
-            float value=(*observation)[i];
-            key = mix(key ^ static_cast<uint64_t>(static_cast<int>(value)+1));
-        }
-        // Global features include continuous, signed PDA conditioning. Hash the
-        // exact float bits so fractional advantages remain distinct and seeded
-        // outputs stay independent of batch/thread scheduling.
-        for (size_t i=spatial;i<observation->size();++i) {
-            float value=(*observation)[i];
-            uint32_t bits;std::memcpy(&bits,&value,sizeof(bits));
-            key = mix(key ^ bits);
-        }
-        std::mt19937_64 random(key); std::normal_distribution<double> gaussian;
-        Evaluation e; e.logits.resize(spec.actions(canvas_));
-        for (auto& logit : e.logits) logit = gaussian(random);
-        double w=std::exp(0.2*gaussian(random)), d=std::exp(0.2*gaussian(random)), l=std::exp(0.2*gaussian(random));
-        double sum=w+d+l;e.wdl={w/sum,d/sum,l/sum};
-        result.push_back(std::move(e));
+        std::vector<uint8_t> mask(spec.actions(canvas_),1);
+        if(spec.action_layout!=ActionLayout::MOVES)
+            for(int i=0;i<canvas_*canvas_;++i)mask[i]=(*observation)[i]!=0;
+        result.push_back(random_evaluation(*random_,mask,no_result_possible(*observation,spec,canvas_)));
     }
     return result;
 }

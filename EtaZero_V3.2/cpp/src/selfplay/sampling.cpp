@@ -4,6 +4,9 @@
 #include <iterator>
 #include <filesystem>
 #include <set>
+#include <iostream>
+#include "etazero/go_position.h"
+#include "../../external/katago/dataio/files.h"
 namespace etazero {
 void ForkPool::add(InitialPosition position) {
     if(position.game.finished())throw std::runtime_error("Cannot enqueue terminal fork");
@@ -32,14 +35,35 @@ GameForkConfig::GameForkConfig(double early,double late,double proportion,int mi
 std::vector<InitialPosition> load_hint_positions(const Config& c,int canvas) {
     std::vector<InitialPosition> positions;
     if(c.number("hint_positions.hint_positions_prob")==0)return positions;
-    const auto path=c.text("hint_positions.positions_file");
-    std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot open game hint positions: "+path);
-    std::string contents{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
-    if(file.bad())throw std::runtime_error("Cannot read game hint positions: "+path);
     const auto options=rule_options(c,GameConfigMode::SELFPLAY);
+    const auto configured=c.contains("environment.rules")?parse_rule(c.list("environment.rules").front()):Rule::FREESTYLE;
+    if(configured==Rule::GO)Game(std::min(5,canvas),canvas,Rule::GO,options); // Initialize source board hashes before parsing.
+    std::vector<std::filesystem::path> files;
+    for(const auto& path:c.list("hint_positions.positions_file")) {
+        if(std::filesystem::is_directory(path)) {
+            for(const auto& e:std::filesystem::recursive_directory_iterator(path)) {
+                auto name=e.path().filename().string();
+                if(e.is_regular_file()&&(Global::isSuffix(name,".hintposes.txt")||Global::isSuffix(name,".startposes.txt")||Global::isSuffix(name,".bookposes.txt")))files.push_back(e.path());
+            }
+        } else files.emplace_back(path);
+    }
+    std::sort(files.begin(),files.end());std::string contents;
+    for(const auto& path:files){std::ifstream file(path);if(!file)throw std::runtime_error("Cannot open hint positions: "+path.string());
+        contents.append(std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>());contents+='\n';}
     std::istringstream input(contents);
     for(std::string line;std::getline(input,line);) {
         line=trim(line);if(line.empty() || line[0]=='#')continue;
+        if(line[0]=='{') {
+            if(configured!=Rule::GO)throw std::runtime_error("Source Go hints require a Go model");
+            try {
+                auto sample=Sgf::PositionSample::ofJsonLine(line);
+                auto game=game_from_go_sample(sample,canvas,options);
+                int hint=go_action(sample.hintLoc,sample.board.x_size,canvas);
+                if(game.finished()||(hint>=0&&!game.legal(hint)))continue;
+                auto moves=game.moves();positions.push_back({std::move(game),std::move(moves),InitialKind::Hint,hint,sample.weight,sample.trainingWeight});
+            } catch(const std::exception& e){std::cerr<<"Invalid hint position: "<<e.what()<<'\n';}
+            continue;
+        }
         std::istringstream row(line);int size,hint,count;std::string rule;double weight;
         if(!(row>>size>>rule>>weight>>hint>>count) || !std::isfinite(weight)||weight<0||size>canvas||size<5||count<0||hint<0)
             throw std::runtime_error("Invalid game hint row: "+line);
@@ -63,13 +87,13 @@ std::vector<InitialPosition> load_hint_positions(const Config& c,int canvas) {
         positions.push_back(std::move(position));
     }
     double mass=0;for(const auto& p:positions)mass+=p.sampling_weight;
-    if(positions.empty()||!std::isfinite(mass)||mass<=0)throw std::runtime_error("Enabled hint input has no positive sampling mass");
+    if(!std::isfinite(mass)||(!positions.empty()&&mass<=0))throw std::runtime_error("Enabled hint input has no positive sampling mass");
     return positions;
 }
 std::optional<InitialPosition> sample_hint_position(const std::vector<InitialPosition>& positions,double probability,std::mt19937_64& rng) {
     if(!std::isfinite(probability)||probability<0||probability>1)throw std::runtime_error("Invalid hint probability");
     if(probability==0 || !std::bernoulli_distribution(probability)(rng))return {};
-    if(positions.empty())throw std::runtime_error("Enabled hint sampling lacks positions");
+    if(positions.empty())return {};
     std::vector<double> weights;for(const auto& p:positions)weights.push_back(p.sampling_weight);
     return positions[std::discrete_distribution<size_t>(weights.begin(),weights.end())(rng)];
 }
@@ -80,7 +104,9 @@ std::vector<InitialPosition> load_start_positions(const Config& c,int canvas,std
     const double load=c.number("start_positions.load_probability"),lambda=c.number("start_positions.turn_weight_lambda");
     if(load<0||load>1||lambda< -10||lambda>10)throw std::runtime_error("Invalid start-position sampling parameters");
     std::set<std::string> excludes,unique;
-    for(const auto& path:c.list("start_positions.excludes")) {
+    const bool is_go=parse_rule(c.list("environment.rules").front())==Rule::GO;
+    auto source_excludes=is_go?Sgf::readExcludes(c.list("start_positions.excludes")):std::set<Hash128>{};
+    for(const auto& path:is_go?std::vector<std::string>{}:c.list("start_positions.excludes")) {
         std::ifstream file(path);if(!file)throw std::runtime_error("Cannot open start-position exclusions: "+path);
         for(std::string line;std::getline(file,line);) {line=trim(line);if(!line.empty()&&line[0]!='#')excludes.insert(line);}
     }
@@ -88,15 +114,36 @@ std::vector<InitialPosition> load_start_positions(const Config& c,int canvas,std
     for(const auto& path:c.list("start_positions.files")) {
         if(std::filesystem::is_directory(path)) {
             for(const auto& entry:std::filesystem::recursive_directory_iterator(path))
-                if(entry.is_regular_file() && (entry.path().extension()==".startpos" || entry.path().extension()==".txt"))files.push_back(entry.path());
+                if(entry.is_regular_file() && (entry.path().extension()==".startpos" || entry.path().extension()==".txt" || entry.path().extension()==".sgf"))files.push_back(entry.path());
         } else files.emplace_back(path);
     }
     std::sort(files.begin(),files.end());
     const auto options=rule_options(c,GameConfigMode::SELFPLAY);
+    std::set<Hash128> source_unique;
+    if(parse_rule(c.list("environment.rules").front())==Rule::GO)Game(std::min(5,canvas),canvas,Rule::GO,options);
     for(const auto& path:files) {
+        if(path.extension()==".sgf") {
+            if(parse_rule(c.list("environment.rules").front())!=Rule::GO)throw std::runtime_error("SGF starts require a Go model");
+            try {
+                std::unique_ptr<Sgf> sgf(Sgf::loadFile(path.string()));
+                if(source_excludes.count(sgf->hash))continue;
+                sgf->iterAllUniquePositions(source_unique,false,false,true,false,nullptr,[&](Sgf::PositionSample& sample,const BoardHistory&,const std::string&){
+                    if(!std::bernoulli_distribution(load)(rng))return;
+                    auto game=game_from_go_sample(sample,canvas,options);if(game.finished())return;
+                    auto moves=game.moves();positions.push_back({std::move(game),std::move(moves),InitialKind::External,-1,sample.weight,sample.trainingWeight});
+                });
+            }catch(const std::exception& e){std::cerr<<"Invalid SGF "<<path<<": "<<e.what()<<'\n';}
+            continue;
+        }
         std::ifstream file(path);if(!file)throw std::runtime_error("Cannot open start positions: "+path.string());
         for(std::string line;std::getline(file,line);) {
             line=trim(line);if(line.empty()||line[0]=='#')continue;
+            if(line[0]=='{') {
+                if(parse_rule(c.list("environment.rules").front())!=Rule::GO)throw std::runtime_error("Source Go starts require a Go model");
+                auto sample=Sgf::PositionSample::ofJsonLine(line);auto game=game_from_go_sample(sample,canvas,options);
+                if(!game.finished()&&std::bernoulli_distribution(load)(rng)) {auto moves=game.moves();positions.push_back({std::move(game),std::move(moves),InitialKind::External,-1,sample.weight,sample.trainingWeight});}
+                continue;
+            }
             // Corpus id, board size, rule, sampling weight, loss weight, move count,
             // then moves in physical coordinates. Rows explicitly enumerate starts.
             std::istringstream row(line);std::string id,rule;int size,count;double sampling,training;
@@ -121,13 +168,16 @@ std::vector<InitialPosition> load_start_positions(const Config& c,int canvas,std
             std::string key=std::to_string(size)+":"+rule+":"+std::to_string(position.game.player())+":";
             for(auto cell:position.game.board().cells)key+=std::to_string(cell)+",";
             if(!unique.insert(key).second || !std::bernoulli_distribution(load)(rng))continue;
-            position.sampling_weight*=std::exp(-position.game.turn()*lambda);
-            if(!std::isfinite(position.sampling_weight)||position.sampling_weight>=1e200)
-                throw std::runtime_error("Nonfinite start position sampling mass");
             positions.push_back(std::move(position));
         }
     }
-    double total_weight=0;for(const auto& p:positions)total_weight+=p.sampling_weight;
+    int minimum_turn=0;for(const auto& p:positions)minimum_turn=std::min(minimum_turn,int(p.game.training_metadata()[2]));
+    double total_weight=0;
+    for(auto& p:positions) {
+        p.sampling_weight*=std::exp(-(std::max(0,p.game.turn())-minimum_turn)*lambda);
+        if(!std::isfinite(p.sampling_weight)||p.sampling_weight<0||p.sampling_weight>=1e200)throw std::runtime_error("Invalid start position sampling mass");
+        total_weight+=p.sampling_weight;
+    }
     if(!positions.empty()&&!(total_weight>0))throw std::runtime_error("Start corpus has zero sampling weight");
     return positions;
 }
@@ -161,12 +211,13 @@ std::optional<InitialPosition> make_game_fork(const FinishedGame& record,const G
     bool early=c.early_probability>0 && std::bernoulli_distribution(c.early_probability)(rng);
     bool late=!early && c.late_probability>0 && std::bernoulli_distribution(c.late_probability)(rng);
     if(!early && !late)return {};
-    size_t move_index=early?static_cast<size_t>(std::floor(std::exponential_distribution<double>(1)(rng)*c.early_expected_move_proportion*record.size*game_spec(record.rule).width(record.size))):
+    Game game(record.size,record.canvas,record.rule,record.options);
+    size_t move_index=early?static_cast<size_t>(std::floor(std::exponential_distribution<double>(1)(rng)*c.early_expected_move_proportion*game.area())):
         (record.steps.empty()?0:std::uniform_int_distribution<size_t>(0,record.steps.size()-1)(rng));
     // Source replayGameUpToMove always stops before the final recorded move,
     // including the unbounded exponential tail of early forks.
     if(!record.steps.empty())move_index=std::min(move_index,record.steps.size()-1);
-    Game game(record.size,record.canvas,record.rule,record.options);std::vector<int> actions;
+    std::vector<int> actions;
     for(size_t i=0;i<move_index && i<record.steps.size() && !game.finished();++i) {int a=record.steps[i].action;game.play(a);actions.push_back(a);}
     if(game.finished())return {};
     int choices=std::uniform_int_distribution<int>(c.minimum_choices,early?c.early_maximum_choices:c.late_maximum_choices)(rng);
@@ -180,7 +231,7 @@ std::optional<InitialPosition> make_game_fork(const FinishedGame& record,const G
     for(int i=0;i<choices;++i) {
         if(should_stop && should_stop())return {};
         Game next=game;next.play(candidates[i]);
-        auto nn=evaluator.evaluate_symmetry(next.observation(),symmetry,false,1,randomize,0);
+        auto nn=evaluator.evaluate_position(next.observation(),next.player(),symmetry,false,1,randomize,0);
         if(!std::isfinite(nn.wdl[0])||!std::isfinite(nn.wdl[2]))throw std::runtime_error("Nonfinite fork value");
         // Pure W-L adaptation of source's value-net score ranking, from the parent perspective.
         double value=nn.wdl[2]-nn.wdl[0];if(chosen<0 || value>best){chosen=candidates[i];best=value;}
@@ -213,17 +264,10 @@ int sample_fork_move(const Game& game,const std::vector<double>& policy,int bann
 }
 std::vector<double> evaluate_policy(const Game& game,Evaluator& evaluator,double temperature,bool randomize,int symmetry) {
     if(!std::isfinite(temperature)||temperature<=0)throw std::runtime_error("Invalid fork NN temperature");
-    auto output=evaluator.evaluate_symmetry(game.observation(),symmetry,false,temperature,randomize,0);
+    auto output=evaluator.evaluate_position(game.observation(),game.player(),symmetry,false,temperature,randomize,0);
     if(output.logits.size()!=static_cast<size_t>(game.actions()))throw std::runtime_error("Fork NN output mismatch");
-    std::vector<double> policy(game.actions(),0);double maximum=-1e100,mass=0;
-    for(int a=0;a<game.actions();++a)if(game.legal(a)) {
-        if(!std::isfinite(output.logits[a]))throw std::runtime_error("Nonfinite fork logits");
-        maximum=std::max(maximum,output.logits[a]/temperature);
-    }
-    for(int a=0;a<game.actions();++a)if(game.legal(a)) {policy[a]=std::exp(output.logits[a]/temperature-maximum);mass+=policy[a];}
-    if(mass<=0 || !std::isfinite(mass))throw std::runtime_error("Empty fork NN policy");
-    for(auto& p:policy)p/=mass;
-    return policy;
+    std::vector<int> legal;for(int a=0;a<game.actions();++a)if(game.legal(a))legal.push_back(a);
+    return source_policy_probabilities(output,legal,temperature,0);
 }
 void search_side_positions(std::vector<Game>& positions,FinishedGame& record,GameSearch& search,Evaluator& evaluator,
                            int64_t full_visits,bool randomize,int symmetry,
@@ -241,6 +285,7 @@ void search_side_positions(std::vector<Game>& positions,FinishedGame& record,Gam
         if(should_stop && should_stop())return;
         if(result.action<0)throw std::runtime_error("Side search did not complete");
         record.side_positions.push_back({game.player(),game.observation(),std::move(result.policy_target),std::move(result.visits),result.search_wdl});
+        record.side_positions.back().metadata=search_metadata(result,game);
         record.side_positions.back().q_values=std::move(result.q_values);
         record.side_positions.back().q_visits=std::move(result.q_visits);
         // Source uses the response chosen by this independent full search, then a new
@@ -313,6 +358,7 @@ void reanalyze_positions(FinishedGame& record,const std::vector<Game>& positions
         auto& step=record.steps[turn];step.reanalyzed=true;step.reanalysis_used_outcome=config.use_outcome_targets;
         step.reanalysis_policy_surprise=step.policy_surprise;step.reanalysis_value_surprise=step.value_surprise;
         step.reanalysis_original_visits=1;for(auto n:step.visits)step.reanalysis_original_visits+=n;
+        step.metadata=search_metadata(result,game);
         step.policy=std::move(result.policy);step.visits=std::move(result.visits);step.policy_target=std::move(result.policy_target);
         step.q_values=std::move(result.q_values);step.q_visits=std::move(result.q_visits);
         step.network_wdl=result.network_wdl;step.search_wdl=result.search_wdl;step.policy_surprise=result.policy_surprise;
