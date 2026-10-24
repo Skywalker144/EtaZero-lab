@@ -4,6 +4,21 @@
 #include "search/gumbel_search.h"
 #include "search/muzero/search.h"
 namespace etazero {
+int playout_advantage_player(std::string value,bool allow_unspecified) {
+    for(auto& c:value)c=std::tolower(c);
+    if(value=="black"||value=="b")return 1;
+    if(value=="white"||value=="w")return -1;
+    if(allow_unspecified&&value=="unspecified")return 0;
+    throw std::runtime_error("Invalid playout doubling advantage player");
+}
+void set_playout_advantage(Game& game,double value,int player) {
+    if(!std::isfinite(value)||value< -3 || value>3)throw std::runtime_error("playoutDoublingAdvantage must be in [-3,3]");
+    game.set_pda(value,player);
+}
+void set_playout_advantage(Game& game,const Config& config,const std::string& mode) {
+    set_playout_advantage(game,config.number(mode+".playout_doubling_advantage"),
+        playout_advantage_player(config.text(mode+".playout_doubling_advantage_player")));
+}
 SearchSettings settings(const Config& c, const std::string& mode) {
     bool selfplay = mode == "selfplay";
     std::string section = selfplay ? "search" : mode == "match" ? "match" : "analysis";

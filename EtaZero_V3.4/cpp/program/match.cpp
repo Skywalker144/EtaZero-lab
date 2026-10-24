@@ -1,5 +1,6 @@
 #include "program/game_config.h"
 #include "program/match.h"
+#include "program/setup.h"
 #include "dataio/record.h"
 #include <algorithm>
 #include <iomanip>
@@ -170,7 +171,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
         };
         auto play=[&](const MatchTask& t,int color,InferenceService& ea,InferenceService& eb) {
             Game game(size,canvas,rule,options);for(int a:t.moves)game.play(a);
-            game.set_pda(c.number("match.playout_doubling_advantage"),c.text("match.playout_doubling_advantage_player")=="black"?1:-1);
+            set_playout_advantage(game,c,"match");
             auto start=Clock::now();uint64_t seed=t.seed^(0xd1b54a32d192ed03ULL*(color+1));
             bool same=models[t.a].id==models[t.b].id;auto sa=search(ea,mix(seed));
             auto sb=same?std::unique_ptr<GameSearch>{}:search(eb,mix(seed^0x9e3779b97f4a7c15ULL));

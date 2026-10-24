@@ -1,6 +1,7 @@
 #include "program/game_config.h"
 #include "command/session.h"
-#include "core/version.h"
+#include "program/setup.h"
+#include "etazero/version.h"
 #include "game/go_position.h"
 #include "etazero/source_config.h"
 #include "game/go/sgf_handicap.h"
@@ -150,7 +151,7 @@ class Session {
         auto modes=history_modes(config_);options.go_pass_alive=modes.alwaysComputePassAliveUnderSuicideRules;options.go_exclude_atari=modes.excludeTerritoryAdjacentToAtari;
         options.komi=data.value("komi",options.komi);options.go_rules=data.value("go_rules",options.go_rules);
         Game replacement(size,canvas_,parse_rule(data.value("rule",config_.text("analysis.rule"))),options);
-        replacement.set_pda(config_.number("analysis.playout_doubling_advantage"),config_.text("analysis.playout_doubling_advantage_player")=="black"?1:-1);
+        set_playout_advantage(replacement,config_,"analysis");
         if(!same_layout(replacement.spec(),evaluator_.spec()))
             throw std::runtime_error("Requested game layout does not match the loaded model");
         std::vector<int> moves;Json opening=nullptr;
@@ -182,8 +183,8 @@ class Session {
                 replacement.play(replacement.native_action(int(a)));moves.push_back(int(a));
             }
         }
-        replacement.set_pda(config_.number("analysis.playout_doubling_advantage"),config_.text("analysis.playout_doubling_advantage_player")=="black"?1:-1);
-        if(replacement.rule()==Rule::GO){go_initial_=replacement.go_history();go_initial_->clear(replacement.go_history().initialBoard,replacement.go_history().initialPla,replacement.go_history().rules,0);go_initial_->setInitialTurnNumber(replacement.go_history().initialTurnNumber);go_moves_=replacement.go_history().moveHistory;}else{go_initial_.reset();go_moves_.clear();}
+        set_playout_advantage(replacement,config_,"analysis");
+        if(replacement.rule()==Rule::GO)remember_go_history(replacement.go_history());else{go_initial_.reset();go_moves_.clear();}
         last_result_.reset();recent_white_values_.clear();game_=std::move(replacement);history_=std::move(moves);opening_=std::move(opening);search_->reset(seed_);
         boards_.clear();players_.clear();
         if(game_->rule()==Rule::GO||game_->rule()==Rule::XIANGQI){Game replay(size,canvas_,game_->rule(),options);
@@ -211,10 +212,14 @@ class Session {
         h.setInitialTurnNumber(go_initial_->initialTurnNumber);h.setAssumeMultipleStartingBlackMovesAreHandicap(true);
         for(auto m:moves)tolerant_go_move(h,b,m.loc,m.pla);return h;
     }
+    void remember_go_history(const ::BoardHistory& h) {
+        go_initial_=h;go_initial_->clear(h.initialBoard,h.initialPla,h.rules,h.initialEncorePhase);
+        go_initial_->setInitialTurnNumber(h.initialTurnNumber);go_moves_=h.moveHistory;
+    }
     void install_go(const ::BoardHistory& h,bool reset_record=true) {
         Game g=game_from_go_history(h,canvas_);
-        g.set_pda(config_.number("analysis.playout_doubling_advantage"),config_.text("analysis.playout_doubling_advantage_player")=="black"?1:-1);
-        if(reset_record){go_initial_=h;go_initial_->clear(h.initialBoard,h.initialPla,h.rules,h.initialEncorePhase);go_initial_->setInitialTurnNumber(h.initialTurnNumber);go_moves_=h.moveHistory;}
+        set_playout_advantage(g,config_,"analysis");
+        if(reset_record)remember_go_history(h);
         game_=std::move(g);history_.clear();for(auto m:go_moves_)history_.push_back(game_->local_action(go_action(m.loc,game_->width(),canvas_)));
         boards_={game_->board().cells};players_={game_->player()};opening_=nullptr;search_->reset(seed_);last_result_.reset();
     }
@@ -256,7 +261,7 @@ class Session {
             if(args.size()==2){int n=number(args[1]);if(n<1||n>10000001)throw std::runtime_error("Invalid moveNumber");turns=std::min<int64_t>(turns,n-1);}
             if(sgf->xSize>canvas_||sgf->ySize>canvas_)throw std::runtime_error("SGF exceeds model canvas");
             auto rules=sgf->getRulesOrWarn(h.rules,[](const std::string& s){std::cerr<<s<<'\n';});Player next;
-            sgf->setupInitialBoardAndHist(rules,b,next,h,::BoardHistoryModes(true,true));h.setInitialTurnNumber(b.numStonesOnBoard());
+            sgf->setupInitialBoardAndHist(rules,b,next,h,history_modes(config_));h.setInitialTurnNumber(b.numStonesOnBoard());
             auto initial=h;sgf->playMovesTolerant(b,next,h,turns,false);install_go(h);go_initial_=initial;go_moves_.assign(sgf->moves.begin(),sgf->moves.begin()+turns);return {};
         }
         if(cmd=="printsgf") {
@@ -421,7 +426,6 @@ class Session {
         options.should_stop=[&]{return r.cancelled->load()||interrupted_();};
         if(r.continuous){options.max_playouts=SEARCH_CONFIG_LIMIT;options.max_time=1e20;}
         auto requests=evaluator_.requests.load(),batches=evaluator_.batches.load();Game before=*game_;
-        if(before.finished()){auto h=before.go_history();h.isGameFinished=false;h.isNoResult=false;h.winner=C_EMPTY;before=game_from_go_history(h,canvas_);before.set_pda(game_->pda_doublings(),game_->pda_player());}
         const bool gtp_stream=protocol_=="gtp"&&(r.command=="kata-analyze"||r.command=="kata-genmove_analyze");
         if(gtp_stream){output("="+r.gtp_id+"\n");r.streaming=true;}
         if(interval>0) {
@@ -447,7 +451,7 @@ class Session {
                 for(int i=0;i<n&&resigned;++i)resigned=(-before.player()*recent_white_values_[recent_white_values_.size()-1-i])<config_.number("analysis.resign_threshold");
             }
             if(protocol_=="gtp"&&config_.contains("analysis.delay_move_scale")&&config_.number("analysis.delay_move_scale")>0&&config_.number("analysis.delay_move_max")>0){
-                double prob=result.network_policy[result.action];if(evaluator_.secondary&&evaluator_.secondary->available()){auto e=evaluator_.secondary->evaluate_position(before.observation(),before.player());std::vector<int> legal;for(int a:before.static_actions())if(before.legal(a))legal.push_back(a);prob=source_policy_probabilities(e,legal,1,0)[result.action];}
+                double prob=result.network_policy[result.action];if(evaluator_.secondary&&evaluator_.secondary->available()){auto e=evaluator_.secondary->evaluate_position(before.observation(),before.player());std::vector<int> legal;for(int a:before.static_actions())if(before.search_legal(a))legal.push_back(a);prob=source_policy_probabilities(e,legal,1,0)[result.action];}
                 double mean=.5*config_.number("analysis.delay_move_scale")/(std::max(0.0,prob)+.1);double delay=std::max(.0001,std::min(config_.number("analysis.delay_move_max"),std::gamma_distribution<double>(2,mean/2)(gtp_random_)));
                 auto end=std::chrono::steady_clock::now()+std::chrono::duration<double>(delay);while(!r.cancelled->load()&&!interrupted_()&&std::chrono::steady_clock::now()<end)std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
@@ -550,17 +554,19 @@ class Session {
                         else {double v=effective.number("analysis."+sp->second);double low=key=="resignThreshold"?-1:0,high=key=="analysisWideRootNoise"?5:key=="resignThreshold"?0:key=="delayMoveScale"?10000:1000000;if(v<low||v>high)throw std::runtime_error("Parameter outside range");if(key=="resignConsecTurns"&&effective.integer("analysis."+sp->second)<1)throw std::runtime_error("resignConsecTurns must be positive");}
                     }else{auto found=SOURCE_SEARCH_KEYS.find(key);if(found==SOURCE_SEARCH_KEYS.end())throw std::runtime_error("Unsupported parameter: "+key);
                         for(auto fixed:{"node_table_shards_power_of_two","use_eval_cache","eval_cache_min_visits","avoid_repeated_pattern_utility"})if(found->second==fixed&&text!=config_.text("analysis."+found->second))throw std::runtime_error("Cannot change parameter after initialization: "+key);
-                        if(found->second=="visit_cap_contempt_player"||found->second=="playout_doubling_advantage_player"){for(auto& c:text)c=std::tolower(c);if(found->second=="visit_cap_contempt_player"){if(text=="b"||text=="black")text="1";else if(text=="w"||text=="white")text="-1";else if(text=="unspecified")text="0";}else {if(text=="b")text="black";else if(text=="w")text="white";if(text!="black"&&text!="white")throw std::runtime_error("Invalid playout doubling advantage player");}}overrides[found->second]=text;effective.override_field("analysis."+found->second,text);}
+                        if(found->second=="visit_cap_contempt_player"||found->second=="playout_doubling_advantage_player"){for(auto& c:text)c=std::tolower(c);if(found->second=="visit_cap_contempt_player"){if(text=="b"||text=="black")text="1";else if(text=="w"||text=="white")text="-1";else if(text=="unspecified")text="0";}else {if(text=="b")text="black";else if(text=="w")text="white";playout_advantage_player(text,false);}}overrides[found->second]=text;effective.override_field("analysis."+found->second,text);}
                 }
+                std::set<std::string> supplied;for(auto it=overrides.begin();it!=overrides.end();++it)supplied.insert(it.key());
+                resolve_source_defaults(effective,supplied);
                 bool replace_search=human_profile&&*human_profile!=config_.text("analysis.human_sl_profile");
                 for(const auto& [key,type]:SOURCE_SEARCH_TYPES){auto name="analysis."+key;if(!effective.contains(name)||!config_.contains(name))continue;replace_search|=type=='b'?effective.boolean(name)!=config_.boolean(name):type=='i'||type=='f'?effective.number(name)!=config_.number(name):effective.text(name)!=config_.text(name);}
                 if(analysis_mode_)for(auto key:{"analysis_wide_root_noise","analysis_ignore_pre_root_history"}){auto name=std::string("analysis.")+key;if(effective.contains(name)&&config_.contains(name))replace_search|=effective.text(name)!=config_.text(name);}
                 auto active_overrides=overrides;if(analysis_mode_){active_overrides["wide_root_noise"]=effective.number("analysis.analysis_wide_root_noise");active_overrides["ignore_pre_root_history"]=effective.boolean("analysis.analysis_ignore_pre_root_history");}
                 auto replacement=replace_search?factory_(active_overrides):nullptr;std::optional<::BoardHistory> replayed;if(go_initial_&&history_modes(effective)!=go_initial_->modes)replayed=replay_go(go_initial_->rules,go_moves_,history_modes(effective));
-                if(human_profile){auto secondary=dynamic_cast<InferenceService*>(evaluator_.secondary.get());if(!secondary||!secondary->description().uses_human_profile)throw std::runtime_error("No metadata human model loaded");secondary->set_human_profile(*human_profile);}
+                if(human_profile){auto secondary=evaluator_.secondary?dynamic_cast<InferenceService*>(evaluator_.secondary.get()):&evaluator_;if(!secondary||!secondary->description().uses_human_profile)throw std::runtime_error("No metadata human model loaded");secondary->set_human_profile(*human_profile);}
                 config_=std::move(effective);overrides_=std::move(overrides);if(replacement){search_=std::move(replacement);last_result_.reset();if(automatic_patterns())reload_patterns();}
                 if(replayed){go_initial_->modes=replayed->modes;install_go(*replayed,false);}
-                game_->set_pda(config_.number("analysis.playout_doubling_advantage"),config_.text("analysis.playout_doubling_advantage_player")=="black"?1:-1);
+                set_playout_advantage(*game_,config_,"analysis");
             }
             else if(cmd=="debug_moves") {
                 Game position=*game_;std::vector<int> branch;bool raw=false;
@@ -575,7 +581,7 @@ class Session {
                 std::string seed="benchmarkPosSeed|";for(auto m:sgf->moves)seed+=std::to_string(int(m.loc))+"|";Rand rand(seed);std::vector<int> positions(sgf->moves.size());std::iota(positions.begin(),positions.end(),0);
                 for(int i=int(positions.size())-1;i>1;--i)std::swap(positions[i],positions[rand.nextUInt(i)]);if(positions.size()>10)positions.resize(10);std::sort(positions.begin(),positions.end());
                 auto params=overrides_;params["max_time"]=1e20;params["max_playouts"]=SEARCH_CONFIG_LIMIT;params["visits"]=visits;auto benchmark=factory_(params);
-                auto rules=::Rules::getTrompTaylorish();rules.komi=sgf->getRulesOrFailAllowUnspecified(rules).komi;::Board board;::BoardHistory hist;Player pla;sgf->setupInitialBoardAndHist(rules,board,pla,hist,::BoardHistoryModes(true,true));
+                auto rules=::Rules::getTrompTaylorish();rules.komi=sgf->getRulesOrFailAllowUnspecified(rules).komi;::Board board;::BoardHistory hist;Player pla;sgf->setupInitialBoardAndHist(rules,board,pla,hist,history_modes(config_));
                 int turn=0;double seconds=0;int64_t completed=0;auto requests=evaluator_.requests.load(),batches=evaluator_.batches.load();
                 for(int end:positions){while(turn<end){auto m=sgf->moves[turn++];if(!hist.makeBoardMoveTolerant(board,m.loc,m.pla))throw std::runtime_error("Invalid benchmark SGF move");}benchmark->reset(seed_);evaluator_.clear_cache();auto game=game_from_go_history(hist,canvas_);SearchRun options;options.max_visits=visits;options.should_stop=[&]{return r.cancelled->load()||interrupted_();};auto result=benchmark->run(game,0,options);seconds+=result.seconds;completed+=result.root_visits;if(options.should_stop())break;}
                 value="positions "+std::to_string(positions.size())+" visits "+std::to_string(completed)+" seconds "+Global::doubleToString(seconds)+" visitsPerSecond "+Global::doubleToString(completed/std::max(seconds,1e-30))+" nnRows "+std::to_string(evaluator_.requests.load()-requests)+" nnBatches "+std::to_string(evaluator_.batches.load()-batches);
