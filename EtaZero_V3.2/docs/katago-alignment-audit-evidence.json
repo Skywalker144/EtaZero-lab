@@ -1050,5 +1050,170 @@
       "Pure W-L, latent-state, Gumbel-root, formats/backends/scheduling and recovery adaptations remain as documented."
     ]
   },
-  "record_layout": "Original top-level audit fields describe EtaZero_V3 before implementation. v3_1_implementation separately records current implementation and its own validation."
+  "record_layout": "Original top-level fields describe EtaZero_V3 before implementation. v3_1_implementation is historical; v3_2_implementation records the current target and its own validation.",
+  "v3_2_implementation": {
+    "target": "EtaZero_V3.2",
+    "source_commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "source_files_verified": 123,
+    "source_hash_mismatches": [],
+    "status": "implemented_and_targeted_validation_passed",
+    "artifact_root": "/home/sky/RL/EtaZero-lab/EtaZero_V3.2/data/validation/v3_2_alignment_20261024",
+    "checks": [
+      {
+        "name": "native_ctest",
+        "passed": 17,
+        "log": "ez32-ctest4.log"
+      },
+      {
+        "name": "full_cpu",
+        "passed": 799,
+        "skipped": 413,
+        "log": "ez32-final-cpu3.log"
+      },
+      {
+        "name": "native_cuda_parity",
+        "passed": 61,
+        "log": "ez32-parity-nr.log",
+        "scope": "AZ/MZ, four games, FP16/FP32, dynamic batches, HumanSL; tested before the equivalent finite FP16 NR mask correction"
+      },
+      {
+        "name": "web",
+        "passed": 10,
+        "subtests": 2,
+        "log": "ez32-web-ui.log"
+      },
+      {
+        "name": "source_initialization_forward_gradient",
+        "architectures": [
+          "b2c16-fson-mish",
+          "b5c192nbt-fson-mish",
+          "b5c192h3nbttfrs"
+        ],
+        "device": "cpu",
+        "max_forward_abs": 0,
+        "max_gradient_abs": 0,
+        "log": "ez32-source-architectures.json"
+      },
+      {
+        "name": "source_reader_clock_metadata_gatekeeper",
+        "passed": 11,
+        "log": "ez32-final-focused2.log"
+      },
+      {
+        "name": "source_architecture_and_cuda_export_boundaries",
+        "passed": 125,
+        "log": "ez32-cuda-export-boundary.log"
+      },
+      {
+        "name": "cuda_compiled_pipeline",
+        "passed": 8,
+        "logs": [
+          "ez32-final-gpu-pipeline.log",
+          "ez32-final-gpu-xiangqi.log"
+        ],
+        "scope": "Four Gumbel AZ/MZ and nonroot combinations; Go/Xiangqi AZ/MZ compiled training, exact-state audit, native analysis and Web engine. The initial Xiangqi audit failed; the final log supersedes it after fixing audit compiler conditions."
+      },
+      {
+        "name": "cuda_amp_optimizer_head_controls",
+        "passed": 11,
+        "logs": [
+          "ez32-final-gpu-extra.log",
+          "ez32-final-gpu-recheck.log"
+        ],
+        "scope": "Segmented AMP skip/recovery; Aurora and NorMuon real training; eight FP32-head checks across AMP precision, compilation and train/eval. The NorMuon fixture now uses source-native-exportable b2c16-brn; b1c6 with zero regular mid channels is rejected before export."
+      },
+      {
+        "name": "gatekeeper_cancel_before_launch",
+        "passed": 3,
+        "log": "ez32-gate-cancel.log"
+      },
+      {
+        "name": "source_replay_oracle",
+        "cases": {
+          "window_formula": 2592,
+          "group_threshold": 30,
+          "output_plan": 324,
+          "file_path_md5": 10000,
+          "file_orders": 264,
+          "source_reader_batches": 68
+        },
+        "log": "ez32-replay-final.json"
+      },
+      {
+        "name": "source_optimizer_clock_blocks",
+        "step_cases": 3696,
+        "log": "ez32-clocks-final.json"
+      }
+    ],
+    "inference_benchmark": {
+      "architecture": "b5c192nbt-fson-mish",
+      "canvas": 15,
+      "game": "gomoku",
+      "precision": "float16",
+      "hardware": "RTX 5080",
+      "seed": 932,
+      "repeats": 3,
+      "seconds_per_measurement": 1.5,
+      "scope": "packing, transfers, inference and result construction; excludes search and training",
+      "binary_sha256": "c7e936d0c126f87b922f42deaa4f011c518ddf60be1443bbd48b98429933bd65",
+      "results": [
+        {
+          "batch": 1,
+          "cuda_positions_per_second": 1723.2746753610836,
+          "torchscript_positions_per_second": 2298.7903176820714,
+          "ratio": 0.7496441333103862,
+          "cuda_executed_batch": 1,
+          "torchscript_executed_batch": 1
+        },
+        {
+          "batch": 17,
+          "cuda_positions_per_second": 28615.312933442412,
+          "torchscript_positions_per_second": 15003.426797878705,
+          "ratio": 1.9072518111321246,
+          "cuda_executed_batch": 17,
+          "torchscript_executed_batch": 32
+        },
+        {
+          "batch": 32,
+          "cuda_positions_per_second": 41407.23678181163,
+          "torchscript_positions_per_second": 28189.19651549013,
+          "ratio": 1.4689044705143728,
+          "cuda_executed_batch": 32,
+          "torchscript_executed_batch": 32
+        },
+        {
+          "batch": 64,
+          "cuda_positions_per_second": 45098.634105452846,
+          "torchscript_positions_per_second": 31569.306226353874,
+          "ratio": 1.4285595566178382,
+          "cuda_executed_batch": 64,
+          "torchscript_executed_batch": 64
+        }
+      ],
+      "artifact": "inference_benchmark"
+    },
+    "limitations": [
+      "No formal playing-strength or equal-time training experiment",
+      "No exhaustive architecture/game/algorithm or entire optional GPU-test matrix; CPU suite skips GPU/browser cases",
+      "Bitwise recovery requires the documented fixed compiler and numerical audit conditions",
+      "Multi-physical-GPU execution not tested; learner remains single GPU with synchronous outer stages",
+      "Legacy MuZero_V2 mathematical reference checkout is absent locally; that manual check could not execute (ez32-mz-math.log). Normalization/gradient properties and native parity are covered by the version tests."
+    ],
+    "short_training_artifacts": [
+      "ez32-gate-source-clock",
+      "ez32-mz-source-clock",
+      "ez32-gate-smoke-v2"
+    ],
+    "recovery_compiler_diagnosis": {
+      "case": "MuZero Xiangqi, eight FP16 updates, stop after first batch",
+      "dynamic": "Cold full run differs from warm full run by up to 1.12e-6 in model state; warm full and resumed runs are bitwise identical in model, optimizer, optimization, scaler, RNG and reader.",
+      "static_audit": "Cold full, warm full and interrupted/resumed runs are bitwise identical in all compared state. Deterministic algorithms, static shapes, NCHW layout, cuDNN benchmark disabled, NVIDIA_TF32_OVERRIDE=0.",
+      "production": "Dynamic MuZero compilation and source numerical settings remain enabled. Arbitrary compiler-cache states are not promised bitwise equivalence.",
+      "logs": [
+        "ez32-resume-dynamic.log",
+        "ez32-resume-static.log",
+        "ez32-resume-state-comparison.json"
+      ]
+    }
+  }
 }

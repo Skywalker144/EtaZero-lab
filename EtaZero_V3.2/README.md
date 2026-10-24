@@ -2,11 +2,11 @@
 
 EtaZero 面向 Freestyle、Standard、Renju 五子棋、Hex、围棋和中国象棋。支持 AlphaZero / MuZero 的 PUCT 与 Gumbel 搜索。AlphaZero 使用真实棋规搜索，MuZero 使用独立 latent 搜索与展开训练；Gumbel 根配 PUCT 或论文非根选点，详见 [Gumbel](docs/gumbel.md)。
 
-训练按完整轮次执行自对弈 → shuffle → learner → 模型发布。各阶段内部支持并行对局、GPU 组批与 CUDA Graph 推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
+训练按完整轮次执行自对弈 → shuffle → learner → 候选发布 → 可选 gatekeeper。各阶段内部支持并行对局、GPU 组批与专用 CUDA/cuDNN 推理、数据处理和预取；当前为单卡 learner，无 DDP、跨机器调度或跨阶段异步流水线。算法、数据与恢复边界由下方文档分别维护，工程检查不代表棋力或等时间性能收益已验证。
 
 ## 构建与小规模验证
 
-以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖支持 C++20 的编译器（象棋规则模块）、CMake、zlib 和该环境的 LibTorch。
+以下命令在本版本目录执行，使用已有 Conda `pytorch` 环境。构建依赖支持 C++20 的编译器（象棋规则模块）、CMake、zlib、CUDA Toolkit、cuDNN 和该环境的 LibTorch（CPU／TorchScript 参考路径）。
 
 ```bash
 bash scripts/build.sh
@@ -24,7 +24,7 @@ CONFIG_DIR=configs/az_g bash scripts/run.sh
 
 `CONFIG_DIR` 选择配置目录，显式 `--config-dir` 优先。不带子命令时直接训练，也支持 `run`、`check-config`、`analysis`、`gtp`、`match`、`arena` 和 `plot`。配置继承、文件归属、本机覆盖与输出路径见 [配置组织](docs/implementation.md#配置组织)；具体参数以配置文件和解析器为准。
 
-bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照单遍限制；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
+bootstrap 为 iteration 0；iteration 1 完成首轮训练发布，后续每轮使用开始时已发布的模型产样，再训练并发布下一代。新增数据量按基准训练量与 replay ratio 规划，实际训练量受新增数据额度和快照完整 batch 数上限限制；内部来源 epoch/subepoch 跨轮延续；零步轮次保留当前模型。详见 [产样规划](docs/implementation.md#训练额度与自对弈产量)。
 
 围棋和象棋的规则、输入／动作编码、棋盘尺寸和价值语义见 [棋类边界](docs/algorithms.md#围棋与中国象棋)。例如 `CONFIG_DIR=configs/az_go bash scripts/run.sh` 或 `CONFIG_DIR=configs/mz_xiangqi bash scripts/run.sh`；续训仍使用同一目录与原有恢复流程。四种棋类共用 backbone 实现，每种输入／动作布局独立训练；不把旧五子棋权重直接当作新棋类权重加载。
 
@@ -41,11 +41,11 @@ AlphaZero 可按名称选择固定 KataGo 来源的全部手写网络及派生�
 ```bash
 CONFIG_DIR=configs/checks/smoke_test bash scripts/run.sh --run-dir data/my_check --iterations 3
 bash scripts/run.sh analysis --config-dir configs/checks/smoke_test --run-dir data/my_check --size 5 --rule renju --moves 0,6
-bash scripts/run.sh match --config-dir configs/checks/smoke_test --run-dir data/my_check --model-b /path/to/model.pt --size 5 --rule freestyle --games 4 --output data/my_match
+bash scripts/run.sh match --config-dir configs/checks/smoke_test --run-dir data/my_check --model-b /path/to/model.bin --size 5 --rule freestyle --games 4 --output data/my_match
 bash scripts/run.sh plot --run-dir data/my_check
 ```
 
-评估显式选择已发布模型；五子棋、Hex 和围棋落点使用实际棋盘的零起始行优先编号，围棋的 `size²` 表示停一手，象棋使用固定 2086 项动作表。比赛按成对开局交换模型执色，支持逐局续测。配置、预算与 Elo 统计见 [评估与 Elo](docs/elo.md)。
+评估显式选择已发布模型；五子棋、Hex 和围棋落点使用实际棋盘的零起始行优先编号，围棋的 `width*height` 表示停一手，象棋使用固定 2086 项动作表。比赛逐局独立生成开局，按打乱的双方执色轮次分配棋手，支持逐局续测。配置、预算与 Elo 统计见 [评估与 Elo](docs/elo.md)。
 
 ## 训练图与自动实验
 
@@ -79,8 +79,8 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 
 | 任务 | 阅读入口 |
 |---|---|
-| 梳理 EtaZero 与 KataGo 的设计差异、逐项审查共有机制 | [KataGo 对照与审查清单](docs/katago-comparison.md) |
-| 查看通用机制逐项实现、保留差异及验证证据 | [KataGo 对齐审查](docs/katago-alignment-audit.md) |
+| 明确期望的 EtaZero 与 KataGo 的差异，并据此审查共有机制 | [定位与对齐目标](docs/katago-target.md) |
+| 查看按对齐目标开展的审查结论、剩余项和验证范围 | [对齐审查](docs/katago-target-review-2026-10-24.md) |
 | 查看对局线程、搜索线程、共享组批及 C++ / Python 分工 | [执行架构](docs/implementation.md#执行架构) |
 | 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
@@ -89,7 +89,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 调整平衡开局及独立 policy init | [开局机制](docs/algorithms.md#平衡开局与-policy-init) |
 | 查看实验产物和内部状态位置 | [运行目录](docs/implementation.md#运行目录) |
 | 调整配置、继承与本机覆盖 | [配置组织](docs/implementation.md#配置组织) |
-| 固定评估预算、成对比赛、续测与 Elo 图 | [评估与 Elo](docs/elo.md) |
+| 固定评估预算、独立对局、续测与 Elo 图 | [评估与 Elo](docs/elo.md) |
 | 查看 AlphaZero / KataGo 的局长变化、规模规律与架构对照经验 | [训练经验](../docs/training-experience.md) |
 | GTP 对弈、持续分析、停止和 JSON 批量局面 | [原生交互引擎](docs/engine.md) |
 | 网页对弈、手动局面研究与搜索诊断 | [Web 开发工作台](../web/README.md) |
@@ -98,14 +98,16 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 配置根剪枝、评估缓存、模式惩罚、HumanSL 与搜索并行 | [通用搜索控制](docs/search-controls.md) |
 | 配置局部模式共享的网络效用偏差及内存分片 | [SubtreeValueBias](docs/algorithms.md#subtreevaluebias) |
 | 选择 KataGo 网络名称、后缀与核对架构 | [KataGo 网络配置](docs/networks.md) |
-| 比较现有配置或命名预设的原生 CUDA Graph 推理速度 | [推理测速](docs/networks.md#原生推理测速) |
+| 比较现有配置或命名预设的专用 CUDA 与 TorchScript 推理速度 | [推理测速](docs/networks.md#原生推理测速) |
 | 查看算法组合、公共边界和 Gumbel | [算法组合](docs/algorithms.md#算法与搜索组合)、[算法接口](docs/algorithms.md#算法接口)、[Gumbel](docs/gumbel.md) |
 | 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
-| 查看 V0 历史对齐范围、网络映射和验收证据 | [V0 核查记录](../EtaZero.md#alignment-targets)、[V0 实施记录](../plan.md) |
-| 追溯 V0 工程对齐与分批验收 | [V0 工程核查](../EtaZero.md#engineering-audit)、[V0 验收记录](../plan.md) |
+| 查看 V0 历史对齐范围和网络映射 | [V0 核查记录](../EtaZero.md#alignment-targets) |
+| 追溯 V0 工程对齐 | [V0 工程核查](../EtaZero.md#engineering-audit) |
 | 核对代码来源和许可证 | [参考来源](THIRD_PARTY.md)、[来源校验值](reference_sources.json) |
 | 训练图、实验伞目录与 GPU 排队 | [绘图与自动实验](docs/implementation.md#训练图与性能图)、[调度](docs/implementation.md#自动实验) |
 | 运行检查和了解验证限制 | [验收与限制](docs/implementation.md#验收与限制) |
 
 
 本 README 是版本文档总入口。算法语义维护在 `docs/algorithms.md`，工程与数据行为维护在 `docs/implementation.md`；字段归属和校验以 [config.py](python/etazero/config.py) 为准。
+
+公共 KataGo JSON 分析入口为 `analysis --katago-json`，支持矩形围棋、SGF／PositionSample 起点及并行优先级任务；GTP 命令、参数和排除范围见 [交互引擎](docs/engine.md)。AlphaZero 默认原始数据使用公共训练字段，完整研究轨迹通过 `writer.research_records` 显式启用；MuZero 持续保存展开所需的完整轨迹，见 [数据链路](docs/implementation.md#数据链路)。
