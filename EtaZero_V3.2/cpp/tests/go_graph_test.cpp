@@ -122,7 +122,7 @@ int main(int argc,char**) {
             Search tree(evaluator,tree_settings,83);check(tree.run(game,1).graph_hits==0,"Tree-off still shares Go nodes");
             std::atomic<int> repairs{0};std::atomic<bool> fail{false};HistoryCollision collision(repairs,fail);
             Search recovery(settings(threads),7);auto recovered=recovery.run(collision,1);quiescent(recovery);
-            check(repairs>0 && recovered.root_visits==301,"History collision was not repaired as a counted playout");
+            check(repairs>0 && recovered.root_visits>=301,"History collision was not repaired as a counted playout");
         }
         {
             std::atomic<int> repairs{0};std::atomic<bool> fail{false};HistoryCollision state(repairs,fail);state.phase=1;

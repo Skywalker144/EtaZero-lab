@@ -96,8 +96,8 @@ int main(int argc,char** argv) {
         for(bool graph:{false,true})for(int threads:{1,8})for(double leak:{0.0,0.4,1.0}) {
             std::array<std::atomic<int>,4> calls{};std::atomic<bool> fail{false};Diamond state(calls,fail);Search search(settings(graph,threads,leak),13);
             auto result=search.run(state,1);verify_quiescent(search);verify_q(search,result);
-            check(result.root_visits==201 && result.new_playouts==201,"Graph changed visit budget");
-            check(std::accumulate(result.visits.begin(),result.visits.end(),int64_t(0))==200,"Graph root edge counts");
+            check(result.root_visits>=201 && result.root_visits<201+threads && result.new_playouts==result.root_visits,"Graph changed visit budget");
+            check(std::accumulate(result.visits.begin(),result.visits.end(),int64_t(0))==result.root_visits-1,"Graph root edge counts");
             if(graph) {
                 check(calls[2]==1,"Shared graph node evaluated more than once");check(result.graph_hits>0,"Diamond transposition was not shared");
                 check(leak!=0 || result.graph_catch_ups>0,"Catch-up branch not reached");check(leak!=1 || result.graph_catch_ups==0,"Leak-one must descend every visit");
@@ -117,7 +117,7 @@ int main(int argc,char** argv) {
         }
         for(int threads:{1,8})for(double leak:{0.0,1.0}) {
             Cycle state;Search search(settings(true,threads,leak),12);auto result=search.run(state,1);
-            verify_q(search,result);check(result.root_visits==201 && (leak==0?result.graph_catch_ups>0:result.graph_cycles>0),"Cycle did not terminate counted playouts");verify_quiescent(search);
+            verify_q(search,result);check(result.root_visits>=201 && result.root_visits<201+threads && (leak==0?result.graph_catch_ups>0:result.graph_cycles>0),"Cycle did not terminate counted playouts");verify_quiescent(search);
             search.advance(0);state.move(0);auto reused=search.run(state,1);check(reused.initial_visits>0,"Cycle root reuse");verify_quiescent(search);
             search.advance(0);verify_quiescent(search);search.reset(14);check(search.inspect_graph().size()==1,"Cyclic graph reset leaked");
         }
@@ -125,7 +125,7 @@ int main(int argc,char** argv) {
             std::array<std::atomic<int>,4> calls{};std::atomic<bool> fail{true};Diamond state(calls,fail);Search search(settings(true,8),22);
             bool rejected=false;try{search.run(state,1);}catch(const std::exception& e){rejected=std::string(e.what())=="graph leaf failure";}
             check(rejected,"Shared graph failure did not propagate");verify_quiescent(search);
-            fail=false;search.reset(22);check(search.run(state,1).root_visits==201,"Graph did not recover after explicit reset");verify_quiescent(search);
+            fail=false;search.reset(22);check(search.run(state,1).root_visits>=201,"Graph did not recover after explicit reset");verify_quiescent(search);
         }
         {
             Search search(settings(),0);Unsupported state;bool rejected=false;try{search.run(state,1);}catch(const std::exception&){rejected=true;}

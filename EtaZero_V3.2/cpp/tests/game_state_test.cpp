@@ -131,7 +131,7 @@ int main() {
     auto geometry=repetition.board();
     check(geometry.width==9&&geometry.height==10&&geometry.stride==10&&geometry.area()==90&&geometry.cells.size()==100,"Board geometry is independent of storage padding");
     check(repetition.area()==90&&repetition.canvas_area()==100&&repetition.actions()==2086,"Board, canvas and action domains are distinct");
-    check((Outcome{0,Reason::NO_RESULT}).wdl(1)==std::array<double,3>{.5,0,.5},"No-result WDL is neutral");
+    check((Outcome{0,Reason::NO_RESULT}).wdl(1)==std::array<double,4>{0,0,0,1},"No-result WDL is neutral");
     check(!(Outcome{0,Reason::NO_RESULT}).has_result()&&(Outcome{0,Reason::SCORE}).draw_probability()==1,"No-result and scored draw differ");
     auto path=std::filesystem::temp_directory_path()/("etazero-game-config-"+std::to_string(getpid()));
     {std::ofstream out(path);out<<"[go]\nrules=chinese\nkomi=7.5\n[analysis]\ngo_rules=japanese\nkomi=6.5\n[match]\ngo_rules=tromp-taylor\nkomi=0.5\n";}
