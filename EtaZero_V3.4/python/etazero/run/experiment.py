@@ -112,7 +112,7 @@ def initialization_key(config):
 
 def prepare_initializations(work, arms):
     import torch
-    from etazero.models.network import make_network
+    from etazero.models.factory import make_network
     from etazero.train.learner import model_identity
     references = {}
     prepared = {}

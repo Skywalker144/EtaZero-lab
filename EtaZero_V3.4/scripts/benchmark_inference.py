@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / 'python'))
 
 from etazero.config import load_config
 from etazero.models.katago_configs import resolve
-from etazero.models.network import make_network, inference_network
+from etazero.models.factory import make_network, inference_network
 from etazero.run.runtime import provenance, source_snapshot
 from etazero.storage import save_json, sha256
 from etazero.games import SPECS, spec_for_config
