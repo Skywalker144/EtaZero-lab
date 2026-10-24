@@ -97,6 +97,7 @@ def policy_indices(canvas):
 
 
 def generate_cpp():
+    deltas = ','.join('{'+','.join(map(str,d))+'}' for d in XIANGQI_DELTAS)
     moves = ',\n'.join('{'+','.join(map(str,m))+'}' for m in XIANGQI_MOVES)
     layouts = ',\n'.join(
         f'{{GameKind::{s.name.upper()}, "{s.name}", {s.planes}, {s.globals}, '
@@ -119,6 +120,7 @@ struct GameLayout {
 };
 ''' + 'inline constexpr GameLayout GAME_LAYOUTS[] = {\n'+layouts+'\n};\n'
         + 'inline constexpr GameKind RULE_GAME_KINDS[] = {'+rules+'};\n'
+        + f'inline constexpr int XIANGQI_DELTAS[{len(XIANGQI_DELTAS)}][2] = {{'+deltas+'};\n'
         + f'inline constexpr int XIANGQI_MOVES[{len(XIANGQI_MOVES)}][4] = {{\n'+moves+'\n};\n')
 
 

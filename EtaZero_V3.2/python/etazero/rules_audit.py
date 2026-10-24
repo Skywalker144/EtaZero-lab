@@ -56,4 +56,5 @@ def validate_games(a, require):
         obs=unpack_observations(a['side_observations'][i:i+1],canvas)[0]
         size=int(a['sizes'][g]);width=spec_for_rule(RULES[a['rules'][g]]).width(size)
         mask=np.zeros((canvas,canvas),np.uint8);mask[:size,:width]=1
+        if RULES[a['rules'][g]]=='go':mask=unpack_observations(a['observations'][a['observation_offsets'][g]:a['observation_offsets'][g]+1],canvas)[0,0].astype(np.uint8)
         require(np.array_equal(obs[0],mask) and not (obs*(1-mask)).any(),'side mask/padding')

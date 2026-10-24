@@ -44,6 +44,7 @@ def main():
             sub.add_argument('--moves',default='',help='Comma-separated board-row-major action indices')
             protocol = sub.add_mutually_exclusive_group()
             protocol.add_argument('--stream',action='store_true',help='Persistent interactive engine: new/play/analyze/genmove/state/undo/quit')
+            protocol.add_argument('--katago-json',action='store_true',help='KataGo stateless JSON analysis protocol')
             protocol.add_argument('--json-stream',action='store_true',help='Asynchronous JSON lines: request ids, progress, cancellation and queued positions')
         if name=="match":
             sub.add_argument("--model-b",required=True)
@@ -58,7 +59,7 @@ def main():
         directory=ROOT/directory
     if args.command in ('analysis','gtp','match'):
         from .engine_config import load_engine_config
-        config=load_engine_config(args.config or directory, match=args.command=='match')
+        config=load_engine_config(args.config or directory, match=args.command=='match',gtp=args.command=='gtp')
     else:
         config=load_config(directory, run_dir=args.run_dir)
     if args.command=="check-config":
@@ -91,7 +92,7 @@ def main():
             path,games=single_match(config,binary,select_model(root,args.model),args.model_b,
                                    args.output or root/'matches'/uuid.uuid4().hex,args.games)
             result={'complete':True,'games':games}
-        elif args.command=='gtp' or args.stream or args.json_stream:
+        elif args.command=='gtp' or args.stream or args.json_stream or args.katago_json:
             if (getattr(args,'moves','') or getattr(args,'output',None) or getattr(args,'size',None) is not None or getattr(args,'rule',None) is not None):
                 parser.error('--stream uses new/play commands for positions; --moves/--size/--rule/--output are for single-position analysis')
             from .analysis import stream_analysis
@@ -101,7 +102,7 @@ def main():
             if (profile/'match.cfg').is_file():
                 config['opening'] = load_match_opening_config(profile)
                 config['hex_opening'] = load_match_hex_opening_config(profile)
-            return stream_analysis(config,binary,root,args.model,protocol='gtp' if args.command=='gtp' else 'json' if args.json_stream else 'text')
+            return stream_analysis(config,binary,root,args.model,protocol='gtp' if args.command=='gtp' else 'katago' if args.katago_json else 'json' if args.json_stream else 'text')
         else:
             from .analysis import analyze
             path,payload=analyze(config,binary,root,args.model,args.size,args.rule,args.moves,args.output)
