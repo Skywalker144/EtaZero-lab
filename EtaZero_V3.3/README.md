@@ -80,7 +80,6 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 任务 | 阅读入口 |
 |---|---|
 | 明确期望的 EtaZero 与 KataGo 的差异，并据此审查共有机制 | [定位与对齐目标](docs/katago-target.md) |
-| 查看按对齐目标开展的审查结论、剩余项和验证范围 | [对齐审查](docs/katago-target-review-2026-10-24.md) |
 | 查看对局线程、搜索线程、共享组批及 C++ / Python 分工 | [执行架构](docs/implementation.md#执行架构) |
 | 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
@@ -101,8 +100,6 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 比较现有配置或命名预设的专用 CUDA 与 TorchScript 推理速度 | [推理测速](docs/networks.md#原生推理测速) |
 | 查看算法组合、公共边界和 Gumbel | [算法组合](docs/algorithms.md#算法与搜索组合)、[算法接口](docs/algorithms.md#算法接口)、[Gumbel](docs/gumbel.md) |
 | 运行 MuZero、配置展开训练与检查 KataGo 机制适用边界 | [MuZero](docs/muzero.md) |
-| 查看 V0 历史对齐范围和网络映射 | [V0 核查记录](../EtaZero.md#alignment-targets) |
-| 追溯 V0 工程对齐 | [V0 工程核查](../EtaZero.md#engineering-audit) |
 | 核对代码来源和许可证 | [参考来源](THIRD_PARTY.md)、[来源校验值](reference_sources.json) |
 | 训练图、实验伞目录与 GPU 排队 | [绘图与自动实验](docs/implementation.md#训练图与性能图)、[调度](docs/implementation.md#自动实验) |
 | 运行检查和了解验证限制 | [验收与限制](docs/implementation.md#验收与限制) |

@@ -268,7 +268,7 @@ LR/WD 在优化器 epoch 开始刷新，之后按本轮消费 batch 数每 5 批
 
 FP16 overflow 时 GradScaler 跳过 optimizer 更新并降低 scale，消费样本、Lookahead 同步计数与 SWA 累积仍推进；因此同步可能发生在跳步 batch，成功更新数另存。learner的训练与validation autocast只用于主干，heads与loss的实际运算保持FP32；`model.eval()`只切换归一化等训练行为，不改变heads精度。独立导出副本的heads跟随推理精度配置。
 
-主局 TD 在完整轨迹上构造，使用实际棋盘面积的三种指数时间尺度；先把搜索 WDL 转成固定黑方视角，累加到真实终局，再还原每个训练位置的玩家视角。每个 TD loss 为有效系数 0.72 的交叉熵减目标熵。误差预测和 source surrogate backward、无 score optimistic 权重及完整主局有效性定义见 [辅助监督契约](../../EtaZero.md#alignment-targets) 与 [network.py](../python/etazero/network.py)。短期误差 target 和 optimistic 权重中的预测量均 stop-gradient；禁手失利仍是正常真实终局。
+主局 TD 在完整轨迹上构造，使用实际棋盘面积的三种指数时间尺度；先把搜索 WDL 转成固定黑方视角，累加到真实终局，再还原每个训练位置的玩家视角。每个 TD loss 为有效系数 0.72 的交叉熵减目标熵。误差预测和 source surrogate backward、无 score optimistic 权重及完整主局有效性定义见 [network.py](../python/etazero/network.py)。短期误差 target 和 optimistic 权重中的预测量均 stop-gradient；禁手失利仍是正常真实终局。
 
 搜索保留归一化前的最终选择权重，将最大值至少放大到 10、超出 30000 时统一缩小，然后按 C++ round 写入 int16。learner 读取后除行和，再生成 soft 目标；不从概率乘固定整数推回原权重。末手无效 opponent 保存全 1 占位，两个对应 loss 权重为零。重复行已在 view 展开，不再乘 surprise 频率。
 

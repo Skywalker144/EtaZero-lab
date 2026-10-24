@@ -331,7 +331,7 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 
 `optimizer.lookahead_print` 参与运行和 checkpoint 的续训身份比较；逐 batch 范数模式下它影响自适应衰减，续训时改变此字段会明确拒绝。缺少该字段的恢复身份不能通过当前 checkpoint 校验。纯日志频率 `training.log_every` 可以调整，优化器范数采样条件须保持一致，数学行为见 [优化器](algorithms.md#学习与数据使用)。[配置回归](../tests/test_resume_sampling_config.py)核对 checkpoint 拒绝路径和 Python/native 的采样参数校验；[真实 GPU 回归](../tests/test_gpu.py)覆盖关闭采样功能后的完整训练、拒绝配置变化和继续更新。
 
-V3.2 验证使用 RTX 5080、PyTorch 2.12.0+cu132 与小规模配置；实际已运行的检查和结果见[审查证据](katago-alignment-audit-evidence.json)的 `v3_2_implementation`。多 worker 的验收使用同一 GPU 上两个进程，多物理 GPU 尚无对应硬件验证。固定样本 learner 的逐位恢复审计固定确定性算子、NCHW 编译布局、静态形状和 cuDNN 选核；生产 MuZero 的动态形状编译可能因图泛化产生微小舍入差异，不能据此承诺任意编译缓存状态下逐位复现。并行 selfplay 也不承诺逐位复现。不保存半局和全部在途树。
+多物理 GPU 的行为需在对应硬件上另行验证。固定样本 learner 的逐位恢复检查需要固定确定性算子、NCHW 编译布局、静态形状和 cuDNN 选核；生产 MuZero 的动态形状编译可能因图泛化产生微小舍入差异，不能据此承诺任意编译缓存状态下逐位复现。并行 selfplay 也不承诺逐位复现。不保存半局和全部在途树。
 
 专用原生 CUDA/cuDNN 推理已接入 AlphaZero 和 MuZero。DDP rank 数据分片及各 rank 状态恢复、跨阶段异步流水线不在当前单卡逐轮实现范围。来源文件队列和 epoch/subepoch 选择保持其语义，CUDA 上传 stream、派生视图缓存和可恢复快照回收为当前调度所需的工程适配。
 
