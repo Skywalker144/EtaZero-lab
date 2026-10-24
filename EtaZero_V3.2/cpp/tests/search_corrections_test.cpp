@@ -1,10 +1,12 @@
 #include "etazero/search.h"
+#include "../external/katago/neuralnet/nninputs.h"
 #include <cmath>
 #include <iostream>
 using namespace etazero;
 namespace {
 void check(bool ok,const char* msg){if(!ok)throw std::runtime_error(msg);}
 void near(double a,double b,const char* msg){check(std::abs(a-b)<1e-11,msg);}
+void near_policy(double a,double b,const char* message){check(std::abs(a-b)<1e-7,message);}
 struct AuxState : SearchState {
     int depth=0;double error=.5;bool auxiliary=true,draw=false;std::vector<std::pair<int,double>>* seen=nullptr;
     std::unique_ptr<SearchState> clone() const override{return std::make_unique<AuxState>(*this);}
@@ -28,6 +30,21 @@ struct SymmetricAux : AuxState {
         result.optimistic_logits={0,double(symmetry)/2};return result;
     }
 };
+struct FloatSymmetricAux : AuxState {
+    std::vector<std::shared_ptr<NNOutput>>* source;
+    std::unique_ptr<SearchState> clone() const override{return std::make_unique<FloatSymmetricAux>(*this);}
+    int symmetry_count() const override{return 4;}
+    Evaluation evaluate(SearchEvaluation options={}) const override {
+        float values[]={.1f,.2f,.3f,.7f};float w=values[options.symmetry];
+        auto out=AuxState::evaluate(options);out.wdl={w,.05f,float(1.0f-w-.15f),.1f};out.shortterm_value_stdev=w;
+        auto ref=std::make_shared<NNOutput>();ref->nnHash=Hash128();ref->nnXLen=ref->nnYLen=1;
+        ref->whiteWinProb=w;ref->whiteLossProb=out.wdl[2];ref->whiteNoResultProb=out.wdl[3];
+        ref->whiteScoreMean=ref->whiteScoreMeanSq=ref->varTimeLeft=ref->shorttermScoreError=0;
+        ref->whiteLead=out.wdl[1];ref->shorttermWinlossError=w;ref->policyOptimismUsed=0;
+        std::fill(ref->policyProbs,ref->policyProbs+NNPos::MAX_NN_POLICY_SIZE,0);
+        source->push_back(ref);return out;
+    }
+};
 struct AuxBackend : Backend {
     bool supports_auxiliary() const override{return true;}
     std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
@@ -46,6 +63,14 @@ int main(int argc,char**) {
                 auto s=settings();s.use_uncertainty=true;s.use_noise_pruning=true;
                 if(kind=='u') {double u;int support;std::cin>>u>>support>>s.uncertainty_coeff>>s.uncertainty_exponent>>s.uncertainty_max_weight;std::cout<<uncertainty_weight(u,support,s)<<'\n';}
                 else if(kind=='m') {double p,o,a;std::cin>>p>>o>>a;std::cout<<mixed_policy_logit(p,o,a)<<'\n';}
+                else if(kind=='p') {int count;double temperature,optimism;Evaluation e;
+                    std::cin>>count>>temperature>>e.policy_output_scale>>optimism>>e.policy_optimism_allowed;
+                    e.has_auxiliary=true;e.logits.resize(count);e.optimistic_logits.resize(count);std::vector<int> legal;
+                    for(int i=0;i<count;++i){int allowed;std::cin>>e.logits[i]>>e.optimistic_logits[i]>>allowed;if(allowed)legal.push_back(i);}
+                    for(double p:source_policy_probabilities(e,legal,temperature,optimism))std::cout<<p<<' ';std::cout<<'\n';}
+                else if(kind=='t') {int count;double temperature;std::cin>>count>>temperature;std::vector<double> weights(count);
+                    for(auto& p:weights){float x;std::cin>>x;p=x;}
+                    for(double p:policy_temperature_distribution(weights,temperature))std::cout<<p<<' ';std::cout<<'\n';}
                 else if(kind=='n') {int count;std::cin>>count>>s.noise_prune_utility_scale>>s.noise_pruning_cap;
                     std::vector<RootChildStats> children;for(int i=0;i<count;++i){double p,w,q;std::cin>>p>>w>>q;children.push_back({p,w*q,w*q*q,1,w,w,0});}
                     for(double w:noise_pruned_weights(children,s))std::cout<<w<<' ';std::cout<<'\n';}
@@ -91,17 +116,26 @@ int main(int argc,char**) {
         // D4 averages stdev first; the nonlinear reciprocal cannot be averaged instead.
         SymmetricAux symmetric;auto eight=s;eight.root_symmetries=8;Search ensemble(eight,1);SearchRun one;one.max_playouts=1;
         ensemble.run(symmetric,1,one);near(ensemble.inspect_graph()[0].stats.weight,8.0/19,"Average D4 error before weighting");
+        for(int count:{2,3,4})for(uint64_t seed:{1,9,23}) {
+            std::vector<std::shared_ptr<NNOutput>> outputs;FloatSymmetricAux state;state.source=&outputs;
+            auto options=s;options.root_symmetries=count;Search search(options,seed);
+            auto actual=search.run(state,0,one);NNOutput reference(outputs);
+            check(outputs.size()==size_t(count),"Root symmetry request count");
+            check(actual.network_wdl==WDL{reference.whiteWinProb,reference.whiteLead,reference.whiteLossProb,reference.whiteNoResultProb},
+                  "Root outcome averaging must match source FP32 operation order exactly");
+            check(actual.network_value_stdev==reference.shorttermWinlossError,"Root uncertainty averaging must match source exactly");
+        }
         double expected=0;for(int k=0;k<8;++k){float main=std::log(9);double x=main+(float(0)-main)*float(.2),y=float(k)/2*float(.2);expected+=std::exp(x)/(std::exp(x)+std::exp(y))/8;}
-        eight.root_policy_optimism=.2;Search optimism_ensemble(eight,1);near(optimism_ensemble.run(symmetric,1,one).network_policy[0],expected,"Mix D4 logits before each probability average");
+        eight.root_policy_optimism=.2;Search optimism_ensemble(eight,1);near_policy(optimism_ensemble.run(symmetric,1,one).network_policy[0],expected,"Mix D4 logits before each probability average");
         auto opt=settings();opt.root_policy_optimism=.2;opt.policy_optimism=1;opt.nn_policy_temperature=2;opt.graph_search=true;
         std::vector<std::pair<int,double>> seen;state.seen=&seen;Search optimistic(opt,1);
-        auto r=optimistic.run(state,1,one);float main=std::log(9),mixed=main+(float(0)-main)*float(.2);double odds=std::exp((double(mixed)-float(main*float(.2)))/2);near(r.network_policy[0],odds/(1+odds),"Logit mixture precedes Tnn softmax");
+        auto r=optimistic.run(state,1,one);float main=std::log(9),mixed=main+(float(0)-main)*float(.2);double odds=std::exp((double(mixed)-float(main*float(.2)))/2);near_policy(r.network_policy[0],odds/(1+odds),"Logit mixture precedes Tnn softmax");
         optimistic.run(state,1,one);check(seen.back()==std::pair<int,double>{1,1},"Leaf optimism condition");
         optimistic.advance(r.action);state.move(r.action);one.max_playouts=0;auto promoted=optimistic.run(state,1,one);
         check(seen.back()==std::pair<int,double>{1,.2},"Promoted root must re-evaluate with root optimism");check(promoted.new_playouts==0,"Root optimism refresh counted as a new playout");
-        near(promoted.network_policy[0],odds/(1+odds),"Promoted leaf policy did not become a root policy");
+        near_policy(promoted.network_policy[0],odds/(1+odds),"Promoted leaf policy did not become a root policy");
         state.depth=0;state.auxiliary=false;Search unsupported(opt,1);one.max_playouts=1;
-        near(unsupported.run(state,1,one).network_policy[0],.75,"Absent optimism capability uses ordinary logits at Tnn2");
+        near_policy(unsupported.run(state,1,one).network_policy[0],.75,"Absent optimism capability uses ordinary logits at Tnn2");
         auto noise=settings();noise.use_noise_pruning=true;
         double q=.6-.15*std::log(2);std::vector<RootChildStats> children{{.5,2.4,1.44,4,4,4,0},{.25,20*q,20*q*q,20,20,20,0}};
         auto weights=noise_pruned_weights(children,noise);near(weights[0],4,"First noise prefix kept");near(weights[1],12,"Half excess pruned at log2 utility gap");

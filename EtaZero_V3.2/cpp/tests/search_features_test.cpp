@@ -8,6 +8,7 @@ using namespace etazero;
 namespace {
 void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 void near(double a,double b,const char* message){check(std::abs(a-b)<1e-10,message);}
+void near_policy(double a,double b,const char* message){check(std::abs(a-b)<1e-7,message);}
 struct TwoMoveState : SearchState {
     int action=-1;bool lcb_case=false;
     std::unique_ptr<SearchState> clone() const override{return std::make_unique<TwoMoveState>(*this);}
@@ -193,13 +194,13 @@ int main(){
         ensemble.root_policy_temperature=ensemble.root_policy_temperature_early=2;
         Search sym_search(ensemble,17);auto sym_result=sym_search.run(sym_state,0,{2,true,true,false});
         auto sorted=seen;std::sort(sorted.begin(),sorted.end());check(sorted==std::vector<int>({0,1,2,3,4,5,6,7}),"Root samples D4 without replacement");
-        near(sym_result.network_wdl[0],0.45,"Root averages WDL probabilities");near(sym_result.network_wdl[1],0.1,"Root retains draw probability");
+        near_policy(sym_result.network_wdl[0],0.45,"Root averages FP32 WDL probabilities");near_policy(sym_result.network_wdl[1],0.1,"Root retains FP32 draw probability");
         double average=(0.75+1/(1+std::sqrt(3.0)))/2;
         double root_p=std::sqrt(average)/(std::sqrt(average)+std::sqrt(1-average));
-        near(sym_result.policy_surprise,-std::log(root_p),"NN temperature then probability ensemble then root temperature");
+        near_policy(sym_result.policy_surprise,-std::log(root_p),"NN temperature then probability ensemble then root temperature");
         seen.clear();auto sym_cheap=sym_search.run(sym_state,0,{2,true,true,true});
         check(seen==std::vector<int>({0}),"Cheap search disables multi-symmetry evaluation");
-        near(sym_cheap.policy_surprise,-std::log(0.75),"Cheap search retains NN temperature but disables root temperature");
+        near_policy(sym_cheap.policy_surprise,-std::log(0.75),"Cheap search retains NN temperature but disables root temperature");
         {
             SparseSymmetryState sparse;SearchSettings sparse_settings{1,1,1.5,1,0,1,true};
             sparse_settings.root_symmetries=2;Search sparse_search(sparse_settings,17);
@@ -214,7 +215,7 @@ int main(){
             sparse_search.advance(first.action);sparse.move(first.action);
             auto promoted=sparse_search.run(sparse,0,refresh);
             check(promoted.initial_visits>0 && promoted.new_playouts==0,"Sparse child was not reused on promotion");
-            for(int a=0;a<6;++a)near(promoted.network_policy[a],(a==0 || a==3)?.5:0,
+            for(int a=0;a<6;++a)near_policy(promoted.network_policy[a],(a==0 || a==3)?.5:0,
                                    "Promoted node retains its own legal moves across symmetry reevaluation");
         }
         seen.clear();ensemble.root_symmetries=4;Search sampled(ensemble,17);sampled.run(sym_state,0,{2,true,true,false});
@@ -241,7 +242,7 @@ int main(){
         near(kept.network_wdl[0],0.1,"Cheap promoted root retains its non-root NN evaluation");
         auto refreshed=promoted.run(sym_line,0,{3,true,false,false});
         check(sym_calls==before_calls+8 && refreshed.simulations==0 && refreshed.root_visits==8,"Normal promoted root refreshes ensemble without consuming visits");
-        near(refreshed.network_wdl[0],0.45,"Promoted ensemble replaces single-orientation root WDL");
+        near_policy(refreshed.network_wdl[0],0.45,"Promoted ensemble replaces single-orientation root WDL in FP32");
         near(fpu_value(0.6,-0.2,0.25,2,0.2),0.45,"FPU visited-policy interpolation and reduction");
         near(fpu_value(0.6,-0.2,0,2,0.2),0.6,"FPU starts at network value");
         near(fpu_value(0.6,-0.2,1,2,0.2),-0.4,"FPU ends at parent minus reduction");
@@ -288,11 +289,11 @@ int main(){
         seen.clear();SearchSettings reset_priors{1,1,1,1,0,1,true};
         reset_priors.root_policy_temperature_early=2;reset_priors.root_policy_temperature=1;
         Search prior_reset(reset_priors,1);auto early_root=prior_reset.run(sym_state,0,root_only);
-        near(early_root.search_policy[0],0.75,"Early root temperature applies to raw 9:1 policy");
+        near_policy(early_root.search_policy[0],0.75,"Early root temperature applies to raw 9:1 policy");
         root_only.turn=19;root_only.board_area=361;
         auto later_root=prior_reset.run(sym_state,0,root_only);
-        near(later_root.network_policy[0],0.9,"Reused root preserves original NN prior");
-        near(later_root.search_policy[0],std::pow(9,2.0/3)/(std::pow(9,2.0/3)+1),
+        near_policy(later_root.network_policy[0],0.9,"Reused root preserves original NN prior");
+        near_policy(later_root.search_policy[0],std::pow(9,2.0/3)/(std::pow(9,2.0/3)+1),
              "Root temperature restarts from raw prior rather than compounding prior exploration");
         // Random single orientations reach both cheap roots and non-root leaves.
         orientations.clear();sym_calls=0;SymmetryLineState random_line(sym_calls,orientations);
