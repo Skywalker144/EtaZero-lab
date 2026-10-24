@@ -1,7 +1,7 @@
 #include "etazero/game_config.h"
 #include "etazero/config.h"
 #include "etazero/record.h"
-#include "etazero/torch_backend.h"
+#include "etazero/backend_factory.h"
 #include "etazero/random_evaluator.h"
 #include "etazero/search_limits.h"
 #include "etazero/sampling.h"
@@ -10,6 +10,7 @@
 #include "etazero/muzero/torch_backend.h"
 #include "etazero/match.h"
 #include "etazero/session.h"
+#include "etazero/source_config.h"
 #include "etazero/symmetry.h"
 #include <csignal>
 #include <charconv>
@@ -58,8 +59,8 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     SearchSettings s{selfplay?c.integer64("search.full_search_visits")-1:std::max<int64_t>(0,c.integer64(section+".visits")-1),
                      c.integer(key("parallelism","search_threads")),
                      c.number(key("puct","c_puct")),c.number(key("puct","virtual_loss")),
-                     selfplay?c.number("dirichlet_noise.noise_fraction"):0,
-                     selfplay?c.number("dirichlet_noise.dirichlet_total_concentration"):1,c.boolean(key("search","reuse_tree")),
+                     selfplay?c.number("dirichlet_noise.noise_fraction"):c.contains(section+".root_noise_enabled")&&c.boolean(section+".root_noise_enabled")?c.number(section+".noise_fraction"):0,
+                     selfplay?c.number("dirichlet_noise.dirichlet_total_concentration"):c.contains(section+".dirichlet_total_concentration")?c.number(section+".dirichlet_total_concentration"):1,c.boolean(key("search","reuse_tree")),
                      selfplay?0:c.integer64(section+".visits")};
     if(c.contains(key("patterns","avoid_repeated_pattern_utility")))s.avoid_repeated_pattern_utility=c.number(key("patterns","avoid_repeated_pattern_utility"));
     if(c.contains(key("patterns","pattern_corpora")))s.external_patterns=PatternBonusTable::load(c.text(key("patterns","pattern_corpora")),c.integer("network.canvas"),RuleOptions{});
@@ -120,6 +121,7 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     s.fpu_parent_weight=c.number(key("fpu","fpu_parent_weight"));
     s.max_playouts=c.integer64(key("search","max_playouts"));s.max_time=c.number(key("search","max_time"));
     s.use_lcb=c.boolean(key("lcb","use_lcb"));s.lcb_stdevs=c.number(key("lcb","lcb_stdevs"));
+    s.use_non_buggy_lcb=c.contains(key("lcb","use_non_buggy_lcb"))?c.boolean(key("lcb","use_non_buggy_lcb")):!selfplay;
     s.min_lcb_visit_prop=c.number(key("lcb","min_visit_prop_for_lcb"));
     s.policy_target_pruning=c.boolean(key("policy_target","policy_target_pruning"));
     s.value_weight_exponent=c.number(key("value_weighting","value_weight_exponent"));
@@ -136,6 +138,7 @@ SearchSettings settings(const Config& c, const std::string& mode) {
     s.temperature_halflife=c.number(key("temperature","temperature_halflife"));
     s.chosen_move_temperature_only_below_prob=c.number(key("temperature","temperature_only_below_prob"));
     if(selfplay){s.shaped_noise=c.boolean("dirichlet_noise.shaped_dirichlet_noise");s.forced_playouts=c.number("forced_playouts.root_desired_per_child_visits_coeff");}
+    if(!selfplay&&c.contains(section+".root_noise_enabled")){s.shaped_noise=c.boolean(section+".shaped_dirichlet_noise");s.forced_playouts=c.number(section+".root_desired_per_child_visits_coeff");}
     return s;
 }
 double move_temperature(const Config& c,const std::string& mode,const Game& game) {
@@ -160,13 +163,14 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
     if(kind!="random" && kind!="network")throw std::runtime_error("Unknown evaluator: "+kind);
     if(kind=="random" && mode!="selfplay")throw std::runtime_error("Random evaluator is for cold-start selfplay only");
     std::string algorithm=c.contains("agent.algorithm")?c.text("agent.algorithm"):"alphazero";
+    if(kind=="network" && is_cuda_model(a.get("model")))algorithm=cuda_model_algorithm(a.get("model"));
     std::optional<torch::jit::Module> detected_model;
-    if(kind=="network" && mode!="selfplay" && mode!="infer") {
+    if(kind=="network" && mode!="selfplay" && mode!="infer" && (!is_cuda_model(a.get("model")) || web_model)) {
         // Detect from the actual inference model, then hand it to its backend.
         // Selfplay already knows the algorithm and loads during backend preparation.
         torch::Device device(a.get("device"));c10::cuda::OptionalCUDAGuard guard;
         if(device.is_cuda())guard.set_device(device);
-        detected_model=supplied_model?*supplied_model:torch::jit::load(a.get("model"),device);
+        detected_model=supplied_model?*supplied_model:torch::jit::load(reference_model_path(a.get("model")),device);
         detected_model->eval();
         if(device.is_cuda())c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
         auto metadata=detected_model->get_method("metadata")({}).toTuple();
@@ -183,16 +187,23 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         if(!c.contains(key)||c.text(key).empty())return primary;
         std::string path=c.text(key),device=a.get("device"),precision=c.text(prefix+".inference_precision");
         if(precision=="auto")precision=device.rfind("cuda",0)==0?"float16":"float32";
-        auto model=torch::jit::load(path,torch::Device(device));model.eval();auto metadata=model.get_method("metadata")({}).toTuple();
-        std::string secondary_algorithm=metadata->elements().at(1).toStringRef();
-        auto prepared_secondary=std::make_shared<PreparedModel>(std::move(model));
+        std::string secondary_algorithm=is_cuda_model(path) && std::filesystem::exists(std::filesystem::path(path).parent_path()/"manifest.json")?cuda_model_algorithm(path):"alphazero";
+        auto prepared_secondary=std::make_shared<PreparedModel>();
+        if(!is_cuda_model(path)) {
+            auto model=torch::jit::load(path,torch::Device(device));model.eval();
+            secondary_algorithm=model.get_method("metadata")({}).toTuple()->elements().at(1).toStringRef();
+            prepared_secondary=std::make_shared<PreparedModel>(std::move(model));
+        }
+        std::string profile_key=(mode=="infer"||mode=="selfplay"?"human_sl":prefix)+".human_sl_profile";
+        std::string human_profile=c.contains(profile_key)?c.text(profile_key):"";
+        if(!human_profile.empty() && !is_cuda_model(path))throw std::runtime_error("Human SL profiles require a source CUDA metadata model");
         uint64_t seed=std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")));
         if(secondary_algorithm=="alphazero") {
-            std::vector<std::unique_ptr<Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(std::make_unique<TorchBackend>(path,device,canvas,batch,precision,prepared_secondary));
+            std::vector<std::unique_ptr<Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(make_backend(path,device,canvas,batch,precision,prepared_secondary,human_profile));
             primary->secondary=std::make_shared<BatchEvaluator>(std::move(models),path,canvas,batch,c.integer(prefix+".batch_wait_us"),c.integer(prefix+".cache_entries"),false,0,seed,
                 c.contains(prefix+".nn_mutex_pool_power_of_two")?c.integer(prefix+".nn_mutex_pool_power_of_two"):16);
         } else if(secondary_algorithm=="muzero") {
-            std::vector<std::unique_ptr<muzero::Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(std::make_unique<muzero::TorchBackend>(path,device,canvas,batch,precision,prepared_secondary));
+            std::vector<std::unique_ptr<muzero::Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(make_muzero_backend(path,device,canvas,batch,precision,prepared_secondary));
             primary->secondary=std::make_shared<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),c.integer(prefix+".cache_entries"),false,0,seed,c.integer(prefix+".muzero_queue_capacity"),c.contains(prefix+".nn_mutex_pool_power_of_two")?c.integer(prefix+".nn_mutex_pool_power_of_two"):16);
         } else throw std::runtime_error("Unknown secondary network algorithm");
         if(!same_layout(primary->spec(),primary->secondary->spec()))throw std::runtime_error("Secondary policy game layout differs");
@@ -201,23 +212,23 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
     if(algorithm=="muzero") {
         std::vector<std::unique_ptr<muzero::Backend>> models;
         for(int i=0;i<c.integer(prefix+".server_threads");++i) {
-            if(kind=="random")models.push_back(std::make_unique<muzero::RandomBackend>(canvas,std::stoull(a.get("seed")),random_spec));
+            if(kind=="random")models.push_back(std::make_unique<muzero::RandomBackend>(canvas,std::stoull(a.get("seed"))+i,random_spec));
             else {
                 auto precision=c.text(prefix+".inference_precision");
                 if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
-                models.push_back(std::make_unique<muzero::TorchBackend>(a.get("model"),a.get("device"),canvas,batch,precision,
+                models.push_back(make_muzero_backend(a.get("model"),a.get("device"),canvas,batch,precision,
                     prepared));
             }
         }
         return attach_secondary(std::make_unique<muzero::BatchEvaluator>(std::move(models),canvas,batch,c.integer(prefix+".batch_wait_us"),
             c.integer(prefix+".cache_entries"),c.boolean((prefix=="inference"?"symmetry":prefix)+".nn_randomize"),
             c.integer((prefix=="inference"?"symmetry":prefix)+".nn_symmetry"),
-            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))),c.integer(prefix+".muzero_queue_capacity")));
+            std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed"))),c.integer(prefix+".muzero_queue_capacity"),c.integer(prefix+".nn_mutex_pool_power_of_two")));
     }
     if(algorithm!="alphazero")throw std::runtime_error("Unknown model algorithm");
     for (int i=0;i<c.integer(prefix+".server_threads");++i) {
-        if(kind=="random")backends.push_back(std::make_unique<RandomBackend>(canvas,std::stoull(a.get("seed")),random_spec));
-        else backends.push_back(std::make_unique<TorchBackend>(a.get("model"),a.get("device"),canvas,batch,
+        if(kind=="random")backends.push_back(std::make_unique<RandomBackend>(canvas,std::stoull(a.get("seed"))+i,random_spec));
+        else backends.push_back(make_backend(a.get("model"),a.get("device"),canvas,batch,
                                                          c.text(prefix+".inference_precision"),prepared));
     }
     return attach_secondary(std::make_unique<BatchEvaluator>(std::move(backends), a.get("model-id"), canvas,
@@ -284,6 +295,7 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
     if(c.text("agent.algorithm")=="muzero")source.unroll_steps=c.integer("unroll.steps");
     source.gumbel=c.text("agent.root_search_algo")=="gumbel";source.full_gumbel=c.text("agent.nonroot_search_algo")=="gumbel";
+    source.research_records=c.contains("writer.research_records")&&c.boolean("writer.research_records");
     RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),
                         c.number("writer.first_file_min_random_proportion"),std::stoull(a.get("seed"))^0xA0761D6478BD642FULL);
     std::vector<int> sizes; std::vector<Rule> rules; std::vector<double> sw, rw;
@@ -350,9 +362,10 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                     auto result = search.run(game,temp,limits.search);
                     if(stop_requested || failure)break;
                     if(result.action<0)throw std::runtime_error("Selfplay search has no move: zero playout budget");
+                    auto metadata=search_metadata(result,game);
                     Step step{game.player(),result.action,result.simulations,static_cast<float>(temp),0,
                               game.observation(),std::move(result.policy),std::move(result.visits)};
-                    step.cheap_search=limits.cheap_search;step.target_weight=limits.target_weight;
+                    step.metadata=metadata;step.cheap_search=limits.cheap_search;step.target_weight=limits.target_weight;
                     step.policy_target=std::move(result.policy_target);step.policy_surprise=result.policy_surprise;step.network_wdl=result.network_wdl;step.search_wdl=result.search_wdl;
                     step.q_values=std::move(result.q_values);step.q_visits=std::move(result.q_visits);
                     historical_values.push_back(game.player()*result.value);
@@ -381,7 +394,6 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                                                [&]{return stop_requested.load() || failure.load();}))forks.add(std::move(*position));
                 if(stop_requested || failure)break;
                 if(auto position=make_hint_fork(record))forks.add(std::move(*position));
-                if(!record.outcome().has_result())for(auto& step:record.steps){step.row_repeats=0;step.target_weight=0;}
                 writer.enqueue(std::move(record)); finished.fetch_add(1);
             }
         } catch (...) { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error=std::current_exception(); failure=true; }
@@ -445,11 +457,11 @@ int analyze(const Args& a, const Config& c, bool raw) {
     }
     auto eval=evaluator(a,c,raw?"infer":"analysis");
     // Raw diagnostics must not seed the search cache with an identity-orientation output.
-    auto network=eval->evaluate_symmetry(game.observation(),0,true);
+    auto network=eval->evaluate_position(game.observation(),game.player(),0,true);
     std::cout.precision(12);
     std::cout << "{\"terminal\":" << (game.finished()?"true":"false") << ",\"raw_value\":" << network.value() << ",\"raw_logits\":";
-    array(std::cout,network.logits);std::cout << ",\"raw_wdl\":";array(std::cout,std::vector<double>(network.wdl.begin(),network.wdl.end()));
-    std::cout << ",\"raw_optimistic_logits\":";array(std::cout,network.optimistic_logits);
+    array(std::cout,network.scaled_policy_logits());std::cout << ",\"raw_wdl\":";array(std::cout,std::vector<double>(network.wdl.begin(),network.wdl.end()));
+    std::cout << ",\"raw_optimistic_logits\":";array(std::cout,network.scaled_policy_logits(true));
     std::cout << ",\"raw_shortterm_value_stdev\":" << network.shortterm_value_stdev;
     if(raw)if(auto mu=dynamic_cast<muzero::Evaluator*>(eval.get())) {
         auto obs=game.observation();
@@ -464,9 +476,9 @@ int analyze(const Args& a, const Config& c, bool raw) {
             output=mu->recurrent(output.latent,mapping[action]);
             muzero::restore_evaluation(output.evaluation,mapping);const auto& e=output.evaluation;
             if(index++)std::cout<<',';
-            std::cout<<"{\"action\":"<<action<<",\"logits\":";array(std::cout,e.logits);
+            std::cout<<"{\"action\":"<<action<<",\"logits\":";array(std::cout,e.scaled_policy_logits());
             std::cout<<",\"wdl\":";array(std::cout,std::vector<double>(e.wdl.begin(),e.wdl.end()));
-            std::cout<<",\"optimistic_logits\":";array(std::cout,e.optimistic_logits);
+            std::cout<<",\"optimistic_logits\":";array(std::cout,e.scaled_policy_logits(true));
             std::cout<<",\"stdev\":"<<e.shortterm_value_stdev<<'}';
         }
         std::cout<<']';
@@ -528,7 +540,7 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
     logits=logits[0].narrow(0,0,6).index_select(1,torch::tensor(selected,torch::kInt64).to(device)).to(torch::kFloat32);
     auto probabilities=torch::softmax(logits,1).to(torch::kCPU).contiguous();
     auto value=output.toTuple()->elements()[1].toTensor().to(torch::kFloat32);
-    if(value.dim()!=2 || value.size(0)!=1 || value.size(1)!=3)
+    if(value.dim()!=2 || value.size(0)!=1 || value.size(1)!=4)
         throw std::runtime_error("Invalid raw NN value output");
     auto wdl=torch::softmax(value,1).to(torch::kCPU).contiguous();
     logits=logits.to(torch::kCPU).contiguous();value=value.to(torch::kCPU).contiguous();
@@ -538,13 +550,46 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
 }
 int analysis_session(const Args& a,const Config& c,const std::string& protocol) {
     torch::jit::Module model;
-    auto eval=evaluator(a,c,"analysis",&model);
+    auto eval=evaluator(a,c,"analysis",protocol=="katago"||protocol=="gtp"?nullptr:&model);
+    auto factory=[&](const Json& overrides) {
+            Config effective=c;
+            for(auto it=overrides.begin();it!=overrides.end();++it) {
+                if(it.key()=="reportAnalysisWinratesAs"||it.key()=="humanSLProfile"||it.key()=="alwaysComputePassAliveUnderSuicideRules"||it.key()=="excludeTerritoryAdjacentToAtari"||it.key()=="always_compute_pass_alive_under_suicide_rules"||it.key()=="exclude_territory_adjacent_to_atari")continue;
+                auto key=SOURCE_SEARCH_KEYS.find(it.key());if(key==SOURCE_SEARCH_KEYS.end())throw std::runtime_error("Unsupported overrideSettings key: "+it.key());
+                std::string text=it.value().is_string()?it.value().get<std::string>():it.value().dump();
+                if(key->second=="visit_cap_contempt_player"||key->second=="playout_doubling_advantage_player"){for(auto& c:text)c=std::tolower(c);if(key->second=="visit_cap_contempt_player"){if(text=="b"||text=="black")text="1";else if(text=="w"||text=="white")text="-1";else if(text=="unspecified")text="0";}else {if(text=="b")text="black";else if(text=="w")text="white";if(text!="black"&&text!="white")throw std::runtime_error("Invalid playout doubling advantage player");}}
+                effective.override_field("analysis."+key->second,text);
+                auto name="analysis."+key->second;char type=SOURCE_SEARCH_TYPES.at(key->second);
+                if(type=='b')effective.boolean(name);
+                else if(type=='i'||type=='f'){
+                    double value=type=='i'?double(effective.integer64(name)):effective.number(name);
+                    auto range=SOURCE_SEARCH_RANGES.find(key->second);
+                    if(range!=SOURCE_SEARCH_RANGES.end()&&(value<range->second.first||value>range->second.second))throw std::runtime_error("overrideSettings value outside source range: "+it.key());
+                }
+            }
+            auto parameters=settings(effective,"analysis");
+            if(overrides.contains("humanSLProfile")){if(!eval->secondary)throw std::runtime_error("humanSLProfile requires a human model");parameters.human_evaluator=std::make_shared<ProfileEvaluator>(*eval->secondary,overrides["humanSLProfile"].get<std::string>());}
+            return search_for(*eval,parameters,std::stoull(a.get("seed","0")),effective,"analysis");
+        };
+    auto precision=c.text("analysis.inference_precision");
+        if(precision=="auto")precision=a.get("device").rfind("cuda:",0)==0?"float16":"float32";
+        Json models=Json::array();
+        auto add_model=[&](InferenceService& service,const std::string& path) {
+            auto d=service.description();
+            Json info={{"name",path},{"internalName",d.name.empty()?path:d.name},
+                {"maxBatchSize",c.integer("analysis.max_batch")},{"usesHumanSLProfile",d.uses_human_profile},{"usingFP16",precision=="float16"?"true":"false"}};
+            // TorchScript and MuZero containers do not have a KataGo ModelDesc version.
+            info["version"]=d.version<0?Json(nullptr):Json(d.version);models.push_back(info);
+        };
+        add_model(*eval,a.get("model"));
+        if(auto secondary=dynamic_cast<InferenceService*>(eval->secondary.get()))add_model(*secondary,c.text("analysis.human_model"));
+    if(protocol=="katago") {int code=source_analysis_session(*eval,c,models,factory,[]{return stop_requested.load();});eval->finish();return code;}
     auto search=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");
     auto raw=[&](const Game& game) {
         auto planes=web_policy_planes(model,game,a.get("device"),c.text("analysis.inference_precision"));
         Json result={{"precision",planes.precision},{"heads",Json::array()}};
-        result["value_logits"]=std::vector<float>(planes.value_logits.data_ptr<float>(),planes.value_logits.data_ptr<float>()+3);
-        result["wdl"]=std::vector<float>(planes.wdl.data_ptr<float>(),planes.wdl.data_ptr<float>()+3);
+        result["value_logits"]=std::vector<float>(planes.value_logits.data_ptr<float>(),planes.value_logits.data_ptr<float>()+4);
+        result["wdl"]=std::vector<float>(planes.wdl.data_ptr<float>(),planes.wdl.data_ptr<float>()+4);
         const int count=game.local_actions();
         const std::array<int,4> heads{0,1,4,5};
         const std::array<std::string,4> names{"policy","opponent_policy","long_optimistic_policy","short_optimistic_policy"};
@@ -556,8 +601,8 @@ int analysis_session(const Args& a,const Config& c,const std::string& protocol) 
         }
         return result;
     };
-    int code=engine_session(*search,*eval,c,std::stoull(a.get("seed","0")),protocol,raw,
-                           [&](const Game& game){return move_temperature(c,"analysis",game);},[]{return stop_requested.load();});
+    int code=engine_session(std::move(search),*eval,c,models,factory,std::stoull(a.get("seed","0")),protocol,raw,
+                           [&](const Game& game,const Config& effective){return move_temperature(effective,"analysis",game);},[]{return stop_requested.load();});
     eval->finish();return code;
 }
 int arena(const Args& a,const Config& c) {
@@ -575,7 +620,7 @@ int arena(const Args& a,const Config& c) {
     if(!task_file)throw std::runtime_error("Cannot read arena tasks");
     for(std::string line;std::getline(task_file,line);) {
         std::istringstream row(line);MatchTask t{};int count;
-        if(!(row>>t.pair>>t.a>>t.b>>t.id>>t.seed>>t.generator>>t.mask>>count) || count < -1)
+        if(!(row>>t.pair>>t.a>>t.b>>t.id>>t.seed>>t.generator>>count) || count < -1)
             throw std::runtime_error("Invalid arena task");
         t.generated=count>=0;Game task_game(size,canvas,parse_rule(a.get("rule")),rule_options(c,GameConfigMode::MATCH));
         for(int i=0;i<count;++i) {
@@ -594,6 +639,10 @@ int arena(const Args& a,const Config& c) {
     return run_matches(c,size,parse_rule(a.get("rule")),precision,models,tasks,a.integer("max-models"),
         [&](const MatchModel& m,const MatchEventSink& emit){auto args=a;args.args["model"]=m.path;args.args["model-id"]=m.id;
             args.args["seed"]=std::to_string(m.seed);
+            if(is_cuda_model(m.path)){
+                std::lock_guard<std::mutex> lock(cuda_preparation);
+                return evaluator(args,c,"match");
+            }
             // Deserialization and layout inspection are CPU-only and independent.
             // CUDA allocations, warmup and capture stay isolated from other models.
             auto started=std::chrono::steady_clock::now();
@@ -626,8 +675,7 @@ int match(const Args& a,const Config& c) {
     if(!input)throw std::runtime_error("Cannot read match tasks");
     for(std::string line;std::getline(input,line);) {
         std::istringstream row(line);MatchTask t{};t.a=0;t.b=1;int count;
-        if(!(row>>t.id>>t.seed>>t.generator>>t.mask>>count) || t.id<0 || t.generator!=t.id%2 ||
-           t.mask<1 || t.mask>3 || count < -1 || !ids.insert(t.id).second)
+        if(!(row>>t.id>>t.seed>>t.generator>>count) || t.id<0 || (t.generator<0 || t.generator>1) || count < -1 || !ids.insert(t.id).second)
             throw std::runtime_error("Invalid match task");
         Game game(size,canvas,parse_rule(a.get("rule")),rule_options(c,GameConfigMode::MATCH));t.generated=count>=0;
         for(int i=0;i<count;++i) {

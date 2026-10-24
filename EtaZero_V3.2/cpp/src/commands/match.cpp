@@ -19,6 +19,11 @@ template<class T> void array(std::ostream& out,const std::vector<T>& values) {
 using Clock=std::chrono::steady_clock;
 double elapsed(Clock::time_point start) {return std::chrono::duration<double>(Clock::now()-start).count();}
 }
+bool should_resign(const std::vector<double>& history,int player,int area,double threshold,int consecutive) {
+    if(history.size()<static_cast<size_t>(consecutive) || int(history.size())-1<1+area/5)return false;
+    for(int j=0;j<consecutive;++j)if(!(history[history.size()-j-1]*player<threshold))return false;
+    return true;
+}
 int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                 const std::vector<MatchModel>& models,std::vector<MatchTask>& tasks,int max_models,
                 const MatchEvaluatorFactory& evaluator,const MatchSearchFactory& search,
@@ -28,6 +33,11 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
     const int threads=c.integer("match.game_threads");
     if(threads<1 || max_models<2 || model_load_workers<1)throw std::runtime_error("Invalid arena concurrency/model limit");
     const auto options=rule_options(c,GameConfigMode::MATCH);
+    const bool allow_resignation=c.contains("match.allow_resignation") && c.boolean("match.allow_resignation");
+    const double resign_threshold=c.contains("match.resign_threshold")?c.number("match.resign_threshold"):-.95;
+    const int resign_consecutive=c.contains("match.resign_consec_turns")?c.integer("match.resign_consec_turns"):6;
+    if(!std::isfinite(resign_threshold)||resign_threshold< -1||resign_threshold>0||resign_consecutive<1||resign_consecutive>100)
+        throw std::runtime_error("Invalid match resignation settings");
     OpeningConfig opening(c);
     if(rule!=Rule::GO && rule!=Rule::XIANGQI && (rule==Rule::HEX ? (opening.hex_probability!=1 || opening.hex_make_fair_probability!=1 || opening.hex_min_accept_rate<=0)
                       : (opening.probability!=1 || opening.rejection_probability_fallback>=1)))
@@ -35,7 +45,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
     std::set<std::pair<std::string,int>> identities;
     std::map<std::string,std::pair<size_t,size_t>> pairs;
     for(const auto& t:tasks) {
-        if(t.a>=models.size() || t.b>=models.size() || t.id<0 || t.generator!=t.id%2 || t.mask<1 || t.mask>3 ||
+        if(t.a>=models.size() || t.b>=models.size() || t.id<0 || (t.generator<0 || t.generator>1) ||
            !identities.emplace(t.pair,t.id).second)throw std::runtime_error("Invalid arena task identity");
         auto inserted=pairs.emplace(t.pair,std::make_pair(t.a,t.b));
         if(!inserted.second && inserted.first->second!=std::make_pair(t.a,t.b))throw std::runtime_error("Conflicting arena pair");
@@ -130,7 +140,7 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             const auto& t=tasks[i];if(!selected.count(t.a)||!selected.count(t.b))continue;
             assigned[i]=true;
             if(!t.generated)ready.push_back({i,-1});
-            else if(!single_pair)for(int color=0;color<2;++color)if(t.mask&(1<<color))ready.push_back({i,color});
+            else ready.push_back({i,t.generator});
         }
         std::mutex mutex;std::condition_variable changed;
         size_t active=0;std::atomic<bool> failed{false};std::exception_ptr error;
@@ -165,20 +175,27 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
             bool same=models[t.a].id==models[t.b].id;auto sa=search(ea,mix(seed));
             auto sb=same?std::unique_ptr<GameSearch>{}:search(eb,mix(seed^0x9e3779b97f4a7c15ULL));
             std::vector<int> actions=t.moves;std::vector<int64_t> visits,initial,new_playouts;
+            std::vector<double> winloss_history;Outcome outcome;
             while(!game.finished()) {
                 if(stop())return;
                 SearchRun options;options.clear_before_search=same;options.should_stop=stop;
                 auto& bot=same||((game.player()==1)==(color==0))?sa:sb;
                 auto result=bot->run(game,temperature(game),options);if(stop())return;
                 if(result.action<0)throw std::runtime_error("Match search has no move: zero playout budget");
+                int player=game.player();
+                if(allow_resignation)winloss_history.push_back(player*(result.search_wdl[0]-result.search_wdl[2]));
                 game.play(result.action);actions.push_back(result.action);visits.push_back(result.root_visits);
                 initial.push_back(result.initial_visits);new_playouts.push_back(result.new_playouts);
                 sa->advance(result.action);if(sb)sb->advance(result.action);
+                outcome=game.outcome();
+                if(allow_resignation && should_resign(winloss_history,player,game.area(),resign_threshold,resign_consecutive)) {
+                    outcome={-player,Reason::RESIGNATION};break;
+                }
             }
             std::ostringstream row;row<<std::setprecision(17)<<"{\"type\":\"game\"";
             if(!single_pair)row<<",\"pair\":"<<quote(t.pair);
-            row<<",\"id\":"<<2*t.id+color<<",\"opening_id\":"<<t.id<<",\"black_a\":"<<(color==0?"true":"false")
-                <<",\"reason\":"<<int(game.reason())<<",\"winner\":"<<game.winner()<<",\"seconds\":"<<elapsed(start)<<",\"root_visits\":";
+            row<<",\"id\":"<<t.id<<",\"opening_id\":"<<t.id<<",\"black_a\":"<<(color==0?"true":"false")
+                <<",\"reason\":"<<int(outcome.reason)<<",\"winner\":"<<outcome.winner<<",\"seconds\":"<<elapsed(start)<<",\"root_visits\":";
             array(row,visits);row<<",\"initial_visits\":";array(row,initial);row<<",\"new_playouts\":";array(row,new_playouts);
             row<<",\"same_bot\":"<<(same?"true":"false")<<",\"inference_precision\":"<<quote(precision)<<",\"moves\":";
             moves(row,actions);row<<'}';emit(row.str());
@@ -196,8 +213,8 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
                     auto& t=tasks[job.task];auto& ea=*resident.at(t.a);auto& eb=*resident.at(t.b);
                     if(job.color<0)generate(t,ea,eb);else play(t,job.color,ea,eb);
                     {std::lock_guard<std::mutex> lock(mutex);
-                        if(!single_pair && job.color<0 && t.generated && !stop())
-                            for(int color=1;color>=0;--color)if(t.mask&(1<<color))ready.push_front({job.task,color});
+                        if(job.color<0 && t.generated && !stop())
+                            ready.push_front({job.task,t.generator});
                         --active;
                     }
                     changed.notify_all();
@@ -209,19 +226,13 @@ int run_matches(const Config& c,int size,Rule rule,const std::string& precision,
         };
         auto execute_jobs=[&] {
             auto playing=Clock::now();std::vector<std::thread> workers;
-            const auto worker_count=std::min<size_t>(threads,(single_pair?1:2)*ready.size());
+            const auto worker_count=std::min<size_t>(threads,ready.size());
             try {for(size_t i=0;i<worker_count;++i)workers.emplace_back(loop);}
             catch(...) {{std::lock_guard<std::mutex> lock(mutex);failed=true;}changed.notify_all();for(auto& w:workers)w.join();throw;}
             for(auto& w:workers)w.join();play_seconds+=elapsed(playing);
             if(error)std::rethrow_exception(error);
         };
         execute_jobs();
-        if(single_pair && !stop()) {
-            // Preserve match's barrier and game order, including resumed openings.
-            for(size_t i:pending)if(assigned[i] && tasks[i].generated)
-                for(int color=0;color<2;++color)if(tasks[i].mask&(1<<color))ready.push_back({i,color});
-            execute_jobs();
-        }
         for(auto& item:resident)item.second->drain();
     }
     while(!resident.empty())release(resident.begin()->first);
