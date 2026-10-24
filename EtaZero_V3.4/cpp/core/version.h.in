@@ -1,0 +1,2 @@
+#pragma once
+namespace etazero { inline constexpr char VERSION[] = "@ETAZERO_VERSION@"; }

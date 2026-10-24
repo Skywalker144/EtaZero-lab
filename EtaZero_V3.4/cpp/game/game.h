@@ -1,6 +1,7 @@
 #pragma once
 #include "game/rule_state.h"
 #include <cmath>
+#include "core/datetime.h"
 namespace etazero {
 // Common state ownership and NN conditioning. Rules live in RuleState implementations.
 class Game {
@@ -8,9 +9,11 @@ class Game {
     RuleOptions options_;
     int size_,canvas_,turn_=0,last_action_=-1;
     Rule rule_;
+    std::string date_=DateTime::getDateString();
     std::vector<int> moves_;
     double pda_doublings_=0;
     int pda_player_=0;
+    void apply_move(int a) {state_->play(a);moves_.push_back(a);last_action_=a;++turn_;}
 public:
     explicit Game(int size,int canvas,Rule rule,const RuleOptions& options={});
     Game(int size,int canvas,Rule rule,const RuleOptions& options,std::unique_ptr<RuleState> state,std::vector<int> moves,int turn)
@@ -48,12 +51,16 @@ public:
     std::vector<int> static_actions() const { if(rule_!=Rule::GO)return spec().static_actions(size_,canvas_);std::vector<int> out;for(int a=0;a<local_actions();++a)out.push_back(native_action(a));return out; }
     double pda_doublings() const { return pda_doublings_; }
     int pda_player() const { return pda_player_; }
-    void set_pda(double doublings,int player) {
-        if(!std::isfinite(doublings) || doublings<0 || doublings>std::log2(100.0) ||
-           (player!=1 && player!=-1 && player!=0) || (doublings!=0 && player==0))
-            throw std::runtime_error("Invalid PDA conditioning");
-        pda_doublings_=doublings;pda_player_=doublings==0?0:player;
+    int resolved_pda_player(int search_for_player=0) const {
+        return pda_doublings_==0?0:pda_player_?pda_player_:search_for_player?search_for_player:player();
     }
+    void set_pda(double doublings,int player) {
+        if(!std::isfinite(doublings) || std::abs(doublings)>std::log2(100.0) ||
+           (player!=1 && player!=-1 && player!=0))
+            throw std::runtime_error("Invalid PDA conditioning");
+        pda_doublings_=doublings==0?0:doublings;pda_player_=doublings==0?0:player;
+    }
+    const std::string& date() const {return date_;}
     Rule rule() const { return rule_; }
     int player() const { return state_->player(); }
     int turn() const { return turn_; }
@@ -65,13 +72,16 @@ public:
     const Board& board() const { return state_->board(); }
     bool legal(int a) const { return state_->legal(a); }
     bool raw_legal(int a) const {return state_->raw_legal(a); }
+    // KataGo analyzes finished Go roots without erasing their history or NN inputs.
+    bool searchable_root() const {return !finished() || rule_==Rule::GO;}
+    bool search_legal(int a) const {return rule_==Rule::GO?raw_legal(a):legal(a);}
     bool subtree_bias_key(int action,SubtreeValueBiasKey& key) const {
         return state_->subtree_bias_key(last_action_,action,key);
     }
     std::vector<float> observation() const { return observation(player()); }
-    std::vector<float> observation(int perspective,bool forbidden_feature=true) const {
+    std::vector<float> observation(int perspective,bool forbidden_feature=true,int search_for_player=0) const {
         if(perspective!=1 && perspective!=-1)throw std::runtime_error("Invalid observation perspective");
-        return state_->observation(perspective,pda_doublings_==0?0.0:pda_doublings_*(perspective==pda_player_?1:-1),forbidden_feature);
+        return state_->observation(perspective,pda_doublings_==0?0.0:pda_doublings_*(perspective==resolved_pda_player(search_for_player)?1:-1),forbidden_feature);
     }
     double terminal_value() const {
         if(!finished())throw std::runtime_error("State is not terminal");
@@ -81,7 +91,11 @@ public:
     double terminal_draw_probability() const { if(!finished())throw std::runtime_error("State is not terminal");return outcome().draw_probability(); }
     void play(int a) {
         if(!legal(a))throw std::runtime_error("Illegal move: "+std::to_string(a));
-        state_->play(a);moves_.push_back(a);last_action_=a;++turn_;
+        apply_move(a);
+    }
+    void play_for_search(int a) {
+        if(!search_legal(a))throw std::runtime_error("Illegal search move: "+std::to_string(a));
+        apply_move(a);
     }
 };
 }

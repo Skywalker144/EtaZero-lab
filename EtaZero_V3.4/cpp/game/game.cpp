@@ -25,7 +25,7 @@ Game::Game(int size,int canvas,Rule rule,const RuleOptions& options)
 }
 Game::Game(const Game& other)
     :state_(other.state_->clone()),options_(other.options_),size_(other.size_),canvas_(other.canvas_),
-     turn_(other.turn_),last_action_(other.last_action_),rule_(other.rule_),moves_(other.moves_),
+     turn_(other.turn_),last_action_(other.last_action_),rule_(other.rule_),date_(other.date_),moves_(other.moves_),
      pda_doublings_(other.pda_doublings_),pda_player_(other.pda_player_) {}
 Game& Game::operator=(const Game& other) {
     if(this==&other)return *this;
@@ -33,7 +33,7 @@ Game& Game::operator=(const Game& other) {
         state_->reset_from(*other.state_);
     else state_=other.state_->clone();
     options_=other.options_;size_=other.size_;canvas_=other.canvas_;turn_=other.turn_;
-    last_action_=other.last_action_;rule_=other.rule_;moves_=other.moves_;
+    last_action_=other.last_action_;rule_=other.rule_;date_=other.date_;moves_=other.moves_;
     pda_doublings_=other.pda_doublings_;pda_player_=other.pda_player_;
     return *this;
 }

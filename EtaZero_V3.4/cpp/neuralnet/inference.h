@@ -45,6 +45,8 @@ public:
     GameSpec spec() const { return spec_; }
     virtual ~Evaluator() = default;
     virtual bool available() const {return true;}
+    virtual void wait_for_next_evaluation() {}
+    virtual bool uses_selfplay_metadata() const {return false;}
     virtual void validate_human_profile(const std::string&) const {throw std::runtime_error("Model has no human profile");}
     virtual Evaluation evaluate_profile(const std::vector<float>&,int,int,bool,double,bool,double,const SGFMetadata&) {throw std::runtime_error("Model has no human profile");}
     virtual Evaluation evaluate(const std::vector<float>& observation) = 0;
@@ -61,6 +63,7 @@ class ProfileEvaluator final:public Evaluator {
 public:
     ProfileEvaluator(Evaluator& d,const std::string& profile);
     bool available() const override;
+    void wait_for_next_evaluation() override {delegate_.wait_for_next_evaluation();}
     Evaluation evaluate(const std::vector<float>&) override {throw std::runtime_error("Human metadata needs player perspective");}
     Evaluation evaluate_position(const std::vector<float>& obs,int player,int symmetry=0,bool skip=false,double temperature=1,bool randomize=false,double optimism=0) override {
         return delegate_.evaluate_profile(obs,player,symmetry,skip,temperature,randomize,optimism,*profile_);
@@ -69,18 +72,21 @@ public:
 class Backend {
 protected:
     GameSpec spec_;
+    std::shared_ptr<const SGFMetadata> metadata_profile_;
+    bool selfplay_metadata_=false;
 public:
     explicit Backend(GameSpec spec=game_spec(GameKind::GOMOKU)):spec_(spec) {}
     GameSpec spec() const { return spec_; }
     virtual ~Backend() = default;
-    virtual bool available() const {return true;}
+    virtual bool available() const;
+    bool uses_selfplay_metadata() const {return selfplay_metadata_;}
     virtual bool supports_auxiliary() const { return false; }
     virtual int metadata_channels() const {return 0;}
     virtual ModelDescription description() const {return {};}
-    virtual void set_human_profile(const std::string&) {throw std::runtime_error("Model has no human profile");}
-    virtual void append_metadata(std::vector<float>&,int) const {}
-    virtual void append_profile(std::vector<float>&,int,const SGFMetadata&) const {throw std::runtime_error("Model has no human profile");}
-    virtual void validate_human_profile(const std::string&) const {throw std::runtime_error("Model has no human profile");}
+    virtual void set_human_profile(const std::string&);
+    virtual void append_metadata(std::vector<float>&,int) const;
+    virtual void append_profile(std::vector<float>&,int,const SGFMetadata&) const;
+    virtual void validate_human_profile(const std::string&) const;
     virtual void initialize() {} // Called serially, before any service threads start.
     virtual std::vector<Evaluation> evaluate(const InferenceInputs& inputs) = 0;
 };
@@ -133,6 +139,7 @@ class BatchEvaluator final : public InferenceService {
     std::condition_variable changed_;
     std::deque<Request*> queue_;
     size_t active_=0;
+    uint64_t completed_batches_=0;
     bool closing_ = false;
     std::exception_ptr failure_;
     std::vector<std::thread> servers_;
@@ -151,10 +158,12 @@ public:
                                  bool skip_cache=false, double policy_temperature=1, bool randomize=false, double policy_optimism=0) override;
     void finish();
     void drain();
+    void wait_for_next_evaluation() override;
     void reset_stats();
     void clear_cache() override;
     void set_human_profile(const std::string&) override;
     bool available() const override {return backends_.front()->available();}
+    bool uses_selfplay_metadata() const override {return backends_.front()->uses_selfplay_metadata();}
     void validate_human_profile(const std::string& profile) const override {backends_.front()->validate_human_profile(profile);}
     Evaluation evaluate_profile(const std::vector<float>&,int,int,bool,double,bool,double,const SGFMetadata&) override;
     ModelDescription description() const override {return backends_.front()->description();}

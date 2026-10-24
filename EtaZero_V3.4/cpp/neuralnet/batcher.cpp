@@ -95,6 +95,14 @@ void BatchEvaluator::drain() {
     changed_.wait(lock,[&]{return failure_ || (queue_.empty() && active_==0);});
     if(failure_)std::rethrow_exception(failure_);
 }
+void BatchEvaluator::wait_for_next_evaluation() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if(failure_)std::rethrow_exception(failure_);
+    if(queue_.empty() && active_==0)return;
+    const auto completed=completed_batches_;
+    changed_.wait(lock,[&]{return completed_batches_!=completed || closing_ || failure_;});
+    if(failure_)std::rethrow_exception(failure_);
+}
 void BatchEvaluator::reset_stats() {
     drain();requests=0;batches=0;max_observed_batch=0;cache_hits=0;submitted=0;
     std::fill(rows_by_server.begin(),rows_by_server.end(),0);
@@ -244,7 +252,7 @@ void BatchEvaluator::serve(size_t index) {
                 }
             }
             for(size_t i=0;i<batch.size();++i)batch[i]->complete(std::move(outputs[i]));
-            {std::lock_guard<std::mutex> lock(mutex_);--active_;}
+            {std::lock_guard<std::mutex> lock(mutex_);--active_;++completed_batches_;}
             changed_.notify_all();
         } catch (...) {
             auto error = std::current_exception();

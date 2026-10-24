@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
 project(etazero LANGUAGES CXX)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" ETAZERO_VERSION)
+string(STRIP "${ETAZERO_VERSION}" ETAZERO_VERSION)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+configure_file(core/version.h.in generated/etazero/version.h @ONLY)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -41,9 +45,9 @@ add_library(etazero_game game/game.cpp game/gomoku.cpp game/hex.cpp game/rules.c
     game/go.cpp game/go_position.cpp game/xiangqi.cpp)
 set_property(SOURCE game/xiangqi.cpp PROPERTY COMPILE_OPTIONS -std=c++20)
 target_link_libraries(etazero_game PUBLIC etazero_sgf etazero_xiangqi_rules)
-add_library(etazero_neuralnet neuralnet/batcher.cpp neuralnet/random_evaluator.cpp neuralnet/muzero/batcher.cpp)
+add_library(etazero_neuralnet neuralnet/metadata.cpp neuralnet/batcher.cpp neuralnet/random_evaluator.cpp neuralnet/muzero/batcher.cpp)
 target_link_libraries(etazero_neuralnet PUBLIC etazero_game)
-add_library(etazero_search_common search/search_math.cpp search/searchresults.cpp search/searchparams.cpp
+add_library(etazero_search_common search/algorithm.cpp search/search_math.cpp search/searchresults.cpp search/searchparams.cpp
     search/gumbel.cpp search/subtree_value_bias.cpp search/timecontrols.cpp search/time_budget.cpp search/pattern_bonus.cpp)
 target_link_libraries(etazero_search_common PUBLIC etazero_neuralnet)
 add_library(etazero_search search/search.cpp search/gumbel_search.cpp search/analysis.cpp)

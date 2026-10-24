@@ -28,6 +28,7 @@ public:
     virtual double terminal_value() const = 0;
     virtual double terminal_no_result_probability() const {return 0;}
     virtual double terminal_draw_probability() const {return terminal_value()==0?1:0;}
+    virtual void wait_for_next_evaluation() const {}
     // Policy logits are returned in the original action coordinates.
     virtual Evaluation evaluate(SearchEvaluation options = {}) const = 0;
     virtual Evaluation evaluate_with(Evaluator&,SearchEvaluation) const {throw std::runtime_error("State has no secondary network adapter");}
@@ -54,19 +55,24 @@ class AlphaZeroState final : public SearchState {
     Game game_;
     Evaluator& evaluator_;
     mutable int graph_rep_bound_=11;
+    bool at_root_=true;
 public:
-    AlphaZeroState(const Game& game, Evaluator& evaluator) : game_(game), evaluator_(evaluator) {}
+    AlphaZeroState(const Game& game, Evaluator& evaluator,int search_for_player=0) : game_(game), evaluator_(evaluator) {
+        // Resolve once at the root; descendants retain the same conditioning side.
+        game_.set_pda(game.pda_doublings(),game.resolved_pda_player(search_for_player));
+    }
     std::unique_ptr<SearchState> clone() const override { return std::make_unique<AlphaZeroState>(*this); }
     bool reset_from(const SearchState& state) override {
         auto other=dynamic_cast<const AlphaZeroState*>(&state);
         if (!other || &evaluator_!=&other->evaluator_) return false;
-        game_=other->game_;graph_rep_bound_=other->graph_rep_bound_;return true;
+        game_=other->game_;graph_rep_bound_=other->graph_rep_bound_;at_root_=other->at_root_;return true;
     }
     int actions() const override { return game_.actions(); }
     int pass_action() const override {return game_.rule()==Rule::GO?game_.canvas_area():-1;}
     int player() const override { return game_.player(); }
-    bool legal(int action) const override { return game_.legal(action); }
-    bool terminal() const override { return game_.finished(); }
+    bool legal(int action) const override { return at_root_?game_.search_legal(action):game_.legal(action); }
+    bool terminal() const override { return at_root_?!game_.searchable_root():game_.finished(); }
+    void wait_for_next_evaluation() const override {evaluator_.wait_for_next_evaluation();}
     double terminal_value() const override { return game_.terminal_value(); }
     double terminal_no_result_probability() const override {return game_.terminal_no_result_probability();}
     double terminal_draw_probability() const override {return game_.terminal_draw_probability();}
@@ -83,11 +89,7 @@ public:
     Evaluation evaluate(SearchEvaluation options = {}) const override {
         return evaluate_with(evaluator_,options);
     }
-    Evaluation evaluate_with(Evaluator& evaluator,SearchEvaluation options) const override {
-        auto observation=game_.observation();limit_history_features(observation,game_.canvas(),game_.spec(),options.max_history);
-        return evaluator.evaluate_position(observation,game_.player(),options.symmetry,options.skip_cache,
-                                           options.policy_temperature,options.randomize,options.optimism);
-    }
+    Evaluation evaluate_with(Evaluator&,SearchEvaluation) const override;
     std::string graph_key() const override {
         std::string key;
         auto append=[&](int n) {
@@ -98,6 +100,7 @@ public:
         // Conditioning changes NN input at every depth and must split transpositions.
         double d=game_.pda_doublings();
         key.append(reinterpret_cast<const char*>(&d),sizeof(d));key.push_back(static_cast<char>(game_.pda_player()));
+        if(evaluator_.uses_selfplay_metadata())key+=game_.date();
         if(graph_approximates_history()) {
             // Do not append turn, recent NN history or the full move sequence:
             // those would prevent the transpositions GraphHash deliberately permits.
@@ -110,7 +113,9 @@ public:
         return key;
     }
     int move(int action) override {
-        int parent=game_.player();game_.play(action);
+        int parent=game_.player();
+        if(at_root_)game_.play_for_search(action);else game_.play(action);
+        at_root_=false;
         // Exact terminal values supply the outcome; no duplicated terminal reward.
         return parent==game_.player()?1:-1;
     }
