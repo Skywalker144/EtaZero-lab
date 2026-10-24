@@ -29,9 +29,9 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 - dynamics 只接收 latent 和 int64 `[B]` 动作。Gomoku／Hex 为单 one-hot，Go pass 为全零动作平面（普通着法仍 one-hot），象棋为起点和终点两张 one-hot；不接收未来观测、占用、禁手或真实终局。
 - prediction 复用按四结果和棋类动作适配的来源 heads：六项策略、主 WDL、三项 TD WDL、短期误差，以及可选纯 W−L Q。MuZero 两种主干均支持 `network.predict_q_values`；AlphaZero 的 Q 架构约束保持原样。
 
-价值头为当前 latent 玩家视角的 W/D/L/NR，非围棋屏蔽 NR。该棋类适配没有 reward head 或 reward loss，折扣为 1，相邻边只交换 W/L；latent、mask 和训练 heads 的关键归约保持 FP32。initial/recurrent 返回 latent、普通/optimistic policy、价值 logits 和误差标准差。
+价值头为当前 latent 玩家视角的 W/D/L/NR，非围棋屏蔽 NR。该棋类适配没有 reward head 或 reward loss，折扣为 1，相邻边只交换 W/L；latent、mask 和训练 heads 的关键归约保持 FP32。initial/recurrent 返回 latent、普通/optimistic policy、价值 logits、误差标准差和 variance-time。
 
-[原生 CUDA 对照](../tests/test_muzero_cuda_backend.py) 比较 PyTorch 与三个 CUDA 组件的根、连续展开和旧父 latent 再次使用，覆盖四棋类、FP16/FP32 与不同 batch。测试检查 latent、policy、四类概率、optimistic 和 stdev；误差阈值仅适用于已测样例。参考 TorchScript 路径另由 [组件测试](../tests/test_muzero_network.py) 覆盖。
+[原生 CUDA 对照](../tests/test_muzero_cuda_backend.py) 比较 PyTorch 与三个 CUDA 组件的根、连续展开和旧父 latent 再次使用，覆盖四棋类、FP16/FP32 与不同 batch。测试检查 latent、policy、四类概率、optimistic、stdev 和 variance-time；误差阈值仅适用于已测样例。参考 TorchScript 路径另由 [组件测试](../tests/test_muzero_network.py) 覆盖。
 
 [推理服务](../cpp/neuralnet/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
