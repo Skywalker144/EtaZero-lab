@@ -101,7 +101,7 @@ class Initializer {
     }
     double value(const Game& game, int player) {
         check_cancelled();
-        return balance_evaluator_->evaluate(game.observation(player)).value();
+        return balance_evaluator_->evaluate_position(game.observation(player),player).value();
     }
     int nearby_move(const Game& game, double avg_dist) {
         int size = game.size();
@@ -242,7 +242,7 @@ class Initializer {
             int x=random_.uniform_index(game.size()),y=random_.uniform_index(game.size());
             int action=y*game.canvas()+x;
             Game candidate=game;candidate.play(action);
-            auto evaluation=white_.evaluate(candidate.observation());
+            auto evaluation=white_.evaluate_position(candidate.observation(),candidate.player());
             double acceptance=hex_opening_accept_rate(evaluation.wdl[0],config_.hex_balance_exponent,config_.hex_min_accept_rate);
             result_.balance_evaluators.push_back(1);
             if (!random_.coin(acceptance)) continue;
@@ -260,18 +260,11 @@ class Initializer {
             check_cancelled();
             auto& evaluator=game.player()==1?black_:white_;
             result_.policy_evaluators.push_back(game.player()==1?0:1);
-            auto evaluation = evaluator.evaluate(game.observation());
+            auto evaluation = evaluator.evaluate_position(game.observation(),game.player());
             if (evaluation.logits.size() != static_cast<size_t>(game.actions()))
                 throw std::runtime_error("Invalid opening policy shape");
-            for (int a = 0; a < game.actions(); ++a) {
-                if (!std::isfinite(evaluation.logits[a])) throw std::runtime_error("Nonfinite opening policy logit");
-                if (!game.legal(a)) evaluation.logits[a] = -std::numeric_limits<double>::infinity();
-            }
-            double maximum = *std::max_element(evaluation.logits.begin(), evaluation.logits.end());
-            std::vector<double> probabilities(evaluation.logits.size());
-            double sum = 0;
-            for (size_t a = 0; a < probabilities.size(); ++a) sum += probabilities[a] = std::exp(evaluation.logits[a] - maximum);
-            for (auto& p : probabilities) p /= sum;
+            std::vector<int> legal;for(int a=0;a<game.actions();++a)if(game.legal(a))legal.push_back(a);
+            auto probabilities=source_policy_probabilities(evaluation,legal,1,0);
             std::vector<int> actions;
             std::vector<double> weights;
             for (int a = 0; a < game.actions(); ++a) if (game.legal(a) && probabilities[a] > 0) {
