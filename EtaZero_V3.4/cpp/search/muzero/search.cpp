@@ -183,28 +183,28 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
 SearchResult Search::run_impl(const Game& game,double temperature,SearchRun options,const GumbelSettings* gumbel,bool full) {
     analysis_pv_length_=options.analysis_pv_length;
     if(!std::isfinite(temperature)||temperature<0||options.max_visits<0||options.max_playouts<-1||options.max_time<-1||!std::isfinite(options.max_time))throw std::runtime_error("Invalid MuZero search caps/temperature");
-    if(options.hint_action<-1||(options.hint_action>=0&&!game.legal(options.hint_action)))throw std::runtime_error("Illegal MuZero root hint");
+    if(options.hint_action<-1||(options.hint_action>=0&&!game.search_legal(options.hint_action)))throw std::runtime_error("Illegal MuZero root hint");
     auto focus=focus_snapshot();advance(0);std::atomic_store(&focus_,focus);
     auto start=std::chrono::steady_clock::now();SearchResult result;int area=game.actions();result.gumbel=gumbel!=nullptr;
     result.policy.resize(area);result.move_policy.resize(area);result.network_policy.resize(area);result.search_policy.resize(area);result.visits.resize(area);result.q_values.resize(area);result.q_visits.resize(area);
-    if(game.finished()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl=wdl_from_value(v,game.terminal_draw_probability(),game.terminal_no_result_probability());return result;}
+    if(!game.searchable_root()){double v=game.terminal_value();result.value=v;result.network_wdl=result.search_wdl=wdl_from_value(v,game.terminal_draw_probability(),game.terminal_no_result_probability());return result;}
     avoid_=options.avoid_until;for(auto& a:avoid_){if(a.empty())a.assign(area,0);if(int(a.size())!=area)throw std::runtime_error("Avoid action count differs");for(int d:a)if(d<0)throw std::runtime_error("Negative avoid depth");}
     root_player_=game.player();pass_=game.rule()==Rule::GO?game.canvas_area():-1;
     representatives_.resize(area);std::iota(representatives_.begin(),representatives_.end(),0);
     if(settings_.root_symmetry_pruning)representatives_=game.root_symmetry_representatives(avoid_[root_player_==1?0:1]);
     int64_t max_playouts=effective_search_limits(settings_,options).playouts;
     if(!max_playouts||(options.should_stop&&options.should_stop())){result.stopped_early=max_playouts!=0;return result;}
-    auto obs=game.observation();if(settings_.ignore_all_history||settings_.ignore_pre_root_history)limit_history_features(obs,game.canvas(),game.spec(),0);
+    auto obs=game.observation(game.player(),true,options.search_for_player);if(settings_.ignore_all_history||settings_.ignore_pre_root_history)limit_history_features(obs,game.canvas(),game.spec(),0);
     int symmetry=settings_.nn_randomize?std::uniform_int_distribution<int>(0,game.spec().symmetries-1)(random_):settings_.nn_symmetry;
     auto spatial=symmetry_mapping(game.canvas(),input_symmetry(obs,game.spec(),symmetry));mapping_=policy_mapping(spatial,game.spec());
-    board_actions_=game.static_actions();std::vector<int> root_actions;for(int a:board_actions_)if(game.legal(a))root_actions.push_back(a);
+    board_actions_=game.static_actions();std::vector<int> root_actions;for(int a:board_actions_)if(game.search_legal(a))root_actions.push_back(a);
     root_=node();root_->player=game.player();remove_noise_=options.remove_root_noise;hint_=options.hint_action;
     capped_player_=settings_.visit_cap_contempt==0?0:settings_.visit_cap_contempt_player;
     if(settings_.visit_cap_contempt>0&&capped_player_==0)capped_player_=-(options.search_for_player?options.search_for_player:game.player());
     auto input=transform_observation(obs,game.canvas(),spatial,game.spec());auto initial=evaluator_.initial(input);
     if(options.collect_root_policy_invalid_mass){const auto& logits=initial.evaluation.logits;double maximum=-1e100,total=0,invalid=0;
         for(int a:board_actions_)maximum=std::max(maximum,logits.at(mapping_[a]));
-        for(int a:board_actions_){double p=std::exp((logits.at(mapping_[a])-maximum)*initial.evaluation.policy_output_scale);total+=p;if(!game.legal(a))invalid+=p;}
+        for(int a:board_actions_){double p=std::exp((logits.at(mapping_[a])-maximum)*initial.evaluation.policy_output_scale);total+=p;if(!game.search_legal(a))invalid+=p;}
         if(!std::isfinite(total)||total<=0)throw std::runtime_error("Invalid root policy mass");result.root_policy_invalid_mass=invalid/total;}
     expand(*root_,std::move(initial),root_actions,true);
     auto* human_latent=dynamic_cast<Evaluator*>(human_evaluator().get());

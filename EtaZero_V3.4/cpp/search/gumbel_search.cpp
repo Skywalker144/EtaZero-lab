@@ -67,7 +67,7 @@ template<bool Full> void GumbelSearch<Full>::gumbel_worker_loop(int worker) {
 template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double temperature,SearchRun options) {
     options.turn=game.turn();options.board_area=game.area();
     options.occupied_points=std::count_if(game.board().cells.begin(),game.board().cells.end(),[](int c){return c!=0;});
-    AlphaZeroState state(game,*evaluator_);return run(state,temperature,options);
+    AlphaZeroState state(game,settings_.primary_evaluator?*settings_.primary_evaluator:*evaluator_,options.search_for_player);return run(state,temperature,options);
 }
 template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& state,double temperature,SearchRun options) {
     analysis_pv_length_=options.analysis_pv_length;

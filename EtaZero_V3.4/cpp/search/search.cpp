@@ -464,6 +464,7 @@ void Search::simulation(int worker,int root_move,const GumbelSettings* gumbel) {
         double value,draw;bool count_playout=true;
         for(;;) {
             if(state.terminal()) {
+                state.wait_for_next_evaluation();
                 value=state.terminal_value();draw=state.terminal_draw_probability();
                 if(!std::isfinite(value) || std::abs(value)>1)throw std::runtime_error("Invalid terminal value");
                 std::lock_guard<std::mutex> lock(node->stats_mutex);
@@ -716,7 +717,10 @@ SearchResult Search::run(const Game& game,double temperature,SearchRun options) 
     if(!evaluator_)throw std::runtime_error("Game search requires an AlphaZero evaluator");
     options.turn=game.turn();options.board_area=game.area();
     options.occupied_points=std::count_if(game.board().cells.begin(),game.board().cells.end(),[](int c){return c!=0;});
-    AlphaZeroState state(game,*evaluator_);return run(state,temperature,options);
+    int pda_player=game.resolved_pda_player(options.search_for_player);
+    options.clear_before_search |= last_pda_!=game.pda_doublings() || last_pda_player_!=pda_player;
+    last_pda_=game.pda_doublings();last_pda_player_=pda_player;
+    AlphaZeroState state(game,settings_.primary_evaluator?*settings_.primary_evaluator:*evaluator_,options.search_for_player);return run(state,temperature,options);
 }
 SearchResult Search::run(const SearchState& state,double temperature,SearchRun options) {
     analysis_pv_length_=options.analysis_pv_length;
@@ -767,7 +771,7 @@ SearchResult Search::run(const SearchState& state,double temperature,SearchRun o
         double value=state.terminal_value();
         if(!std::isfinite(value) || std::abs(value)>1)throw std::runtime_error("Invalid terminal value");
         result.value=value;result.network_wdl=result.search_wdl=wdl_from_value(value,state.terminal_draw_probability(),state.terminal_no_result_probability());
-        return result; // EtaZero keeps rule-terminal roots final; no KataGo forceNonTerminal root mode.
+        return result;
     }
     if(result.initial_visits==0 && (playout_cap==0 || (options.should_stop && options.should_stop()))) {
         result.stopped_early=static_cast<bool>(options.should_stop) && options.should_stop();return result;

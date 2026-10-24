@@ -86,6 +86,7 @@ protected:
     std::vector<ThreadState> thread_states_;
     Evaluator* evaluator_ = nullptr;
     int root_player_=1,search_for_player_=1;
+    double last_pda_=0;int last_pda_player_=0;
     std::unique_ptr<PatternBonusTable> patterns_;
     double pattern_bonus(const Node&) const;
     void prepare_patterns(const SearchState&,const SearchRun&);

@@ -49,7 +49,7 @@ struct SearchSettings {
     bool root_symmetry_pruning=false;
     double avoid_repeated_pattern_utility=0;
     std::shared_ptr<const PatternBonusTable> external_patterns;
-    std::shared_ptr<Evaluator> human_evaluator;
+    std::shared_ptr<Evaluator> primary_evaluator, human_evaluator;
     bool use_eval_cache=false;int64_t eval_cache_min_visits=100;
     int64_t max_visits_pondering=SEARCH_CONFIG_LIMIT,max_playouts_pondering=SEARCH_CONFIG_LIMIT;
     double max_time_pondering=1e20,lag_buffer=0,tree_reuse_carry_over_time_factor=0;
