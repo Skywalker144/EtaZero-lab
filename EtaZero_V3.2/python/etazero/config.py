@@ -53,37 +53,83 @@ SEARCH_PARAMETERS = dict(use_uncertainty=boolean, uncertainty_coeff=float, uncer
                          root_policy_temperature_early=float, root_policy_temperature=float,
                          temperature_halflife=float, temperature_only_below_prob=float)
 SEARCH_PARAMETERS.update(root_symmetry_pruning=boolean)
+SEARCH_PARAMETERS.update(use_non_buggy_lcb=boolean)
 SEARCH_PARAMETERS.update(use_eval_cache=boolean,eval_cache_min_visits=int)
 SEARCH_PARAMETERS.update(wide_root_noise=float,futile_visits_threshold=float,visit_cap_contempt=int,visit_cap_contempt_player=int)
 SEARCH_PARAMETERS.update(node_table_shards_power_of_two=int,min_playouts_per_thread=float,ignore_pre_root_history=boolean,ignore_all_history=boolean)
 
 
 PATTERN_DEFAULTS={'avoid_repeated_pattern_utility':0.0,'pattern_corpora':'[]'}
-PATTERN_FIELDS={'avoid_repeated_pattern_utility':float,'pattern_corpora':str}
+PATTERN_DEFAULTS.update(auto_avoid_repeat_dir='', auto_avoid_repeat_utility=0.0,
+    auto_avoid_repeat_lambda=1.0, auto_avoid_repeat_min_turn_number=0,
+    auto_avoid_repeat_max_turn_number=1000000, auto_avoid_repeat_max_poses=1000000000000,
+    auto_avoid_repeat_save_chunk_size=200, auto_avoid_repeat_sizes='{}')
+PATTERN_FIELDS={key:type(value) for key,value in PATTERN_DEFAULTS.items()}
 SEARCH_PARAMETERS.update(PATTERN_FIELDS)
 
 def resolve_pattern_corpora(value,base):
     import json
     sources=json.loads(value)
     if not isinstance(sources,list): raise ValueError('pattern_corpora must be a JSON array')
+    sources=[s for s in sources if s!={}]
     for source in sources:
         if not isinstance(source,dict) or set(source)-{'paths','penalty','decay','min_turn','max_files','players'}: raise ValueError('Invalid pattern corpus fields')
         if not isinstance(source.get('paths'),list) or not source['paths']: raise ValueError('Pattern corpus requires paths')
-        for key,low,high in [('penalty',0,3),('decay',0,1),('min_turn',0,2**50),('max_files',0,2**50)]:
+        for key,low,high in [('penalty',-3,3),('decay',0,1),('min_turn',0,1000000),('max_files',1,1000000)]:
             if key in source and not low<=source[key]<=high: raise ValueError(f'Invalid pattern corpus {key}')
         source['paths']=[str((Path(base)/p).resolve()) for p in source['paths']]
     return json.dumps(sources,separators=(',',':'))
 
-HUMAN_SL_DEFAULTS = {'human_model': '', 'human_sl_cpuct_exploration': 1.0, 'human_sl_cpuct_permanent': 0.0, 'human_sl_root_weightless': 0.0, 'human_sl_root_weightful': 0.0, 'human_sl_player_weightless': 0.0, 'human_sl_player_weightful': 0.0, 'human_sl_opponent_weightless': 0.0, 'human_sl_opponent_weightful': 0.0, 'human_sl_chosen_move_proportion': 0.0, 'human_sl_chosen_move_pikl_lambda': 1000000000.0, 'human_sl_chosen_move_ignore_pass': False}
-HUMAN_SL_FIELDS = {'human_model':str, 'human_sl_cpuct_exploration':float, 'human_sl_cpuct_permanent':float, 'human_sl_root_weightless':float, 'human_sl_root_weightful':float, 'human_sl_player_weightless':float, 'human_sl_player_weightful':float, 'human_sl_opponent_weightless':float, 'human_sl_opponent_weightful':float, 'human_sl_chosen_move_proportion':float, 'human_sl_chosen_move_pikl_lambda':float, 'human_sl_chosen_move_ignore_pass':boolean}
+HUMAN_SL_DEFAULTS = {'human_model': '', 'human_sl_profile': '', 'human_sl_cpuct_exploration': 1.0, 'human_sl_cpuct_permanent': 0.0, 'human_sl_root_weightless': 0.0, 'human_sl_root_weightful': 0.0, 'human_sl_player_weightless': 0.0, 'human_sl_player_weightful': 0.0, 'human_sl_opponent_weightless': 0.0, 'human_sl_opponent_weightful': 0.0, 'human_sl_chosen_move_proportion': 0.0, 'human_sl_chosen_move_pikl_lambda': 1000000000.0, 'human_sl_chosen_move_ignore_pass': False}
+HUMAN_SL_FIELDS = {
+'human_model':str, 'human_sl_profile':str, 'human_sl_cpuct_exploration':float, 'human_sl_cpuct_permanent':float, 'human_sl_root_weightless':float, 'human_sl_root_weightful':float, 'human_sl_player_weightless':float, 'human_sl_player_weightful':float, 'human_sl_opponent_weightless':float, 'human_sl_opponent_weightful':float, 'human_sl_chosen_move_proportion':float, 'human_sl_chosen_move_pikl_lambda':float, 'human_sl_chosen_move_ignore_pass':boolean}
 SEARCH_PARAMETERS.update(HUMAN_SL_FIELDS)
 
 TIME_CONTROL_DEFAULTS = {'max_visits_pondering': 1125899906842624, 'max_playouts_pondering': 1125899906842624, 'max_time_pondering': 1e+20, 'lag_buffer': 0.0, 'tree_reuse_carry_over_time_factor': 0.0, 'overallocate_time_factor': 1.0, 'midgame_time_factor': 1.0, 'midgame_turn_peak_time': 130.0, 'endgame_turn_time_decay': 100.0, 'obvious_moves_time_factor': 1.0, 'obvious_moves_policy_entropy_tolerance': 0.3, 'obvious_moves_policy_surprise_tolerance': 0.15}
 TIME_CONTROL_FIELDS = {'max_visits_pondering':int, 'max_playouts_pondering':int, 'max_time_pondering':float, 'lag_buffer':float, 'tree_reuse_carry_over_time_factor':float, 'overallocate_time_factor':float, 'midgame_time_factor':float, 'midgame_turn_peak_time':float, 'endgame_turn_time_decay':float, 'obvious_moves_time_factor':float, 'obvious_moves_policy_entropy_tolerance':float, 'obvious_moves_policy_surprise_tolerance':float}
 SEARCH_PARAMETERS.update(TIME_CONTROL_FIELDS)
 
+SOURCE_SEARCH_BOUNDS = {
+    'noise_fraction':(0,1),'dirichlet_total_concentration':(.001,10000),'root_desired_per_child_visits_coeff':(0,100),
+    'fpu_loss_prop':(0,1),'root_fpu_loss_prop':(0,1),'value_weight_exponent':(0,1),
+    'temperature_only_below_prob':(0,1),'max_playouts':(0,2**50),'root_num_symmetries_to_sample':(1,8),
+    'wide_root_noise':(0,5),'futile_visits_threshold':(0,1),'min_playouts_per_thread':(0,1e20),
+    'graph_search_rep_bound':(3,50),'graph_search_catch_up_leak_prob':(0,1),'node_table_shards_power_of_two':(8,24),
+    'uncertainty_coeff':(.0001,1),'uncertainty_exponent':(0,2),'uncertainty_max_weight':(1,100),
+    'policy_optimism':(0,1),'root_policy_optimism':(0,1),'noise_prune_utility_scale':(.001,10),'noise_pruning_cap':(0,1e50),
+    'subtree_value_bias_factor':(0,1),'subtree_value_bias_free_prop':(0,1),'subtree_value_bias_weight_exponent':(0,1),
+    'eval_cache_min_visits':(1,2**50),'max_visits_pondering':(1,2**50),'max_playouts_pondering':(1,2**50),
+    'max_time_pondering':(0,1e20),'lag_buffer':(0,3600),'tree_reuse_carry_over_time_factor':(0,1),
+    'overallocate_time_factor':(.01,100),'midgame_time_factor':(.01,100),'midgame_turn_peak_time':(0,1000),
+    'endgame_turn_time_decay':(0,1000),'obvious_moves_time_factor':(.01,1),'obvious_moves_policy_entropy_tolerance':(.001,2),'obvious_moves_policy_surprise_tolerance':(.001,2),
+    'playout_doubling_advantage':(0,math.log2(100)),
+
+    'visits':(1,2**50),'search_threads':(1,4096),'max_time':(0,1e20),
+    'root_policy_temperature':(.01,100),'root_policy_temperature_early':(.01,100),
+    'c_puct': (0,10), 'c_puct_log': (0,10), 'c_puct_base': (10,100000),
+    'c_puct_stdev_prior': (1e-8,10), 'c_puct_stdev_prior_weight': (0,100),
+    'c_puct_stdev_scale': (0,1), 'fpu_reduction_max': (0,2),
+    'root_fpu_reduction_max': (0,2), 'fpu_parent_weight_by_visited_policy_pow': (0,5),
+    'fpu_parent_weight': (0,1), 'nn_policy_temperature': (.01,5),
+    'temperature': (0,5), 'temperature_early': (0,5), 'temperature_halflife': (.1,100000),
+    'lcb_stdevs': (1,12), 'min_visit_prop_for_lcb': (0,1),
+    'virtual_loss': (.01,1000), 'chosen_move_subtract': (0,1e10), 'chosen_move_prune': (0,1e10),
+}
+
 def validate_search_parameters(c):
-    if not 0<=c.get("avoid_repeated_pattern_utility",0)<=3: raise ValueError("Invalid repeated-pattern utility")
+    for key, (low, high) in SOURCE_SEARCH_BOUNDS.items():
+        if key in c and not low <= c[key] <= high:
+            raise ValueError(f'{key} must be in [{low},{high}]')
+    if c.get('human_sl_profile') and not c.get('human_model'):
+        raise ValueError('human_sl_profile requires human_model')
+    if not -3<=c.get("avoid_repeated_pattern_utility",0)<=3: raise ValueError("Invalid repeated-pattern utility")
+    auto_bounds={'utility':(-3,3),'lambda':(0,1),'min_turn_number':(0,1000000),
+                 'max_turn_number':(0,1000000),'max_poses':(0,1000000000000),'save_chunk_size':(1,10000)}
+    for suffix,(lo,hi) in auto_bounds.items():
+        key='auto_avoid_repeat_'+suffix
+        if key in c and not lo<=c[key]<=hi:raise ValueError(f'Invalid {key}')
+    if c.get('auto_avoid_repeat_dir') and c.get('rule','go')!='go':
+        raise ValueError('Automatic pattern history requires Go PositionSample records')
     for key,value in HUMAN_SL_DEFAULTS.items():
         if isinstance(value,(str,bool)):continue
         maximum=1e9 if key.endswith('pikl_lambda') else 1000 if 'cpuct' in key else 1
@@ -131,6 +177,10 @@ def validate_search_parameters(c):
         raise ValueError('Root policy temperatures must be in [0.01,100]')
 
 OPTION_DEFAULTS = {
+    'lcb': dict(use_non_buggy_lcb=False),
+    'writer': dict(research_records=False),
+    'training': dict(use_tf32_matmul=False),
+    'gatekeeper': dict(enabled=False, match_config='', games=200, required_candidate_win_prop=0.5),
     'patterns':PATTERN_DEFAULTS,
     'human_sl': HUMAN_SL_DEFAULTS,
     'time_control': TIME_CONTROL_DEFAULTS,
@@ -153,6 +203,7 @@ OPTION_DEFAULTS = {
 
 
 FIELDS = {
+    'gatekeeper': ('run', dict(enabled=boolean, match_config=str, games=int, required_candidate_win_prop=float)),
     'patterns':('selfplay',PATTERN_FIELDS),
     'human_sl': ('selfplay',HUMAN_SL_FIELDS),
     'time_control': ('selfplay',TIME_CONTROL_FIELDS),
@@ -176,7 +227,7 @@ FIELDS = {
     'losses': ('train', {key: float for key in OPTION_DEFAULTS['losses']}),
     'lr_schedule': ('train', {key: type(value) for key, value in OPTION_DEFAULTS['lr_schedule'].items()}),
     'attention_penalty': ('train', {key: float for key in OPTION_DEFAULTS['attention_penalty']}),
-    "training": ("train", {"train_steps": int, "batch_size": int, "prefetch_depth": int,
+    "training": ("train", {"use_tf32_matmul": boolean, "train_steps": int, "batch_size": int, "prefetch_depth": int,
                            'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "log_every": int, "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
                            "replay_ratio": float, "d4_augmentation": boolean, "soft_policy_weight_scale": float, "disable_optimistic_policy": boolean}),
@@ -225,7 +276,7 @@ FIELDS = {
     'forced_playouts': ("selfplay", {'root_desired_per_child_visits_coeff': float}),
     'policy_target': ("selfplay", {'policy_target_pruning': boolean, 'chosen_move_subtract': float,
                                    'chosen_move_prune': float}),
-    'lcb': ("selfplay", {'use_lcb': boolean, 'lcb_stdevs': float, 'min_visit_prop_for_lcb': float}),
+    'lcb': ("selfplay", {'use_lcb': boolean, 'use_non_buggy_lcb':boolean, 'lcb_stdevs': float, 'min_visit_prop_for_lcb': float}),
     'symmetry': ("selfplay", {'root_num_symmetries_to_sample': int, 'nn_randomize': boolean, 'nn_symmetry': int}),
     'temperature': ("selfplay", {'nn_policy_temperature': float, 'root_policy_temperature_early': float,
                                  'root_policy_temperature': float, 'temperature': float,
@@ -247,7 +298,7 @@ FIELDS = {
     'inference': ("selfplay", {'server_threads': int, 'max_batch': int, 'inference_precision': str,
                                'nn_mutex_pool_power_of_two':int,
                                'cache_entries': int, 'batch_wait_us': int, 'muzero_queue_capacity': int}),
-    'writer': ("selfplay", {'writer_queue': int, 'shard_rows': int, 'first_file_min_random_proportion': float}),
+    'writer': ("selfplay", {'research_records': boolean, 'writer_queue': int, 'shard_rows': int, 'first_file_min_random_proportion': float}),
 }
 FILES = tuple(dict.fromkeys(v[0] for v in FIELDS.values()))
 
@@ -334,13 +385,16 @@ def load_config(directory, run_dir=None):
                 config[section][key] = convert(values[(section, key)])
             except ValueError as error:
                 raise ValueError(f"Invalid {section}.{key}: {error}") from error
+    if config['gatekeeper']['match_config']:
+        config['gatekeeper']['match_config'] = str((directory/config['gatekeeper']['match_config']).resolve())
     hints=config['hint_positions']
     for key in ('files', 'excludes'):
         config['start_positions'][key] = ','.join(str((directory/Path(path)).resolve()) for path in csv(config['start_positions'][key]))
     if hints['positions_file']:
-        path=Path(hints['positions_file']);path=path if path.is_absolute() else directory/path
-        hints['positions_file']=str(path.resolve())
-        if hints['hint_positions_prob'] > 0 and not path.is_file():raise ValueError('Missing hint positions file')
+        paths=[(directory/Path(item)).resolve() for item in csv(hints['positions_file'])]
+        hints['positions_file']=','.join(map(str,paths))
+        if hints['hint_positions_prob'] > 0 and any(not path.exists() for path in paths):
+            raise ValueError('Missing hint positions file or directory')
     validate(config)
     if run_dir is not None:
         if not str(run_dir).strip():
@@ -354,6 +408,8 @@ def load_config(directory, run_dir=None):
         except ValueError as error:
             raise ValueError(f"Configuration outside {ROOT/'configs'} requires an explicit run_dir or --run-dir: {directory}") from error
         destination = ROOT/'data'/relative
+    if config['patterns']['auto_avoid_repeat_dir']:
+        raise ValueError('Automatic pattern history is a GTP/interactive genmove feature')
     config['patterns']['pattern_corpora']=resolve_pattern_corpora(config['patterns']['pattern_corpora'],directory)
     if config['agent']['algorithm']=='muzero' and (config['patterns']['avoid_repeated_pattern_utility']!=0 or config['patterns']['pattern_corpora']!='[]'):
         raise ValueError('Pattern bonuses require a real-board AlphaZero search')
@@ -425,6 +481,11 @@ NUMERIC_MINIMUMS = {
 
 def validate(c):
     from .schema import RULES
+    gate = c['gatekeeper']
+    if not 0 <= gate['games'] <= 2**24 or not math.isfinite(gate['required_candidate_win_prop']) or not 0 <= gate['required_candidate_win_prop'] <= 1:
+        raise ValueError('Invalid gatekeeper game count or required win proportion')
+    if gate['enabled'] and not gate['match_config']:
+        raise ValueError('Enabled gatekeeper requires an explicit match_config')
     a = c["agent"]
     if not 0 <= c["run"]["seed"] < 2**64:
         raise ValueError("Run seed must fit uint64")
@@ -477,10 +538,15 @@ def validate(c):
     env, net = c["environment"], c["network"]
     # MuZero ResNet keeps the NBT head width rules; the AZ presets are unchanged.
     from .katago_configs import is_preset, resolve, validate_dimensions
+    if a['algorithm'] == 'alphazero':
+        from .katago_configs import source_architecture
+        net['architecture'] = source_architecture(net['architecture'], net.get('channels'), net.get('blocks'))
     named = a['algorithm'] == 'alphazero' and is_preset(net['architecture'])
     if named:
         preset = resolve(net['architecture'])
         validate_dimensions(preset)
+        if preset.get('metadata_encoder'):
+            raise ValueError('Ordinary RL requires a non-metadata preset; use metadata networks with explicit HumanSL profiles')
         for key, actual in (('channels', preset['trunk_num_channels']), ('blocks', len(preset['block_kind']))):
             if net[key] != actual:
                 raise ValueError(f"{net['architecture']} fixes network.{key}={actual}, got {net[key]}")
@@ -595,6 +661,16 @@ def validate(c):
     for key, value in c.get('losses', {}).items():
         if not math.isfinite(value) or value < (-1 if key.endswith('head_scale') else 0):
             raise ValueError(f'Invalid losses.{key}')
+    from .katago_configs import is_preset, resolve
+    has_intermediate = (c['agent']['algorithm'] == 'alphazero' and
+                        is_preset(c['network']['architecture']) and
+                        resolve(c['network']['architecture']).get('has_intermediate_head', False))
+    main_scale = c.get('losses', {}).get('main_head_scale', -1)
+    intermediate_scale = c.get('losses', {}).get('intermediate_head_scale', -1)
+    if intermediate_scale >= 0 and not has_intermediate:
+        raise ValueError('intermediate_head_scale requires an intermediate head')
+    if has_intermediate and main_scale >= 0 and intermediate_scale < 0:
+        raise ValueError('Specify both main_head_scale and intermediate_head_scale or neither')
     if o['kind'] not in ('sgd', 'adamw', 'muon', 'normuon', 'aurora'):
         raise ValueError('Optimizer kind must be sgd, adamw, muon, normuon or aurora')
     if (o['muon_adam_lr_factor'] < 0 or o['wd_floor_frac'] < 0 or o['ns_steps'] < 1 or
@@ -616,7 +692,7 @@ def validate(c):
         raise ValueError('lookahead_alpha must be in (0,1] and swa_scale must be >= 1')
     if c['inference']['inference_precision'] not in ("float32", "float16"):
         raise ValueError("Invalid inference precision")
-    if not -1<=c['inference']['nn_mutex_pool_power_of_two']<=24:
+    if not (0 if c['inference']['cache_entries'] else -1)<=c['inference']['nn_mutex_pool_power_of_two']<=24:
         raise ValueError('Invalid NN cache mutex pool power')
     if c['inference']['inference_precision'] == "float16" and "cpu" in csv(c["devices"]["selfplay"]):
         raise ValueError("FP16 inference requires CUDA selfplay devices")
