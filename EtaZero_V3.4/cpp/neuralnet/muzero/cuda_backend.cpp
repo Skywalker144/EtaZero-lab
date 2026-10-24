@@ -94,8 +94,7 @@ struct CudaBackend::Impl {
         std::vector<float> policy,pass,value,aux;
         NeuralNet::getDeviceOutput(prediction->handle,prediction->host,n,nullptr,policy,pass,value,aux);
         const auto& desc=prediction->desc();
-        auto eval=decode_cuda_outputs(policy,pass,value,aux,n,canvas,spec,desc.numPolicyChannels,desc.numValueChannels,
-                                      desc.numScoreValueChannels,desc.postProcessParams.outputScaleMultiplier,allow_no_result);
+        auto eval=decode_cuda_outputs(policy,pass,value,aux,n,canvas,spec,desc,allow_no_result);
         std::vector<InferenceOutput> output(n);
         for(int row=0;row<n;++row){auto state=std::make_shared<State>();state->allocation=memory;state->offset=row*stride();state->count=stride();state->owner=owner;state->mask=masks[row];state->allow_no_result=allow_no_result[row];output[row]={state,std::move(eval[row])};}
         return output;

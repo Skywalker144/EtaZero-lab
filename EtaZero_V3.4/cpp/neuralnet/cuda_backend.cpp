@@ -3,7 +3,6 @@
 #include "neuralnet/sgfmetadata.h"
 #include <cuda_runtime.h>
 #include <cmath>
-#include <numeric>
 namespace etazero {
 struct CudaBackend::Impl {
     LoadedModel* model=nullptr;
@@ -11,14 +10,12 @@ struct CudaBackend::Impl {
     ComputeHandle* handle=nullptr;
     InputBuffers* buffers=nullptr;
     ConfigParser config;
-    SGFMetadata profile;
     int canvas,max_batch,device;
     bool fp16;
-    Impl(const std::string& path,int size,int batch,int gpu,const std::string& precision,const std::string& human)
+    Impl(const std::string& path,int size,int batch,int gpu,const std::string& precision)
       :canvas(size),max_batch(batch),device(gpu),fp16(precision=="float16") {
         if(precision!="float16" && precision!="float32")throw std::runtime_error("Invalid CUDA inference precision");
         model=NeuralNet::loadModelFile(path,"");
-        if(!human.empty())profile=SGFMetadata::getProfile(human);
     }
     ~Impl(){
         if(buffers)NeuralNet::freeInputBuffers(buffers);
@@ -29,27 +26,17 @@ struct CudaBackend::Impl {
 };
 CudaBackend::CudaBackend(const std::string& path,int canvas,int batch,int device,
                          const std::string& precision,GameSpec spec,const std::string& profile)
-  :Backend(spec),impl_(std::make_unique<Impl>(path,canvas,batch,device,precision,profile)) {
+  :Backend(spec),impl_(std::make_unique<Impl>(path,canvas,batch,device,precision)) {
     const auto& desc=NeuralNet::getModelDesc(impl_->model);
     if(desc.numInputChannels!=spec.planes || desc.numInputGlobalChannels!=spec.globals || (desc.numValueChannels!=4 && !(spec.kind==GameKind::GO && desc.numValueChannels==3)))
         throw std::runtime_error("CUDA model game input/outcome layout mismatch");
-    if(!desc.numInputMetaChannels && !profile.empty())throw std::runtime_error("Human SL profile has no metadata encoder to condition");
+    if(desc.numInputMetaChannels || !profile.empty())set_human_profile(profile);
 }
 CudaBackend::~CudaBackend()=default;
-bool CudaBackend::available() const {return !metadata_channels()||impl_->profile.initialized;}
 int CudaBackend::metadata_channels() const {return NeuralNet::getModelDesc(impl_->model).numInputMetaChannels;}
 ModelDescription CudaBackend::description() const {
     const auto& d=NeuralNet::getModelDesc(impl_->model);
     return {d.name,d.modelVersion,d.numInputMetaChannels>0,d.preferPassAliveUnderSuicideRules,d.preferExcludeTerritoryAdjacentToAtari};
-}
-void CudaBackend::append_metadata(std::vector<float>& input,int player) const {
-    if(!metadata_channels())return;
-    if(!impl_->profile.initialized)throw std::runtime_error("Human SL profile is not set");
-    if(player!=1 && player!=-1)throw std::runtime_error("Metadata requires the actual side to move");
-    const int area=impl_->canvas*impl_->canvas;
-    int board_area=std::lround(std::accumulate(input.begin(),input.begin()+area,0.0f));
-    size_t begin=input.size();input.resize(begin+192);
-    SGFMetadata::fillMetadataRow(&impl_->profile,input.data()+begin,player==1?P_BLACK:P_WHITE,board_area);
 }
 void CudaBackend::initialize(){
     auto& p=*impl_;if(p.handle)return;
@@ -72,14 +59,16 @@ std::vector<Evaluation> CudaBackend::evaluate(const InferenceInputs& inputs){
     std::vector<float> policy,pass,value,auxiliary;
     NeuralNet::getRawOutput(p.handle,p.buffers,n,obs.data(),globals.data(),metas.data(),policy,pass,value,auxiliary);
     std::vector<uint8_t> allow(n);for(int row=0;row<n;++row)allow[row]=no_result_possible(*inputs[row],spec_,p.canvas);
-    auto result=decode_cuda_outputs(policy,pass,value,auxiliary,n,p.canvas,spec_,desc.numPolicyChannels,
-                               desc.numValueChannels,desc.numScoreValueChannels,desc.postProcessParams.outputScaleMultiplier,allow);
+    auto result=decode_cuda_outputs(policy,pass,value,auxiliary,n,p.canvas,spec_,desc,allow);
     for(auto& output:result)output.policy_optimism_allowed=desc.numInputMetaChannels==0;
     return result;
 }
 std::vector<Evaluation> decode_cuda_outputs(std::vector<float>& policy,std::vector<float>& pass,
     std::vector<float>& value,std::vector<float>& auxiliary,int n,int canvas,GameSpec spec,
-    int policyChannels,int valueChannels,int scoreChannels,float scale,const std::vector<uint8_t>& allow_no_result) {
+    const ModelDesc& desc,const std::vector<uint8_t>& allow_no_result) {
+    const int policyChannels=desc.numPolicyChannels,valueChannels=desc.numValueChannels,scoreChannels=desc.numScoreValueChannels;
+    const auto& post=desc.postProcessParams;float scale=post.outputScaleMultiplier;
+    auto softplus=[](double x){return std::max(0.0,x)+std::log1p(std::exp(-std::abs(x)));};
     int area=canvas*canvas;
     // Source ModelDesc may rescale activations for FP16. Policy scaling is
     // deferred until after optimism mixing and combined with NN temperature.
@@ -107,21 +96,13 @@ std::vector<Evaluation> decode_cuda_outputs(std::vector<float>& policy,std::vect
             logits[i]=source>=valueChannels?-std::numeric_limits<double>::infinity():value[row*valueChannels+source];
         }
         out.wdl=outcome_probabilities(logits,allow_no_result.at(row));
-        float variance=auxiliary[row*scoreChannels+3];out.variance_time=40*(std::max(0.0f,variance)+std::log1p(std::exp(-std::abs(variance))));
-        float raw=auxiliary[row*scoreChannels+4]*.5f;
-        out.shortterm_value_stdev=.5*(std::max(0.0f,raw)+std::log1p(std::exp(-std::abs(raw))));out.has_auxiliary=true;
+        out.variance_time=post.varianceTimeMultiplier*softplus(auxiliary[row*scoreChannels+3]);
+        double raw=auxiliary[row*scoreChannels+4];
+        if(desc.modelVersion>=14){double s=softplus(raw*.5);out.shortterm_value_stdev=std::sqrt(s*s*post.shorttermValueErrorMultiplier);}
+        else if(desc.modelVersion>=10)out.shortterm_value_stdev=std::sqrt(softplus(raw)*post.shorttermValueErrorMultiplier);
+        else out.shortterm_value_stdev=softplus(raw);
+        out.has_auxiliary=true;
     }
     return result;
-}
-}
-
-namespace etazero { void CudaBackend::set_human_profile(const std::string& value) {validate_human_profile(value);impl_->profile=SGFMetadata::getProfile(value);} }
-
-namespace etazero {
-void CudaBackend::validate_human_profile(const std::string& value) const {if(!metadata_channels())throw std::runtime_error("Metadata model requires a human profile");SGFMetadata::getProfile(value);}
-void CudaBackend::append_profile(std::vector<float>& input,int player,const SGFMetadata& profile) const {
-
-    int board_area=std::lround(std::accumulate(input.begin(),input.begin()+impl_->canvas*impl_->canvas,0.0f));size_t begin=input.size();input.resize(begin+192);
-    SGFMetadata::fillMetadataRow(&profile,input.data()+begin,player==1?P_BLACK:P_WHITE,board_area);
 }
 }
