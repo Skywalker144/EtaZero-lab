@@ -7,13 +7,14 @@ from torch import nn
 
 from etazero.data.targets import TRAIN_TARGETS
 from etazero.data.source_data import encode_view, decode_view, encode_targets, decode_targets
-from etazero.models.network import TrainingForward
+from etazero.train.training import TrainingForward
 from etazero.train.muzero.training import TrainingForward as MuZeroForward
 from etazero.train.learner import forward_batch
 
 
 class Predictions(nn.Module):
     game = 'gomoku'
+    head_loss_weights = (1.0,)
 
     def __init__(self):
         super().__init__()

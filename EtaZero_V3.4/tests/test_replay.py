@@ -14,7 +14,8 @@ from etazero.data.reader import BatchReader, BatchPrefetcher
 
 from etazero.data.shuffle import build_snapshot, desired_window, window_sources, _groups, resource_plan, prune_derived, restore_snapshot
 from etazero.storage import save_npz, save_json, sha256
-from etazero.models.network import make_network, TrainingForward
+from etazero.models.factory import make_network
+from etazero.train.training import TrainingForward
 from etazero.train.learner import validate_epoch
 from test_python import winning_record, source_fields
 from etazero.data.source_data import encode_view, decode_view

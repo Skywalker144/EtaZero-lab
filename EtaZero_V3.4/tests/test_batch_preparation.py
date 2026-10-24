@@ -12,7 +12,7 @@ import torch
 from config_samples import CONFIGS
 from etazero.config import load_config
 from etazero.data.muzero import prepare_batch
-from etazero.models.network import make_network
+from etazero.models.factory import make_network
 from etazero.train.optimization import optimizer_for, optimization_for
 from etazero.data.reader import CudaBatchPrefetcher
 from etazero.schema import GLOBALS, HEX_GLOBAL, HEX_WHITE_GLOBAL

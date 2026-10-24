@@ -4,14 +4,16 @@ import subprocess
 
 import pytest
 from etazero.config import write_native
+from etazero.version import VERSION
 from test_multigame_diagnostics import cpu_model
 from test_multigame import BINARY
 
 
-def source_process(tmp_path,algorithm='alphazero',human=False,prune=False):
+def source_process(tmp_path,algorithm='alphazero',human=False,prune=False,pda_player=None):
     _,model,config,profile=cpu_model(tmp_path,'go',algorithm,5,6)
     profile['analysis'].update(reuse_tree=False,num_analysis_threads=2,search_threads=3,
                                min_playouts_per_thread=0,root_symmetry_pruning=prune)
+    if pda_player is not None:profile['analysis']['playout_doubling_advantage_player']=pda_player
     if human:profile['analysis'].update(human_model=str(model),human_sl_profile='',search_threads=1)
     # Keep the model configuration, replacing only the engine fields.
     text=config.read_text();start=text.index('[analysis]')
@@ -36,7 +38,7 @@ def test_source_requests_setup_turns_and_control(tmp_path,algorithm):
     assert p.returncode==0,err
     replies=[json.loads(x) for x in out.splitlines()]
     assert len(replies)==5 and not any('error' in x for x in replies),replies
-    assert next(x for x in replies if x['id']=='v')['version']=='EtaZero_V3.3'
+    assert next(x for x in replies if x['id']=='v')['version']=='EtaZero_V'+VERSION
     reports=[x for x in replies if x['id']=='board']
     assert {x['turnNumber'] for x in reports}=={0,2}
     for report in reports:
@@ -238,7 +240,7 @@ def test_gtp_streaming_controls_and_benchmark(tmp_path):
 def test_gtp_reports_current_version(tmp_path):
     p=gtp_process(tmp_path)
     try:
-        assert gtp_command(p,'version')=='= 3.3'
+        assert gtp_command(p,'version')=='= '+VERSION
         assert gtp_command(p,'quit')=='='
         assert p.wait(timeout=10)==0
     finally:
@@ -263,3 +265,125 @@ def test_human_prior_is_independent_of_include_policy_and_uses_reported_move(tmp
             index=25 if vertex=='pass' else (5-int(vertex[1:]))*5+'ABCDEFGHJKLMNOPQRST'.index(vertex[0])
             assert move['humanPrior']==pytest.approx(max(0,policy[index]))
     if prune:assert any('isSymmetryOf' in move for move in reports['True']['moveInfos'])
+
+
+@pytest.mark.parametrize('algorithm',['alphazero','muzero'])
+def test_finished_go_root_remains_analyzable(tmp_path,algorithm):
+    p=source_process(tmp_path,algorithm)
+    query=dict(id='ended',boardXSize=5,boardYSize=5,rules='chinese',komi=.5,
+               moves=[['B','pass'],['W','pass']],maxVisits=20,includePolicy=True)
+    out,err=p.communicate(json.dumps(query)+'\n',timeout=45)
+    assert p.returncode==0,err
+    report=json.loads(out)
+    assert 'error' not in report and not report.get('noResults'),report
+    assert report['turnNumber']==2 and report['rootInfo']['visits']>=20
+    assert report['moveInfos'] and all(p>=0 for p in report['policy'])
+
+
+def test_torch_primary_metadata_profiles_are_request_local(tmp_path):
+    import numpy as np
+    import torch
+    from etazero.models.katago_network import KataGoNet, inference_network
+    _,path,config,profile=cpu_model(tmp_path,'go','alphazero',5,6)
+    torch.jit.script(inference_network(KataGoNet('b2c16-fson-mish-meta',6,game='go').eval())).save(str(path))
+    profile['analysis'].update(num_analysis_threads=2,search_threads=1,human_sl_profile='',human_model='')
+    text=config.read_text();native=tmp_path/'engine.cfg';write_native(profile,native)
+    config.write_text(text[:text.index('[analysis]')]+native.read_text())
+    base=dict(boardXSize=5,boardYSize=5,rules='chinese',moves=[],maxVisits=12,includePolicy=True)
+    requests=[dict(base,id=str(i),overrideSettings={'humanSLProfile':name})
+              for i,name in enumerate(['rank_1d','rank_20k','rank_1d','rank_20k'])]
+    requests.append(dict(base,id='missing'))
+    result=subprocess.run([str(BINARY),'analysis','--stream','true','--protocol','katago',
+        '--config',str(config),'--model',str(path),'--model-id','metadata','--device','cpu'],
+        input=''.join(json.dumps(r)+'\n' for r in requests),text=True,capture_output=True,timeout=45)
+    assert result.returncode==0,result.stderr
+    reports={r['id']:r for r in map(json.loads,result.stdout.splitlines())}
+    assert all('error' not in reports[str(i)] for i in range(4)),reports
+    assert 'error' in reports['missing'] # Never invent a profile for an external model.
+    np.testing.assert_allclose(reports['0']['policy'],reports['2']['policy'],atol=1e-6)
+    np.testing.assert_allclose(reports['1']['policy'],reports['3']['policy'],atol=1e-6)
+    assert not np.allclose(reports['0']['policy'],reports['1']['policy'],atol=1e-6)
+
+
+@pytest.mark.parametrize('algorithm',['alphazero','muzero'])
+def test_sgf_roundtrip_preserves_history_modes_and_winner(tmp_path,algorithm):
+    # Pinned KataGo testpassalivesuicide.cpp: these stones distinguish the two modes.
+    p=gtp_process(tmp_path,algorithm)
+    def ok(command):
+        result=gtp_command(p,command)
+        assert result.startswith('='),(command,result)
+        return result[1:].strip()
+    try:
+        ok('rectangular_boardsize 4 5');ok('kata-set-rules chinese');ok('komi 16.5')
+        ok('kata-set-params {"alwaysComputePassAliveUnderSuicideRules":false,"excludeTerritoryAdjacentToAtari":false}')
+        rows=['...x','xx..','oxxx','oox.','.x.x']
+        stones=[f'{"B" if stone=="x" else "W"} {"ABCD"[x]}{5-y}'
+                for y,row in enumerate(rows) for x,stone in enumerate(row) if stone!='.']
+        ok('set_position '+' '.join(stones))
+        path=tmp_path/'position.sgf';ok(f'printsgf {path}')
+        raw=ok('kata-raw-nn 0')
+        ok('play b pass');ok('play w pass');assert ok('final_score')=='B+3.5'
+        ok('clear_board');ok(f'loadsgf {path}')
+        assert ok('kata-get-param alwaysComputePassAliveUnderSuicideRules')=='false'
+        assert ok('kata-raw-nn 0')==raw
+        ok('play b pass');ok('play w pass');assert ok('final_score')=='B+3.5'
+        ok('undo');ok('play w pass');assert ok('final_score')=='B+3.5'
+        ok('quit');p.wait(timeout=5)
+    finally:
+        if p.poll() is None:p.kill();p.wait()
+
+
+@pytest.mark.parametrize('algorithm',['alphazero','muzero'])
+def test_source_pda_uses_search_player_and_reports_variance(tmp_path,algorithm):
+    p=source_process(tmp_path,algorithm,pda_player='unspecified')
+    base=dict(boardXSize=5,boardYSize=5,rules='chinese',moves=[],initialPlayer='W',maxVisits=1)
+    queries=[dict(base,id=str(i),overrideSettings=settings) for i,settings in enumerate([
+        {'playoutDoublingAdvantage':-1},
+        {'playoutDoublingAdvantage':-1,'playoutDoublingAdvantagePla':'W'},
+        {'playoutDoublingAdvantage':1,'playoutDoublingAdvantagePla':'B'},
+        {'playoutDoublingAdvantage':4},
+        {'playoutDoublingAdvantage':-4},
+    ])]
+    out,err=p.communicate(''.join(json.dumps(q)+'\n' for q in queries),timeout=45)
+    assert p.returncode==0,err
+    reports={x['id']:x for x in map(json.loads,out.splitlines())}
+    for i in ('0','1','2'):
+        assert 'error' not in reports[i],reports[i]
+        assert reports[i]['rootInfo']['rawVarTimeLeft']>0
+    for key in ('rawWinrate','rawStWrError','rawVarTimeLeft'):
+        assert reports['0']['rootInfo'][key]==reports['1']['rootInfo'][key]==reports['2']['rootInfo'][key]
+    assert all('error' in reports[i] for i in ('3','4'))
+
+
+def test_gtp_parent_overrides_recompute_only_inherited_defaults(tmp_path):
+    from etazero.engine_config import load_engine_config
+    _,model,config,_=cpu_model(tmp_path,'go','alphazero',5,6)
+    source=tmp_path/'source.cfg';source.write_text('numSearchThreads=1\nmaxVisits=8\ndevice=cpu\nboard_size=5\n')
+    profile=load_engine_config(source,environ={},gtp=True)
+    text=config.read_text();native=tmp_path/'native.cfg';write_native(profile,native)
+    config.write_text(text[:text.index('[analysis]')]+native.read_text())
+    p=subprocess.Popen([str(BINARY),'gtp','--config',str(config),'--model',str(model),'--model-id','defaults','--device','cpu'],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    def ok(command):
+        value=gtp_command(p,command);assert value.startswith('='),(command,value)
+        return value[1:].strip()
+    try:
+        assert float(ok('kata-get-param rootFpuReductionMax'))==.1
+        ok('kata-set-param rootNoiseEnabled true')
+        assert float(ok('kata-get-param rootFpuReductionMax'))==0
+        ok('kata-set-param fpuLossProp 0.4')
+        assert float(ok('kata-get-param rootFpuLossProp'))==.4
+        ok('kata-set-param policyOptimism 0.1')
+        assert float(ok('kata-get-param rootPolicyOptimism'))==.1
+        ok('kata-set-param rootPolicyTemperature 1.3')
+        assert float(ok('kata-get-param rootPolicyTemperatureEarly'))==1.3
+        ok('kata-set-param rootFpuReductionMax 0.7')
+        ok('kata-set-param rootNoiseEnabled false')
+        assert float(ok('kata-get-param rootFpuReductionMax'))==.7
+        ok('kata-set-param playoutDoublingAdvantage -1')
+        assert float(ok('kata-get-param playoutDoublingAdvantage'))==-1
+        assert gtp_command(p,'kata-set-param playoutDoublingAdvantage 4').startswith('?')
+        assert float(ok('kata-get-param playoutDoublingAdvantage'))==-1
+        ok('quit');p.wait(timeout=5)
+    finally:
+        if p.poll() is None:p.kill();p.wait()

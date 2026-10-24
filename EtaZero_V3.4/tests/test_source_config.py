@@ -82,3 +82,39 @@ def test_source_thread_aliases_conflict_across_includes(tmp_path):
         load_engine_config(path,environ={})
     path.write_text('@include parent.cfg\nnumSearchThreads=3\n')
     assert load_engine_config(path,environ={})['analysis']['search_threads']==3
+
+
+def test_source_search_defaults_and_conditional_overrides(tmp_path):
+    path=tmp_path/'source.cfg';path.write_text('numSearchThreads=1\n')
+    c=load_engine_config(path,environ={})['analysis']
+    assert (c['virtual_loss'],c['subtree_value_bias_factor'],c['subtree_value_bias_weight_exponent'])==(1,.45,.85)
+    assert c['root_fpu_reduction_max']==.1 and c['playout_doubling_advantage_player']=='unspecified'
+    parent=tmp_path/'parent.cfg';parent.write_text('rootNoiseEnabled=true\nfpuLossProp=.3\nrootPolicyTemperature=1.4\n')
+    path.write_text('@include parent.cfg\nnumSearchThreads=1\n')
+    c=load_engine_config(path,environ={})['analysis']
+    assert (c['root_fpu_reduction_max'],c['root_fpu_loss_prop'],c['root_policy_temperature_early'])==(0,.3,1.4)
+    assert load_engine_config(path,environ={'ENGINE_ROOT_FPU_REDUCTION_MAX':'.7'})['analysis']['root_fpu_reduction_max']==.7
+    assert load_engine_config(path,environ={},overrides={'analysis':{'root_fpu_reduction_max':.6}})['analysis']['root_fpu_reduction_max']==.6
+    path.write_text(path.read_text()+'rootFpuReductionMax=.8\n')
+    assert load_engine_config(path,environ={})['analysis']['root_fpu_reduction_max']==.8
+
+
+@pytest.mark.parametrize('value',[-3,-1,0,1,3])
+def test_source_signed_pda_domain(tmp_path,value):
+    path=tmp_path/'source.cfg';path.write_text(f'numSearchThreads=1\nplayoutDoublingAdvantage={value}\nplayoutDoublingAdvantagePla=W\n')
+    c=load_engine_config(path,environ={})['analysis']
+    assert c['playout_doubling_advantage']==value and c['playout_doubling_advantage_player']=='white'
+
+
+@pytest.mark.parametrize('value',[-3.01,3.01,4,float('inf'),float('nan')])
+def test_source_pda_rejects_values_outside_source_domain(tmp_path,value):
+    path=tmp_path/'source.cfg';path.write_text(f'numSearchThreads=1\nplayoutDoublingAdvantage={value}\n')
+    with pytest.raises(ValueError,match='playout_doubling_advantage'):
+        load_engine_config(path,environ={})
+
+
+@pytest.mark.parametrize('value',['unspecified','empty','0','red'])
+def test_source_pda_explicit_player_must_be_black_or_white(tmp_path,value):
+    path=tmp_path/'source.cfg';path.write_text(f'numSearchThreads=1\nplayoutDoublingAdvantagePla={value}\n')
+    with pytest.raises(ValueError,match='playoutDoublingAdvantagePla'):
+        load_engine_config(path,environ={})

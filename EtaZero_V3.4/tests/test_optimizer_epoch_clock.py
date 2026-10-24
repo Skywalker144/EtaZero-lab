@@ -4,7 +4,7 @@ import torch
 import pytest
 from config_samples import CONFIGS
 from etazero.config import load_config
-from etazero.models.network import make_network
+from etazero.models.factory import make_network
 from etazero.train.optimization import Optimization, optimizer_for, optimization_for
 
 
