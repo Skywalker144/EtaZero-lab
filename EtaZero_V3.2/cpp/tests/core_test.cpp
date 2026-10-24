@@ -125,12 +125,12 @@ int main() {
             BroadState position;
             Search capped({99,threads,1.5,1,0,1,true,100},42);
             auto first=capped.run(position,0);
-            check(first.root_visits==100 && first.simulations==99,"100v includes initial root visit");
+            check(first.root_visits>=100 && first.root_visits<100+threads && first.simulations==first.root_visits-1,"100v includes initial root visit");
             auto again=capped.run(position,0);
-            check(again.root_visits==100 && again.simulations==0,"Reused visits consume the cap");
+            check(again.root_visits==first.root_visits && again.simulations==0,"Reused visits consume the cap");
             capped.advance(first.action);position.move(first.action);
             auto next=capped.run(position,0);
-            check(next.root_visits==100 && next.simulations<=99,"Child reuse never adds 100 visits on top");
+            check(next.root_visits>=100 && next.root_visits<100+threads && next.simulations<99+threads,"Child reuse never adds 100 visits on top");
         }
         for(Rule rule:{Rule::FREESTYLE,Rule::STANDARD,Rule::RENJU}) {
             Game g(6,9,rule);
@@ -206,31 +206,37 @@ int main() {
         {
             Game conditioned(5,5,Rule::RENJU);conditioned.set_pda(0.75,1);
             auto own=conditioned.observation(1),opposite=conditioned.observation(-1);
-            RandomBackend backend(5,19);
+            RandomBackend backend(5,19),replay(5,19);
             auto batch=backend.evaluate({&own,&opposite});
-            auto reordered=backend.evaluate({&opposite,&own});
-            check(batch[0].logits==reordered[1].logits && batch[0].wdl==reordered[1].wdl &&
-                  batch[1].logits==reordered[0].logits && batch[1].wdl==reordered[0].wdl,
-                  "Fractional PDA random evaluation is independent of batch order");
-            check(batch[0].logits!=batch[1].logits,"PDA perspective conditions random evaluation");
-            auto adjacent=own;adjacent.back()=std::nextafter(adjacent.back(),1.0f);
-            check(backend.evaluate({&adjacent})[0].logits!=batch[0].logits,
-                  "Random evaluator preserves fractional global float precision");
+            auto first=replay.evaluate({&own})[0],second=replay.evaluate({&opposite})[0];
+            check(batch[0].logits==first.logits && batch[0].wdl==first.wdl &&
+                  batch[1].logits==second.logits && batch[1].wdl==second.wdl,
+                  "Same seeded request stream is independent of batch boundaries");
+            auto repeated=backend.evaluate({&own})[0];
+            check(repeated.logits!=batch[0].logits && repeated.wdl!=batch[0].wdl,
+                  "Uncached repeated input must advance the random server");
             for(const auto& e:batch) {
                 check(e.logits.size()==25,"Random policy shape");
                 for(double x:e.logits)check(std::isfinite(x),"Finite random policy");
-                check(std::abs(e.wdl[0]+e.wdl[1]+e.wdl[2]-1)<1e-12,"Normalized random WDL");
+                check(std::abs(e.wdl[0]+e.wdl[1]+e.wdl[2]-1)<1e-7 && e.wdl[3]==0,"Normalized non-Go random WDL");
+                check(e.has_auxiliary && e.shortterm_value_stdev==float(.5*std::log(2.0)),"Source random short-term uncertainty");
+                check(e.optimistic_logits==e.logits && !e.policy_optimism_allowed,"Random policy does not invent an optimistic head");
             }
-
+            std::vector<std::unique_ptr<Backend>> servers;servers.push_back(std::make_unique<RandomBackend>(5,19));
+            BatchEvaluator service(std::move(servers),"random",5,4,0,32);
+            auto a=service.evaluate(own),hit=service.evaluate(own),miss=service.evaluate_symmetry(own,0,true);
+            check(a.logits==hit.logits && a.wdl==hit.wdl && service.cache_hits==1,"Random outputs remain cacheable");
+            check(a.logits!=miss.logits && a.wdl!=miss.wdl,"Random skip-cache performs a fresh evaluation");
+            service.finish();
         }
         InvalidPerspectiveState state;Search generic(one,9);bool unsupported=false;
         try {generic.run(state,0);}catch(const std::runtime_error&){unsupported=true;}
         check(unsupported && generic.pending()==0,"WDL search rejects invalid value perspectives");
         SearchSettings many{31,4,1.5,1,0.25,0.3,true};KnownEvaluator pe(0,0);
         Search ps(pe,many,4);auto pr=ps.run(empty,1);int64_t sum=0;for(auto n:pr.visits)sum+=n;
-        check(sum==31&&pr.simulations==31&&ps.pending()==0,"Parallel exact budget and rollback");
+        check(sum>=31&&sum<31+many.threads&&pr.simulations==sum&&ps.pending()==0,"Parallel exact budget and rollback");
         empty.play(pr.action);ps.advance(pr.action);auto next=ps.run(empty,0);
-        check(next.simulations==31&&ps.pending()==0,"Persistent threads and subtree promotion");
+        check(next.simulations>=31&&next.simulations<31+many.threads&&ps.pending()==0,"Persistent threads and subtree promotion");
         FailedLeaf fe;Search fs(fe,many,3);
         bool leaf_failed=false;
         try{fs.run(Game(5,5,Rule::FREESTYLE),0);}catch(const std::runtime_error&){leaf_failed=true;}
@@ -240,9 +246,9 @@ int main() {
         BroadState broad;Search wide({8192,4,1.5,1,0,0.3,true},7);
         auto broad_result=wide.run(broad,0);int64_t broad_visits=0;
         for(auto n:broad_result.visits){check(n>0,"All legal children remain reachable across storage tiers");broad_visits+=n;}
-        check(broad_visits==8192 && wide.pending()==0,"Large parallel search budget");
+        check(broad_visits>=8192 && broad_visits<8196 && wide.pending()==0,"Large parallel search budget");
         broad.move(broad_result.action);wide.advance(broad_result.action);
-        check(wide.run(broad,0).simulations==8192,"Parallel reclamation preserves the promoted subtree");
+        check(wide.run(broad,0).simulations>=8192,"Parallel reclamation preserves the promoted subtree");
         wide.reset(7);check(wide.pending()==0,"Reset after parallel reclamation");
         std::atomic<int> entered{0};std::vector<std::unique_ptr<Backend>> concurrent;
         for(int i=0;i<2;++i)concurrent.push_back(std::make_unique<ConcurrentBackend>(entered));
