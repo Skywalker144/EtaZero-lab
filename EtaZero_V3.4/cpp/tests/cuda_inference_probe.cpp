@@ -18,5 +18,5 @@ int main(int argc,char** argv){try{
     for(auto& row:rows)inputs.push_back(&row);
     auto outputs=backend.evaluate(inputs);std::cout<<std::setprecision(17);
     for(auto& out:outputs){for(auto x:out.scaled_policy_logits())std::cout<<x<<' ';for(auto x:out.wdl)std::cout<<x<<' ';
-        for(auto x:out.scaled_policy_logits(true))std::cout<<x<<' ';std::cout<<out.shortterm_value_stdev<<'\n';}
+        for(auto x:out.scaled_policy_logits(true))std::cout<<x<<' ';std::cout<<out.shortterm_value_stdev<<' '<<out.variance_time<<'\n';}
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

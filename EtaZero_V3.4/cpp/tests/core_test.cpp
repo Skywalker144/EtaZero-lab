@@ -5,6 +5,7 @@
 #include <iostream>
 #include <filesystem>
 #include <limits>
+#include <future>
 using namespace etazero;
 WDL wdl(double v) { return {(1+v)/2,0,(1-v)/2}; }
 void check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
@@ -31,6 +32,13 @@ struct GatedBackend : IdentityBackend {
     std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
         while(!ready.load())std::this_thread::yield();
         return IdentityBackend::evaluate(inputs);
+    }
+};
+struct PausedBackend : IdentityBackend {
+    std::promise<void>& entered;std::shared_future<void> release;
+    PausedBackend(std::promise<void>& e,std::shared_future<void> r):entered(e),release(r) {}
+    std::vector<Evaluation> evaluate(const InferenceInputs& inputs) override {
+        entered.set_value();release.wait();return IdentityBackend::evaluate(inputs);
     }
 };
 struct NonemptyBackend : IdentityBackend {
@@ -258,6 +266,19 @@ int main() {
         for(int i=0;i<2;++i)service_callers.emplace_back([&]{services.evaluate(empty.observation());++serviced;});
         for(auto& t:service_callers)t.join();services.finish();
         check(serviced==2 && services.rows_by_server[0]==1 && services.rows_by_server[1]==1,"Each service owns a concurrent backend");
+        {
+            std::promise<void> entered_batch,release_batch;
+            std::vector<std::unique_ptr<Backend>> servers;
+            servers.push_back(std::make_unique<PausedBackend>(entered_batch,release_batch.get_future().share()));
+            BatchEvaluator paced(std::move(servers),"paced",5,1,0,0);
+            paced.wait_for_next_evaluation(); // No pending work must return immediately.
+            auto evaluation=std::async(std::launch::async,[&]{return paced.evaluate(empty.observation());});
+            entered_batch.get_future().wait();
+            auto terminal=std::async(std::launch::async,[&]{paced.wait_for_next_evaluation();});
+            bool waited=terminal.wait_for(std::chrono::milliseconds(30))==std::future_status::timeout;
+            release_batch.set_value();terminal.get();evaluation.get();paced.finish();
+            check(waited,"Terminal pacing must wait for an in-flight NN batch");
+        }
         // All servers can enter the timed fill wait for a single request.
         // Once one takes it, the other waiters must return to waiting for work.
         std::vector<std::unique_ptr<Backend>> waiting_backends;

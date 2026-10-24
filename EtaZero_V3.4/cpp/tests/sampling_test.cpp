@@ -104,6 +104,23 @@ int main(int argc,char** argv) {
         }
         return 0;
     }
+    // Source PDA is signed; an unspecified side resolves once for a whole search.
+    for(bool graph:{false,true}) {
+        Conditioned eval;Game game(5,6,Rule::RENJU);game.set_pda(-1,0);
+        AlphaZeroState root(game,eval,-1);root.evaluate();near(eval.halfs.back(),.5);
+        root.move(0);root.evaluate();near(eval.halfs.back(),-.5);
+        SearchSettings config{20,1,1,1,0,1,true};config.graph_search=graph;
+        Search search(eval,config,18);SearchRun run;run.max_visits=20;run.search_for_player=-1;
+        auto first=search.run(game,0,run);near(first.initial_visits,0);
+        auto reused=search.run(game,0,run);check(reused.initial_visits>=20,"PDA reuses unchanged conditioning");
+        run.search_for_player=1;
+        auto changed=search.run(game,0,run);near(changed.initial_visits,0);
+        game.play(changed.action);search.advance(changed.action);
+        // Ponder for the same side keeps conditioning across an opponent root.
+        auto pondered=search.run(game,0,run);check(pondered.initial_visits>0,"PDA retains tree for the same serving player");
+        run.search_for_player=0;
+        auto switched=search.run(game,0,run);near(switched.initial_visits,0);
+    }
     check_hint_input();
     SelfplaySearchConfig c{400,70,.6,0,false,true,.9,3,350,.1};
     auto strong=selfplay_search_limits(c,{},false,{3,1},1),weak=selfplay_search_limits(c,{},false,{3,1},-1);

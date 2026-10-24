@@ -13,7 +13,7 @@ int main(int argc,char** argv){try{
     std::ofstream file(argv[6],std::ios::binary);for(auto& row:rows){inputs.push_back(&row);file.write(reinterpret_cast<const char*>(row.data()),row.size()*sizeof(float));}file.close();
     auto initial=backend.initial(inputs),current=initial;std::cout<<std::setprecision(17);
     auto output=[&]{for(auto& out:current){for(float x:out.latent->copy_to_cpu())std::cout<<x<<' ';auto& e=out.evaluation;
-        for(auto x:e.scaled_policy_logits())std::cout<<x<<' ';for(auto x:e.wdl)std::cout<<x<<' ';for(auto x:e.scaled_policy_logits(true))std::cout<<x<<' ';std::cout<<e.shortterm_value_stdev<<'\n';}};
+        for(auto x:e.scaled_policy_logits())std::cout<<x<<' ';for(auto x:e.wdl)std::cout<<x<<' ';for(auto x:e.scaled_policy_logits(true))std::cout<<x<<' ';std::cout<<e.shortterm_value_stdev<<' '<<e.variance_time<<'\n';}};
     output();
     for(int step=0;step<4;++step){
         std::vector<muzero::InferenceAction> actions;

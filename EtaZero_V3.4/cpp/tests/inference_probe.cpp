@@ -15,7 +15,7 @@ void output(const std::vector<Evaluation>& values) {
         for(auto x:e.logits)std::cout<<x<<',';
         for(auto x:e.wdl)std::cout<<x<<',';
         for(auto x:e.optimistic_logits)std::cout<<x<<',';
-        std::cout<<e.shortterm_value_stdev<<']';
+        std::cout<<e.shortterm_value_stdev<<','<<e.variance_time<<']';
     }
     std::cout<<']';
 }
@@ -31,7 +31,7 @@ void close(const std::vector<Evaluation>& a,const std::vector<Evaluation>& b) {
             compare(a[i].logits[j],b[i].logits[j]);compare(a[i].optimistic_logits[j],b[i].optimistic_logits[j]);
         }
         for(int j=0;j<3;++j)compare(a[i].wdl[j],b[i].wdl[j]);
-        compare(a[i].shortterm_value_stdev,b[i].shortterm_value_stdev);
+        compare(a[i].shortterm_value_stdev,b[i].shortterm_value_stdev);compare(a[i].variance_time,b[i].variance_time);
     }
 }
 int main(int argc,char** argv) {

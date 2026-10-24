@@ -11,7 +11,7 @@ void append(std::vector<double>& result,const etazero::Evaluation& e) {
     result.insert(result.end(),e.logits.begin(),e.logits.end());
     result.insert(result.end(),e.wdl.begin(),e.wdl.end());
     result.insert(result.end(),e.optimistic_logits.begin(),e.optimistic_logits.end());
-    result.push_back(e.shortterm_value_stdev);
+    result.push_back(e.shortterm_value_stdev);result.push_back(e.variance_time);
 }
 void append(std::vector<double>& result,const etazero::muzero::InferenceOutput& e) {
     append(result,e.evaluation);auto latent=e.latent->copy_to_cpu();

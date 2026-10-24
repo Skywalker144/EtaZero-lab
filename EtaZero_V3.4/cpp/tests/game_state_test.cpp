@@ -36,6 +36,11 @@ void same_state(const Game& a,const Game& b) {
     check(a.history_identity()==b.history_identity()&&a.fen()==b.fen(),"Copied history");
     for(int m=0;m<a.actions();++m)check(a.legal(m)==b.legal(m),"Copied legal actions");
 }
+struct CaptureEvaluation : Evaluator {
+    std::vector<float> seen;
+    Evaluation evaluate(const std::vector<float>& observation) override {seen=observation;return {};}
+    Evaluation evaluate_position(const std::vector<float>& observation,int,int,bool,double,bool,double) override {return evaluate(observation);}
+};
 struct NoEvaluation : Evaluator {
     Evaluation evaluate(const std::vector<float>&) override {throw std::runtime_error("Graph identity needs no inference");}
 };
@@ -115,6 +120,14 @@ int main() {
     reset.play(4);reset.play(9);check(reset.legal(6)&&!ko.legal(6),"Independent ko history after reset");
     ko.play(25);reset=ko;reset.play(25);
     check(reset.finished()&&!ko.finished(),"Reset preserves pass history");
+    auto ended_observation=reset.observation();auto ended_history=reset.history_identity();
+    CaptureEvaluation capture;AlphaZeroState ended_root(reset,capture);
+    check(!ended_root.terminal()&&ended_root.legal(25),"Finished Go remains searchable at the root");
+    ended_root.evaluate();
+    check(capture.seen==ended_observation,"Finished root must retain original NN history inputs");
+    ended_root.move(25);
+    check(ended_root.terminal(),"Go descendants retain ordinary terminal semantics");
+    check(reset.finished()&&reset.observation()==ended_observation&&reset.history_identity()==ended_history,"Search must not mutate original terminal history");
 
     Game repetition(10,10,Rule::XIANGQI);
     {
