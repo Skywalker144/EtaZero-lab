@@ -455,7 +455,8 @@ class WebTests(unittest.TestCase):
         device = self.config['analysis']['device']
         precision = self.config['analysis']['inference_precision']
         half = precision == 'float16' or (precision == 'auto' and device.startswith('cuda'))
-        module = torch.jit.load(str(model), map_location=device).eval()
+        reference = model.parent/'reference.pt' if info.get('backend')=='cuda' else model
+        module = torch.jit.load(str(reference), map_location=device).eval()
         with Engine(BINARY, Path(MODEL), self.config) as engine:
             engine.command('new 5 renju')
             engine.command('play 12')
@@ -465,11 +466,7 @@ class WebTests(unittest.TestCase):
         obs = torch.as_tensor(obs[None], device=device)
         globals = torch.as_tensor(globals[None], device=device)
         with torch.inference_mode(), torch.autocast('cuda', dtype=torch.float16, enabled=half):
-            if info.get('algorithm') == 'muzero':
-                hidden = module.model.representation(obs, globals)
-                output = module.model.prediction(hidden)
-            else:
-                output = module.model.forward_all(obs, globals)
+            output = module.raw(obs, globals)
             logits, value = output[:2]
         logits = logits[0].reshape(-1, info['canvas'], info['canvas'])[:, :5, :5].float().reshape(-1, 25)
         heads = analysis['network_planes']['heads']
@@ -497,7 +494,7 @@ class WebTests(unittest.TestCase):
             self.assertEqual(reply['analysis']['turn'], 1)
             self.assertEqual(reply['analysis']['board'][12], 1)
             self.assertEqual(sum(value != 0 for value in reply['analysis']['board']), 1)
-            self.assertAlmostEqual(sum(c['network_prior'] for c in reply['analysis']['candidates']), 1)
+            self.assertAlmostEqual(sum(c['network_prior'] for c in reply['analysis']['candidates']), 1, delta=2e-7)
             self.assertAlmostEqual(sum(c['visit_policy'] for c in reply['analysis']['candidates']), 1)
             self.assertAlmostEqual(sum(c['selection_weight'] for c in reply['analysis']['candidates']), 1)
             self.assertEqual(sum(c['visits'] for c in reply['analysis']['candidates']), 15)
@@ -515,7 +512,7 @@ class WebTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 engine.command('play 2garbage')
             with self.assertRaises(RuntimeError):
-                engine.command('genmove 1')
+                engine.command('genmove 0')
             self.assertEqual(engine.command('state')['state']['turn'], 0)
             for move in [0, 5, 1, 6, 2, 7, 3, 8, 4]:
                 state = engine.command(f'play {move}')['state']

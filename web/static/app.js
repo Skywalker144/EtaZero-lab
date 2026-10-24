@@ -101,7 +101,7 @@ function boardCandidates(analysis) {
 function candidateDetail(c, analysis) {
   const value = v => Number.isFinite(v) ? v.toFixed(4) : '—';
   const boardRank = boardCandidates(analysis).find(point => point.action === c.action)?.rank;
-  return `${coordinate(c.action, analysis.board_size)} · 棋盘排名 ${boardRank || '—'} · 得分率 ${percent(c.winrate)}% · W/D/L ${c.wdl ? c.wdl.map(p => percent(p)).join(' / ') : '—'} · 访问 ${c.visits} (${percent(c.visit_policy)}%) · 选择 ${percent(c.selection_weight)}% · 原始权重 ${value(c.raw_selection_weight)} · 效用 ${value(c.utility)} · LCB ${value(c.lcb)} · 半径 ${value(c.radius)} · 改进策略 ${percent(c.improved_policy)}% · PV ${(c.pv || []).map(a => coordinate(a, analysis.board_size)).join(' ')}`;
+  return `${coordinate(c.action, analysis.board_size)} · 棋盘排名 ${boardRank || '—'} · 得分率 ${percent(c.winrate)}% · ${c.wdl?.length === 4 ? 'W/D/L/NR' : 'W/D/L'} ${c.wdl ? c.wdl.map(p => percent(p)).join(' / ') : '—'} · 访问 ${c.visits} (${percent(c.visit_policy)}%) · 选择 ${percent(c.selection_weight)}% · 原始权重 ${value(c.raw_selection_weight)} · 效用 ${value(c.utility)} · LCB ${value(c.lcb)} · 半径 ${value(c.radius)} · 改进策略 ${percent(c.improved_policy)}% · PV ${(c.pv || []).map(a => coordinate(a, analysis.board_size)).join(' ')}`;
 }
 function compactVisits(visits) {
   if (visits >= 1e6) return (visits / 1e6).toFixed(1) + 'm';
@@ -519,8 +519,9 @@ function renderCandidates() {
   $('candidates').append(fragment);
 }
 function renderWdl(id, label, values) {
-  const names = ['W', 'D', 'L'], classes = ['win', 'draw', 'loss'];
+  const names = ['W', 'D', 'L', 'NR'], classes = ['win', 'draw', 'loss', 'no-result'];
   $(id).classList.add('wdl-row');
+  $(id).style.gridTemplateColumns = `auto repeat(${values.length}, 1fr)`;
   $(id).innerHTML = `<span>${label}</span>` + values.map((value, i) =>
     `<span><i class="wdl-key ${classes[i]}" aria-hidden="true"></i>${names[i]} ${percent(value)}%</span>`).join('');
 }
@@ -549,7 +550,10 @@ function renderAnalysis() {
     $('value').textContent = `${a.root_value >= 0 ? '+' : ''}${a.root_value.toFixed(4)}`;
     renderWdl('wdl', '搜索', a.wdl);
     renderWdl('network-wdl', '网络', a.network_wdl);
-    ['wdl-win', 'wdl-draw', 'wdl-loss'].forEach((id, i) => { $(id).style.width = `${a.wdl[i] * 100}%`; });
+    ['wdl-win', 'wdl-draw', 'wdl-loss', 'wdl-no-result'].forEach((id, i) => {
+      $(id).hidden = i >= a.wdl.length;
+      $(id).style.width = `${(a.wdl[i] || 0) * 100}%`;
+    });
     $('inference-metrics').textContent = `NN 请求 ${a.requests} · 批次 ${a.batches} · 平均批量 ${a.batches ? (a.requests / a.batches).toFixed(2) : '—'}`;
     $('raw-analysis').textContent = JSON.stringify(a, null, 2);
     renderHeatmaps();

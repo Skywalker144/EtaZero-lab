@@ -241,3 +241,5 @@ footer {display:flex;justify-content:space-between;gap:12px;max-width:1840px;mar
 .xiangqi-policy-heads section {min-width:0}
 .xiangqi-policy-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;margin-bottom:1em;}
 .xiangqi-policy-list button {font-size:11px;padding:6px;white-space:normal;overflow-wrap:anywhere}
+
+#wdl-no-result,.wdl-key.no-result {background:var(--muted)}

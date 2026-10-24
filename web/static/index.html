@@ -79,7 +79,7 @@
         <div class="analysis-context"><span id="analysis-context" role="status" aria-live="polite"></span><button id="show-analysis" title="在主棋盘查看本次搜索的落子前局面">定位局面</button></div>
         <div class="metrics"><div><small>根访问</small><strong id="completed"></strong></div><div><small>搜索耗时</small><strong id="seconds"></strong></div><div><small>根访问 / s</small><strong id="throughput"></strong></div></div>
         <div class="value-heading"><span id="value-label">当前方 W−L</span><strong id="value"></strong></div>
-        <div class="wdl-bar" aria-hidden="true"><i id="wdl-win"></i><i id="wdl-draw"></i><i id="wdl-loss"></i></div>
+        <div class="wdl-bar" aria-hidden="true"><i id="wdl-win"></i><i id="wdl-draw"></i><i id="wdl-loss"></i><i id="wdl-no-result" hidden></i></div>
         <p id="wdl" class="mono metric-note"></p><p id="network-wdl" class="mono metric-note muted"></p>
         <div id="inference-metrics" class="inference-metrics mono"></div><p id="candidate-detail" class="heatmap-detail" aria-live="polite">悬停候选点查看 W/D/L、LCB 和主变化。</p>
         <div class="tabs" role="tablist" aria-label="分析视图"><button id="tab-candidates" role="tab" aria-controls="candidates-view" aria-selected="true" data-tab="candidates-view">候选点</button><button id="tab-network" role="tab" aria-controls="network-view" aria-selected="false" data-tab="network-view" tabindex="-1">网络输出</button><button id="tab-heatmaps" role="tab" aria-controls="heatmaps-view" aria-selected="false" data-tab="heatmaps-view" tabindex="-1">策略对照</button><button id="tab-raw" role="tab" aria-controls="raw-view" aria-selected="false" data-tab="raw-view" tabindex="-1">原始数据</button></div>

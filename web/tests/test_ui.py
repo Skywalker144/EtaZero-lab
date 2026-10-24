@@ -370,6 +370,13 @@ class AnalysisUpdateTests(unittest.TestCase):
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto(f'http://127.0.0.1:{server.server_port}')
             page.wait_for_function("document.querySelector('#status').textContent === '轮到你落子'")
+            # Old three-class models stay readable; V3.2 exposes a distinct NR.
+            self.assertTrue(page.locator('#wdl-no-result').is_hidden())
+            page.evaluate("renderWdl('wdl', '搜索', [.4, .2, .3, .1])")
+            self.assertIn('D 20.0%', page.locator('#wdl').inner_text())
+            self.assertIn('NR 10.0%', page.locator('#wdl').inner_text())
+            page.evaluate("renderWdl('wdl', '搜索', [.5, .12, .38])")
+            self.assertNotIn('NR', page.locator('#wdl').inner_text())
             candidate = page.locator('[data-candidate="114"]')
             candidate.hover()
             self.assertEqual(page.locator('#board .preview-point').count(), 0)
