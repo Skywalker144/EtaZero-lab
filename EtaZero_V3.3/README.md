@@ -80,6 +80,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 | 任务 | 阅读入口 |
 |---|---|
 | 明确期望的 EtaZero 与 KataGo 的差异，并据此审查共有机制 | [定位与对齐目标](docs/katago-target.md) |
+| 寻找模块、公共实现及构建依赖 | [代码职责与依赖](docs/implementation.md#代码职责与依赖) |
 | 查看对局线程、搜索线程、共享组批及 C++ / Python 分工 | [执行架构](docs/implementation.md#执行架构) |
 | 测量并调整 selfplay 并行局数、推理 batch 和服务数 | [并行参数短测](docs/implementation.md#selfplay-并行参数短测) |
 | 理解原始对局、两阶段 shuffle 和训练预取 | [数据链路](docs/implementation.md#数据链路) |
