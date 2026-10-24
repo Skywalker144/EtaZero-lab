@@ -3,6 +3,9 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from reference.sources import source_root
 import subprocess
 import tempfile
 import sys
@@ -13,7 +16,7 @@ COMMIT = 'df152116e3787c75c6a3de099d261ca092b7dfc1'
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, default=Path('/home/sky/RL/SkyZero/KataGomo'))
+    parser.add_argument('--source', type=Path, default=source_root('KataGomo'))
     args = parser.parse_args()
     source = args.source.resolve()
     if subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip() != COMMIT:

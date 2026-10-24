@@ -15,6 +15,20 @@ import pytest
 from config_samples import CONFIG_ROOT
 
 
+@pytest.fixture
+def native_reference_precision(monkeypatch):
+    """Compare Python and native at full FP32, independent of learner TF32 state."""
+    import torch
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision('highest')
+    monkeypatch.setenv('NVIDIA_TF32_OVERRIDE', '0')
+    try:
+        with torch.backends.cudnn.flags(benchmark=False, allow_tf32=False):
+            yield
+    finally:
+        torch.set_float32_matmul_precision(precision)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def isolated_configuration_sources():
     """Parser fallback parents and umbrella defaults come from test samples."""

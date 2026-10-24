@@ -6,6 +6,9 @@ import json
 import math
 import re
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from reference.sources import source_root
 import subprocess
 import tempfile
 from check_katago_graph import body
@@ -13,7 +16,7 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=Path('/home/sky/RL/SkyZero/KataGo'))
+    p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=source_root('KataGo'))
     p.add_argument('--build',type=Path,default=ROOT/'build');p.add_argument('--output',type=Path);a=p.parse_args()
     manifest=json.loads((ROOT/'reference_sources.json').read_text())['KataGo'];source=a.source/'cpp/program/play.cpp'
     assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=a.source,text=True).strip()==manifest['commit']

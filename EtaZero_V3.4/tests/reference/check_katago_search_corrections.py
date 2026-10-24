@@ -5,6 +5,9 @@ import itertools
 import json
 import math
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from reference.sources import source_root
 import random
 import subprocess
 import tempfile
@@ -15,7 +18,7 @@ ROOT=Path(__file__).resolve().parents[2]
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('--source',type=Path,default=Path('/home/sky/RL/SkyZero/KataGo'))
+    parser.add_argument('--source',type=Path,default=source_root('KataGo'))
     parser.add_argument('--binary',type=Path,default=ROOT/'build/search_corrections_test')
     parser.add_argument('--output',type=Path)
     args=parser.parse_args()

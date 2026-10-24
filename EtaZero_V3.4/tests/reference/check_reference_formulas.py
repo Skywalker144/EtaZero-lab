@@ -14,6 +14,9 @@ import json
 import logging
 import math
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from reference.sources import source_root
 from types import SimpleNamespace
 
 
@@ -193,7 +196,7 @@ def check_norm_history(eta, reference):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--katago-root', type=Path, default=Path.home()/'RL/SkyZero/KataGo')
+    parser.add_argument('--katago-root', type=Path, default=source_root())
     args = parser.parse_args()
     eta_root = Path(__file__).resolve().parents[2]
     eta_shuffle = Source(eta_root/'python/etazero/data/shuffle.py')
