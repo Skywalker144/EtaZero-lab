@@ -10,10 +10,10 @@ from test_replay import id_snapshot
 
 @pytest.mark.parametrize('area', [25, 121, 225, 361])
 def test_td_convex_recurrence_preserves_boundary_probabilities(area):
-    search = np.tile(np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1],
-                               [0, 1-1e-7, 1e-7]], np.float32), (40, 1))
+    search = np.tile(np.array([[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 1, 0],
+                               [0, 1-1e-7, 1e-7, 0], [0, 0, 0, 1]], np.float32), (40, 1))
     players = np.resize([1, -1], len(search))
-    for terminal in np.eye(3):
+    for terminal in np.eye(4):
         td = trajectory_td_targets(search, players, terminal, area)
         assert np.isfinite(td).all() and (td >= 0).all() and (td <= 1).all()
         np.testing.assert_allclose(td.sum(-1), 1, atol=1e-7)
@@ -32,7 +32,8 @@ def test_reader_resume_preserves_targets_without_scanning_or_repair(tmp_path, sp
         arrays = {key: file[key] for key in file.files}
     # Deliberately invalid: the reader now only owns layout/cursor validation.
     # The learner's every-batch nonfinite-loss check handles this on consumption.
-    arrays['td_value'][5] = [-5e-11, 1., 7e-9]
+    arrays['globalTargetsNC'][5,4:7] = [-5e-11, 7e-9, 0.]
+    arrays['drawTargetsNC'][5,1]=1.
     np.savez(path, **arrays)
     digest = sha256(path)
     reader = BatchReader(snapshot, 4, 1, 17, split=split)
@@ -45,7 +46,9 @@ def test_reader_resume_preserves_targets_without_scanning_or_repair(tmp_path, sp
     try:
         batch = resumed.next()
         assert batch['globals'][:, 5].tolist() == [4, 5, 6, 7]
-        np.testing.assert_array_equal(batch['td_value'], arrays['td_value'][4:8])
+        from etazero.source_data import decode_view
+        from etazero.data import TRAIN_TARGETS
+        np.testing.assert_array_equal(batch['td_value'], decode_view(arrays,TRAIN_TARGETS)['td_value'][4:8])
         assert resumed.state()['offset'] == 8
     finally:
         resumed.close()
@@ -59,15 +62,15 @@ def test_reader_still_rejects_invalid_layout(tmp_path, bad):
     with np.load(path) as file:
         arrays = {k: file[k] for k in file.files}
     if bad == 'dtype':
-        arrays['value'] = arrays['value'].astype(np.float64)
+        arrays['drawTargetsNC'] = arrays['drawTargetsNC'].astype(np.float64)
     elif bad == 'shape':
-        arrays['value'] = arrays['value'][:, :2]
+        arrays['drawTargetsNC'] = arrays['drawTargetsNC'][:, :2]
     else:
-        del arrays['value']
+        del arrays['drawTargetsNC']
     np.savez(path, **arrays)
     reader = BatchReader(snapshot, 4, 1, 17)
     try:
-        with pytest.raises(ValueError, match='Invalid training'):
+        with pytest.raises(ValueError, match='(source|drawTargetsNC)'):
             reader.next()
     finally:
         reader.close()

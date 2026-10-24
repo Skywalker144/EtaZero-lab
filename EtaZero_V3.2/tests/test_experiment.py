@@ -481,7 +481,7 @@ def test_experiment_restarts_archived_arm_with_new_architecture(tmp_path, monkey
     assert started == ['a']
     assert 'skipped completed b' in capsys.readouterr().out
     assert (archive/'.internal/run.json').read_bytes() == old_record
-    assert load_json(root/'.internal/run.json')['config']['network']['architecture'] == 'plain'
+    assert load_json(root/'.internal/run.json')['config']['network']['architecture'] == 'b10c128-fson-mish'
     origins = load_json(work/'.internal/plan.json')['initializations']
     assert set(origins) == {'a'} and origins['a'] != old_origins['a']
     assert Path(old_origins['a']['path']).is_file()

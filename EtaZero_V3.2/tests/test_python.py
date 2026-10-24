@@ -1,4 +1,6 @@
 from etazero.schema import GLOBALS
+from etazero.source_data import decode_view
+from etazero.data import TRAIN_TARGETS
 from config_samples import CONFIGS, derive_config
 from collections import Counter
 import copy
@@ -63,7 +65,7 @@ def winning_record(rule=0):
         a[key]=np.zeros(t,np.float32)
     a['cheap_search']=np.zeros(t,np.uint8)
     for key in ('network_wdl','search_wdl'):
-        a[key]=np.tile(np.array([0.5,0,0.5],np.float32),(t,1))
+        a[key]=np.tile(np.array([0.5,0,0.5,0],np.float32),(t,1))
     for key in ("opening_moves","balanced_moves","policy_moves","opening_attempts","opening_status","start_values","initial_position_moves","initial_position_kind"):
         a[key]=np.zeros(1,dtype=RAW_DTYPES[key])
     a["hint_actions"]=np.array([-1],dtype=RAW_DTYPES["hint_actions"])
@@ -72,13 +74,22 @@ def winning_record(rule=0):
        "worker_id":0,"iteration_id":1,"model_id":"model","config_id":"config","shard_id":str(rule),"created_ns":rule}
     a["metadata"]=np.frombuffer(json.dumps(m).encode(),np.uint8)
     for key, shape in {'side_observations': (0,5,5), 'side_globals': (0,len(GLOBALS)),
-                       'side_policies': (0,36), 'side_visits': (0,36), 'side_wdl': (0,3),
+                       'side_policies': (0,36), 'side_visits': (0,36), 'side_wdl': (0,4),
                        'side_q_values':(0,36),'side_q_visits':(0,36)}.items():
         a[key] = np.zeros(shape,dtype=RAW_DTYPES[key])
     for key in ("reanalyzed","reanalysis_used_outcome","reanalysis_original_visits","reanalysis_policy_surprise","reanalysis_value_surprise"):
         a[key]=np.zeros(t,dtype=RAW_DTYPES[key])
     a["forbidden_input"] = np.full(t, rule==2, np.uint8)
+    source_fields(a)
     return a,m
+
+
+def source_fields(a):
+    """Complete a hand-built trajectory with the current on-disk fields."""
+    from etazero.data import alphazero_training_view
+    from etazero.source_data import encode_view
+    a.update(encode_view(alphazero_training_view(a)))
+    return a
 
 
 def compact_search(a):
@@ -89,6 +100,9 @@ def compact_search(a):
     a['q_values']=np.repeat((a['q_visits']>0).astype(np.int16)*8000,a['row_repeats'][indices],axis=0)
     a['sample_indices'] = indices
     a['forbidden_input'] = np.full(int(a['row_repeats'].sum()), a['rules'][0]==2, np.uint8)
+    m=json.loads(a['metadata'].tobytes());m['rows']=int(a['row_repeats'].sum()+a['side_row_repeats'].sum())
+    a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
+    source_fields(a)
 
 
 def test_configuration_inheritance_and_fail_fast(tmp_path,config,monkeypatch):
@@ -255,7 +269,7 @@ def test_network_preserves_independent_policy_and_value_features(config):
             obs[row,1].flatten()[cells[::2]]=1
             obs[row,2].flatten()[cells[1::2]]=1
         pooled=[]
-        hook=model.value_head.hidden.register_forward_pre_hook(lambda module,args:pooled.append(args[0]))
+        hook=model.network.value_head.linear2.register_forward_pre_hook(lambda module,args:pooled.append(args[0]))
         try:
             with torch.no_grad():
                 policy,_=model(obs,torch.zeros(16,len(GLOBALS)))
@@ -273,7 +287,7 @@ def test_opponent_targets_survive_missing_successor_and_terminal_boundary():
     a['row_repeats'][:]=0;a['row_repeats'][[0,8]]=[2,1]
     a['target_weights']=a['row_repeats'].astype(np.float32);a['cheap_search'][1]=1
     compact_search(a);m['rows']=3;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
-    validate_raw(a);view=training_view(a)
+    source_fields(a);validate_raw(a);view=training_view(a)
     assert view['opponent_policy'].argmax(1)[:2].tolist()==[6,6]
     assert view['opponent_policy_weight'].tolist()==[1,1,0]
     assert view['policy'].argmax(1).tolist()==[0,0,4]
@@ -285,6 +299,7 @@ def test_opponent_targets_survive_missing_successor_and_terminal_boundary():
 
 @pytest.mark.parametrize("waves",[1,3])
 def test_shuffle_conservation_and_reader_restoration(tmp_path,config,waves):
+    config["training"]["skip_validation"]=True
     config["replay"].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows='all')
     config["shuffle"].update(bucket_rows=2,training_shard_rows=2,waves=waves,temp_dir=str(tmp_path/"scratch"))
     entries=[];expected=Counter()
@@ -299,7 +314,8 @@ def test_shuffle_conservation_and_reader_restoration(tmp_path,config,waves):
     snapshot=tmp_path/"snapshots"/identity
     manifest=json.loads((snapshot/"manifest.json").read_text());actual=Counter()
     for item in manifest["files"]:
-        with np.load(snapshot/"data"/item["path"]) as a:
+        with np.load(snapshot/"data"/item["path"]) as raw:
+            a=decode_view(raw,TRAIN_TARGETS)
             actual.update((obs.tobytes(),p.tobytes(),op.tobytes(),float(w),v.tobytes())
                           for obs,p,op,w,v in zip(a["obs"],a["policy"],a['opponent_policy'],
                                                  a['opponent_policy_weight'],a["value"]))
@@ -346,7 +362,7 @@ def test_shuffle_failure_cleans_unpublished_files(tmp_path,config):
     entries=[{"path":str(path.relative_to(tmp_path)),"sha256":sha256(path),"metadata":m}]
     config["replay"]["min_rows"]=9
     config["shuffle"].update(workers=4,training_shard_rows=2,waves=3,temp_dir=str(tmp_path/"scratch"))
-    a['globals']=a['globals'].astype(np.float64)
+    a['globalInputNC']=a['globalInputNC'].astype(np.float64)
     bad=path.with_name('bad.npz');save_npz(bad,a);os.replace(bad,path)
     with pytest.raises(ValueError,match="dtype mismatch"):
         build_snapshot(tmp_path,1,entries,config)
@@ -385,6 +401,7 @@ def test_replay_configuration_has_source_window_extensions(tmp_path,monkeypatch)
 
 @pytest.mark.parametrize('files,target,group_rows,expected_rows',[(3,12,128,12),(11,5,52,5)])
 def test_katago_sampled_snapshot_waves_and_rebuild(tmp_path,config,files,target,group_rows,expected_rows):
+    config['training']['skip_validation']=True
     config['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=target)
     config['shuffle'].update(group_rows=group_rows,bucket_rows=2,training_shard_rows=2)
     config['writer']['shard_rows']=16
@@ -400,7 +417,8 @@ def test_katago_sampled_snapshot_waves_and_rebuild(tmp_path,config,files,target,
     def contents(snapshot,manifest):
         result=Counter()
         for item in manifest['files']:
-            with np.load(snapshot/'data'/item['path']) as a:
+            with np.load(snapshot/'data'/item['path']) as raw:
+                a=decode_view(raw,TRAIN_TARGETS)
                 result.update((o.tobytes(),p.tobytes(),v.tobytes()) for o,p,v in zip(a['obs'],a['policy'],a['value']))
         return result
     sampled=[]
@@ -474,7 +492,7 @@ def test_cached_views_eviction_and_exact_rebuild(tmp_path,config,monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(shuffle,'open_raw',lambda *a:(_ for _ in ()).throw(AssertionError('revalidated')))
         view=shuffle._source_view(path,view_key(entries[0],targets),tmp_path/'.internal/training_views',targets)
-        assert len(view['value'])==9
+        assert len(view['globalTargetsNC'])==9
     prune_derived(tmp_path,[identity],set())
     assert path.exists() and (snapshot/'manifest.json').read_bytes()==manifest_before
     assert not (snapshot/'data').exists() and not list((tmp_path/'.internal/training_views').glob('*'))
@@ -596,7 +614,7 @@ def test_prefix_excluded_from_targets_catalog_and_shuffle(tmp_path,config):
         catalog.close()
     corrupt=copy.deepcopy(a);corrupt['train_mask'][1]=1;corrupt['row_repeats'][1]=1;corrupt['target_weights'][1]=1
     m['rows']=6;corrupt['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
-    with pytest.raises(ValueError,match='sample indices|temperature/budget|prefix mask|completed visits'):
+    with pytest.raises(ValueError,match='sample indices|temperature/budget|prefix mask|completed visits|source training field'):
         validate_raw(corrupt)
     # Policy init may end a game before search: retained evidence, zero training rows.
     a['train_mask'][:]=0;a['row_repeats'][:]=0;a['target_weights'][:]=0;a['opening_moves'][0]=9;a['policy_moves'][0]=5
@@ -665,13 +683,13 @@ def test_adamw_decoupled_decay_and_config(config):
     from etazero.training import optimizer_for
     c=copy.deepcopy(config);c['optimizer']['kind']='adamw'
     model=make_network(c)
-    with torch.no_grad(): model.stem.weight.fill_(2.)
+    with torch.no_grad(): model.network.conv_spatial.weight.fill_(2.)
     optimizer=optimizer_for(model,c)
     assert isinstance(optimizer,torch.optim.AdamW)
     group=next(g for g in optimizer.param_groups if g['group_name']=='input')
-    model.stem.weight.grad=torch.zeros_like(model.stem.weight)
+    model.network.conv_spatial.weight.grad=torch.zeros_like(model.network.conv_spatial.weight)
     optimizer.step()
-    torch.testing.assert_close(model.stem.weight,torch.full_like(model.stem.weight,2*(1-group['lr']*group['weight_decay'])))
+    torch.testing.assert_close(model.network.conv_spatial.weight,torch.full_like(model.network.conv_spatial.weight,2*(1-group['lr']*group['weight_decay'])))
     c=copy.deepcopy(config);c['environment'].update(rules='renju,freestyle,standard,',rule_weights='1,0,0')
     validate(c)
     for weights in ('0,0,0','1,-1,0','1,nan,0'):
@@ -716,8 +734,8 @@ def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
     a['visits'][0,1]=4;a['policies'][0,0]=8;a['policies'][0,1]=2
     m['rows']=int(repeats.sum());a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
     compact_search(a)
-    validate_raw(a);view=training_view(a)
-    np.testing.assert_array_equal(view['value'],np.tile([1,0,0],(m['rows'],1)))
+    source_fields(a);validate_raw(a);view=training_view(a)
+    np.testing.assert_array_equal(view['value'],np.tile([1,0,0,0],(m['rows'],1)))
     assert np.array_equal(view['obs'][0],view['obs'][1])
     path=tmp_path/'selfplay/game.npz';save_npz(path,a)
     catalog=Catalog(tmp_path,'test','config')
@@ -736,7 +754,7 @@ def test_sample_repeats_survive_catalog_shuffle_and_reader(tmp_path,config):
     a['forbidden_input']=np.zeros(13,np.uint8)
     a['q_values']=np.concatenate((np.repeat(a['q_values'][:1],4,axis=0),a['q_values']))
     a['row_repeats'][0]=6;m['rows']+=4;a['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
-    with pytest.raises(ValueError,match='rounding'):validate_raw(a)
+    with pytest.raises(ValueError,match='rounding|source training field'):validate_raw(a)
 
 
 def test_sampled_search_preserves_full_trajectory_and_exact_targets(tmp_path):
@@ -803,7 +821,7 @@ def test_shuffle_fixed_output_file_count_even_when_empty(tmp_path,config):
     policies=[]
     for item in manifest['files']:
         with np.load(tmp_path/'snapshots'/identity/'data'/item['path']) as rows:
-            policies.extend(map(bytes,rows['policy']))
+            policies.extend(map(bytes,rows['policyTargetsNCMove'][:,0]))
     assert Counter(policies)==Counter(map(bytes,a['policies']))
 
 
@@ -884,7 +902,7 @@ def test_output_row_forbidden_dropout_repeats_and_domains(config):
     a['forbidden_input'][2:6]=[1,0,1,0]
     obs=unpack_observations(a['observations'],6)
     obs[2,3,2,2]=1;a['observations']=pack_observations(obs)
-    validate_raw(a);view=training_view(a)
+    source_fields(a);validate_raw(a);view=training_view(a)
     final=unpack_observations(view['obs'],6)
     np.testing.assert_array_equal(view['globals'][2:6,3],[1,0,1,0])
     np.testing.assert_array_equal(final[2:6,3,2,2],[1,0,1,0])
@@ -897,7 +915,7 @@ def test_output_row_forbidden_dropout_repeats_and_domains(config):
     input=torch.tensor(final[2:3],dtype=torch.float32)
     policy=torch.tensor(view['policy'][2:3]);opponent=torch.tensor(view['opponent_policy'][2:3])
     value=torch.tensor(view['value'][2:3])
-    total,*_=losses(logits,torch.zeros(1,3,requires_grad=True),input,policy,opponent,torch.ones(1),value,8.)
+    total,*_=losses(logits,torch.zeros(1,4,requires_grad=True),input,policy,opponent,torch.ones(1),value,8.)
     total.backward();grad=logits.grad[0,0].reshape(canvas,canvas)
     assert grad[0,0]>0 and grad[2,2]>0 and torch.count_nonzero(grad[5])==0 and torch.count_nonzero(grad[:,5])==0
 

@@ -23,7 +23,8 @@ def small_config(rule,algorithm):
     c=load_config(CONFIGS/'smoke_test')
     size=5 if rule=='go' else 10
     c['environment'].update(sizes=str(size),size_weights='1',rules=rule,rule_weights='1')
-    c['network'].update(canvas=size,channels=24,blocks=1)
+    c['network'].update(canvas=size,architecture='b2c16-fson-mish',channels=16,blocks=2)
+    if algorithm=='muzero': c['network'].update(architecture='nbt',channels=24,blocks=1)
     c['agent']['algorithm']=algorithm
     c['symmetry'].update(root_num_symmetries_to_sample=1,nn_symmetry=0)
     c['search'].update(full_search_visits=4,cheap_search_visits=2,reuse_tree=False)
@@ -99,7 +100,7 @@ def test_terminal_outcomes_and_rectangular_board_geometry():
     reasons=np.array([Reason.SCORE,Reason.NO_RESULT,Reason.MATE,Reason.INSUFFICIENT_MATERIAL])
     np.testing.assert_array_equal(has_result(reasons),[True,False,True,True])
     np.testing.assert_array_equal(terminal_wdl(np.array([0,0,1,0]),reasons,player=-1),
-                                  [[0,1,0],[.5,0,.5],[0,0,1],[0,1,0]])
+                                  [[0,1,0,0],[0,0,0,1],[0,0,1,0],[0,1,0,0]])
     xq=spec_for_rule('xiangqi')
     assert (xq.width(10),xq.height(10),xq.board_stride(10),xq.area(10),xq.actions(10))==(9,10,10,90,2086)
 
@@ -236,6 +237,7 @@ def test_cuda_training_resume_evaluation_and_web(tmp_path,rule,algorithm,compile
     from web.engine import Engine
     from test_gpu import assert_compiled_partial_resume
     torch.set_num_threads(1)
+    torch._dynamo.reset()  # Different games/algorithms are separate production runs.
     c=small_config(rule,algorithm);c['training'].update(compile=compiled,train_steps=8)
     c['replay'].update(min_rows=32,keep_target_rows=128)
     root=tmp_path/'run'
@@ -357,9 +359,9 @@ def test_native_match_and_completed_resume(tmp_path,rule,algorithm):
             result=subprocess.run([str(BINARY),'analysis','--stream','true','--protocol','gtp',
                 '--config',str(Path(engine.directory.name)/'analysis.cfg'),'--model',str(path),
                 '--model-id',info['id'],'--device','cpu','--seed','1'],
-                input='1 komi 0\n2 play b pass\n3 play w pass\n4 showboard\n5 clear_board\n6 showboard\n7 quit\n',
+                input='1 komi 0\n2 play b pass\n3 play w pass\n4 final_score\n5 clear_board\n6 final_score\n7 get_komi\n8 quit\n',
                 check=True,capture_output=True,text=True,timeout=30)
-            rows=[json.loads(line.split(' ',1)[1]) for line in result.stdout.splitlines() if line.startswith(('=4 {','=6 {'))]
-            assert len(rows)==2 and rows[0]['finished'] and not rows[1]['finished']
-            assert all(row['komi']==0 for row in rows) and '?' not in result.stdout
+            assert '=4 0' in result.stdout and '?6 Unfinished position' in result.stdout
+
+            assert '=7 0' in result.stdout
     finally:engine.close()

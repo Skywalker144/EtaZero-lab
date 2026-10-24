@@ -51,15 +51,15 @@ def test_q_loss_calculus_zero_visits_and_real_source():
 
 def test_side_q_is_not_gated_by_game_outcome():
     p=torch.zeros(2,7,4,requires_grad=True);obs=torch.zeros(2,5,2,2);obs[:,0]=1
-    policy=torch.ones(2,4);wdl=torch.tensor([[.2,.3,.5]]*2)
-    result=losses(p,torch.zeros(2,3),torch.zeros(2,3,3),torch.zeros(2),obs,
+    policy=torch.ones(2,4);wdl=torch.tensor([[.2,.3,.5,0.]]*2)
+    result=losses(p,torch.zeros(2,4),torch.zeros(2,3,4),torch.zeros(2),obs,
                   policy,policy,torch.zeros(2),wdl,wdl[:,None].expand(-1,3,-1),
                   torch.zeros(2),8.,False,torch.tensor([[1.,-1.,0.,0.]]*2),torch.tensor([[9.,4.,0.,0.]]*2))
     assert len(result)==13 and result[-1]>0
     result[-1].backward();assert p.grad[:,6,:2].count_nonzero()==4
     assert not p.grad[:,:6].any() and not p.grad[:,6,2:].any()
     with pytest.raises(ValueError,match='requires'):
-        losses(p,*[torch.zeros(2,3),torch.zeros(2,3,3),torch.zeros(2),obs,policy,policy,
+        losses(p,*[torch.zeros(2,4),torch.zeros(2,3,4),torch.zeros(2),obs,policy,policy,
                    torch.zeros(2),wdl,wdl[:,None].expand(-1,3,-1),torch.zeros(2),8.,False])
 
 
@@ -85,6 +85,8 @@ def test_q_per_repeat_values_survive_shuffle_reader_and_resume(tmp_path,config):
     meta['rows']=11;raw['metadata']=np.frombuffer(json.dumps(meta).encode(),np.uint8)
     raw['q_values'][:3,0]=[-8001,-8000,-8001]
     raw['q_visits'][0,0]=32000
+    from test_python import source_fields
+    source_fields(raw)
     validate_raw(raw);view=training_view(raw)
     np.testing.assert_array_equal(view['q_values'][:3,0],np.array([-8001,-8000,-8001],np.float32)/32000)
     assert view['q_visits'][:3,0].tolist()==[32000]*3
@@ -98,7 +100,9 @@ def test_q_per_repeat_values_survive_shuffle_reader_and_resume(tmp_path,config):
     actual=Counter()
     for item in manifest['files']:
         with np.load(snapshot/'data'/item['path']) as data:
-            actual.update(zip(map(bytes,data['q_values']),map(bytes,data['q_visits'])))
+            from etazero.source_data import decode_view
+            view_data=decode_view(data,manifest['targets'])
+            actual.update(zip(map(bytes,view_data['q_values']),map(bytes,view_data['q_visits'])))
     assert expected==actual
     first=BatchReader(snapshot,1,2,1);first.next()
     second=BatchReader(snapshot,1,2,999,first.state())
@@ -118,10 +122,11 @@ def test_q_configuration_and_head_contract(config):
     for architecture in ('plain','nbt'):
         c=copy.deepcopy(config);c['network']['predict_q_values']=True;c['network']['architecture']=architecture
         if architecture=='plain':c['network'].update(channels=128,blocks=10)
+        else:c['network'].update(channels=192,blocks=5)
         with pytest.raises(ValueError,match='predict_q_values'):validate(c)
     c=copy.deepcopy(config);c['network'].update(architecture='transformer',predict_q_values=True,channels=192,blocks=5)
     validate(c);model=make_network(c)
-    assert model.model_version==17 and model.policy_head.out.out_channels==7
+    assert model.model_version==17 and model.network.policy_head.conv2p.out_channels==8
 
 
 def test_native_writer_independently_quantizes_repeats_and_caps(tmp_path):
