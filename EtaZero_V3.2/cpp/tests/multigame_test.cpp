@@ -16,6 +16,7 @@ struct NoResult : SearchState {
     bool terminal() const override{return true;}
     double terminal_value() const override{return 0;}
     double terminal_draw_probability() const override{return 0;}
+    double terminal_no_result_probability() const override{return 1;}
     Evaluation evaluate(SearchEvaluation={}) const override{throw std::runtime_error("Terminal state evaluated");}
     int move(int) override{throw std::runtime_error("Terminal state moved");}
 };
@@ -95,6 +96,19 @@ int main(int argc,char** argv) {
     Game ko(5,5,Rule::GO);for(int a:{5,6,1,10,7,12,24,16,11})ko.play(a);
     check(!ko.legal(6),"Immediate ko recapture rejected");
     ko.play(4);ko.play(9);check(ko.legal(6),"Ko recapture after intervening moves");
+    for(const char* rules:{"japanese","tromp-taylor"}) {
+        RuleOptions options;options.go_rules=rules;Game game(5,6,Rule::GO,options);auto obs=game.observation();
+        RandomBackend az(6,19,game.spec());muzero::RandomBackend mz(6,19,game.spec());
+        auto a=az.evaluate({&obs})[0];auto m=mz.initial({&obs})[0];
+        check(a.wdl==m.evaluation.wdl && a.logits==m.evaluation.logits,"AZ/MZ random outputs share source distribution");
+        bool nr=std::string(rules)=="japanese";
+        check((a.wdl[3]>0)==nr && a.wdl[1]>0,"Random Go separates ordinary draw and rule-dependent NR");
+        for(int action:{0,1,36}) {
+            auto next=mz.recurrent({{m.latent,action}})[0];
+            check((next.evaluation.wdl[3]>0)==nr && next.evaluation.wdl[1]>0,"Random latent steps retain the root NR rule mask");
+            check(next.evaluation.logits!=m.evaluation.logits,"Random recurrent requests advance server RNG");m=std::move(next);
+        }
+    }
     for(auto rule:{Rule::GO,Rule::XIANGQI}) {
         int size=rule==Rule::GO?5:10;Game game(size,size,rule);
         auto obs=game.observation();check(obs.size()==size_t(game.planes()*size*size+game.globals()),"Observation layout");
@@ -104,7 +118,7 @@ int main(int argc,char** argv) {
         check(rejected,"AZ rejects another input canvas before symmetry mapping");
         SearchSettings settings{7,1,1.1,1,0,1,false,8};
         Search az(eval,settings,7);NoResult no_result;
-        auto neutral=az.run(no_result,0);check(neutral.search_wdl==WDL{.5,0,.5},"No-result is neutral, not ordinary draw");auto result=az.run(game,0);check(game.legal(result.action),"AZ move legality");
+        auto neutral=az.run(no_result,0);check(neutral.search_wdl==WDL{0,0,0,1},"No-result is neutral, not ordinary draw");auto result=az.run(game,0);check(game.legal(result.action),"AZ move legality");
         GumbelSettings gs;gs.max_num_considered_actions=4;
         GumbelSearch<true> gaz(eval,settings,gs,7);result=gaz.run(game,0);check(game.legal(result.action),"Gumbel move legality");
         std::vector<std::unique_ptr<muzero::Backend>> models;models.push_back(std::make_unique<muzero::RandomBackend>(size,7,game.spec()));
@@ -149,7 +163,7 @@ int main(int argc,char** argv) {
             }
             for(int k:{0,3}) {
                 auto dir=std::filesystem::path(argv[1])/(std::string(RULE_NAMES[int(rule)])+(k?"-mz":"-az"));
-                RecordWriter writer(dir,{"test","2","model","config","source",1,0,k},64,1,1,9);writer.enqueue(record);writer.finish();
+                RecordWriter writer(dir,{"test","2","model","config","source",1,0,k,false,false,true},64,1,1,9);writer.enqueue(record);writer.finish();
             }
             std::cout<<RULE_NAMES[int(rule)]<<" plies "<<game.turn()<<'\n';
         }
