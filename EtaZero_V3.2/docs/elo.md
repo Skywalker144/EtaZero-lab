@@ -10,11 +10,11 @@
 
 命令可用 `--config /path/to/analysis.cfg` 或 `--config /path/to/match.cfg` 直接加载独立文件，也可用 `--config-dir` 选择对应模式文件所在目录；两者互斥。字段事实源是 [engine_config.py](../python/etazero/engine_config.py)。
 
-根访问上限由所选评估／比赛配置指定；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 analysis 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；详细边界和严格并行发放与来源的差异见 [搜索预算](algorithms.md#puct-与搜索预算)。
+根访问上限由所选评估／比赛配置指定；根初始访问和完成的边访问合计为 `root_visits`。`initial_visits` 为搜索前保留量，`new_playouts` 是本手新增访问（含首次根初始化），`simulations` 为本手新增根边模拟。不同 bot 的 Match 默认复用推进命中的子树，相同模型身份双方强制每手清树；同身份必须对应同模型路径。固定局面 analysis 默认不复用，新的 500v 根通常为一个初始化和 499 个边模拟。`max_playouts` 独立约束新增访问，`max_time` 从开始搜索计时，时间停止保留至少两个新 playout，显式停止可阻止全部搜索。在途路径完成后返回；普通 PUCT 允许在途尾部超额，详细边界见 [搜索预算](algorithms.md#puct-与搜索预算)。
 
 NN 单朝向默认随机 D4，cache 命中复用首次 canonical 输出，根多对称绕 cache。落子温度使用来源 Match profile 的半衰期调度；policy target 不乘落子温度。analysis/match 的 `inference_precision=auto` 在本实现指定 CUDA 时使用 FP16、指定 CPU 时使用 FP32，结果记录实际精度，显式 FP32 保留。网络缓存、终局节点和根集成使 NN 请求数不等于 visits。
 
-评估和比赛均无训练根噪声；落子温度和搜索线程数由各自配置指定。零温度时，并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用 EtaZero LibTorch 后端，不宣称复制 KataGo 的全部比赛功能或数值行为。
+评估和比赛均无训练根噪声；落子温度和搜索线程数由各自配置指定。零温度时，并列最大行为权重按来源选择首个已分配子边。FPU、子树价值加权、policy target pruning、LCB、根多对称、根／全树 policy 温度与落子温度半衰期由独立 profile 显式配置；评估及比赛落子使用剪枝和 LCB 后的权重，原始 visits 单独输出。WDL 搜索 Q 为 W−L。比赛共享组批 evaluator、多局线程的结构参考 KataGo match，使用专用 CUDA/cuDNN 后端（显式 .pt 为 LibTorch 参考路径），不宣称复制 KataGo 的全部比赛功能或数值行为。
 
 ## 比赛与续测
 
@@ -33,11 +33,11 @@ bash scripts/run.sh analysis --config configs/baseline/analysis.cfg --model /pat
 # 输入示例：new 15 renju，然后 analyze 100、play 112、genmove 100、quit。
 ```
 
-每对模型局数为四的正倍数。以A或B作为参考黑方的开局各占一半（任务 `generator` 表示参考黑方模型），另一个模型为参考白方。每次balance尝试随机选参考botB/botW评估两个根视角与全部候选；可选policy init每手按当前棋盘执色选参考模型。参数遵循固定KataGomo：Match平衡指数10，policy init默认关闭，开启时显式mean、温度缺省1。开局记录保存参考黑方及实际balance/policy模型索引（0黑/1白）。同一个已生成开局交换A/B执黑／执白下两局，棋盘颜色和Renju规则不变。这是EtaZero的成对换色协议，第二侧不重新生成开局；与KataGomo逐局独立初始化区分。只接受成功且非终局的开局。无认输、无提前截断，按真实棋规结束。每局保存完整落子、胜者、时间与逐手根访问数。
+每对模型使用正整数局数，每局独立生成开局。双方执色组成一个 shuffled round，随机打乱后逐局消费；下一轮重新打乱。五子棋／Hex 使用各自的平衡开局参数，不复用同一个开局交换双方。默认按真实规则结束；可在 match 配置中启用 `allow_resignation`，用 `resign_threshold` 和 `resign_consec_turns` 控制认输。判定使用连续搜索 W−L，且从开局结束后计数，满足来源最低落子数；认输结果记录独立终局原因。Gatekeeper 使用同一比赛路径；每局保存落子、胜者、终局原因、时间与根访问数。
 
-普通 `match` 与 `arena` 共用 [比赛执行器](../cpp/src/commands/match.cpp) 和 Python 子进程事件收集逻辑。普通 match 保留两侧独立推理服务与种子，并在全部缺失开局生成后开始比赛；arena 在同一模型驻留窗口内将开局与对局任务混合调度。
+普通 `match` 与 `arena` 共用 [比赛执行器](../cpp/src/commands/match.cpp)，开局与对局使用同一独立游戏任务，无“全部开局完成后再比赛”的屏障。每个模型仍有独立推理状态和随机流。
 
-开局和单局完成后分别原子落盘，重启只安排缺失的一侧或新开局。中断的半局重跑，同开局已完成的一侧保持不变。相同输出目录可以用 `--games` 增加成对开局，不能减少目标；模型、搜索条件、种子或配对身份变化时使用新输出目录。训练采用整轮提交，比赛采用逐开局／逐局提交，两者边界独立。
+每局的开局和结果分别原子落盘。恢复只安排未完成游戏，已保存开局可重用，中断半局重跑；同目录增加目标局数时保留已有结果。模型、种子或搜索条件变化使用新输出目录。
 
 ## 历史模型与 Elo
 
@@ -51,7 +51,7 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-o
 
 横轴为模型所属轮次的 `elapsed_seconds`，即已提交完整轮次扣除 `torch.compile` 编译后的累计训练墙钟。暂停和作废轮次不进入横轴；恢复后的重跑成功轮只计一次，编译前完成的自对弈仍计时。计时字段与历史结果口径限制见 [运行观测与证据](implementation.md#运行观测与证据)。图上连线用于展示实测模型点，不代表测量了中间时刻棋力，不向训练停止后外推。原始活动时间仍在训练事件日志中，不能与这个横轴混用。
 
-评分与区间沿用 MuZero_V2 的 [elo.py](../python/etazero/elo.py)：联合 Bradley–Terry 得分模型，和棋记半分，同时拟合共同先手优势；anchor 只规定相对 Elo 零点，不代表外部等级分。弱高斯正则防止全胜／全负导致无穷评分，强度随输出记录。95% 区间按配对分层、以同开局两局为单位 bootstrap；全胜配对会标记先验敏感性。区间条件于已选择的模型、开局与协议，不表示独立训练种子的不确定性。所有开局的两侧和整个赛程完整后才拟合。
+[Elo 拟合](../python/etazero/elo.py) 使用固定 KataGo 的 likelihood、每玩家先验、中心约束、协方差和 LOS 实现。`prior_games` 控制先验强度；共同先手优势只在 `estimate_first_player_advantage=true` 时拟合。图中范围为相对 anchor 的约一个标准误，不再使用配对 bootstrap 95% 区间。和棋及无结果按半分计入比赛点数，训练标签仍保持 D/NR 独立。整个指定赛程完成后才拟合。
 
 输出 `elo.json`、`elo.csv`、`elo.png`、`elo.svg`；PNG 和 SVG 使用与 `training.png`、`loss.png` 相同的深色主题。评估目录保存模型／配置身份和二进制路径、赛程、逐开局和逐局原始记录。`--fit-only` 从已有赛果重建评分，不启动 GPU 比赛。
 
@@ -79,8 +79,9 @@ bash scripts/autoelo.sh --fit-only --output "data/<实验伞目录>/elo/<评估�
 | `neighbors` | 在已选模型序列上向前连接的近邻级数 |
 | `cross_seconds` | 跨臂固定累计训练时间间隔，单位秒；在双方已覆盖的采样时间网格内，从固定采样模型取最近模型 |
 | `final_cross` | 各臂最后一个已选模型是否两两比赛 |
-| `games_per_pair` | 每对总局数，必须为四的正倍数 |
-| `bootstrap_samples` | 成对开局 bootstrap 重采样次数 |
+| `games_per_pair` | 每对总局数，必须为正整数 |
+| `prior_games` | 每玩家先验强度 |
+| `estimate_first_player_advantage` | 是否拟合共同先手优势 |
 | `anchor` | Elo 零点模型 ID；空值复用结果根的 `anchor.json`，首次选择首臂最早的采样模型 |
 | `game_threads` | 整个 Elo 赛程的 C++ 对局／开局工作线程上限，覆盖 `match.cfg` 的同名字段 |
 | `max_loaded_models` | 同时驻留的模型服务上限，至少为二；控制权重、CUDA Graph、缓存和 MuZero latent 的显存压力 |
@@ -98,21 +99,21 @@ autoexp 在启动训练前解析、校验并保存本次评估配置和设备映
 
 默认结果根为数据伞目录的 `elo/`；配置臂输出分散在不同父目录时使用 controller 默认目录下的 `elo/`，也可用 `--output` 指定根目录。模型、赛程、采样、比赛条件改变时创建独立评估子目录，旧原始结果不覆盖。局数改变也创建新评估。`pair_cache/` 按模型对身份保存原始开局和逐局记录，各结果子目录保存独立快照；新增臂、延长训练、改变采样或拟合设置时，匹配的比赛直接复用。提高 `games_per_pair` 只补后续开局；降低局数时只读取所需前缀。
 
-缓存身份包含有序双方模型的绝对路径、实际比赛种子、比赛与开局配置（不含目标局数）。发布模型保持路径不可变；移动模型会形成新的缓存身份，替换权重应发布到新路径。训练时间、完整赛程、anchor、采样和 Python 源码摘要不决定比赛身份；配置解析后的实际比赛条件参与身份。改变 visits、精度、开局、搜索／组批参数等实际比赛条件时重新比赛。二进制重新编译、源码修改和模型加载并发数不自动改变缓存身份；实际评估算法变化时使用独立结果根，避免复用旧实现的赛果。每次执行保留源码副本和执行条件。缓存不足时从历史评估目录导入身份一致的对局；缓存已满足本次局数时不扫描历史会话。独立重跑同一模型对时每个开局只采用一个试验来源，不叠加重复赛果或混合两次试验的换色对局。中断时已完成开局和逐局记录也进入缓存，恢复只补缺失的一侧。
+缓存身份包含有序双方模型的绝对路径、实际比赛种子、比赛与开局配置（不含目标局数）。发布模型保持路径不可变；移动模型会形成新的缓存身份，替换权重应发布到新路径。训练时间、完整赛程、anchor、采样和 Python 源码摘要不决定比赛身份；配置解析后的实际比赛条件参与身份。改变 visits、精度、开局、搜索／组批参数等实际比赛条件时重新比赛。二进制重新编译、源码修改和模型加载并发数不自动改变缓存身份；实际评估算法变化时使用独立结果根，避免复用旧实现的赛果。每次执行保留源码副本和执行条件。缓存不足时从历史评估目录导入身份一致的对局；缓存已满足本次局数时不扫描历史会话。独立重跑同一模型对时每个开局只采用一个试验来源，不叠加重复赛果或混合两次试验的同编号游戏。中断时已完成开局和逐局记录也进入缓存，恢复只补缺失游戏。
 
-每次调用显示 `reused_games`，性能记录保存复用局数和新增局数。交互终端用 tqdm 显示总对局进度和 Elo bootstrap 进度；总局数包含已复用／已完成对局，速度与 ETA 按本次新增对局估计。启动或切换驻留窗口时显示模型准备数量，对局开始后显示当前窗口。日志重定向到文件时关闭动态进度条，只输出阶段信息与定期局数。全部完成才拟合并原子更新 `elo/latest`，当前图入口为 `elo/latest/elo.png`。
+每次调用显示 `reused_games`，性能记录保存复用局数和新增局数。交互终端用 tqdm 显示总对局进度及来源 Elo 拟合状态；总局数包含已复用／已完成对局，速度与 ETA 按本次新增对局估计。启动或切换驻留窗口时显示模型准备数量，对局开始后显示当前窗口。日志重定向到文件时关闭动态进度条，只输出阶段信息与定期局数。全部完成才拟合并原子更新 `elo/latest`，当前图入口为 `elo/latest/elo.png`。
 
 每套结果保存 `plan.json`、`manifest.json`、`resolved.cfg`、`status.json`，以及 `pairs/` 的开局与逐局赛果；共享进程日志保存为结果目录的 `native.log`，失败不发布新的 latest。`invocations/` 保存每次调用的性能和源码摘要记录，恢复调用另存；对应源码保存在 `source/` 下。源码记录不决定会话目录，修改注释或拟合代码不会另建赛程。
 
 ## C++ 并行与性能观测
 
-Python 只规划、启动一个 native arena 进程和落盘；棋规、开局、搜索、对局和 GPU 组批推理均在 C++。autoelo/arena 将缺失的开局和单局提交到全局工作池，任意棋局结束后立即领取下一任务。开局完成并输出后，两局换色比赛即可启动，不等待其他开局或所属模型对完成。配对仍决定赛程、种子、结果目录与 bootstrap 分组，不作为执行屏障。
+Python 只规划、启动一个 native arena 进程和落盘；棋规、开局、搜索、对局和 GPU 组批推理均在 C++。autoelo/arena 将缺失的独立开局和单局提交到全局工作池，任意棋局结束后立即领取下一任务。每局开局完成并输出后即可启动该局，不等待其他开局或所属模型对完成。模型对决定赛程、种子和结果目录，不作为执行屏障。
 
-按解析后的模型文件路径去重，同路径的请求跨 pair 合并到一个推理服务，复用权重、CUDA Graph 和缓存；不同路径分别组批。赛程模型数超过 `max_loaded_models` 时，调度器优先选择共享模型的任务组成驻留窗口；窗口内全局异步补局，窗口结束才安全切换模型，以避免 CUDA Graph capture 与其他推理重叠。相邻窗口共用的模型继续驻留。此上限是模型数量而非显存字节预算，大网络或 MuZero 仍需按显存调整。
+按解析后的模型文件路径去重，同路径的请求跨 pair 合并到一个推理服务，复用权重、执行计划和缓存；不同路径分别组批。赛程模型数超过 `max_loaded_models` 时，调度器优先选择共享模型的任务组成驻留窗口；窗口内全局异步补局，窗口结束才安全切换模型，也避免参考 `.pt` 后端的 CUDA Graph capture 与其他推理重叠。相邻窗口共用的模型继续驻留。此上限是模型数量而非显存字节预算，大网络或 MuZero 仍需按显存调整。
 
-autoelo 不调用训练用的 `torch.compile`。启动准备包括模型校验、TorchScript 反序列化、权重传输、JIT 预热与多个 batch 桶的 CUDA Graph 捕获。Python 按唯一路径读取模型 manifest，各模型直接使用 `match.seed` 初始化推理随机数；C++ 按 `model_load_workers` 并行反序列化 CPU 模型和检查结构，再串行转移权重、预热与捕获 GPU 图。该值独立于 LibTorch 算子的 `cpu_threads`，也不增加比赛搜索线程。
+autoelo 不调用训练编译器。`.bin` 模型由原生 CUDA/cuDNN 后端准备，`.pt` 模型使用 LibTorch 参考路径；加载并行度、每模型服务数及 GPU 工作区均独立于对局线程。准备时间计入评估总耗时，不能归入稳态推理吞吐。
 
-结构、方法图、非 Tensor 属性、Tensor shape／stride／dtype 和推理精度均一致的模型共享已预热的 TorchScript 方法与执行计划，每个模型通过深复制保留独立参数和缓冲区，各推理服务仍单独捕获 CUDA Graph。执行模板只保留 CPU 权重，不占用额外 GPU 模型驻留槽位；切换驻留窗口后可继续复用。代码、结构、属性或精度不同的模型分别准备。该优化减少同结构历史模型重复 JIT 预热，第一套结构及其 GPU 图准备仍需等待。
+使用 `.pt` 参考模型时，同结构执行计划可共享，参数和 buffers 仍独立；原生 `.bin` 使用来源模型描述与 CUDA 组件，不经过 JIT 或 CUDA Graph 捕获。
 
 独立 `match` 保留一对模型的执行入口，`match.game_threads` 为该对的局数上限；autoelo 使用独立 `elo.game_threads`，不继承训练 selfplay。独立 `arena` 使用 `--game-threads`、`--max-loaded-models` 和 `--model-load-workers`。可通过 `ELO_GAME_THREADS`、`ELO_MAX_LOADED_MODELS`、`ELO_MODEL_LOAD_WORKERS` 或对应 autoelo 命令行参数覆盖。提高线程数需要足够的缺失任务，并不保证每个模型的 batch 同比例增长。
 
@@ -129,8 +130,14 @@ autoelo 不调用训练用的 `torch.compile`。启动准备包括模型校验�
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `cpu_threads` | LibTorch CPU 算子线程数，区别于对局和搜索线程 |
 | `engine.cfg`，可由 `match.cfg` 覆盖 | `muzero_queue_capacity` | MuZero 推理待处理队列上限；AlphaZero 使用无容量门槛的入队方式 |
 
-先保留单搜索线程和单推理服务，调节全局对局并发和模型驻留上限，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件。共享模型服务直接使用配置的比赛种子初始化 NN 随机数，不混入模型路径、编号或内容哈希；调度、缓存与服务重载可能改变随机 D4 的分配及具体赛果，逐局结果不保证跨并发配置一致。赛程、每对局数、成对开局、搜索预算与拟合定义保持独立。
+先保留单搜索线程和单推理服务，调节全局对局并发和模型驻留上限，再按实际 batch、吞吐决定填批等待和搜索并行。不要仅凭加线程声称性能提升。比较时记录模型、棋盘、规则、visits、精度、开局和执行条件。共享模型服务直接使用配置的比赛种子初始化 NN 随机数，不混入模型路径、编号或内容哈希；调度、缓存与服务重载可能改变随机 D4 的分配及具体赛果，逐局结果不保证跨并发配置一致。赛程、每对局数、独立开局、搜索预算与拟合定义保持独立。
 
 共享 C++ arena 输出每次模型驻留的 `model_stats`（请求数、batch 数、最大实际 batch、队列等待、缓存统计）与 `arena_stats`（完成局数、总耗时、模型加载耗时、开局加对局耗时、加载次数和驻留窗口数），保存在结果目录的 `performance/`。`arena_progress` 保存每个驻留窗口的准备进度、加载线程数和累计准备秒数；`model_prepared` 保存每个模型的 CPU 准备、权重传输与图准备耗时，以及是否复用 JIT 执行计划。独立 match 仍输出双方 `match_stats`，保存在对应 pair 的 `performance/`。autoelo 每次调用的 `invocations/` 只汇总本次调用新产生的 native 统计，并记录新增／复用局数、总耗时和吞吐；总耗时包含比赛校验、恢复扫描、拟合和绘图，不等于纯 GPU 推理吞吐。
 
-Go／Xiangqi 的成对比赛从标准初始局面或共用 policy-init 前缀开始，不使用五子棋骨架平衡；空前缀可持久化和续测。结果记录终局 reason，围棋无结果记录保留但不进入 Elo 拟合。贴目及围棋规则由 `[match] komi/go_rules` 控制并写入生效配置。
+Go／Xiangqi 每局从标准初始局面或该局独立生成的 policy-init 前缀开始，不使用五子棋平衡骨架。无结果保留 reason 并按来源中性点数参与评估；贴目及规则来自 `[match] komi/go_rules`。
+
+## 训练候选验收
+
+`run.cfg` 的 `[gatekeeper]` 可启用候选对当前 accepted 模型的比赛，显式指定 `match_config`、`games` 和 `required_candidate_win_prop`。默认关闭时直接接受；第一代模型直接接受。有基准模型时按来源点数及剩余局数提前接受/拒绝，最终达到阈值即接受，平手通过。决策和逐局结果保存在 `gatekeeper/<candidate>/`，支持中断恢复。
+
+候选被拒绝后，learner 继续使用最新 checkpoint，后续自对弈继续使用 accepted 模型。发现历史评估模型时按首次接受的模型路径去重，不把重复使用同一模型的轮次当作不同棋手。
