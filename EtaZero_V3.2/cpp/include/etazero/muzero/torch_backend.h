@@ -12,6 +12,7 @@ public:
     class Latent : public etazero::muzero::Latent {
         friend class TorchBackend;
         torch::Tensor tensor_;
+        bool allow_no_result_;
         std::shared_ptr<const int> owner_;
         std::shared_ptr<const std::vector<uint8_t>> mask_;
     public:
@@ -51,6 +52,6 @@ private:
     c10::IValue replay(const std::vector<std::unique_ptr<Graph>>& graphs,
                       const torch::Tensor& input0,const torch::Tensor& input1);
     std::vector<Output> unpack(const c10::IValue& result,
-        const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks);
+        const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks,const std::vector<uint8_t>& allow_no_result);
 };
 }

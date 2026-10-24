@@ -78,9 +78,9 @@ torch::Tensor TorchBackend::forward(const torch::Tensor& input,const torch::Tens
     if (!precision_checked_ && precision_=="float16" && (logits.scalar_type()!=torch::kFloat16 || values.scalar_type()!=torch::kFloat16))
         throw std::runtime_error("FP16 inference did not execute half-precision output heads");
     precision_checked_=true;
-    if (logits.dim() != 2 || logits.size(0) != n || logits.size(1) != actions || values.dim() != 2 || values.size(0) != n || values.size(1) != 3)
+    if (logits.dim() != 2 || logits.size(0) != n || logits.size(1) != actions || values.dim() != 2 || values.size(0) != n || values.size(1) != 4)
         throw std::runtime_error("Native model output shape mismatch");
-    return torch::cat({logits.to(torch::kFloat32), torch::softmax(values.to(torch::kFloat32),1), optimistic.to(torch::kFloat32), error.to(torch::kFloat32).unsqueeze(1)}, 1);
+    return torch::cat({logits.to(torch::kFloat32), values.to(torch::kFloat32), optimistic.to(torch::kFloat32), error.to(torch::kFloat32).unsqueeze(1)}, 1);
 }
 void TorchBackend::capture_graphs() {
     c10::cuda::CUDAStreamGuard stream_guard(*stream_);
@@ -137,10 +137,10 @@ std::vector<Evaluation> TorchBackend::evaluate(const InferenceInputs& inputs) {
     auto cpu=output.to(torch::kCPU).contiguous();
     std::vector<Evaluation> result(n);
     for (int64_t i = 0; i < n; ++i) {
-        auto row = cpu.data_ptr<float>() + i * (2*actions+4);
-        result[i].logits.assign(row, row+actions); result[i].wdl = {row[actions],row[actions+1],row[actions+2]};
-        result[i].optimistic_logits.assign(row+actions+3,row+2*actions+3);
-        result[i].shortterm_value_stdev=row[2*actions+3];result[i].has_auxiliary=true;
+        auto row = cpu.data_ptr<float>() + i * (2*actions+5);
+        result[i].logits.assign(row, row+actions); result[i].wdl = outcome_probabilities({row[actions],row[actions+1],row[actions+2],row[actions+3]},no_result_possible(*inputs[i],spec_,canvas_));
+        result[i].optimistic_logits.assign(row+actions+4,row+2*actions+4);
+        result[i].shortterm_value_stdev=row[2*actions+4];result[i].has_auxiliary=true;
     }
     return result;
 }
