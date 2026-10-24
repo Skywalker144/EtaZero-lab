@@ -43,7 +43,7 @@ Gumbel 根不执行 Dirichlet、根 policy 温度、forced playout、PUCT target
 
 多线程根调度按完成数与在途预约发放配额，在 considered-visit 层次切换前等待在途任务完成，再使用完成 Q 淘汰。非根 Gumbel 将单位在途预约计入访问缺口，Q completion 和缩放只使用完成数；这是并行适配，单线程退化为论文规则。同步只作用于该局，不阻塞其他对局的共享 GPU 服务。异常释放全部路径和根预约并向调用者传播。
 
-Gumbel 当前要求 `reuse_tree=false`、`use_graph_search=false`，非法配置在启动时明确拒绝。这是 fresh-tree Gumbel 的实现边界，不宣称图共享或跨手复用数学上不可行。MZ 继续要求单一根对称；AZ 可沿用合法的根对称集成。数值使用 double 搜索统计和 V2 已归一化先验，零先验取 double 最小正规数进行 log 保护；不承诺与 JAX 随机数或极端 logits 下逐位一致。
+Gumbel 当前要求 `reuse_tree=false`、`use_graph_search=false`，非法配置在启动时明确拒绝。按[对齐目标](katago-target.md#gumbel-与-muzero-的适配范围)，采用 tree、不做图共享是约定差异。fresh-tree 是当前实现边界；跨手复用与图共享分别评估，不能仅由 tree 结构推出必须禁止复用，也不宣称二者数学上不可行。MZ 继续要求单一根对称；AZ 可沿用合法的根对称集成。数值使用 double 搜索统计和 V2 已归一化先验，零先验取 double 最小正规数进行 log 保护；不承诺与 JAX 随机数或极端 logits 下逐位一致。
 
 根调度和 Gumbel 数学验证在 [gumbel_test.cpp](../cpp/tests/gumbel_test.cpp)，数据与 CUDA 链路在 [test_gumbel.py](../tests/test_gumbel.py)。工程验收与性能回归不能证明棋力收益；不同非根策略、预算及增强项的实验选择由用户安排。
 
