@@ -1,6 +1,6 @@
 #include "etazero/game.h"
 // Time the production inference path, including packing, transfers and outputs.
-#include "etazero/torch_backend.h"
+#include "etazero/backend_factory.h"
 #include "etazero/schema.h"
 #include <ATen/Parallel.h>
 #include <algorithm>
@@ -56,11 +56,11 @@ int main(int argc, char** argv) {
         }
         if(batches.empty())throw std::runtime_error("No batch sizes supplied");
         const int max_batch=*std::max_element(batches.begin(),batches.end());
-        std::vector<std::unique_ptr<TorchBackend>> backends;
+        std::vector<std::unique_ptr<Backend>> backends;
         std::cout<<std::setprecision(17);
         for(int i=8;i<argc;++i) {
             auto shared=std::make_shared<TorchBackend::LoadedModel>();
-            auto backend=std::make_unique<TorchBackend>(argv[i],device,canvas,max_batch,precision,shared);
+            auto backend=make_backend(argv[i],device,canvas,max_batch,precision,shared);
             auto started=Clock::now();backend->initialize();
             std::cout<<"{\"event\":\"initialize\",\"model\":"<<i-8
                      <<",\"seconds\":"<<seconds(started)
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
                     const double checksum=validate(last,batch,actions);
                     std::cout<<"{\"event\":\"measure\",\"model\":"<<index
                              <<",\"repeat\":"<<repeat<<",\"batch\":"<<batch
-                             <<",\"graph_batch\":"<<bucket<<",\"iterations\":"<<iterations
+                             <<",\"executed_batch\":"<<(is_cuda_model(argv[8+index])?batch:bucket)<<",\"iterations\":"<<iterations
                              <<",\"seconds\":"<<elapsed<<",\"batch_ms\":"<<1000*elapsed/iterations
                              <<",\"positions_per_second\":"<<batch*iterations/elapsed
                              <<",\"checksum\":"<<checksum<<"}"<<std::endl;
