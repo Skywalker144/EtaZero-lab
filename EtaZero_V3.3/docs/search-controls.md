@@ -14,7 +14,7 @@ PUCT 同分时保留先分配的 child；新着只由最高先验的未展开动
 
 ## 图评估缓存与并行
 
-`[graph_search] use_eval_cache` 在真实棋盘图搜索中保存已搜索节点的 WDL、访问权重和首次探索信息。缓存条目在一次搜索完成后发布，在后续搜索中按来源的访问比率衰减；它与按完整输入缓存 NN 输出的缓存分开。新局和更换模型清空搜索评估缓存。MuZero 保留不使用真实棋盘图共享的边界。
+`[graph_search] use_eval_cache` 在真实棋盘图搜索中保存已搜索节点的 WDL、访问权重和首次探索信息。缓存条目在一次搜索完成后发布，在后续搜索中按来源的访问比率衰减；它与按完整输入缓存 NN 输出的缓存分开。缓存键包含图身份、实际生效的临时访问／playout／时间预算、根噪声设置、训练时的 LCB 选择及 capped-side 身份；相同条件可跨清树复用，不同条件分别保存。新局、更换模型或替换外部模式表清空搜索评估缓存。MuZero 保留不使用真实棋盘图共享的边界。
 
 `node_table_shards_power_of_two` 控制图节点表分片，`nn_mutex_pool_power_of_two` 独立控制推理缓存锁池，后者为 −1 仅在 cache_entries=0 时合法。AlphaZero 和 MuZero 的 initial cache 均接通该控制。`[parallelism] min_playouts_per_thread` 依据本次剩余新访问数减少活动线程；普通 PUCT 按完成计数限制并允许在途尾部超额；Gumbel 保留严格配额。
 
@@ -40,6 +40,6 @@ PUCT 同分时保留先分配的 child；新着只由最高先验的未展开动
 
 AlphaZero 可以在每个真实节点调用第二模型。MuZero 的非根第二策略必须来自另一个 MuZero 模型，两个 latent 沿相同动作独立演进；AlphaZero 第二模型可用于 MuZero 的真实根及最终策略混合，配置其非根探索会明确报错。普通 RL 不接受 meta 预设；HumanSL 用 `human_sl_profile` 和实际执色、面积生成来源 metadata，不使用零向量；metadata 模型可先不设置 profile，此时第二策略停用，随后由 GTP 参数或单条公共 JSON 请求启用；使用该能力需要实际可用的第二策略模型，不自动生成或训练人类模型。带 metadata 的 HumanSL 模型强制使用普通策略，root／leaf optimism 均不生效。
 
-按深度限制、focus、棋钟和 pondering 的命令格式见 [原生交互引擎](engine.md)。核心实现入口为 [AlphaZero 搜索](../cpp/src/search/search.cpp)、[MuZero 搜索](../cpp/src/muzero/search.cpp)、[时间预算](../cpp/src/search/time_budget.cpp) 和 [模式表](../cpp/src/search/pattern_bonus.cpp)。
+按深度限制、focus、棋钟和 pondering 的命令格式见 [原生交互引擎](engine.md)。核心实现入口为 [AlphaZero 搜索](../cpp/search/search.cpp)、[MuZero 搜索](../cpp/search/muzero/search.cpp)、[时间预算](../cpp/search/time_budget.cpp) 和 [模式表](../cpp/search/pattern_bonus.cpp)。
 
 `autoAvoidRepeatDir` 启用跨会话的重复模式历史。按实际棋盘尺寸保存来源 PositionSample `_poses.txt`，达到 save chunk 或退出时写入；文件内去重、按有效位置衰减，超过 maxPoses 时按文件边界清理。新历史在下一次 clear_board 时重载，不在落子热路径反复扫描。来源 `autoAvoidRepeat...ByBoardSizeN` 覆盖按尺寸生效；启用目录后须提供来源要求的 utility/lambda/turn/maxPoses 设置。静态语料不受 NN 画布大小限制；自对弈起点必须能放入网络画布。

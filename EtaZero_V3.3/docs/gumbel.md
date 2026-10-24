@@ -15,7 +15,7 @@ Gumbel 起始配置按模型、非根策略和棋类分类，继承对应的基�
 
 ## 根搜索、预算与落子
 
-算法参考 [Policy improvement by planning with Gumbel](https://davidstarsilver.wordpress.com/wp-content/uploads/2025/04/gumbel-alphazero.pdf) 和作者团队 [Mctx 428bfb7](https://github.com/google-deepmind/mctx/tree/428bfb7e1c931715cd3d74f9c65e9991afd86df8)。固定路径、哈希和 Apache-2.0 许可见 [参考来源](../THIRD_PARTY.md)。实现入口是 [公共数学与调度](../cpp/src/search/gumbel.cpp)、[真实状态搜索](../cpp/src/search/gumbel_search.cpp) 和 [latent 搜索](../cpp/src/muzero/gumbel_search.cpp)。
+算法参考 [Policy improvement by planning with Gumbel](https://davidstarsilver.wordpress.com/wp-content/uploads/2025/04/gumbel-alphazero.pdf) 和作者团队 [Mctx 428bfb7](https://github.com/google-deepmind/mctx/tree/428bfb7e1c931715cd3d74f9c65e9991afd86df8)。固定路径、哈希和 Apache-2.0 许可见 [参考来源](../THIRD_PARTY.md)。实现入口是 [公共数学与调度](../cpp/search/gumbel.cpp)、[真实状态搜索](../cpp/search/gumbel_search.cpp) 和 [latent 搜索](../cpp/search/muzero/gumbel_search.cpp)。
 
 每手从干净合法域先验 P 生成 log(P)，采样一份根 Gumbel 噪声。首轮按 `log(P)+g` 无放回选择候选，后续按 `log(P)+g+sigma(Q)` 分配访问。使用 Mctx 的 considered-visit 序列实现 Sequential Halving；最多候选数由配置限制，合法动作不足时缩小。没有强制要求预算足够完成全部阶段，余数全部发放；预算不足时从完成访问数最多的动作中按最终分数选胜者。并列取合法域中的第一个动作。
 
@@ -24,6 +24,8 @@ Gumbel 起始配置按模型、非根策略和棋类分类，继承对应的基�
 `[gumbel]` 属于 `selfplay.cfg`，字段及缺省值唯一维护于 [config.py](../python/etazero/config.py)。`max_num_considered_actions` 限制候选数量；`c_visit` / `c_scale` 控制 Q 的访问数缩放；`rescale_q_values` 选择节点内 completed-Q min/max 缩放；`noise_scale` 控制根噪声强度。
 
 `action_selection=gumbel` 使用 SH 胜者，不再对改进策略或访问数抽样；已有落子温度不改变此行为。`visit` 显式选择论文棋类实验中的访问次数温度抽样，使用已有 early/late 温度调度；策略训练目标仍是 completed-Q 改进策略。analysis/match 在自身 profile 配置根/非根策略和 `gumbel_*` 字段，噪声缺省零。cheap 搜索的 remove-root-noise 关闭 Gumbel 噪声，保持当前非根策略。
+
+启用 HumanSL chosen-move 混合时，只调整实际落子分布，保留 Gumbel 改进策略、30000 标度的量化目标及 policy surprise。混合以 SH 胜者的 one-hot 或归一化访问数为基础，落子温度在混合后应用一次。
 
 ## Completed Q、非根策略与训练
 
