@@ -101,3 +101,22 @@ if __name__ == '__main__':
     parser.add_argument('--name', help='Resolve one complete source network name')
     args = parser.parse_args()
     print(json.dumps(resolve(args.name), indent=2) if args.name else '\n'.join(BASE_NAMES))
+
+
+def network_widths(channels, architecture='nbt'):
+    """Widths of the selected source preset; NBT retains its width scaling."""
+    if architecture == 'plain':
+        if channels != 128:
+            raise ValueError('plain requires b10c128-fson-mish: channels=128, blocks=10')
+        return dict(mid=128, gpool=32, policy=32, value=32, value_hidden=80)
+    if architecture == 'transformer':
+        if channels != 192:
+            raise ValueError('transformer requires b5c192h3nbttfrs: channels=192, blocks=5')
+        return dict(mid=96, gpool=32, policy=32, value=32, value_hidden=64)
+    if architecture != 'nbt':
+        raise ValueError(f'Unsupported network architecture: {architecture}')
+    if channels < 24 or channels % 2:
+        raise ValueError("NBT network.channels must be even and >= 24")
+    return {"mid": channels // 2, "gpool": 8 * ((channels + 47) // 48),
+            "policy": 8 * ((channels + 47) // 48), "value": 8 * ((channels + 47) // 48),
+            "value_hidden": 8 * ((5 * channels + 95) // 96)}

@@ -33,9 +33,9 @@ struct TorchBackend::Graph {
 };
 TorchBackend::~TorchBackend()=default;
 TorchBackend::TorchBackend(const std::string& path, const std::string& device, int canvas, int max_batch, const std::string& precision,
-                           std::shared_ptr<LoadedModel> shared_model)
+                           std::shared_ptr<LoadedModel> shared_model,const std::string& profile)
     : device_(device), path_(path), precision_(precision), shared_model_(shared_model?std::move(shared_model):std::make_shared<LoadedModel>()),
-      canvas_(canvas), max_batch_(max_batch) {
+      canvas_(canvas), requested_profile_(profile), max_batch_(max_batch) {
     if(canvas<5 || canvas>25 || max_batch<1)throw std::runtime_error("Invalid inference backend dimensions");
     if(precision_=="auto")precision_=device_.is_cuda()?"float16":"float32";
     if (precision_!="float32" && precision_!="float16") throw std::runtime_error("Invalid inference precision");
@@ -54,7 +54,9 @@ void TorchBackend::initialize() {
     if (meta->elements().size() != 2 || meta->elements()[0].toInt() != canvas_ || meta->elements()[1].toStringRef() != "alphazero")
         throw std::runtime_error("Model algorithm/canvas mismatch");
     spec_=game_spec(std::string(model_.get_method("game_name")({}).toStringRef()));
-    input_planes_=spec_.planes;global_features_=spec_.globals;action_count_=spec_.actions(canvas_);
+    if(auto method=model_.find_method("metadata_channels"))metadata_channels_=(*method)({}).toInt();
+    if(metadata_channels_ || !requested_profile_.empty())set_human_profile(requested_profile_);
+    input_planes_=spec_.planes;global_features_=spec_.globals+metadata_channels_;action_count_=spec_.actions(canvas_);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(device_.is_cuda());
     host_ = torch::empty({max_batch_, input_planes_, canvas_, canvas_}, options);
     global_host_ = torch::empty({max_batch_, global_features_}, options);
@@ -69,18 +71,20 @@ void TorchBackend::initialize() {
 }
 torch::Tensor TorchBackend::forward(const torch::Tensor& input,const torch::Tensor& globals) {
     const int64_t n=input.size(0),actions=action_count_;
-    auto out = model_.forward({input,globals}).toTuple();
-    if (out->elements().size() != 4) throw std::runtime_error("Expected ordinary/WDL/optimistic/error outputs");
+    std::vector<torch::jit::IValue> args{input,globals.narrow(1,0,spec_.globals)};
+    if(metadata_channels_)args.push_back(globals.narrow(1,spec_.globals,metadata_channels_));
+    auto out = model_.forward(args).toTuple();
+    if (out->elements().size() != 5) throw std::runtime_error("Expected ordinary/WDL/optimistic/error/variance-time outputs");
     auto logits = out->elements()[0].toTensor(), values = out->elements()[1].toTensor();
-    auto optimistic=out->elements()[2].toTensor(), error=out->elements()[3].toTensor();
-    if(optimistic.sizes()!=logits.sizes() || error.dim()!=1 || error.size(0)!=n)
+    auto optimistic=out->elements()[2].toTensor(), error=out->elements()[3].toTensor(), variance=out->elements()[4].toTensor();
+    if(optimistic.sizes()!=logits.sizes() || error.dim()!=1 || error.size(0)!=n || variance.sizes()!=error.sizes())
         throw std::runtime_error("Native auxiliary output shape mismatch");
     if (!precision_checked_ && precision_=="float16" && (logits.scalar_type()!=torch::kFloat16 || values.scalar_type()!=torch::kFloat16))
         throw std::runtime_error("FP16 inference did not execute half-precision output heads");
     precision_checked_=true;
     if (logits.dim() != 2 || logits.size(0) != n || logits.size(1) != actions || values.dim() != 2 || values.size(0) != n || values.size(1) != 4)
         throw std::runtime_error("Native model output shape mismatch");
-    return torch::cat({logits.to(torch::kFloat32), values.to(torch::kFloat32), optimistic.to(torch::kFloat32), error.to(torch::kFloat32).unsqueeze(1)}, 1);
+    return torch::cat({logits.to(torch::kFloat32), values.to(torch::kFloat32), optimistic.to(torch::kFloat32), error.to(torch::kFloat32).unsqueeze(1), variance.to(torch::kFloat32).unsqueeze(1)}, 1);
 }
 void TorchBackend::capture_graphs() {
     c10::cuda::CUDAStreamGuard stream_guard(*stream_);
@@ -137,10 +141,10 @@ std::vector<Evaluation> TorchBackend::evaluate(const InferenceInputs& inputs) {
     auto cpu=output.to(torch::kCPU).contiguous();
     std::vector<Evaluation> result(n);
     for (int64_t i = 0; i < n; ++i) {
-        auto row = cpu.data_ptr<float>() + i * (2*actions+5);
+        auto row = cpu.data_ptr<float>() + i * (2*actions+6);
         result[i].logits.assign(row, row+actions); result[i].wdl = outcome_probabilities({row[actions],row[actions+1],row[actions+2],row[actions+3]},no_result_possible(*inputs[i],spec_,canvas_));
         result[i].optimistic_logits.assign(row+actions+4,row+2*actions+4);
-        result[i].shortterm_value_stdev=row[2*actions+4];result[i].has_auxiliary=true;
+        result[i].shortterm_value_stdev=row[2*actions+4];result[i].variance_time=row[2*actions+5];result[i].has_auxiliary=true;
     }
     return result;
 }

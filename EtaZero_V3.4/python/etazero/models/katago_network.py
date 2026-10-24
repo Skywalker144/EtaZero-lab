@@ -1,8 +1,7 @@
 """Source KataGo architectures with the EtaZero game input/output contract.
 
 All source heads remain present. Go-only outputs are not supervised by EtaZero.
-Metadata encoders require real player/game metadata. Ordinary RL uses presets
-without a metadata encoder; HumanSL inference supplies a selected source profile.
+Metadata encoders require real player/game metadata in training and inference.
 """
 import copy
 import math
@@ -83,7 +82,7 @@ class KataGoNet(nn.Module):
 
     def source_outputs(self, obs, globals, metadata=None):
         if self.network.metadata_encoder is not None and metadata is None:
-            raise ValueError('Metadata network requires explicit metadataInputNC; ordinary RL must use a non-metadata preset')
+            raise ValueError('Metadata network requires explicit metadataInputNC')
         return self.network(obs * obs[:, 0:1], globals, input_meta=metadata)
 
     def select_outputs(self, outputs, mask):
@@ -106,11 +105,11 @@ class KataGoNet(nn.Module):
         return tuple((*self.select_outputs(head, mask), head[6], head[2][:, 3])
                      for head in self.source_outputs(obs, globals, metadata))
 
-    def forward_all(self, obs, globals):
-        return self.select_outputs(self.source_outputs(obs, globals)[0], obs[:, 0:1])
+    def forward_all(self, obs, globals, metadata=None):
+        return self.select_outputs(self.source_outputs(obs, globals, metadata)[0], obs[:, 0:1])
 
-    def forward(self, obs, globals):
-        policy, value, _, _ = self.forward_all(obs, globals)
+    def forward(self, obs, globals, metadata=None):
+        policy, value, _, _ = self.forward_all(obs, globals, metadata)
         return policy, value
 
     def prepare_compile(self):
@@ -130,28 +129,41 @@ class KataGoNet(nn.Module):
                     parameter.grad[:, :, 1, 1].mul_(2.0)
 
 
+def postprocess_auxiliary(raw_error, raw_variance, version, error_multiplier, variance_multiplier):
+    """The source NN evaluator returns error standard deviation and variance-time."""
+    if version >= 14:
+        stdev = torch.nn.functional.softplus(raw_error.float() * .5) * math.sqrt(error_multiplier)
+    elif version >= 10:
+        stdev = torch.sqrt(torch.nn.functional.softplus(raw_error.float()) * error_multiplier)
+    else:
+        stdev = torch.nn.functional.softplus(raw_error.float())
+    return stdev, torch.nn.functional.softplus(raw_variance.float()) * variance_multiplier
+
+
 class SearchOutputs(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
 
-    def forward(self, obs, globals):
-        policy, value, _, raw = self.model.forward_all(obs, globals)
+    def forward(self, obs, globals, metadata=None):
+        head = self.model.source_outputs(obs, globals, metadata)[0]
+        policy, value, _, raw = self.model.select_outputs(head, obs[:, :1])
+        stdev, variance = postprocess_auxiliary(raw, head[2][:, 3], self.model.model_version,
+            self.model.network.shortterm_value_error_multiplier, self.model.network.variance_time_multiplier)
         # Source policy masking promotes half logits to the FP32 mask dtype.
         # Restore the head dtype without changing any on-board logit value.
         return (policy[:, 0].type_as(value), value, policy[:, 5].type_as(value),
-                0.5 * torch.nn.functional.softplus(raw.float() * 0.5))
+                stdev, variance)
 
-    def raw(self, obs, globals):
-        policy, value, _, _ = self.model.forward_all(obs, globals)
+    def raw(self, obs, globals, metadata=None):
+        policy, value, _, _ = self.model.forward_all(obs, globals, metadata)
         return policy.type_as(value), value
 
 
-class SerializedSearch(nn.Module):
+class SearchIdentity(nn.Module):
     def __init__(self, graph, canvas, game):
         super().__init__()
-        self.graph, self.canvas = graph, canvas
-        self.game = game
+        self.graph, self.canvas, self.game = graph, canvas, game
 
     @torch.jit.export
     def game_name(self) -> str:
@@ -161,12 +173,31 @@ class SerializedSearch(nn.Module):
     def metadata(self) -> tuple[int, str]:
         return self.canvas, 'alphazero'
 
+
+class SerializedSearch(SearchIdentity):
+    @torch.jit.export
+    def metadata_channels(self) -> int:
+        return 0
+
     @torch.jit.export
     def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.graph.raw(obs, globals)
 
-    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.graph(obs, globals)
+
+
+class SerializedMetadataSearch(SearchIdentity):
+    @torch.jit.export
+    def metadata_channels(self) -> int:
+        return 192
+
+    @torch.jit.export
+    def raw(self, obs: torch.Tensor, globals: torch.Tensor, metadata: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.graph.raw(obs, globals, metadata)
+
+    def forward(self, obs: torch.Tensor, globals: torch.Tensor, metadata: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.graph(obs, globals, metadata)
 
 
 class ExportComplexDepthwiseConv2d(nn.Module):
@@ -232,9 +263,11 @@ def inference_network(model):
     globals = torch.zeros(2, result.global_features, device=device)
     # Source uses Python shared-data objects for registers and GAB/TAB. Trace
     # their tensor operations at fixed canvas; batch dimensions remain dynamic.
+    meta_channels=192 if result.network.metadata_encoder is not None else 0
+    inputs=(obs,globals) + ((torch.zeros(2,meta_channels,device=device),) if meta_channels else ())
     with torch.no_grad():
         graph = torch.jit.trace_module(SearchOutputs(result).eval(),
-                                       {'forward': (obs, globals), 'raw': (obs, globals)}, check_trace=False)
+                                       {'forward': inputs, 'raw': inputs}, check_trace=False)
     # Tracing records .device as the tracing device. Recover a tensor-derived
     # device so the saved graph can be moved to CPU or another CUDA device.
     for method in (graph.forward, graph.raw):
@@ -249,4 +282,5 @@ def inference_network(model):
                 node.output().replaceAllUsesWith(device_node.output())
                 node.destroy()
         torch._C._jit_pass_lint(forward_graph)
-    return SerializedSearch(graph, result.canvas, result.game).eval()
+    wrapper=SerializedMetadataSearch if meta_channels else SerializedSearch
+    return wrapper(graph, result.canvas, result.game).eval()

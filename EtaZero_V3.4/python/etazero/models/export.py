@@ -5,7 +5,7 @@ from pathlib import Path
 import uuid
 import numpy as np
 import torch
-from etazero.models.network import make_network, inference_network
+from etazero.models.factory import make_network, inference_network
 from etazero.games import layout_metadata
 from etazero.train.optimization import inference_weights
 from etazero.storage import load_json, save_json, sync_directory
@@ -96,6 +96,7 @@ def export_model(run_dir, config, checkpoint):
     if hasattr(model, 'source_config'):
         info['katago_architecture'] = model.architecture
         info['katago_config'] = model.source_config
+        if model.source_config.get('metadata_encoder'):info['metadata_profile']='selfplay'
         info['normalization'] = 'source_' + model.norm_kind
     if config['agent']['algorithm'] == 'muzero':
         info['algorithm'] = 'muzero'

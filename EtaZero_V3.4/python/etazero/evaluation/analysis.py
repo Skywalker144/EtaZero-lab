@@ -11,7 +11,18 @@ from etazero.games import spec_for_rule
 
 def model_info(path,canvas=None):
     path=Path(path).resolve()
-    info=load_json(path.parent/"manifest.json")
+    manifest=path.parent/"manifest.json"
+    if not manifest.is_file() and path.suffix in ('.bin','.gz'):
+        import gzip
+        opener=gzip.open if path.suffix=='.gz' else open
+        with opener(path,'rb') as stream:
+            name=stream.readline().decode('ascii').strip()
+            version,planes,globals=(int(stream.readline()) for _ in range(3))
+        if (planes,globals)!=(22,19):
+            raise ValueError('Standalone KataGo model must have Go input channels; extended models require their manifest')
+        return path,dict(id=str(path),name=name,model_version=version,canvas=canvas or 25,
+                         game='go',algorithm='alphazero',backend='cuda',bytes=path.stat().st_size)
+    info=load_json(manifest)
     if (canvas is not None and info["canvas"]!=canvas):
         raise ValueError(f"Inference model canvas mismatch: {path}")
     if path.stat().st_size != info["bytes"]:
