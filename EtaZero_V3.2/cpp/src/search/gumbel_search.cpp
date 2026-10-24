@@ -76,6 +76,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const Game& game,double
     AlphaZeroState state(game,*evaluator_);return run(state,temperature,options);
 }
 template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& state,double temperature,SearchRun options) {
+    analysis_pv_length_=options.analysis_pv_length;
     if(!std::isfinite(temperature)||temperature<0||options.max_visits<0||options.max_playouts<-1||options.max_time<-1||!std::isfinite(options.max_time))
         throw std::runtime_error("Invalid Gumbel search caps/temperature");
     if(options.hint_action<-1||(options.hint_action>=0&&!state.legal(options.hint_action)))throw std::runtime_error("Illegal Gumbel root hint");
@@ -88,7 +89,7 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     prepare_subtree_bias(state);
     result.policy.assign(state.actions(),0);result.move_policy=result.policy;result.network_policy=result.policy;result.search_policy=result.policy;
     result.visits.assign(state.actions(),0);result.q_values.assign(state.actions(),0);result.q_visits.assign(state.actions(),0);
-    if(state.terminal()) {double v=state.terminal_value();result.value=v;result.network_wdl=result.search_wdl=wdl_from_value(v,state.terminal_draw_probability());return result;}
+    if(state.terminal()) {double v=state.terminal_value();result.value=v;result.network_wdl=result.search_wdl=wdl_from_value(v,state.terminal_draw_probability(),state.terminal_no_result_probability());return result;}
     int64_t cap=options.max_playouts<0?(options.pondering?settings_.max_playouts_pondering:settings_.max_playouts):options.max_playouts;
     if(cap==0||(options.should_stop&&options.should_stop())){result.stopped_early=cap!=0;return result;}
     remove_root_noise_=options.remove_root_noise;root_symmetries_=remove_root_noise_?1:settings_.root_symmetries;
@@ -126,13 +127,13 @@ template<bool Full> SearchResult GumbelSearch<Full>::run(const SearchState& stat
     if(error_)std::rethrow_exception(error_);
     carried_time_+=std::chrono::duration<double>(std::chrono::steady_clock::now()-actual_search_start).count();
     report_={};
-    if(options.collect_analysis){result.analysis=analysis_snapshot(state.actions(),&gumbel_).analysis;result.gumbel=true;}
+    if(options.collect_analysis){auto report=analysis_snapshot(state.actions(),&gumbel_);result.analysis=std::move(report.analysis);result.human_policy=std::move(report.human_policy);result.pruned_value=report.pruned_value;result.pruned_utility=report.pruned_utility;result.pruned_wdl=report.pruned_wdl;result.gumbel=true;}
     if(!stopped_&&completed_!=budget_)throw std::runtime_error("Gumbel budget mismatch");
     auto children=root_children();auto parent=snapshot(*root_);
     result.simulations=completed_;result.new_playouts=completed_+1;result.root_visits=root_->visits.load()+1;result.stopped_early=stopped_;
-    result.network_wdl=eval->initial_wdl;result.network_sample_weight=eval->initial_weight;result.network_value_stdev=eval->initial_stdev;
-    result.value=parent.win_loss;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
-    result.search_wdl=wdl_from_value(parent.win_loss,parent.draw);
+    result.network_wdl=eval->initial_wdl;result.network_sample_weight=eval->initial_weight;result.network_value_stdev=eval->initial_stdev;result.network_variance_time=eval->initial_variance_time;
+    result.value=parent.win_loss;result.utility=parent.value;result.search_weight=parent.weight;result.search_weight_sq=parent.weight_sq;
+    result.search_wdl=wdl_from_value(parent.win_loss,parent.draw,parent.no_result);
     for(size_t i=0;i<actions.size();++i) {
         result.visits[actions[i]]=children[i].visits;
         int index=root_->moves[i].child_index.load();
