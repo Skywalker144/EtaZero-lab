@@ -38,7 +38,7 @@ PUCT 同分时保留先分配的 child；新着只由最高先验的未展开动
 
 最终落子可将第二策略按已搜索 utility 作 PIKL 指数偏移，再按 `human_sl_chosen_move_proportion` 混入选择权重；未展开动作使用已有 child utility 的简单均值。`human_sl_chosen_move_ignore_pass` 保留原来的 pass 质量。零 PIKL lambda 使用温度趋于零的极限，避免除零。混合在落子温度及整数量化之前执行，也反映在分析和棋钟判断中。训练目标包含已分配但只有 weightless 访问的子边；直接落子及策略 surprise／搜索熵允许补入尚未分配的合法动作，统计策略保留 LCB。
 
-AlphaZero 可以在每个真实节点调用第二模型。MuZero 的非根第二策略必须来自另一个 MuZero 模型，两个 latent 沿相同动作独立演进；AlphaZero 第二模型可用于 MuZero 的真实根及最终策略混合，配置其非根探索会明确报错。普通 RL 不接受 meta 预设；HumanSL 用 `human_sl_profile` 和实际执色、面积生成来源 metadata，不使用零向量；metadata 模型可先不设置 profile，此时第二策略停用，随后由 GTP 参数或单条公共 JSON 请求启用；使用该能力需要实际可用的第二策略模型，不自动生成或训练人类模型。带 metadata 的 HumanSL 模型强制使用普通策略，root／leaf optimism 均不生效。
+AlphaZero 可以在每个真实节点调用第二模型。MuZero 的非根第二策略必须来自另一个 MuZero 模型，两个 latent 沿相同动作独立演进；AlphaZero 第二模型可用于 MuZero 的真实根及最终策略混合，配置其非根探索会明确报错。AlphaZero 的 meta 训练路径见 [网络](networks.md)。HumanSL 用 `human_sl_profile` 和实际执色、面积生成来源 metadata，不使用零向量；metadata 模型可先不设置 profile，此时第二策略停用，随后由 GTP 参数或单条公共 JSON 请求启用；使用该能力需要实际可用的第二策略模型，不自动生成或训练人类模型。未设置第二模型时，`human_sl_profile` 和请求级 `humanSLProfile` 作用于主 metadata 模型。带 metadata 的模型强制使用普通策略，root／leaf optimism 均不生效。
 
 按深度限制、focus、棋钟和 pondering 的命令格式见 [原生交互引擎](engine.md)。核心实现入口为 [AlphaZero 搜索](../cpp/search/search.cpp)、[MuZero 搜索](../cpp/search/muzero/search.cpp)、[时间预算](../cpp/search/time_budget.cpp) 和 [模式表](../cpp/search/pattern_bonus.cpp)。
 

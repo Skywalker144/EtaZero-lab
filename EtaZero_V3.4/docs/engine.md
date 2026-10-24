@@ -4,7 +4,7 @@
 
 ## 命令行
 
-在版本目录执行，`--model` 指向带 manifest 的 CUDA `.bin` 或参考 `.pt` 模型，也可用 `--run-dir` 选择当前发布模型：
+在版本目录执行，`--model` 指向本地 CUDA `.bin`／参考 `.pt` 模型包，或不带 manifest 的来源 KataGo `.bin`／`.bin.gz` 围棋模型，也可用 `--run-dir` 选择当前发布模型：
 
 ```bash
 bash scripts/run.sh gtp --config-dir configs/az_g --run-dir data/my_run
@@ -24,9 +24,9 @@ bash scripts/run.sh analysis --json-stream --config-dir configs/az_g --run-dir d
 {"id":"cancel","action":"terminate","terminateId":"position"}
 ```
 
-任务按 priority 从高到低执行，同优先级按提交顺序；EOF 排空有限任务。`query_version`、`query_models`、`clear_cache`、`terminate`、`terminate_all`、`set_focus` 对应来源控制接口；取消可限定 turns。每个分析时点有独立最终响应，进行中的报告带 `isDuringSearch: true`。`overrideSettings.humanSLProfile` 仅影响该请求，metadata 和 NN cache 按真实输入隔离。
+任务按 priority 从高到低执行，同优先级按提交顺序；EOF 排空有限任务。`query_version`、`query_models`、`clear_cache`、`terminate`、`terminate_all`、`set_focus` 对应来源控制接口；取消可限定 turns。每个分析时点有独立最终响应，进行中的报告带 `isDuringSearch: true`。`overrideSettings.humanSLProfile` 仅影响该请求，有第二模型时作用于第二模型，否则作用于主 metadata 模型；并发请求的 metadata 和 NN cache 按真实输入隔离。围棋终局仍可作为分析根，保留完整 BoardHistory 和网络输入；在搜索中走出根后恢复正常终局判断。
 
-响应含 `rootInfo`、`moveInfos`，可附 policy、humanPolicy 和 PV visits；存在 HumanSL 输出时，每个 `moveInfos` 项都含对应动作的 `humanPrior`，与 `includePolicy` 无关，并按对称等价着的实际坐标取值；使用来源根剪枝聚合值、边访问／节点访问区分及对称等价着报告。四结果扩展 `drawRate`，不把普通和棋并入 NR。`rawVarTimeLeft` 仅在后端暴露 variance-time 输出时提供，参考 TorchScript 后端不伪造该值。score/ownership/seki 相关请求明确拒绝，响应省略这些预测量。
+响应含 `rootInfo`、`moveInfos`，可附 policy、humanPolicy 和 PV visits；存在 HumanSL 输出时，每个 `moveInfos` 项都含对应动作的 `humanPrior`，与 `includePolicy` 无关，并按对称等价着的实际坐标取值；使用来源根剪枝聚合值、边访问／节点访问区分及对称等价着报告。四结果扩展 `drawRate`，不把普通和棋并入 NR。`rawVarTimeLeft` 在模型提供 variance-time 输出时给出；AlphaZero 与 MuZero 的 CUDA 和 TorchScript 后端均传递该预测，并按模型携带的系数处理短期误差与 variance-time。score/ownership/seki 相关请求明确拒绝，响应省略这些预测量。
 
 ## GTP
 
@@ -118,3 +118,5 @@ Ponder 使用独立 `max_visits_pondering`／`max_playouts_pondering`／`max_tim
 更多开关及第二策略模型配置见 [通用搜索控制](search-controls.md)。胜负报告不包含模式惩罚；utility 报告反映实际搜索修正。
 
 公共配置接受 `numSearchThreadsPerAnalysisThread` 作为 `numSearchThreads` 的别名，两者不能同时出现（含 include 文件）。`nnCacheSizePowerOfTwo` 按来源指数转换为容量，`-1` 禁用缓存；未设置容量和锁池时按 analysis、GTP、match 模式取各自缺省。字段转换和缺省值见 [配置解析](../python/etazero/config_files.py) 与 [引擎配置](../python/etazero/engine_config.py)。
+
+公共 PDA 参数采用来源的有符号范围，省略作用方时随当前搜索服务的玩家解析；ponder 保持服务方不变。切换后若网络条件改变，旧搜索统计失效，NN 输入与图身份采用同一作用方。公共参数的条件缺省在配置加载及 GTP／JSON 覆盖时均重新解析，显式设置的子参数保持其值。SGF 导入、规则变更及撤销按有效历史模式重放，保留规则计分和终局语义。
