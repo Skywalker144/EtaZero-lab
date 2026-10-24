@@ -1,0 +1,350 @@
+"""Source replay semantics, complete-file row IDs, holdout and immutable rebuild."""
+from config_samples import CONFIGS
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import numpy as np
+import pytest
+import torch
+from etazero.config import ROOT, load_config, validate
+from etazero.data.targets import Catalog, training_view
+from etazero.data.reader import BatchReader, BatchPrefetcher
+
+from etazero.data.shuffle import build_snapshot, desired_window, window_sources, _groups, resource_plan, prune_derived, restore_snapshot
+from etazero.storage import save_npz, save_json, sha256
+from etazero.models.network import make_network, TrainingForward
+from etazero.train.learner import validate_epoch
+from test_python import winning_record, source_fields
+from etazero.data.source_data import encode_view, decode_view
+
+
+@pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
+def test_file_holdout_partitions_complete_source_shards_with_side_rows(tmp_path, monkeypatch, algorithm):
+    from collections import Counter
+    import subprocess
+    from etazero.config import write_native
+    from etazero.data.targets import read_raw, metadata, game_row_ranges, game_identity, game_weight_statistics, training_targets
+    from test_muzero_pipeline import small_config
+    c=small_config() if algorithm=='muzero' else load_config(CONFIGS/'smoke_test')
+    c['training']['skip_validation']=False
+    c['writer'].update(shard_rows=10,first_file_min_random_proportion=1)
+    c['parallelism'].update(game_threads=1,search_threads=1)
+    c['side_positions']['side_position_prob']=1
+    c['opening']['probability']=0;c['policy_init']['policy_init']=False
+    c['replay'].update(min_rows=1,taper_exponent=1,expand_per_row=1,keep_target_rows='all')
+    c['shuffle'].update(group_rows=20,bucket_rows=16,training_shard_rows=8,waves=2)
+    write_native(c,tmp_path/'effective.cfg')
+    subprocess.run([str(ROOT/'build/etazero'),'selfplay','--config',str(tmp_path/'effective.cfg'),
+                    '--evaluator','random','--model','random','--model-id','model','--device','cpu',
+                    '--games','4','--output',str(tmp_path/'selfplay'),'--run-id','test','--attempt-id','test',
+                    '--config-id','test','--source-id','test','--iteration','1','--worker','0','--seed','734'],
+                   check=True,capture_output=True,text=True,timeout=60)
+    from etazero.data.source_data import source_view
+    entries=[];files={};targets=training_targets(c);side_rows=0
+    def fingerprints(view):
+        return Counter(tuple(view[key][i].tobytes() for key in sorted(view)) for i in range(len(view['globalTargetsNC'])))
+    for path in sorted((tmp_path/'selfplay').glob('*.npz')):
+        raw=read_raw(path);m=metadata(raw)
+        entries.append(dict(path=str(path.relative_to(tmp_path)),metadata=m,weight_stats=game_weight_statistics(raw)))
+        files[str(path)]=fingerprints(source_view(raw,targets))
+        side_rows+=len(raw['side_players'])
+    assert side_rows and len(files)>4
+    held_out=sorted(files)[0]
+    monkeypatch.setattr('etazero.data.shuffle.validation_file',lambda path:path==held_out)
+    expected=[Counter(),Counter()]
+    for path,rows in files.items():expected[path==held_out].update(rows)
+    snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,entries,c)
+    manifest=json.loads((snapshot/'manifest.json').read_text())
+    assert len(manifest['validation_sources'])==1
+    for partition, key in enumerate(('files','validation_files')):
+        actual=Counter()
+        for info in manifest[key]:
+            path=snapshot/'data'/('validation' if partition else '')/info['path']
+            with np.load(path) as arrays:actual.update(fingerprints(dict(arrays)))
+        assert actual==expected[partition]
+    hashes={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
+    prune_derived(tmp_path,[snapshot.name],set());restore_snapshot(snapshot)
+    assert hashes=={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
+
+
+def id_snapshot(root,counts,validation=False):
+    snapshot=Path(root)/'snapshots/ids';directory=snapshot/'data';directory.mkdir(parents=True)
+    base=training_view(winning_record()[0]);files=[];val_files=[]
+    for index,n in enumerate(counts):
+        arrays={k:v[np.arange(n)%len(v)].copy() for k,v in base.items()}
+        ids=np.arange(n)+index*100
+        arrays['globals'][:,5]=ids
+        arrays['q_values'][:,0]=ids/32000
+        arrays=encode_view(arrays)
+        filename=f'{index:03}.npz';save_npz(directory/filename,arrays)
+        info={'path':filename,'rows':n,'sha256':sha256(directory/filename)};files.append(info)
+        if validation:
+            save_npz(directory/'validation'/filename,arrays);val_files.append(info.copy())
+    save_json(snapshot/'manifest.json',{'id':'ids','canvas':6,'rows':sum(counts),'files':files,
+                                      'validation_rows':sum(counts) if validation else 0,'validation_files':val_files})
+    return snapshot
+
+
+def test_round_budget_limits_prefetch_and_preserves_consumed_cursor(tmp_path, monkeypatch):
+    snapshot=id_snapshot(tmp_path,[5,9,8])
+    reader=BatchReader(snapshot,4,8,17,shuffle_files=False,max_batches=3)
+    loaded=[];original=reader._load
+    def load(index):
+        loaded.append(index)
+        return original(index)
+    monkeypatch.setattr(reader,'_load',load)
+    prepared=BatchPrefetcher(reader,4)
+    try:
+        first,cursor=prepared.next()
+        expected=[prepared.next()[0] for _ in range(2)]
+        with pytest.raises(StopIteration):prepared.next()
+        assert first['globals'][:,5].tolist()==[0,1,2,3]
+        assert cursor['index']==0 and cursor['offset']==4
+        resumed=BatchReader(snapshot,4,8,999,cursor,shuffle_files=False,max_batches=2)
+        try:
+            for batch in expected:
+                actual=resumed.next()
+                for key in batch:np.testing.assert_array_equal(actual[key],batch[key])
+            with pytest.raises(StopIteration):resumed.next()
+        finally:resumed.close()
+    finally:prepared.close();reader.close()
+    assert sorted(loaded)==[0,1]
+
+
+def test_zero_and_excess_round_batch_budgets(tmp_path, monkeypatch):
+    snapshot=id_snapshot(tmp_path,[8])
+    reader=BatchReader(snapshot,4,2,17,max_batches=0)
+    monkeypatch.setattr(reader,'_load',lambda _:pytest.fail('Zero budget must not read files'))
+    try:
+        with pytest.raises(StopIteration):reader.next()
+        assert not reader.pending
+    finally:reader.close()
+    with pytest.raises(ValueError,match='insufficient complete file batches'):
+        BatchReader(snapshot,4,2,17,max_batches=3)
+    with pytest.raises(ValueError,match='nonnegative'):
+        BatchReader(snapshot,4,2,17,max_batches=-1)
+
+
+def test_complete_file_prefixes_no_repeat_exhaustion_resume_and_prefetch(tmp_path):
+    counts=[0,1,3,4,5,9,17];snapshot=id_snapshot(tmp_path,counts)
+    expected=[[i*100+j for j in range(start,start+4)] for i,n in enumerate(counts) for start in range(0,n//4*4,4)]
+    reader=BatchReader(snapshot,4,3,17)
+    prepared=BatchPrefetcher(reader,2);actual=[]
+    try:
+        first,state=prepared.next();actual.append(first['globals'][:,5].tolist())
+        resumed=BatchReader(snapshot,4,1,999,state)
+        try:
+            while True:
+                try:batch,cursor=prepared.next()
+                except StopIteration:break
+                other=resumed.next()
+                for key in batch:np.testing.assert_array_equal(batch[key],other[key])
+                np.testing.assert_allclose(batch['globals'][:,5],batch['q_values'][:,0]*32000,rtol=1e-7)
+                actual.append(batch['globals'][:,5].tolist())
+            for _ in range(2):
+                with pytest.raises(StopIteration):resumed.next()
+            exhausted=resumed.state()
+        finally:resumed.close()
+        again=BatchReader(snapshot,4,1,1,exhausted)
+        try:
+            with pytest.raises(StopIteration):again.next()
+        finally:again.close()
+    finally:prepared.close();reader.close()
+    assert sorted(actual)==sorted(expected)
+    assert sum(map(len,actual))==sum(n//4*4 for n in counts)==32
+    with pytest.raises(ValueError,match='complete per-file'):
+        BatchReader(snapshot,100,1,1)
+
+
+def test_reference_repeat_gap_order_retains_each_file():
+    import random
+    from reference.replay_order import repeat_order
+    rng = random.Random(11)
+    previous = list(range(9))
+    for _ in range(5):
+        current = repeat_order(previous, rng)
+        assert sorted(current) == list(range(9))
+        assert min(9 + current.index(i) - previous.index(i) for i in range(9)) >= 3
+        previous = current
+
+
+def test_capped_random_and_actual_mtime_window_range():
+    c=load_config(CONFIGS / 'smoke_test');r=c['replay'];r.update(min_rows=100,taper_exponent=1,expand_per_row=1)
+    entries=[{'path':'newrandom','metadata':{'model_id':'random:1','rows':180,'iteration_id':0,'created_ns':0},'mtime_ns':30},
+             {'path':'oldpost','metadata':{'model_id':'model','rows':70,'iteration_id':9,'created_ns':900},'mtime_ns':10},
+             {'path':'recentpost','metadata':{'model_id':'model','rows':20,'iteration_id':1,'created_ns':1},'mtime_ns':20}]
+    chosen,selection=window_sources(entries,r)
+    assert selection==dict(raw_rows=270,random_rows=180,postrandom_rows=90,usable_rows=190,desired_rows=190,window_rows=200,range=[70,270])
+    assert [e['path'] for e in chosen]==['newrandom','recentpost']
+    r.update(taper_scale=200,add_to_data_rows=10.5,max_rows=150)
+    assert desired_window(190,r)==150
+    chosen,selection=window_sources(entries,r);assert selection['range']==[100,280]
+    r['add_to_data_rows']=-200
+    with pytest.raises(ValueError,match='taper_scale'):validate(c)
+    r['add_to_data_rows']=0;r['max_rows']=99
+    with pytest.raises(ValueError,match='max_rows'):validate(c)
+    assert _groups([('a','A',6),('empty','E',0),('b','B',6),('c','C',1)],10)==[[('a','A'),('b','B')],[('c','C')]]
+
+
+def holdout_entries(root,copies=12):
+    entries=[];train_ids=[];val_ids=[]
+    i=0
+    while len(train_ids)<copies or len(val_ids)<copies:
+        path=Path(root)/'selfplay'/f'raw_{i:05}.npz'
+        value=int(hashlib.md5(path.name.encode()).hexdigest()[:13],16)/2**52
+        selected=val_ids if value>=.99 else train_ids
+        if len(selected)<copies:selected.append(i)
+        i+=1
+    for index,game in enumerate(train_ids+val_ids):
+        name=f'raw_{game:05}.npz'
+        raw,meta=winning_record(index%3);meta.update(shard_id=name,attempt_id='holdout')
+        raw['game_ids'][0]=game
+        raw['metadata']=np.frombuffer(json.dumps(meta).encode(),np.uint8)
+        path=Path(root)/'selfplay'/name;save_npz(path,raw)
+        entries.append({'path':str(path.relative_to(root)),'sha256':sha256(path),'metadata':meta})
+    return entries
+
+
+def test_validation_file_holdout_shared_probability_across_snapshots_and_rebuild(tmp_path):
+    c=load_config(CONFIGS / 'smoke_test');c['training']['skip_validation']=False
+    c['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=108)
+    c['shuffle'].update(group_rows=18,bucket_rows=16,training_shard_rows=8,waves=3)
+    entries=holdout_entries(tmp_path);all_train=set();all_val=set()
+    class RecordingPool:
+        def __init__(self):self.streams=[]
+        def map(self,function,tasks):
+            for task in tasks:
+                if function.__name__=='_scatter':self.streams.append(tuple(task[5])+(task[0],))
+                elif function.__name__=='_merge_bucket':self.streams.append(tuple(task[5]))
+                yield function(task)
+    for iteration in (1,2):
+        pool=RecordingPool()
+        identity=build_snapshot(tmp_path,iteration,entries,c,pool=pool);snapshot=tmp_path/'snapshots'/identity
+        assert len(pool.streams)==len(set(pool.streams)) # Both partitions, every wave/stage/group/bucket.
+        m=json.loads((snapshot/'manifest.json').read_text());train={e['path'] for e in m['sources']};val={e['path'] for e in m['validation_sources']}
+        assert len(train)==len(val)==12 and not train&val and train|val=={e['path'] for e in entries}
+        assert train=={e['path'] for e in entries[:12]} and val=={e['path'] for e in entries[12:]}
+        assert m['keep_prob']==m['validation_resource_plan']['keep_prob']==.5
+        assert m['rows']==m['validation_rows']==54
+        assert not train&all_val and not val&all_train;all_train|=train;all_val|=val
+        hashes={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
+        prune_derived(tmp_path,[identity],set());restore_snapshot(snapshot)
+        assert hashes=={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
+    assert all(sha256(tmp_path/e['path'])==e['sha256'] for e in entries)
+    c['training']['skip_validation']=True
+    identity=build_snapshot(tmp_path,3,entries,c);m=json.loads((tmp_path/'snapshots'/identity/'manifest.json').read_text())
+    assert len(m['sources'])==24 and m['validation_rows']==0 and not m['validation_files']
+
+
+def test_catalog_refreshes_mtime_and_rejects_changed_known_raw(tmp_path):
+    entries=holdout_entries(tmp_path,2);catalog=Catalog(tmp_path,'test','config')
+    try:
+        catalog.scan({1:'model'});path=tmp_path/entries[0]['path'];stamp=path.stat().st_mtime_ns
+        os.utime(path,ns=(stamp,stamp+10**12));catalog.scan({1:'model'})
+        assert catalog.entries()[-1]['path']==entries[0]['path']
+        assert catalog.entries()[-1]['mtime_ns']==stamp+10**12
+        with path.open('ab') as f:f.write(b'changed')
+        with pytest.raises(ValueError,match='changed'):catalog.scan({1:'model'})
+    finally:catalog.close()
+
+
+def test_validation_raw_eval_d4_cap_and_training_state_unchanged(tmp_path):
+    c=load_config(CONFIGS / 'smoke_test');c['training'].update(skip_validation=False,d4_augmentation=False,max_validation_samples=8)
+    snapshot=id_snapshot(tmp_path,[17,9],True)
+    # IDs identify synthetic rows, but are not valid numerical Q targets.
+    for info in json.loads((snapshot/'manifest.json').read_text())['validation_files']:
+        path=snapshot/'data/validation'/info['path']
+        with np.load(path) as f:arrays={k:f[k] for k in f.files}
+        arrays['qValueTargetsNCMove'][:,0].fill(0);save_npz(path.with_suffix('.new.npz'),arrays);os.replace(path.with_suffix('.new.npz'),path)
+    m=json.loads((snapshot/'manifest.json').read_text())
+    for info in m['validation_files']:info['sha256']=sha256(snapshot/'data/validation'/info['path'])
+    (snapshot/'manifest.json').write_text(json.dumps(m))
+    model=make_network(c).train();forward=TrainingForward(model,8,False);before=copy.deepcopy(model.state_dict());rng=torch.get_rng_state();events=[]
+    validate_epoch(snapshot,model,forward,c,1,torch.device('cpu'),lambda event,**fields:events.append((event,fields)))
+    assert model.training and torch.equal(rng,torch.get_rng_state())
+    for k,v in before.items():torch.testing.assert_close(v,model.state_dict()[k],rtol=0,atol=0)
+    assert all(p.grad is None for p in model.parameters())
+    event,fields=events[0];assert event=='validation' and fields['samples']==16 and fields['batches']==2 and fields['model']=='raw'
+    assert sum(fields['symmetry_counts'])==2 and fields['symmetry_counts'][0]!=2
+    assert np.isfinite(fields['loss'])
+
+
+def test_scatter_row_ids_pairing_rounding_and_independent_wave_streams(tmp_path):
+    from etazero.data.shuffle import _scatter, _merge_bucket
+    source=tmp_path/'input.npz';ids=np.arange(12,dtype=np.float32)
+    save_npz(source,dict(globalTargetsNC=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
+    # Source round tie: 12*0.375=4.5 rounds to 4 (ties-to-even).
+    root=tmp_path/'scatter';outputs=_scatter((0,[(str(source),None)],False,str(root),4,(17,2,0),str(tmp_path),.375,True,()))
+    selected=[]
+    for bucket,path,n in outputs:
+        with np.load(path) as a:
+            np.testing.assert_array_equal(a['marker'][:,0],a['globalTargetsNC'][:,0]);selected.extend(a['marker'][:,0].tolist())
+    assert len(outputs)==4 and len(selected)==len(set(selected))==4
+    # Equal source groups assigned to different waves must not reuse permutations.
+    orders=[]
+    for wave in range(3):
+        path=tmp_path/f'merge_input_{wave}.npz'
+        save_npz(path,dict(globalTargetsNC=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
+        files=_merge_bucket(([str(path)],12,str(tmp_path),str(tmp_path/f'out_{wave}'),1,(17,3,wave,0),str(wave),True))
+        with np.load(tmp_path/f'out_{wave}'/files[0]['path']) as a:
+            orders.append(a['marker'][:,0].tolist());np.testing.assert_array_equal(a['marker'][:,0],a['globalTargetsNC'][:,0])
+        assert sorted(orders[-1])==ids.tolist()
+    assert len({tuple(order) for order in orders})==3
+
+
+@pytest.mark.parametrize('waves',[1,3])
+def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves):
+    from etazero.data.targets import TRAIN_POLICY_TARGETS, training_targets
+    from etazero.data.shuffle import view_key
+    c=load_config(CONFIGS/'smoke_test')
+    c['shuffle'].update(group_rows=9,bucket_rows=8,training_shard_rows=8,waves=waves)
+    c['replay'].update(min_rows=9,keep_target_rows='all')
+    raw,meta=winning_record()
+    # Int16 boundaries and nontrivial opponent targets catch truncation or
+    # premature normalization; compare paired rows through the full pipeline.
+    raw['policies'][0]=0;raw['policies'][0,0]=30000;raw['policies'][0,1]=17
+    source_fields(raw)
+    expected=training_view(raw)
+    for key in TRAIN_POLICY_TARGETS:
+        assert expected[key].dtype==np.int16
+    path=tmp_path/'selfplay'/'integer.npz';save_npz(path,raw)
+    entry=dict(path=str(path.relative_to(tmp_path)),metadata=meta,sha256=sha256(path))
+    snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,[entry],c)
+    cache=tmp_path/'.internal/training_views'/(view_key(entry,training_targets(c))+'.npz')
+    with np.load(cache) as disk:
+        stored=decode_view(disk,training_targets(c))
+        for key in TRAIN_POLICY_TARGETS:
+            assert stored[key].dtype==np.int16
+            np.testing.assert_array_equal(stored[key],expected[key])
+    manifest=json.loads((snapshot/'manifest.json').read_text())
+    pairs=[]
+    for info in manifest['files']:
+        with np.load(snapshot/'data'/info['path']) as disk:
+            stored=decode_view(disk,training_targets(c))
+            for key in TRAIN_POLICY_TARGETS:assert stored[key].dtype==np.int16
+            pairs.extend(zip(stored['policy'].tolist(),stored['opponent_policy'].tolist()))
+    expected_pairs=list(zip(expected['policy'].tolist(),expected['opponent_policy'].tolist()))
+    assert sorted(pairs)==sorted(expected_pairs)
+    reader=BatchReader(snapshot,1,1,7)
+    actual=[]
+    try:
+        for _ in range(manifest['rows']):
+            batch=reader.next()
+            for key in TRAIN_POLICY_TARGETS:assert batch[key].dtype==np.float32
+            actual.append((batch['policy'][0].tolist(),batch['opponent_policy'][0].tolist()))
+        with pytest.raises(StopIteration):reader.next()
+    finally:reader.close()
+    assert sorted(actual)==sorted(expected_pairs)
+
+
+def test_holdout_is_basename_stable_across_directories():
+    from etazero.data.shuffle import validation_file
+    # Concrete prior regression: full-path hash selected validation for this name.
+    old='/tmp/pytest-of-sky/pytest-60/test_shuffle_conservation_and_1/selfplay/0.npz'
+    assert not validation_file(old)
+    for i in range(1000):
+        name=f'{i}.npz'
+        expected=int(hashlib.md5(name.encode()).hexdigest()[:13],16)/2**52>=.99
+        assert validation_file('/original/'+name)==validation_file('/relocated/'+name)==expected
