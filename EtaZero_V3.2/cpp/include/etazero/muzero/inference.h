@@ -1,6 +1,7 @@
 #pragma once
 #include "etazero/inference.h"
 #include <stdexcept>
+class Rand;
 
 namespace etazero::muzero {
 struct Latent {
@@ -67,13 +68,15 @@ public:
     void finish() override;
     void drain() override;
     void reset_stats() override;
+    void clear_cache() override;
 };
 class RandomBackend final : public Backend {
-    struct State : Latent { uint64_t key; std::vector<uint8_t> mask; };
-    int canvas_;uint64_t seed_;
+    struct State : Latent { bool allow_no_result=false; std::vector<uint8_t> mask; };
+    int canvas_;std::unique_ptr<Rand> random_;
     InferenceOutput output(std::shared_ptr<State>);
 public:
-    RandomBackend(int canvas,uint64_t seed,GameSpec spec=game_spec(GameKind::GOMOKU)):Backend(spec),canvas_(canvas),seed_(seed){}
+    RandomBackend(int canvas,uint64_t seed,GameSpec spec=game_spec(GameKind::GOMOKU));
+    ~RandomBackend() override;
     std::vector<InferenceOutput> initial(const InferenceInputs&) override;
     std::vector<InferenceOutput> recurrent(const std::vector<InferenceAction>&) override;
 };

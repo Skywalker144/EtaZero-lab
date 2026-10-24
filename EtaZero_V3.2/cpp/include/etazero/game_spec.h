@@ -29,7 +29,7 @@ struct GameSpec : GameLayout {
         return result;
     }
     void validate_dimensions(int size,int canvas) const {
-        if(size<5 || size>canvas || canvas>25 || (board_height && (size!=board_height || canvas!=board_height)))
+        if(size<(kind==GameKind::GO?2:5) || size>canvas || canvas>25 || (board_height && (size!=board_height || canvas!=board_height)))
             throw std::runtime_error(std::string("Invalid board/canvas dimensions for ")+name);
     }
 };

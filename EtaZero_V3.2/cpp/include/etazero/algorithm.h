@@ -26,6 +26,7 @@ public:
     virtual bool legal(int action) const = 0;
     virtual bool terminal() const = 0;
     virtual double terminal_value() const = 0;
+    virtual double terminal_no_result_probability() const {return 0;}
     virtual double terminal_draw_probability() const {return terminal_value()==0?1:0;}
     // Policy logits are returned in the original action coordinates.
     virtual Evaluation evaluate(SearchEvaluation options = {}) const = 0;
@@ -67,6 +68,7 @@ public:
     bool legal(int action) const override { return game_.legal(action); }
     bool terminal() const override { return game_.finished(); }
     double terminal_value() const override { return game_.terminal_value(); }
+    double terminal_no_result_probability() const override {return game_.terminal_no_result_probability();}
     double terminal_draw_probability() const override {return game_.terminal_draw_probability();}
     std::vector<int> root_symmetry_representatives(const std::vector<int>& avoid) const override {return game_.root_symmetry_representatives(avoid);}
     std::string pattern_key(int action) const override {return game_.pattern_key(action);}
@@ -83,7 +85,7 @@ public:
     }
     Evaluation evaluate_with(Evaluator& evaluator,SearchEvaluation options) const override {
         auto observation=game_.observation();limit_history_features(observation,game_.canvas(),game_.spec(),options.max_history);
-        return evaluator.evaluate_symmetry(observation,options.symmetry,options.skip_cache,
+        return evaluator.evaluate_position(observation,game_.player(),options.symmetry,options.skip_cache,
                                            options.policy_temperature,options.randomize,options.optimism);
     }
     std::string graph_key() const override {

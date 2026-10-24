@@ -12,7 +12,7 @@ struct Board : BoardGeometry {
     std::vector<int> cells;
     explicit Board(int edge) : Board(edge,edge,edge) {}
     Board(int width,int height,int stride) : BoardGeometry{width,height,stride} {
-        if(width<5 || height<5 || width>25 || height>25 || stride<width || stride>25)
+        if(width<2 || height<2 || width>25 || height>25 || stride<width || stride>25)
             throw std::runtime_error("Invalid board geometry");
         cells.assign(storage_size(),0);
     }

@@ -2,6 +2,8 @@
 #include "../../external/katago/neuralnet/nninputs.h"
 #include "../../external/katago/game/graphhash.h"
 #include <mutex>
+#include <climits>
+#include "../../external/katago/dataio/sgf.h"
 #include "../../external/katago/search/localpattern.h"
 namespace etazero {
 namespace {
@@ -20,18 +22,45 @@ public:
         if(!std::isfinite(options.komi)||options.komi<::Rules::MIN_USER_KOMI||options.komi>::Rules::MAX_USER_KOMI||options.komi*2!=std::round(options.komi*2))
             throw std::runtime_error("Go komi must be an integer or half-integer in [-400,400]");
         auto rules=::Rules::parseRulesWithoutKomi(options.go_rules,options.komi);
-        history_=::BoardHistory(board_,P_BLACK,rules,0,::BoardHistoryModes(true,true));
+        Player next=P_BLACK;
+        int64_t turn=0;
+        if(!options.go_position.empty()) {
+            auto sample=Sgf::PositionSample::ofJsonLine(options.go_position);
+            if(std::max(sample.board.x_size,sample.board.y_size)!=size||!sample.moves.empty())
+                throw std::runtime_error("Initial Go position must match dimensions and have no history moves");
+            if(sample.initialTurnNumber>INT_MAX||sample.initialTurnNumber<INT_MIN)
+                throw std::runtime_error("Initial Go turn is outside supported integer range");
+            board_=sample.board;next=sample.nextPla;turn=sample.initialTurnNumber;
+        }
+        if(options.go_position.empty())board_=::Board(options.go_width?options.go_width:size,options.go_height?options.go_height:size);
+        if(board_.x_size<2||board_.y_size<2||board_.x_size>canvas||board_.y_size>canvas||std::max(board_.x_size,board_.y_size)!=size)throw std::runtime_error("Invalid Go board dimensions");
+        display_=Board(board_.x_size,board_.y_size,board_.x_size);
+        history_=::BoardHistory(board_,next,rules,0,::BoardHistoryModes(options.go_pass_alive,options.go_exclude_atari));
+        history_.setInitialTurnNumber(turn);
+    }
+    GoState(const ::BoardHistory& history,int canvas):GoState(std::max(history.initialBoard.x_size,history.initialBoard.y_size),canvas,RuleOptions{}) {
+        history_=history;board_=history.getRecentBoard(0);display_=Board(board_.x_size,board_.y_size,board_.x_size);
     }
     std::unique_ptr<RuleState> clone() const override { return std::make_unique<GoState>(*this); }
     void reset_from(const RuleState& other) override { *this=static_cast<const GoState&>(other); }
+    BoardGeometry geometry() const override {return {board_.x_size,board_.y_size,board_.x_size};}
+    const ::BoardHistory* go_history() const override {return &history_;}
+    int initial_turn() const override { return history_.initialTurnNumber; }
     int player() const override { return history_.presumedNextMovePla==P_BLACK?1:-1; }
     Outcome outcome() const override {
         return {history_.winner==C_EMPTY?0:history_.winner==P_BLACK?1:-1,
                 history_.isNoResult?Reason::NO_RESULT:Reason::SCORE};
     }
+    std::array<float,5> training_metadata() const override {
+        return {history_.currentSelfKomi(history_.presumedNextMovePla,.5),
+            float(history_.encorePhase==2 || history_.rules.scoringRule==::Rules::SCORING_AREA),
+            float(history_.initialTurnNumber),float(history_.modes.alwaysComputePassAliveUnderSuicideRules),
+            float(history_.modes.excludeTerritoryAdjacentToAtari)};
+    }
     bool finished() const override { return history_.isGameFinished; }
-    bool legal(int a) const override {
-        if(finished()||a<0||a>canvas_*canvas_)return false;
+    bool legal(int a) const override {return !finished()&&raw_legal(a);}
+    bool raw_legal(int a) const override {
+        if(a<0||a>canvas_*canvas_)return false;
         if(a!=canvas_*canvas_&&(a%canvas_>=board_.x_size||a/canvas_>=board_.y_size))return false;
         return history_.isLegal(board_,location(a),history_.presumedNextMovePla);
     }
@@ -105,8 +134,13 @@ public:
         }
         return result;
     }
+    std::string position_json(int hint) const override {
+        Sgf::PositionSample sample;sample.board=board_;sample.nextPla=history_.presumedNextMovePla;
+        sample.initialTurnNumber=history_.getCurrentTurnNumber();sample.hintLoc=hint<0 ? ::Board::NULL_LOC : location(hint);sample.weight=1;
+        return Sgf::PositionSample::toJsonLine(sample);
+    }
     std::string identity() const override {
-        std::string key=history_.rules.toJsonString();
+        std::string key=history_.rules.toJsonString()+":"+history_.initialBoard.pos_hash.toString()+":"+std::to_string(history_.initialPla)+":"+std::to_string(history_.initialTurnNumber);
         for(auto m:history_.moveHistory){key.append(reinterpret_cast<const char*>(&m.loc),sizeof(m.loc));key.push_back(char(m.pla));}
         return key;
     }
@@ -122,6 +156,7 @@ public:
     }
 };
 }
+std::unique_ptr<RuleState> make_go_history_state(const ::BoardHistory& history,int canvas) {return std::make_unique<GoState>(history,canvas);}
 std::unique_ptr<RuleState> make_go_state(int size,int canvas,const RuleOptions& options) {
     static std::once_flag init;std::call_once(init,[]{::Board::initHash();});
     return std::make_unique<GoState>(size,canvas,options);

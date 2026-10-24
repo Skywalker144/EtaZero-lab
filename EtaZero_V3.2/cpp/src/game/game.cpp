@@ -18,7 +18,11 @@ std::unique_ptr<RuleState> make_rule_state(Rule rule,int size,int canvas,const R
     throw std::runtime_error("Unknown game kind");
 }
 Game::Game(int size,int canvas,Rule rule,const RuleOptions& options)
-    :state_(make_rule_state(rule,size,canvas,options)),options_(options),size_(size),canvas_(canvas),rule_(rule) {}
+    :state_(make_rule_state(rule,size,canvas,options)),options_(options),size_(size),canvas_(canvas),rule_(rule) {
+    turn_=state_->initial_turn();
+    // SGF/PositionSample dimensions take precedence over optional size hints.
+    if(rule_==Rule::GO) {options_.go_width=width();options_.go_height=height();}
+}
 Game::Game(const Game& other)
     :state_(other.state_->clone()),options_(other.options_),size_(other.size_),canvas_(other.canvas_),
      turn_(other.turn_),last_action_(other.last_action_),rule_(other.rule_),moves_(other.moves_),
