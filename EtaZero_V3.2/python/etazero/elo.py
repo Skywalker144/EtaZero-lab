@@ -1,133 +1,87 @@
-"""Joint ratings and paired-opening bootstrap adapted from MuZero_V2."""
+"""KataGo game-result ratings with equal-time plots."""
 import csv
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import minimize
-from scipy.special import expit
-from tqdm.auto import trange
 
 from .plotting import BLUE, GREEN, GREY, ORANGE, RED, THEME
 from .storage import atomic_path, write_json
 
 
-ELO_SCALE = 400 / np.log(10)
-PRIOR_SIGMA_ELO = 1000.0
+def fit_ratings(games: list[dict], anchor: str, prior_games: float = 2.0,
+                estimate_first_player_advantage: bool = False) -> dict:
+    """Pinned KataGo likelihood, prior, Hessian covariance and Student-t LOS.
 
-
-def fit_ratings(games: list[dict], anchor: str, samples: int = 300, seed: int = 1) -> dict:
-    if not games or samples < 2:
-        raise ValueError('Need completed games and at least two bootstrap samples')
+    Relative ratings are a display transformation; the source prior is applied
+    before subtracting the anchor. Draw/NR score half a point for match results,
+    independently of the four categorical training labels.
+    """
+    from ._vendor.katago import elo as source
+    if not games or not np.isfinite(prior_games) or prior_games < 0:
+        raise ValueError('Need completed games and a finite nonnegative Elo prior')
     players = sorted({g[side] for g in games for side in ('black', 'white')})
-    if anchor not in players:
-        raise ValueError('Anchor has no completed games')
+    if anchor not in players or source.P1_ADVANTAGE_NAME in players:
+        raise ValueError('Invalid Elo anchor or reserved player name')
     adjacent = {p: set() for p in players}
-    for game in games:
-        if game['black'] == game['white'] or game['score'] not in (0, 0.5, 1):
-            raise ValueError('Invalid game score or opponent')
-        adjacent[game['black']].add(game['white'])
-        adjacent[game['white']].add(game['black'])
-    reached, pending = set(), [anchor]
-    while pending:
-        node = pending.pop()
-        if node not in reached:
-            reached.add(node)
-            pending.extend(adjacent[node] - reached)
-    if reached != set(players):
-        raise ValueError('Match graph must be connected before a joint Elo fit')
-    free = [p for p in players if p != anchor]
-    indices = {p: i for i, p in enumerate(free)}
-    ordered = sorted({(g['black'], g['white']) for g in games})
-    order_index = {pair: i for i, pair in enumerate(ordered)}
-    design = np.zeros((len(ordered), len(players)))
-    for row, (black, white) in enumerate(ordered):
-        if black != anchor:
-            design[row, indices[black]] = 1
-        if white != anchor:
-            design[row, indices[white]] = -1
-        design[row, -1] = 1
-    counts = np.zeros(len(ordered))
-    wins = np.zeros(len(ordered))
-    clusters = defaultdict(lambda: defaultdict(list))
-    records = {p: {'games': 0, 'wins': 0, 'draws': 0, 'losses': 0} for p in players}
+    counts = defaultdict(lambda: [0, 0.0])
+    records = {p: dict(games=0, wins=0, draws=0, losses=0) for p in players}
     pair_scores = defaultdict(list)
-    for game in games:
-        row = order_index[(game['black'], game['white'])]
-        score = game['score']
-        counts[row] += 1
-        wins[row] += score
-        clusters[game['pair']][game['opening_id']].append((row, score))
-        a, b = sorted((game['black'], game['white']))
-        pair_scores[(a, b)].append(score if game['black'] == a else 1-score)
-        for player, result in ((game['black'], score), (game['white'], 1-score)):
+    for g in games:
+        black, white, score = g['black'], g['white'], g['score']
+        if black == white or score not in (0, 0.5, 1):
+            raise ValueError('Invalid game score or opponent')
+        adjacent[black].add(white); adjacent[white].add(black)
+        counts[black, white][0] += 1
+        counts[black, white][1] += score
+        a, b = sorted((black, white))
+        pair_scores[a, b].append(score if black == a else 1-score)
+        for player, result in ((black, score), (white, 1-score)):
             records[player]['games'] += 1
             records[player]['wins' if result == 1 else 'losses' if result == 0 else 'draws'] += 1
-    penalty = np.eye(len(players))
-    penalty[:-1, :-1] -= np.ones((len(free), len(free))) / len(players)
-    penalty *= (ELO_SCALE / PRIOR_SIGMA_ELO) ** 2
-
-    def solve(n, w, initial):
-        def objective(theta):
-            logits = design @ theta
-            prior = penalty @ theta
-            return (np.sum(n * np.logaddexp(0, logits) - w * logits) + 0.5 * theta @ prior,
-                    design.T @ (n * expit(logits) - w) + prior)
-        result = minimize(objective, initial, jac=True, method='L-BFGS-B',
-                          options={'ftol': 1e-12, 'gtol': 1e-7, 'maxiter': 2000})
-        if not result.success:
-            raise ValueError(f'Elo optimization failed: {result.message}')
-        return result.x
-
-    fitted = solve(counts, wins, np.zeros(len(players)))
-    blocks = []
-    incomplete = 0
-    for openings in clusters.values():
-        block_n = np.zeros((len(openings), len(ordered)))
-        block_w = np.zeros_like(block_n)
-        for i, results in enumerate(openings.values()):
-            incomplete += (len(results) != 2 or
-                           ordered[results[0][0]] != tuple(reversed(ordered[results[-1][0]])))
-            for row, score in results:
-                block_n[i, row] += 1
-                block_w[i, row] += score
-        blocks.append((block_n, block_w))
-    if incomplete:
-        raise ValueError('Complete both colors of each opening before fitting')
-    rng = np.random.default_rng(seed)
-    bootstrap = []
-    for _ in trange(samples, desc='Elo bootstrap', unit='sample', dynamic_ncols=True, disable=None):
-        n, w = np.zeros_like(counts), np.zeros_like(wins)
-        for block_n, block_w in blocks:
-            multiplicity = rng.multinomial(len(block_n), np.full(len(block_n), 1 / len(block_n)))
-            n += multiplicity @ block_n
-            w += multiplicity @ block_w
-        bootstrap.append(solve(n, w, fitted))
-    bootstrap = np.asarray(bootstrap) * ELO_SCALE
-    lower, upper = np.percentile(bootstrap, [2.5, 97.5], axis=0)
+    reached, pending = set(), [anchor]
+    while pending:
+        player = pending.pop()
+        if player not in reached:
+            reached.add(player); pending.extend(adjacent[player]-reached)
+    if reached != set(players):
+        raise ValueError('Match graph must be connected before a joint Elo fit')
+    data = []
+    for (black, white), (n, w) in sorted(counts.items()):
+        data.extend(source.likelihood_of_games(black, white, n, w/n, estimate_first_player_advantage))
+    for player in players:
+        data.extend(source.make_single_player_prior(player, prior_games, 0))
+    data.extend(source.make_center_elos_prior(players, 0))
+    if estimate_first_player_advantage:
+        data.extend(source.make_single_player_prior(source.P1_ADVANTAGE_NAME, (1+prior_games)*2, 0))
+    info = source.compute_elos(data, verbose=False)
     rows = []
     for player in players:
-        i = indices.get(player)
-        rows.append({'player': player, 'elo': float(fitted[i] * ELO_SCALE) if i is not None else 0.0,
-                     'lower': float(lower[i]) if i is not None else 0.0,
-                     'upper': float(upper[i]) if i is not None else 0.0, **records[player]})
-    separated = [{'a': a, 'b': b, 'games': len(scores), 'score_a': sum(scores)}
-                 for (a, b), scores in pair_scores.items() if sum(scores) in (0, len(scores))]
-    return {'anchor': anchor, 'games': len(games), 'ratings': rows,
-            'first_player_advantage_elo': float(fitted[-1] * ELO_SCALE),
-            'first_player_advantage_interval': [float(lower[-1]), float(upper[-1])],
-            'interval_method': '95% stratified paired-opening bootstrap', 'bootstrap_samples': samples,
-            'prior_sigma_elo': PRIOR_SIGMA_ELO, 'separated_pairs': separated}
+        value = info.get_elo_difference(player, anchor)
+        stderr = info.get_approx_elo_difference_stderr(player, anchor) if player != anchor else 0.0
+        rows.append(dict(player=player, elo=value, stderr=stderr, lower=value-stderr, upper=value+stderr,
+                         effective_game_count=info.effective_game_count[player], **records[player]))
+    advantage = source.P1_ADVANTAGE_NAME
+    return dict(anchor=anchor, games=len(games), ratings=rows,
+                first_player_advantage_elo=info.get_elo(advantage) if estimate_first_player_advantage else 0.0,
+                first_player_advantage_stderr=info.get_approx_elo_stderr(advantage) if estimate_first_player_advantage else 0.0,
+                estimate_first_player_advantage=estimate_first_player_advantage,
+                interval_method='KataGo approximate one standard error (relative covariance)',
+                prior_games=prior_games,
+                likelihood_of_superiority={a: {b: float(info.get_approx_likelihood_of_superiority(a,b))
+                                               for b in players} for a in players},
+                separated_pairs=[dict(a=a,b=b,games=len(scores),score_a=sum(scores))
+                                 for (a,b),scores in pair_scores.items() if sum(scores) in (0,len(scores))])
 
 
-def write_ratings(output: Path, samples: int = 300) -> dict:
+def write_ratings(output: Path, prior_games: float = 2.0, estimate_first_player_advantage: bool = False) -> dict:
     print('Elo: validating completed games and fitting ratings', flush=True)
     from .arena import load_results
     manifest, games = load_results(output)
     expected = len(manifest['pairs']) * manifest['games_per_pair']
     if len(games) != expected:
         raise ValueError(f'Incomplete schedule: {len(games)}/{expected} games; resume the arena first')
-    result = fit_ratings(games, manifest['anchor'], samples, manifest['config']['match']['seed'])
+    result = fit_ratings(games, manifest['anchor'], prior_games, estimate_first_player_advantage)
     metadata = {p['id']: p for p in manifest['players']}
     for row in result['ratings']:
         row.update({k: v for k, v in metadata[row['player']].items() if k != 'id'})
@@ -165,7 +119,7 @@ def write_ratings(output: Path, samples: int = 300) -> dict:
         axis.axhline(0, color=GREY, linewidth=0.8, alpha=0.5)
         axis.grid(alpha=0.55)
         axis.legend(fontsize=9)
-        note = 'Shading: 95% paired-opening bootstrap; fixed evaluation search for every model.'
+        note = 'Shading: KataGo approximate ±1 standard error; fixed evaluation search for every model.'
         if result['separated_pairs']:
             note += '\nSwept pairings present: rating magnitudes and intervals can be prior-sensitive.'
         figure.text(0.5, 0.015, note, ha='center', fontsize=8)

@@ -52,14 +52,15 @@ def test_manifest_and_partial_pair_resume(tmp_path):
     with pytest.raises(ValueError):save_manifest(tmp_path/'manifest.json',manifest)
     with pytest.raises(ValueError):save_manifest(tmp_path/'manifest.json',{**manifest,'games_per_pair':8,'config':{'visits':200}})
     store=PairStore(tmp_path/'pair',4)
-    opening={'type':'opening','id':0,'generator':0,'seed':71,'moves':[12],'attempts':1,'value':.1}
-    game={'type':'game','id':0,'opening_id':0,'black_a':True,'winner':1,'moves':[12,0],'seconds':.2}
+    color=store.tasks(71)[0]['generator']
+    opening={'type':'opening','id':0,'generator':color,'seed':71,'moves':[12],'attempts':1,'value':.1}
+    game={'type':'game','id':0,'opening_id':0,'black_a':color==0,'winner':1,'moves':[12,0],'seconds':.2}
     store.accept(opening);store.accept(game)
     tasks=store.tasks(71)
-    assert tasks[0]['mask']==2 and tasks[0]['moves']==[12]
+    assert tasks[0]['id']==1 and tasks[0]['moves'] is None
     assert len(store.games())==1
     with pytest.raises(ValueError):store.accept({**game,'winner':-1})
-    with pytest.raises(ValueError):PairStore(tmp_path,6)
+    with pytest.raises(ValueError):PairStore(tmp_path,0)
     assert PairStore(tmp_path/'pair',4).tasks(71)==tasks
 
 

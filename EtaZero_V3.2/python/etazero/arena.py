@@ -1,4 +1,4 @@
-"""Resumable paired matches and equal committed-time Elo, adapted from MuZero_V2."""
+"""Resumable independent games and equal committed-time Elo."""
 from .outcomes import has_result
 import argparse
 from dataclasses import asdict, dataclass
@@ -6,6 +6,7 @@ import hashlib
 from itertools import combinations
 import json
 import math
+import random
 import os
 from pathlib import Path
 import subprocess
@@ -86,6 +87,7 @@ def discover_players(root: Path, stride: int = 1, *,
             raise ValueError(f'Run has invalid compiler timing and cannot be compared by training time: {arm}')
         previous = 0
         rows = []
+        seen_models = set()
         for iteration in range(state['iteration']):
             path = arm/'.internal/iterations'/f'{iteration:06d}'/'status.json'
             row = json.loads(path.read_text())['commit']
@@ -93,16 +95,17 @@ def discover_players(root: Path, stride: int = 1, *,
             if row['iteration'] != iteration or not math.isfinite(seconds) or seconds < previous:
                 raise ValueError(f'Invalid committed iteration timing: {path}')
             previous = seconds
-            if row['model']:
+            if row['model'] and row['model']['path'] not in seen_models:
                 rows.append(row)
+                seen_models.add(row['model']['path'])
         if previous != state['elapsed_seconds']:
             raise ValueError(f'Committed time does not match state: {arm}')
         if not rows:
             raise ValueError(f'Arm has no committed models: {arm}')
         if sample_seconds is not None:
             times = [row['elapsed_seconds'] for row in rows]
-            sample_horizons[name] = times[-1]
-            selected = set(time_sample_indices(times, sample_seconds))
+            sample_horizons[name] = state['elapsed_seconds']
+            selected = set(time_sample_indices(times, sample_seconds,horizon=state['elapsed_seconds']))
             # Keep a short history usable, but avoid a near-duplicate tail point
             # when a fixed target already represents the end of training.
             if not selected or times[-1] - times[max(selected)] > sample_seconds / 2:
@@ -197,8 +200,8 @@ def build_schedule(players: list[Player], neighbors: int, *,
 
 class PairStore:
     def __init__(self, directory: Path, games: int):
-        if games < 4 or games % 4:
-            raise ValueError('Games per pair must be a positive multiple of 4')
+        if games < 1:
+            raise ValueError('Games per pair must be positive')
         self.directory = directory
         self.total = games
 
@@ -210,14 +213,16 @@ class PairStore:
         if not isinstance(moves, list) or (kind=='game' and not moves) or any(type(m) is not int or m < 0 for m in moves):
             raise ValueError('Invalid move history')
         if kind == 'opening':
-            if index >= self.total // 2 or event['generator'] != index % 2 or not math.isfinite(event['value']):
+            if index >= self.total or event['generator'] not in (0, 1) or not math.isfinite(event['value']):
                 raise ValueError('Invalid opening assignment')
             folder = 'openings'
         elif kind == 'game':
-            if index >= self.total or event['opening_id'] != index // 2 or event['black_a'] is not (index % 2 == 0) or event['winner'] not in (-1, 0, 1):
+            if index >= self.total or event['opening_id'] != index or type(event['black_a']) is not bool or event['winner'] not in (-1, 0, 1):
                 raise ValueError('Invalid game assignment')
-            opening = (openings[index//2] if openings is not None else
-                       json.loads((self.directory / 'openings' / f'{index//2:08d}.json').read_text()))
+            opening = (openings[index] if openings is not None else
+                       json.loads((self.directory / 'openings' / f'{index:08d}.json').read_text()))
+            if event['black_a'] is not (opening['generator'] == 0):
+                raise ValueError('Game color differs from scheduled matchup')
             if moves[:len(opening['moves'])] != opening['moves'] or len(moves) <= len(opening['moves']):
                 raise ValueError('Game does not continue its opening')
             if not math.isfinite(event['seconds']) or event['seconds'] < 0:
@@ -256,26 +261,31 @@ class PairStore:
     def tasks(self, seed: int, records=None) -> list[dict]:
         openings, games = self.read() if records is None else records
         tasks = []
-        for index in range(self.total // 2):
-            mask = sum(1 << color for color in (0, 1)
-                       if 2*index+color not in games)
+        rng = random.Random(seed)
+        colors = []
+        for index in range(self.total):
+            # MatchPairer: refill both matchups, Fisher-Yates shuffle, pop.
+            if not colors:
+                colors = [0, 1]
+                rng.shuffle(colors)
+            color = colors.pop()
             opening_seed = (seed + index * 0x9e3779b97f4a7c15) % (1 << 64)
             moves = None
             if index in openings:
                 opening = openings[index]
-                if opening['seed'] != opening_seed or opening['generator'] != index % 2:
+                if opening['seed'] != opening_seed or opening['generator'] != color:
                     raise ValueError('Saved opening does not match scheduled seed/generator')
                 moves = opening['moves']
-            if not mask:
+            if index in games:
                 continue
-            tasks.append({'id': index, 'seed': opening_seed, 'generator': index % 2, 'mask': mask, 'moves': moves})
+            tasks.append({'id': index, 'seed': opening_seed, 'generator': color, 'moves': moves})
         return tasks
 
     def games(self) -> list[dict]:
         return list(self.read()[1].values())
 
 
-def _run_native(command, log_path, accept, cancel, environ):
+def _run_native(command, log_path, accept, cancel, environ, stop_ok=lambda: False):
     """Persist events while running and draining an interrupted native match process."""
     with log_path.open('a') as log:
         log.write(json.dumps({'command': command})+'\n'); log.flush()
@@ -294,7 +304,9 @@ def _run_native(command, log_path, accept, cancel, environ):
             for line in process.stdout:
                 accept(json.loads(line))
             code = process.wait()
-            if code:
+            if code == 130 and cancel is not None and cancel.is_set() and not stop_ok():
+                raise InterruptedError('Match interrupted; completed games retained')
+            if code and not (code == 130 and stop_ok()):
                 raise RuntimeError(f'{command[1].title()} exited {code}: {log_path}')
         finally:
             stopper = Thread(target=stop_process, args=(process,))
@@ -311,7 +323,8 @@ def _run_native(command, log_path, accept, cancel, environ):
 
 
 def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], store: PairStore,
-                 seed: int, cancel: Event | None = None, environ: dict | None = None) -> None:
+                 seed: int, cancel: Event | None = None, environ: dict | None = None,
+                 on_game=None) -> None:
     if cancel is not None and cancel.is_set():
         return
     records = store.read()
@@ -322,24 +335,29 @@ def execute_pair(binary: Path, config: Path, players: tuple[Player, Player], sto
     task_path = store.directory / 'tasks.txt'
     task_path.parent.mkdir(parents=True, exist_ok=True)
     task_path.write_text(''.join(
-        f"{t['id']} {t['seed']} {t['generator']} {t['mask']} " +
+        f"{t['id']} {t['seed']} {t['generator']} " +
         ('-1' if t['moves'] is None else f"{len(t['moves'])} " + ' '.join(map(str, t['moves']))) + '\n'
         for t in tasks))
     a, b = players
+    decision_reached = False
+    cancel = Event() if cancel is None else cancel
     profile = json.loads((store.directory.parents[1]/'manifest.json').read_text())['config']['match']
     def accept(event):
-        nonlocal completed
+        nonlocal completed, decision_reached
         store.accept(event)
         if event['type'] == 'game':
             completed += 1
+            if on_game is not None and on_game(event):
+                decision_reached = True
+                cancel.set()
             print(f"  {a.id} vs {b.id} games={completed}/{store.total}", flush=True)
     _run_native([str(binary), 'match', '--config', str(config),
                  '--model', a.model, '--model-id', model_info(a.model)[1]['id'],
                  '--model-b', b.model, '--model-b-id', model_info(b.model)[1]['id'],
                  '--device', profile['device'], '--size', str(profile['board_size']),
                  '--rule', profile['rule'], '--tasks', str(task_path)],
-                store.directory/'native.log', accept, cancel, environ)
-    if store.tasks(seed):
+                store.directory/'native.log', accept, cancel, environ, lambda: decision_reached)
+    if not decision_reached and store.tasks(seed):
         raise RuntimeError('Match exited without completing its assignments')
 
 
@@ -350,7 +368,6 @@ def load_results(output: Path) -> tuple[dict, list[dict]]:
         a, b = pair['players']
         store = PairStore(output / 'pairs' / pair['id'], manifest['games_per_pair'])
         for row in store.games():
-            if not has_result(row.get('reason')): continue
             games.append({'pair': pair['id'], 'opening_id': row['opening_id'],
                           'black': a if row['black_a'] else b, 'white': b if row['black_a'] else a,
                           'score': (row['winner'] + 1) / 2})
@@ -418,7 +435,7 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
         for task in tasks:
             suffix = '-1' if task['moves'] is None else f"{len(task['moves'])} " + ' '.join(map(str, task['moves']))
             assignments.append(f"{pair['id']} {slots[0]} {slots[1]} {task['id']} {task['seed']} "
-                               f"{task['generator']} {task['mask']} {suffix}\n")
+                               f"{task['generator']} {suffix}\n")
     if not assignments or cancel.is_set():
         return
     def quoted(value):
@@ -477,8 +494,9 @@ def execute_arena(binary: Path, config: Path, output: Path, manifest: dict,
             raise RuntimeError('Arena exited without completing its assignments')
 
 
-def run_arena(output: Path, manifest: dict, binary: Path, samples: int,
-              max_loaded_models: int = 32, environ: dict | None = None) -> dict:
+def run_arena(output: Path, manifest: dict, binary: Path, prior_games: float = 2.0,
+              max_loaded_models: int = 32, environ: dict | None = None,
+              estimate_first_player_advantage: bool = False) -> dict:
     """Global native game pool; persist partial results and never fit an incomplete schedule."""
     if max_loaded_models < 2:
         raise ValueError('Arena needs at least two resident model slots')
@@ -500,7 +518,7 @@ def run_arena(output: Path, manifest: dict, binary: Path, samples: int,
         finally:
             cancel.set()
         from .elo import write_ratings
-        return write_ratings(output, samples)
+        return write_ratings(output, prior_games, estimate_first_player_advantage)
 
 
 def single_match(config, binary, model_a, model_b, output, games=None):
@@ -538,20 +556,21 @@ def main():
     parser.add_argument('--neighbors', type=int, default=2)
     parser.add_argument('--games', type=int, help='Games per pair; defaults to match.cfg')
     parser.add_argument('--anchor', default='')
-    parser.add_argument('--bootstrap-samples', type=int, default=300)
+    parser.add_argument('--elo-prior-games', type=float, default=2.0)
+    parser.add_argument('--estimate-first-player-advantage', action='store_true')
     parser.add_argument('--game-threads', type=int, default=512)
     parser.add_argument('--max-loaded-models', type=int, default=32)
     parser.add_argument('--model-load-workers', type=int, default=4)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--fit-only', action='store_true')
     args = parser.parse_args()
-    if args.bootstrap_samples < 2:
-        parser.error('--bootstrap-samples must be at least two')
+    if not math.isfinite(args.elo_prior_games) or args.elo_prior_games < 0:
+        parser.error('--elo-prior-games must be finite and nonnegative')
     output = (args.output or args.data / 'elo').resolve()
     if args.fit_only:
         from .elo import write_ratings
         with run_lock(output/'arena.lock'):
-            write_ratings(output, args.bootstrap_samples)
+            write_ratings(output, args.elo_prior_games, args.estimate_first_player_advantage)
         return
     config = load_engine_config(args.config_dir, match=True)
     if args.game_threads < 1 or args.max_loaded_models < 2 or args.model_load_workers < 1:
@@ -581,7 +600,8 @@ def main():
         print(json.dumps(manifest, indent=2))
         return
     install_signals()
-    run_arena(output, manifest, binary, args.bootstrap_samples, args.max_loaded_models)
+    run_arena(output, manifest, binary, args.elo_prior_games, args.max_loaded_models,
+              estimate_first_player_advantage=args.estimate_first_player_advantage)
 
 
 if __name__ == '__main__':

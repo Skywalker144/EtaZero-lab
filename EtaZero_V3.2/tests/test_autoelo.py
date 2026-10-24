@@ -140,24 +140,21 @@ def complete_fake_pair(manifest, pair, directory, limit=None):
         if task['moves'] is None:
             store.accept(dict(type='opening', id=task['id'], generator=task['generator'],
                               seed=task['seed'], moves=[12], value=0))
-        for color in (0, 1):
-            if task['mask'] & (1 << color):
-                store.accept(dict(type='game', id=task['id']*2+color,
-                                  opening_id=task['id'], black_a=color == 0,
-                                  winner=0, moves=[12, 13], seconds=1))
+        store.accept(dict(type='game', id=task['id'],opening_id=task['id'],
+                          black_a=task['generator']==0,winner=0,moves=[12,13],seconds=1))
 
 
 def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path, monkeypatch):
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-not-in-resolved-environment')
     config = tmp_path/'config'; config.mkdir()
-    (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ncross_seconds=1000\ngames_per_pair=4\nbootstrap_samples=2\n')
+    (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ncross_seconds=1000\ngames_per_pair=4\nprior_games=2\n')
     match_profile(config, '[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('b', 'c'):
         history(data/arm, list(range(1, 17)))
     monkeypatch.setattr('etazero.autoelo.verify_build', lambda _: 'binary')
     calls = []
-    def native(output, manifest, binary, samples, workers, env):
+    def native(output, manifest, binary, samples, workers, env, estimate_first_player_advantage=False):
         assert 'CUDA_VISIBLE_DEVICES' not in env
         for pair in manifest['pairs']:
             directory = output/'pairs'/pair['id']
@@ -179,14 +176,14 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
         perf = load_json(next((Path(plan['output'])/'invocations').glob('*.json')))
         return plan, list(calls), perf
     first, tasks, perf = run()
-    assert len(tasks) == 6 and perf['new_games'] == 12
+    assert len(tasks) == 12 and perf['new_games'] == 12
     # A new alphabetically earlier arm must not replace the persisted anchor.
     history(data/'a', list(range(1, 17)))
     second, tasks, perf = run()
     assert second['manifest']['anchor'] == first['manifest']['anchor']
-    assert len(tasks) == 6 and perf['reused_games'] == 12 and perf['new_games'] == 12
+    assert len(tasks) == 12 and perf['reused_games'] == 12 and perf['new_games'] == 12
     third, tasks, perf = run(games_per_pair='8')
-    assert len(tasks) == 12 and perf['reused_games'] == 24 and perf['new_games'] == 24
+    assert len(tasks) == 24 and perf['reused_games'] == 24 and perf['new_games'] == 24
     _, tasks, _ = run(games_per_pair='8')
     assert tasks == []
     # Smaller schedules read only the requested prefix of the larger cache.
@@ -197,7 +194,7 @@ def test_incremental_autoelo_reuses_after_new_arm_more_games_and_resume(tmp_path
     extended, tasks, perf = run()
     assert extended['manifest']['anchor'] == first['manifest']['anchor']
     assert perf['reused_games'] == 12 and perf['new_games'] == 36
-    assert len(tasks) == 18
+    assert len(tasks) == 36
     off_grid = autoelo_plan(config, tmp_path/'binary', data=data, environ={}, overrides={'sample_seconds':'10'})
     assert first['manifest']['anchor'] in {p['id'] for p in off_grid['manifest']['players']}
 
@@ -236,12 +233,12 @@ def test_cache_keeps_partial_opening_and_does_not_mix_independent_trials(tmp_pat
     old = tmp_path/'old'; directory = old/'pairs'/pair['id']
     save_json(old/'manifest.json', manifest)
     store = PairStore(directory, 4); task = store.tasks(pair_seed(manifest, pair))[0]
-    store.accept(dict(type='opening', id=0, generator=0, seed=task['seed'], moves=[12], value=0))
-    store.accept(dict(type='game', id=0, opening_id=0, black_a=True, winner=0, moves=[12,13], seconds=1))
+    store.accept(dict(type='opening', id=0, generator=task['generator'], seed=task['seed'], moves=[12], value=0))
+    store.accept(dict(type='game', id=0, opening_id=0, black_a=task['generator']==0, winner=0, moves=[12,13], seconds=1))
     output = tmp_path/'new'
     assert prepare_pairs(tmp_path, output, manifest) == 1
     pending = PairStore(output/'pairs'/pair['id'],4).tasks(pair_seed(manifest,pair))
-    assert pending[0]['mask'] == 2 and pending[0]['moves'] == [12]
+    assert pending[0]['id'] == 1 and pending[0]['moves'] is None
     complete_fake_pair(manifest, pair, output/'pairs'/pair['id'])
     retain_pairs(tmp_path, output, manifest)
     # Completing the other side propagates the original trial lineage.
@@ -273,7 +270,7 @@ def test_unchanged_cache_merge_reads_each_record_once_and_writes_nothing(tmp_pat
     with monkeypatch.context() as patch:
         patch.setattr(Path, 'read_text', read)
         merge_pair(source, 4, destination, 4, seed)
-    assert len(reads) == 13 and set(reads.values()) == {1}
+    assert len(reads) == 17 and set(reads.values()) == {1}
     assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob('*.json')}
 
 
@@ -342,7 +339,7 @@ def test_arena_deduplicates_paths_and_uses_config_seed_independent_of_schedule(t
 
 def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_path, monkeypatch):
     config = tmp_path/'config'; config.mkdir()
-    (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ngames_per_pair=4\nbootstrap_samples=2\n')
+    (config/'elo.cfg').write_text('[elo]\nsample_seconds=8\ngames_per_pair=4\nprior_games=2\n')
     match_profile(config, '[match]\ndevice=cpu\n')
     data = tmp_path/'data'
     for arm in ('a','b'):
@@ -357,8 +354,8 @@ def test_autoelo_failure_retains_cache_and_publishes_only_after_recovery(tmp_pat
         pair = manifest['pairs'][0]
         store = PairStore(output/'pairs'/pair['id'],4)
         task = store.tasks(pair_seed(manifest,pair))[0]
-        store.accept(dict(type='opening',id=0,generator=0,seed=task['seed'],moves=[12],value=0))
-        store.accept(dict(type='game',id=0,opening_id=0,black_a=True,winner=0,moves=[12,13],seconds=1))
+        store.accept(dict(type='opening',id=0,generator=task['generator'],seed=task['seed'],moves=[12],value=0))
+        store.accept(dict(type='game',id=0,opening_id=0,black_a=task['generator']==0,winner=0,moves=[12,13],seconds=1))
         raise RuntimeError('interrupted native')
     monkeypatch.setattr('etazero.autoelo.run_arena', fail)
     with pytest.raises(RuntimeError,match='interrupted native'):
@@ -385,7 +382,7 @@ def test_shared_profiles_are_independent_and_strict(tmp_path):
     assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'})['sample_seconds'] == 6
     assert load_elo_config(tmp_path, environ={'ELO_SAMPLE_SECONDS': '6'}, overrides={'sample_seconds': '7'})['sample_seconds'] == 7
     assert load_elo_config(tmp_path, environ={'ELO_MODEL_LOAD_WORKERS': '2'})['model_load_workers'] == 2
-    for overrides in [{'games_per_pair': '6'}, {'sample_seconds': '0'}, {'game_threads': '0'},
+    for overrides in [{'games_per_pair': '0'}, {'sample_seconds': '0'}, {'game_threads': '0'},
                       {'model_load_workers': '0'},
                       {'max_loaded_models': '1'}, {'pair_workers': '1'},
                       {'sample_seconds': 'nan'}, {'sample_seconds': 'inf'}, {'sample_seconds': '-1'},
@@ -530,14 +527,12 @@ print(json.dumps(dict(type='arena_progress',stage='playing',window=1,models=3,wo
 partial=not Path(args['--tasks']).with_suffix('.started').exists()
 Path(args['--tasks']).with_suffix('.started').touch()
 for line in tasks:
- p,a,b,i,seed,g,mask,n,*moves=line.split();i=int(i)
+ p,a,b,i,seed,g,n,*moves=line.split();i=int(i)
  if int(n)<0:
   print(json.dumps(dict(type='opening',pair=p,id=i,seed=int(seed),generator=int(g),moves=[12],value=0)),flush=True)
- for color in (0,1):
-  if int(mask)&(1<<color):
-   print(json.dumps(dict(type='game',pair=p,id=2*i+color,opening_id=i,black_a=color==0,winner=0,moves=[12,13],seconds=1)),flush=True)
-   print(json.dumps(dict(type='game',pair=p,id=2*i+color,opening_id=i,black_a=color==0,winner=0,moves=[12,13],seconds=1)),flush=True)
-   if partial: sys.exit(1)
+ print(json.dumps(dict(type='game',pair=p,id=i,opening_id=i,black_a=int(g)==0,winner=0,moves=[12,13],seconds=1)),flush=True)
+ print(json.dumps(dict(type='game',pair=p,id=i,opening_id=i,black_a=int(g)==0,winner=0,moves=[12,13],seconds=1)),flush=True)
+ if partial: sys.exit(1)
 print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
 ''')
     binary.chmod(0o755)
@@ -563,7 +558,7 @@ print(json.dumps(dict(type='arena_stats',games=7)),flush=True)
     assert progress.initial == 1 and progress.n == 8
     assert progress.postfix == 'window=1 playing'
     fields = (output/'tasks.txt').read_text().splitlines()[0].split()
-    assert fields[6:8] == ['2', '1']  # Only the missing white side, saved opening.
+    assert fields[3] == '1' and fields[6] == '-1'  # Next independent game has its own opening.
     assert first.read_bytes() == original
     assert sum(len(PairStore(output/'pairs'/p['id'], 4).games()) for p in manifest['pairs']) == 8
     binary.unlink()  # A fully complete schedule never starts the executable.
@@ -694,3 +689,15 @@ def test_autoexp_invokes_elo_only_after_success_and_keeps_actual_arm_paths(tmp_p
             run_experiment(plan, binary)
         status = load_json(tmp_path/'controller/.internal/elo_status.json')
         assert status['training'] == 'complete' and status['status'] == 'failed'
+
+
+def test_rejected_candidates_do_not_duplicate_the_accepted_player(tmp_path):
+    history(tmp_path/'a',[10,20,30,40])
+    history(tmp_path/'b',[10,20])
+    first=load_json(tmp_path/'a/.internal/iterations/000001/status.json')['commit']['model']
+    for i in (2,3):
+        path=tmp_path/'a/.internal/iterations'/f'{i:06d}'/'status.json'
+        status=load_json(path);status['commit']['model']=first;save_json(path,status)
+    players=discover_players(tmp_path)
+    assert [p.iteration for p in players if p.arm=='a']==[1,4]
+    assert len({p.model for p in players})==len(players)

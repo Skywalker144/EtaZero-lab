@@ -1,4 +1,4 @@
-"""Incremental experiment Elo with fixed checkpoints and reusable paired matches."""
+"""Incremental experiment Elo with fixed checkpoints and reusable independent games."""
 import argparse
 from copy import deepcopy
 from dataclasses import asdict
@@ -22,7 +22,7 @@ from .storage import atomic_write, load_json, run_lock, save_json
 
 
 ELO_FIELDS = {'sample_seconds': float, 'neighbors': int, 'cross_seconds': float,
-              'final_cross': boolean, 'games_per_pair': int, 'bootstrap_samples': int,
+              'final_cross': boolean, 'games_per_pair': int, 'prior_games': float, 'estimate_first_player_advantage': boolean,
               'anchor': str, 'game_threads': int, 'max_loaded_models': int,
               'model_load_workers': int}
 
@@ -54,8 +54,8 @@ def load_elo_config(directory, environ=None, overrides=None):
             raise ValueError(f'elo.{key} must be positive')
     if settings['max_loaded_models'] < 2:
         raise ValueError('elo.max_loaded_models must be at least two')
-    if settings['bootstrap_samples'] < 2:
-        raise ValueError('elo.bootstrap_samples must be at least two')
+    if not math.isfinite(settings['prior_games']) or settings['prior_games'] < 0:
+        raise ValueError('elo.prior_games must be finite and nonnegative')
     for key in ('sample_seconds', 'cross_seconds'):
         if not math.isfinite(settings[key]) or settings[key] <= 0:
             raise ValueError(f'elo.{key} must be finite and positive')
@@ -182,7 +182,8 @@ def run_autoelo(plan, binary):
             else:
                 env['CUDA_VISIBLE_DEVICES'] = visibility
             result = run_arena(output, plan['manifest'], Path(binary),
-                               plan['settings']['bootstrap_samples'], plan['settings']['max_loaded_models'], env)
+                               plan['settings']['prior_games'], plan['settings']['max_loaded_models'], env,
+                               plan['settings']['estimate_first_player_advantage'])
         except BaseException as error:
             save_json(output/'status.json', {'status': 'interrupted' if isinstance(error, KeyboardInterrupt)
                       else 'failed', 'error': str(error)})
@@ -224,12 +225,13 @@ def main():
         if args.output is None:
             parser.error('--fit-only requires --output pointing to an existing session')
         from .elo import write_ratings
-        samples = int(args.bootstrap_samples or 300)
+        prior_games = float(args.prior_games if args.prior_games is not None else 2)
+        estimate_advantage = boolean(args.estimate_first_player_advantage or 'false')
         if args.dry_run:
             print(json.dumps(load_json(args.output/'manifest.json'), indent=2))
             return 0
         with run_lock(args.output/'arena.lock'):
-            write_ratings(args.output, samples)
+            write_ratings(args.output, prior_games, estimate_advantage)
         return 0
     if not args.config_dir:
         parser.error('Set CONFIG_DIR or --config-dir to the experiment umbrella')

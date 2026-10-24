@@ -1,4 +1,4 @@
-"""Reuse raw paired matches for immutable model paths and match conditions."""
+"""Reuse raw independent games for immutable model paths and match conditions."""
 from .arena import PairStore, identity
 from .storage import load_json, save_json
 
@@ -31,10 +31,10 @@ def merge_pair(source, source_total, destination, destination_total, seed):
     source_path = str(source.resolve())
     changed = False
     for opening in openings.values():
-        if opening['id'] >= destination_total // 2:
+        if opening['id'] >= destination_total:
             continue
         # Independent historical reruns can have different stochastic outcomes.
-        # Keep one trial per opening, with both colors coming from that trial.
+        # Keep one trial per opening, with its continuation coming from that trial.
         origin = provenance.get(str(opening['id']))
         source_origin = source_provenance.get(str(opening['id']), source_path)
         if opening['id'] in destination_openings and (destination_openings[opening['id']] != opening or
@@ -46,7 +46,7 @@ def merge_pair(source, source_total, destination, destination_total, seed):
         if origin is None:
             provenance[str(opening['id'])] = source_origin
             changed = True
-        for index in (2*opening['id'], 2*opening['id']+1):
+        for index in (opening['id'],):
             if index not in games:
                 continue
             game = games[index]
@@ -64,9 +64,9 @@ def merge_pair(source, source_total, destination, destination_total, seed):
 
 def cache_capacity(directory, minimum):
     ids = [int(p.stem) for p in (directory/'games').glob('*.json')]
-    openings = [int(p.stem)*2+1 for p in (directory/'openings').glob('*.json')]
+    openings = [int(p.stem) for p in (directory/'openings').glob('*.json')]
     maximum = max(ids + openings, default=-1) + 1
-    return max(minimum, ((maximum+3)//4)*4)
+    return max(minimum, maximum)
 
 
 def prepare_pairs(base, output, manifest):

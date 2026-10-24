@@ -16,7 +16,7 @@ class EloTests(unittest.TestCase):
                     p = 1 / (1 + 10 ** (-(strengths[black] - strengths[white] + 60) / 400))
                     games.append({'pair': a+b, 'opening_id': opening, 'black': black,
                                   'white': white, 'score': float(rng.random() < p)})
-        result = fit_ratings(games, 'a', samples=30, seed=1)
+        result = fit_ratings(games, 'a', estimate_first_player_advantage=True)
         ratings = {r['player']: r for r in result['ratings']}
         self.assertEqual(ratings['a']['elo'], 0)
         self.assertEqual(ratings['a']['lower'], 0)
@@ -29,7 +29,7 @@ class EloTests(unittest.TestCase):
         games = [{'pair': a+b, 'opening_id': 0, 'black': a, 'white': b, 'score': 1}
                  for a, b in [('a', 'b'), ('c', 'd')]]
         with self.assertRaisesRegex(ValueError, 'connected'):
-            fit_ratings(games, 'a', samples=10)
+            fit_ratings(games, 'a')
 
     def test_sweep_and_draws_stay_finite(self):
         games = []
@@ -40,7 +40,7 @@ class EloTests(unittest.TestCase):
                 {'pair': 'bc', 'opening_id': opening, 'black': 'b', 'white': 'c', 'score': 0.5},
                 {'pair': 'bc', 'opening_id': opening, 'black': 'c', 'white': 'b', 'score': 0.5},
             ])
-        result = fit_ratings(games, 'b', samples=10)
+        result = fit_ratings(games, 'b')
         self.assertTrue(all(np.isfinite(r['elo']) for r in result['ratings']))
         self.assertGreater(next(r['elo'] for r in result['ratings'] if r['player'] == 'a'), 0)
         self.assertTrue(result['separated_pairs'])
