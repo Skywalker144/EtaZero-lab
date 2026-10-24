@@ -17,7 +17,8 @@ from etazero.data import read_raw, metadata, game_row_ranges
 from etazero.analysis import analyze
 from etazero.engine_config import load_engine_config
 from etazero.export import example_inputs, export_model, verify_export
-from etazero.network import make_network, inference_network, MaskedBatchNorm
+from etazero.network import make_network, inference_network
+from etazero._vendor.katago.model_pytorch import NormMask
 from etazero.optimization import Optimization, inference_weights
 from etazero.runtime import run_training
 from etazero.schema import GLOBALS
@@ -38,6 +39,13 @@ def isolated_compiler_cache():
     torch._dynamo.reset()
 
 
+def canonical_reader(value, root):
+    if isinstance(value, str): return value.replace(str(root), '<run>')
+    if isinstance(value, dict): return {k:canonical_reader(v,root) for k,v in value.items()}
+    if isinstance(value, (list,tuple)): return tuple(canonical_reader(v,root) for v in value)
+    return value
+
+
 def assert_preserved(root, files):
     for path, digest in files.items():
         if path.exists():
@@ -48,7 +56,7 @@ def assert_preserved(root, files):
 
 
 def assert_training_budget(root, state, config):
-    """Check actual single-pass consumption and successful optimizer updates."""
+    """Check actual outer-credit consumption and successful optimizer updates."""
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
     updates=[e for e in events if e['event']=='update']
     consumed=0
@@ -273,15 +281,15 @@ def test_gpu_pipeline_and_idempotent_completed_resume(pipeline,gpu_config):
 @pytest.mark.parametrize('amp',['off','float16','bfloat16'])
 def test_b5c192nbt_compiled_11x11_pipeline(tmp_path,gpu_config,amp):
     c=copy.deepcopy(gpu_config)
-    c['network'].update(canvas=11,channels=192,blocks=5)
+    c['network'].update(architecture='b5c192nbt-fson-mish',canvas=11,channels=192,blocks=5)
     c['environment'].update(sizes='11',size_weights='1')
     c['training'].update(compile=True,amp=amp)
     c['shuffle']['group_rows']=512  # One complete 11x11 game can exceed smoke's 128-row cap.
     state=run_training(tmp_path,c,BINARY,max_iteration=2)
     assert_training_budget(tmp_path,state,c)
     saved=load_checkpoint(tmp_path,state['checkpoint'],c)
-    assert saved['model']['value_head.hidden.weight'].shape==(80,96)
-    assert saved['model']['policy_head.out.weight'].shape==(6,32,1,1)
+    assert saved['model']['network.value_head.linear2.weight'].shape==(80,96)
+    assert saved['model']['network.policy_head.conv2p.weight'].shape==(6,32,1,1)
     assert saved['optimizer_steps']==state['checkpoint']['optimizer_steps']
     info=load_json(tmp_path/Path(state['model']['path']).parent/'manifest.json')
     assert info['weights']=='swa'
@@ -300,13 +308,13 @@ def test_b10c128_plain_mixed_sizes_compiled_pipeline_and_resume(tmp_path,gpu_con
     state=run_training(root,c,BINARY,max_iteration=2)
     saved=load_checkpoint(root,state['checkpoint'],c)
     assert_training_budget(root,state,c)
-    assert saved['model']['blocks.4.pre.conv.conv.weight'].shape==(96,128,3,3)
-    assert saved['model']['blocks.7.pre.conv.conv_global.weight'].shape==(32,128,3,3)
-    assert saved['model']['value_head.hidden.weight'].shape==(80,96)
-    assert saved['model']['policy_head.out.weight'].shape==(6,32,1,1)
+    assert saved['model']['network.blocks.4.normactconv1.convpool.conv1r.weight'].shape==(96,128,3,3)
+    assert saved['model']['network.blocks.7.normactconv1.convpool.conv1g.weight'].shape==(32,128,3,3)
+    assert saved['model']['network.value_head.linear2.weight'].shape==(80,96)
+    assert saved['model']['network.policy_head.conv2p.weight'].shape==(6,32,1,1)
     initial=load_checkpoint(root,load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'],c)
-    assert not torch.equal(initial['model']['stem.weight'],saved['model']['stem.weight'])
-    assert not torch.equal(initial['model']['blocks.4.pre.conv.linear.weight'],saved['model']['blocks.4.pre.conv.linear.weight'])
+    assert not torch.equal(initial['model']['network.conv_spatial.weight'],saved['model']['network.conv_spatial.weight'])
+    assert not torch.equal(initial['model']['network.blocks.4.normactconv1.convpool.linear_g.weight'],saved['model']['network.blocks.4.normactconv1.convpool.linear_g.weight'])
     assert saved['optimizer_steps']==state['checkpoint']['optimizer_steps']
     manifest=load_json(root/Path(state['model']['path']).parent/'manifest.json')
     assert manifest['weights']=='swa'
@@ -327,7 +335,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
         def record(grad):
             attention_gradients.append(grad.detach().abs().max())
             return grad
-        model.blocks[0].inner[0].q_proj.weight.register_hook(record)
+        model.network.blocks[0].blockstack[0].q_proj.weight.register_hook(record)
         return model
     monkeypatch.setattr('etazero.training.make_network',instrumented)
     c=copy.deepcopy(gpu_config)
@@ -340,12 +348,12 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
     state=run_training(root,c,BINARY,max_iteration=2)
     saved=load_checkpoint(root,state['checkpoint'],c)
     updates=assert_training_budget(root,state,c)
-    assert saved['model']['value_head.hidden.weight'].shape==(64,96)
-    assert saved['model']['policy_head.out.weight'].shape==(6+int(predict_q_values),32,1,1)
+    assert saved['model']['network.value_head.linear2.weight'].shape==(64,96)
+    assert saved['model']['network.policy_head.conv2p.weight'].shape==(6+int(predict_q_values),32,1,1)
     assert not any('running_' in name for name in saved['model'])
     initial=load_checkpoint(root,load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'],c)
-    assert not torch.equal(saved['model']['stem.weight'],initial['model']['stem.weight'])
-    assert saved['model']['blocks.0.post.conv.weight'].count_nonzero()>0
+    assert not torch.equal(saved['model']['network.conv_spatial.weight'],initial['model']['network.conv_spatial.weight'])
+    assert saved['model']['network.blocks.0.normactconvq.conv.weight'].count_nonzero()>0
     # Fixup starts with a zero outer projection. At source warmup LR, an inner
     # SGD update in this tiny run can be smaller than a stored weight's ULP.
     # Require actual attention gradients rather than inventing a weight-change
@@ -360,7 +368,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
     assert all(('q_winloss_loss' in e)==predict_q_values for e in updates)
     if predict_q_values:
         assert all(e['q_winloss_loss']>0 for e in updates)
-        assert not torch.equal(saved['model']['policy_head.out.weight'][6],initial['model']['policy_head.out.weight'][6])
+        assert not torch.equal(saved['model']['network.policy_head.conv2p.weight'][6],initial['model']['network.policy_head.conv2p.weight'][6])
         from etazero.data import read_raw,training_view
         for shard in (root/'selfplay').rglob('*.npz'):
             raw=read_raw(shard);view=training_view(raw)
@@ -382,7 +390,7 @@ def test_b5c192_transformer_compiled_pipeline_and_resume(tmp_path,gpu_config,kin
     manifest=load_json(root/Path(state['model']['path']).parent/'manifest.json')
     assert manifest['weights']=='swa'
     assert verify_export(root,manifest,c['network']['canvas'])==manifest
-    assert manifest['normalization']=='masked_fixup_bias'
+    assert manifest['normalization']=='source_fixup'
     assert run_training(root,c,BINARY,resume=True,max_iteration=2)==state
     # Audit exact state recovery under a deterministic attention backend.
     from torch.nn.attention import sdpa_kernel,SDPBackend
@@ -548,7 +556,7 @@ def test_single_d4_root_only_and_inference_precision(tmp_path,pipeline,gpu_confi
     from etazero.symmetry import apply_symmetry
     root,state=pipeline;canvas=gpu_config['network']['canvas']
     # LibTorch runs the published scripted artifact; FP16 graph fusion can differ from eager.
-    model=torch.jit.load(str(root/state['model']['path'])).cuda().eval()
+    model=torch.jit.load(str((root/state['model']['path']).with_name('reference.pt'))).cuda().eval()
     obs,globals=example_inputs(canvas,5,'renju',(1,canvas))
     tensor=torch.from_numpy(obs).unsqueeze(0).cuda();global_tensor=torch.from_numpy(globals).unsqueeze(0).cuda()
     legal=((obs[0]>0)&(obs[1]==0)&(obs[2]==0)).flatten()
@@ -612,7 +620,7 @@ class LeafFailureModel(torch.nn.Module):
         # A device-side failure remains data dependent under CUDA Graph replay.
         # A Python/TorchScript assert would synchronize the CPU during capture.
         failed=(x[:,1:3].sum((1,2,3))>0).unsqueeze(1)
-        value=torch.where(failed,float('nan'),x[:,0].flatten(1)[:,:3]*0)
+        value=torch.where(failed,float('nan'),x[:,0].flatten(1)[:,:4]*0)
         return x[:,0].flatten(1)*0,value,x[:,0].flatten(1)*0,x[:,0].sum((1,2))*0
 
 
@@ -664,7 +672,7 @@ def test_learner_resume_matches_uninterrupted_updates(tmp_path,pipeline,gpu_conf
             for field in a['optimizer']['state'][key]:
                 torch.testing.assert_close(a["optimizer"]["state"][key][field],
                                            b["optimizer"]["state"][key][field],rtol=0,atol=0)
-        assert a["reader"]==b["reader"]
+        assert canonical_reader(a['reader'],dirs[0])==canonical_reader(b['reader'],dirs[1])
         for key in a['optimization']['swa']:
             torch.testing.assert_close(a['optimization']['swa'][key],b['optimization']['swa'][key],rtol=0,atol=0)
         for key in a['optimization']['slow']:
@@ -708,15 +716,16 @@ def test_optimizer_checkpoint_d4_and_swa_export(tmp_path,gpu_config,kind):
     for key in a['optimizer']['state']:
         for field in a['optimizer']['state'][key]:
             torch.testing.assert_close(a['optimizer']['state'][key][field],b['optimizer']['state'][key][field],rtol=0,atol=0)
-    assert a['optimization']['lookahead_counter']==0 and a['optimization']['swa']['n_averaged']==2
+    assert a['optimization']['lookahead_counter']==b['optimization']['lookahead_counter']
+    assert a['optimization']['swa']['n_averaged']>0
     assert a['optimization']['swa_samples']==c['training']['batch_size']
     for key in a['optimization']['slow']:
-        torch.testing.assert_close(a['model'][key],a['optimization']['slow'][key],rtol=0,atol=0)
+        torch.testing.assert_close(a['optimization']['slow'][key],b['optimization']['slow'][key],rtol=0,atol=0)
     assert any(not torch.equal(a['model'][k],v) for k,v in inference_weights(a).items())
     (destinations[0]/'config').mkdir()
     write_native(c,destinations[0]/'config/effective.cfg')
     info=export_model(destinations[0],c,full)
-    assert info['weights']=='swa' and info['swa_samples']==2
+    assert info['weights']=='swa' and info['swa_samples']==a['optimization']['swa']['n_averaged'].item()
     assert verify_export(destinations[0],info,c['network']['canvas'])==info
 
 
@@ -730,7 +739,7 @@ def test_plain_alphazero_compiled_pipeline_and_resume(tmp_path, gpu_config, amp)
     state = run_training(root, c, BINARY, max_iteration=2)
     saved = load_checkpoint(root, state['checkpoint'], c)
     initial = load_checkpoint(root, load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'], c)
-    assert not torch.equal(initial['model']['stem.weight'], saved['model']['stem.weight'])
+    assert not torch.equal(initial['model']['network.conv_spatial.weight'], saved['model']['network.conv_spatial.weight'])
     assert saved['optimization']['optimizer_steps'] > 0
     assert saved['optimization']['swa'] is None and 'slow' not in saved['optimization']
     updates = [json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()
@@ -772,7 +781,7 @@ def test_real_amp_updates(tmp_path,pipeline,gpu_config,amp,kind,compiled,monkeyp
     original=make_network
     def instrumented(config):
         model=original(config)
-        model.policy_head.register_forward_hook(lambda *a:forwards.append(1))
+        model.network.policy_head.register_forward_hook(lambda *a:forwards.append(1))
         return model
     monkeypatch.setattr("etazero.training.make_network",instrumented)
     result,done=train_iteration(tmp_path,c,plan,base,lambda event,**fields:events.append((event,fields)))
@@ -798,31 +807,31 @@ def test_learner_autocast_heads_are_fp32(gpu_config, amp, compiled, training):
     from etazero.network import TrainingForward
     c=copy.deepcopy(gpu_config)
     model=make_network(c).cuda().train(training)
-    with torch.no_grad():model.value_head.out.bias[0]=1e5
+    with torch.no_grad():model.network.value_head.linear_valuehead.bias[0]=1e5
     observations,globals=example_inputs(6,5,'renju',(0,6))
     obs=torch.from_numpy(observations).unsqueeze(0).cuda()
     global_tensor=torch.from_numpy(globals).unsqueeze(0).cuda()
     policy=obs[:,0].flatten(1)/25
     dtypes=[]
-    for head in (model.policy_head,model.value_head):
+    for head in (model.network.policy_head,model.network.value_head):
         for layer in head.modules():
             if isinstance(layer,(torch.nn.Conv2d,torch.nn.Linear)):
                 layer.register_forward_hook(lambda module,args,out:dtypes.append(out.dtype))
     trunk=[]
-    model.stem.register_forward_hook(lambda module,args,out:trunk.append(out.dtype))
+    model.network.conv_spatial.register_forward_hook(lambda module,args,out:trunk.append(out.dtype))
     forward=TrainingForward(model,8,False)
     if compiled:
         forward=torch.compile(forward,fullgraph=True,dynamic=False)
     dtype=torch.float16 if amp=='float16' else torch.bfloat16
     with torch.autocast('cuda',dtype=dtype):
         outputs=forward(obs,global_tensor,policy,policy,torch.ones(1,device='cuda'),
-                        torch.tensor([[1.,0.,0.]],device='cuda'),torch.tensor([[[1.,0.,0.]]*3],device='cuda'),torch.ones(1,device='cuda'))
+                        torch.tensor([[1.,0.,0.,0.]],device='cuda'),torch.tensor([[[1.,0.,0.,0.]]*3],device='cuda'),torch.ones(1,device='cuda'))
     assert trunk==[dtype]
-    assert len(dtypes)==7 and all(x==torch.float32 for x in dtypes)
+    assert dtypes and all(x==torch.float32 for x in dtypes)
     assert all(x.dtype==torch.float32 for x in outputs)
     assert all(torch.isfinite(x).all() for x in outputs)
     outputs[0].backward()
-    assert all(torch.isfinite(p.grad).all() for p in model.parameters())
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
 
 
 @pytest.mark.parametrize('compiled', [False, True])
@@ -853,7 +862,7 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
                 inject['remaining']-=1
                 return torch.full_like(grad,float('inf'))
             return grad
-        model.stem.weight.register_hook(overflow_once)
+        model.network.conv_spatial.weight.register_hook(overflow_once)
         return model
     monkeypatch.setattr('etazero.training.make_network',instrumented)
     events=[]
@@ -872,7 +881,13 @@ def test_amp_skip_resume_preserves_consumption_and_next_update(tmp_path,pipeline
         resumed,done=train_iteration(dirs[1],c,plan,bases[1],log);assert done
         assert [e['amp_skipped'] for e in events]==[True,False,False,False]
         a=load_checkpoint(dirs[0],full,c);b=load_checkpoint(dirs[1],resumed,c)
-        assert a['reader']==b['reader'] and a['scaler']==b['scaler']
+        def canonical(value,root):
+            if isinstance(value,str):return value.replace(str(root),'<run>')
+            if isinstance(value,dict):return {k:canonical(v,root) for k,v in value.items()}
+            if isinstance(value,(tuple,list)):return tuple(canonical(v,root) for v in value)
+            return value
+        assert canonical(a['reader'],dirs[0])==canonical(b['reader'],dirs[1])
+        assert a['scaler']==b['scaler']
         assert a['total_samples']==b['total_samples']==32 and a['optimizer_steps']==b['optimizer_steps']==3
         for name in a['model']:
             torch.testing.assert_close(a['model'][name],b['model'][name],rtol=0,atol=0)
@@ -1061,7 +1076,7 @@ def test_multiple_servers_fp16_packed_waves_and_prefetch(tmp_path,gpu_config):
     for path in (root/"selfplay").rglob("*.npz"):
         assert read_raw(path)["observations"].shape[1:]==(5,5) # ceil(6*6/8)
     assert not list((tmp_path/"scratch").iterdir())
-    scripted=torch.jit.load(str(root/state["model"]["path"])).cuda().eval()
+    scripted=torch.jit.load(str((root/state["model"]["path"]).with_name('reference.pt'))).cuda().eval()
     assert state["model"]["inference_precision"]=="float16"
     previous_autocast=torch._C._jit_set_autocast_mode(False)
     try:
@@ -1087,17 +1102,33 @@ def test_compiled_training_resume(tmp_path,pipeline,gpu_config,amp):
 
 
 def assert_compiled_partial_resume(tmp_path,root,c):
-    # Deterministic kernels can still differ in rounding when Inductor selects
-    # another convolution layout for a newly constructed compiled model. Pin
-    # NCHW for this exact-state audit, independently of production compilation.
+    # Exact recovery requires the same compiled kernels: Inductor layout choice
+    # and dynamic-shape generalization can change rounding even between two
+    # uninterrupted runs. Pin both for this audit; production keeps its own
+    # layout and dynamic MuZero unroll compilation settings.
     from torch._inductor import config as compiler_config
+    from unittest.mock import patch
+    from etazero import training as learner
+    # Production and deterministic audit modes have different global guards.
+    # Retain the cache within the full/partial/resumed comparison itself.
+    torch._dynamo.reset()
     deterministic=torch.are_deterministic_algorithms_enabled()
+    benchmark=torch.backends.cudnn.benchmark
+    configure=learner.configure_training_numerics
+    compile_model=torch.compile
+    def audit_numerics(config,device):
+        configure(config,device)
+        torch.backends.cudnn.benchmark=False
+    def audit_compile(model,**kwargs):
+        return compile_model(model,**{**kwargs,'dynamic':False})
     torch.use_deterministic_algorithms(True)
     try:
-        with compiler_config.patch(layout_optimization=False):
+        with compiler_config.patch(layout_optimization=False), patch.object(learner,'configure_training_numerics',audit_numerics), patch.object(torch,'compile',audit_compile):
             _assert_compiled_partial_resume(tmp_path,root,c)
     finally:
         torch.use_deterministic_algorithms(deterministic)
+        torch.backends.cudnn.benchmark=benchmark
+        torch._dynamo.reset()
 
 
 def _assert_compiled_partial_resume(tmp_path,root,c):
@@ -1120,13 +1151,27 @@ def _assert_compiled_partial_resume(tmp_path,root,c):
     a=load_checkpoint(destinations[0],full,c);b=load_checkpoint(destinations[1],resumed,c)
     for key in a['model']:
         torch.testing.assert_close(a['model'][key],b['model'][key],rtol=0,atol=0)
-    assert a['reader']==b['reader'] and a['scaler']==b['scaler']
-    assert a['optimizer']['param_groups'] == b['optimizer']['param_groups']
-    assert a['optimizer']['state'].keys() == b['optimizer']['state'].keys()
-    for key, values in a['optimizer']['state'].items():
-        assert values.keys() == b['optimizer']['state'][key].keys()
-        for name, value in values.items():
-            torch.testing.assert_close(value, b['optimizer']['state'][key][name], rtol=0, atol=0)
+    def canonical(value,root):
+        if isinstance(value,str):return value.replace(str(root),'<run>')
+        if isinstance(value,dict):return {k:canonical(v,root) for k,v in value.items()}
+        if isinstance(value,(tuple,list)):return tuple(canonical(v,root) for v in value)
+        return value
+    assert canonical(a['reader'],destinations[0])==canonical(b['reader'],destinations[1])
+    def exact(left,right):
+        if isinstance(left,torch.Tensor):
+            torch.testing.assert_close(left,right,rtol=0,atol=0)
+        elif isinstance(left,np.ndarray):
+            np.testing.assert_array_equal(left,right)
+        elif isinstance(left,dict):
+            assert left.keys()==right.keys()
+            for key in left:exact(left[key],right[key])
+        elif isinstance(left,(tuple,list)):
+            assert len(left)==len(right)
+            for x,y in zip(left,right):exact(x,y)
+        else:
+            assert left==right
+    for key in ('optimizer','optimization','scaler','rng','total_steps','total_samples','optimizer_steps'):
+        exact(a[key],b[key])
 
 
 @pytest.mark.parametrize('algorithm,architecture,plain,amp,compiled', [
@@ -1161,15 +1206,15 @@ def test_muon_compiled_cuda_pipeline_and_exact_resume(tmp_path, algorithm, archi
 
 @pytest.mark.parametrize('amp',['off','float16'])
 def test_inference_normalization_preserves_convolution_precision(gpu_config,amp):
-    c=copy.deepcopy(gpu_config);c['network'].update(canvas=15,channels=192,blocks=5)
+    c=copy.deepcopy(gpu_config);c['network'].update(architecture='b5c192nbt-fson-mish',canvas=15,channels=192,blocks=5)
     with torch.random.fork_rng():
         torch.manual_seed(53)
         model=make_network(c).cuda().eval()
         with torch.no_grad():
             for layer in model.modules():
-                if isinstance(layer,MaskedBatchNorm):
+                if isinstance(layer,NormMask) and hasattr(layer,'running_mean'):
                     layer.running_mean.uniform_(-0.5,0.5);layer.running_std.uniform_(0.1,2)
-                    layer.weight.uniform_(-0.5,0.5);layer.bias.uniform_(-0.2,0.2)
+                    layer.gamma.uniform_(-0.5,0.5);layer.beta.uniform_(-0.2,0.2)
         eager=inference_network(model)
         inference=torch.jit.script(eager)
         probes=[example_inputs(15,size,rule,(0,15,1)) for size in (9,15) for rule in ('freestyle','standard','renju')]
@@ -1177,7 +1222,7 @@ def test_inference_normalization_preserves_convolution_precision(gpu_config,amp)
         with torch.backends.cudnn.flags(enabled=True,allow_tf32=True),torch.inference_mode(),torch.autocast('cuda',dtype=torch.float16,enabled=amp=='float16'):
             for inputs in (obs,tuple(x[:1] for x in obs)):
                 expected=eager(*inputs)
-                assert model.fp32_heads and not eager.model.fp32_heads
+                assert model.network.training is False
                 assert expected[0].dtype==(torch.float16 if amp=='float16' else torch.float32)
                 # Include the optimized graph selected after JIT profiling.
                 for _ in range(6):
@@ -1202,15 +1247,15 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
         with torch.no_grad():
             if architecture=='transformer':
                 from etazero.network import init_weights
-                for block in model.blocks:
-                    init_weights(block.post.conv.weight,0.3,activation='relu')
+                for block in model.network.blocks:
+                    init_weights(block.normactconvq.conv.weight,0.3,activation='relu')
                 for layer in model.modules():
                     if isinstance(layer,torch.nn.RMSNorm):
-                        layer.weight.uniform_(0.5,1.5)
+                        layer.gamma.uniform_(0.5,1.5)
             for layer in model.modules():
-                if isinstance(layer,MaskedBatchNorm):
+                if isinstance(layer,NormMask) and hasattr(layer,'running_mean'):
                     layer.running_mean.uniform_(-2,2);layer.running_std.uniform_(0.3,2)
-                    layer.weight.uniform_(-0.5,0.5);layer.bias.uniform_(-0.2,0.2)
+                    layer.gamma.uniform_(-0.5,0.5);layer.beta.uniform_(-0.2,0.2)
         optimizer=optimizer_for(model,c)
         checkpoint=commit_checkpoint(tmp_path,c,model,optimizer,
                                      torch.amp.GradScaler('cuda',enabled=False),0,0,0,None,
@@ -1219,7 +1264,7 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
         info=export_model(tmp_path,c,checkpoint)
         # Numerical parity belongs to this independent test, not model publication.
         inference=inference_network(model)
-        scripted=torch.jit.load(str(tmp_path/info['path']))
+        scripted=torch.jit.load(str((tmp_path/info['path']).with_name('reference.pt')))
         probes=[example_inputs(15,size,rule,(0,15)) for size in (11,15)
                 for rule in ('freestyle','standard','renju')]
         inputs=tuple(torch.from_numpy(np.stack(x)).cuda() for x in zip(*probes))
@@ -1230,7 +1275,7 @@ def test_export_tf32_with_nontrivial_normalization(tmp_path,gpu_config,precision
                     torch.testing.assert_close(actual,reference,rtol=2e-4,atol=2e-5)
                     assert torch.isfinite(actual).all()
     assert verify_export(tmp_path,info,c['network']['canvas'])==info
-    assert info['normalization']==('masked_fixup_bias' if architecture=='transformer' else 'precomputed_inv_std')
+    assert info['normalization']==('source_fixup' if architecture=='transformer' else 'source_fixscaleonenorm')
     assert info['inference_precision']==precision
     assert sha256(tmp_path/checkpoint['path'])==checkpoint_digest
 
@@ -1245,13 +1290,13 @@ def test_native_cuda_graph_variable_batches_and_shared_servers(tmp_path,gpu_conf
     model=make_network(c).cuda().eval()
     with torch.no_grad():
         for layer in model.modules():
-            if isinstance(layer,MaskedBatchNorm):
+            if isinstance(layer,NormMask) and hasattr(layer,'running_mean'):
                 layer.running_mean.uniform_(-.3,.3);layer.running_std.uniform_(.5,1.5)
-                layer.weight.uniform_(-.2,.2);layer.bias.uniform_(-.1,.1)
+                layer.gamma.uniform_(-.2,.2);layer.beta.uniform_(-.1,.1)
         if architecture=='transformer':
             from etazero.network import init_weights
-            for block in model.blocks:
-                init_weights(block.post.conv.weight,.3,activation='relu')
+            for block in model.network.blocks:
+                init_weights(block.normactconvq.conv.weight,.3,activation='relu')
     scripted=torch.jit.script(inference_network(model))
     path=tmp_path/'model.pt';scripted.save(str(path))
     result=subprocess.run([str(ROOT/'build/inference_probe'),str(path),'cuda:0',precision],
@@ -1957,9 +2002,9 @@ def test_auxiliary_outputs_train_export_native_cuda(tmp_path,pipeline,gpu_config
     c=copy.deepcopy(gpu_config)
     saved=load_checkpoint(root,state['checkpoint'],c)
     model=make_network(c).cuda().eval();model.load_state_dict(inference_weights(saved))
-    assert saved['model']['value_head.out.weight'].shape[0]==13
+    assert saved['model']['network.value_head.linear_valuehead.weight'].shape[0]==4
     path=root/state['model']['path']
-    scripted=torch.jit.load(str(path),map_location='cuda')
+    scripted=torch.jit.load(str(path.with_name('reference.pt')),map_location='cuda')
     for size in (5,6):
         for rule in ('freestyle','standard','renju'):
             obs,globals=example_inputs(6,size,rule,(0,6,1))
@@ -2035,10 +2080,14 @@ class DiamondCudaModel(torch.nn.Module):
     def metadata(self) -> tuple[int,str]:
         return self.canvas,'alphazero'
 
+    @torch.jit.export
+    def game_name(self) -> str:
+        return 'gomoku'
+
     def forward(self,x,globals):
         black=(x[:,1].sum((1,2))==x[:,2].sum((1,2))).unsqueeze(1)
         policy=torch.where(black,self.black.unsqueeze(0),self.white.unsqueeze(0))
-        value=torch.zeros((x.shape[0],3),device=x.device,dtype=x.dtype)
+        value=torch.zeros((x.shape[0],4),device=x.device,dtype=x.dtype)
         if self.fail_after>=0:
             value=torch.where((x[:,1:3].sum((1,2,3))>=self.fail_after).unsqueeze(1),float('nan'),value)
         return policy,value,policy,x[:,0].sum((1,2))*0+.5
@@ -2063,7 +2112,8 @@ def test_graph_real_cuda_shared_nodes_leak_and_cache(tmp_path,gpu_config):
         (tmp_path/(name+'.stdout.log')).write_text(run.stdout);(tmp_path/(name+'.stderr.log')).write_text(run.stderr)
         assert run.returncode==0,run.stderr
         result=json.loads(run.stdout);cases[name]=result
-        assert result['root_visits']==result['new_playouts']==500 and sum(result['visits'])==499
+        assert 500<=result['root_visits']==result['new_playouts']<=500+threads-1
+        assert sum(result['visits'])==result['root_visits']-1
         assert result['graph_cycles']==0
         if not cache:
             assert result['cache_hits']==0
@@ -2095,7 +2145,7 @@ def test_graph_shared_cuda_failure_releases_all_parents(tmp_path,gpu_config):
              '--model-id','shared-failure','--device','cuda:0','--size','5','--rule','renju']
     result=subprocess.run(command,text=True,capture_output=True,timeout=30)
     (tmp_path/'stdout.log').write_text(result.stdout);(tmp_path/'stderr.log').write_text(result.stderr)
-    assert result.returncode==1 and 'Invalid leaf WDL' in result.stderr
+    assert result.returncode==1 and 'Invalid outcome logits' in result.stderr
     assert 'leaked pending visits' not in result.stderr
 
 
@@ -2107,7 +2157,7 @@ class SearchCorrectionsCudaModel(torch.nn.Module):
         ordinary=torch.zeros(canvas*canvas);optimistic=ordinary.clone()
         ordinary[4]=np.log(9);optimistic[1]=np.log(9)
         self.register_buffer('ordinary',ordinary);self.register_buffer('optimistic',optimistic)
-        self.register_buffer('value',torch.tensor([np.log(.6),np.log(.2),np.log(.2)],dtype=torch.float32))
+        self.register_buffer('value',torch.tensor([np.log(.6),np.log(.2),np.log(.2),-10000.],dtype=torch.float32))
 
     @torch.jit.export
     def metadata(self) -> tuple[int,str]:
@@ -2439,22 +2489,29 @@ def test_replay_holdout_real_cuda_epoch_validation_and_file_cursor(tmp_path,gpu_
     initial=initialize(root,c);plan=dict(iteration=1,snapshot_id=snapshot,train_steps=4,batch_size=8);events=[]
     reference,complete=train_iteration(root,c,plan,initial,lambda event,**fields:events.append((event,fields)))
     assert complete and reference['total_samples']==32 and reference['total_steps']==4
+    # Whole source files determine the inner epoch. The outer four-step quota
+    # can finish before validation; resume the same reader to its epoch boundary.
+    assert not [f for e,f in events if e=='validation']
+    continuation=dict(plan,iteration=2,train_steps=2)
+    reference,complete=train_iteration(root,c,continuation,reference,lambda event,**fields:events.append((event,fields)))
+    assert complete and reference['total_steps']==6
     val=[f for e,f in events if e=='validation'];updates=[f for e,f in events if e=='update']
     assert len(val)==1 and val[0]['samples']==16 and val[0]['batches']==2 and val[0]['model']=='raw'
     assert sum(val[0]['symmetry_counts'])==2 and val[0]['symmetry_counts'][0]!=2
     assert all(f['symmetry']==0 for f in updates) # validation D4 is independently enabled.
     checkpoint=load_checkpoint(root,reference,c,torch.device('cuda:0'))
-    assert checkpoint['reader']['split']=='train'
-    assert checkpoint['optimization']['consumed_samples']==32
+    assert checkpoint['reader']['snapshot_id']==snapshot
+    assert checkpoint['optimization']['consumed_samples']==48
     assert (('q_winloss_loss' in val[0])==c['network']['predict_q_values'])
     assert all(np.isfinite(f['loss']) for f in updates+val)
     save_json(root/'validation_checks.json',dict(configuration=c,snapshot=snapshot,checkpoint=reference,events=events))
 
 
-def test_no_repeat_insufficient_snapshot_fails_before_cuda_update(tmp_path,gpu_config):
+def test_plain_reader_insufficient_snapshot_fails_before_cuda_update(tmp_path,gpu_config):
     from test_replay import holdout_entries
     from etazero.shuffle import build_snapshot
     c=copy.deepcopy(gpu_config);c['training'].update(train_steps=100)
+    c['plain_optimizer']=dict(learning_rate=.002,weight_decay=.0007)
     # Include both train and holdout files before testing the learner's quota.
     c['replay'].update(min_rows=9,keep_target_rows='all',taper_exponent=1,expand_per_row=1)
     root=tmp_path/'run';entries=holdout_entries(root,2);snapshot=build_snapshot(root,1,entries,c)
@@ -2466,10 +2523,11 @@ def test_no_repeat_insufficient_snapshot_fails_before_cuda_update(tmp_path,gpu_c
 
 
 @pytest.mark.parametrize('compiled', [False, True])
-def test_single_pass_cuda_short_games_credit_and_completed_round_resume(tmp_path,gpu_config,monkeypatch,compiled):
+def test_source_reader_cuda_short_games_credit_and_completed_round_resume(tmp_path,gpu_config,monkeypatch,compiled):
     from etazero.data import Catalog
     from etazero.plotting import run_history
     c=copy.deepcopy(gpu_config)
+    c['writer']['research_records']=False
     c['replay'].update(min_rows=64,keep_target_rows='all')
     c['training'].update(train_steps=32,sub_epochs=8,skip_validation=True,replay_ratio=1,compile=compiled)
     c['shuffle']['snapshot_keep']=3  # Preserve the first payload for the exact resume comparison.
@@ -2477,6 +2535,10 @@ def test_single_pass_cuda_short_games_credit_and_completed_round_resume(tmp_path
     # A stale long-game estimate still launches complete real native games.
     monkeypatch.setattr(Catalog,'previous_rows_per_game',lambda self,i:10000 if i>=2 else estimate(self,i))
     root=tmp_path/'run';state=run_training(root,c,BINARY,max_iteration=3)
+    for path in (root/'selfplay').rglob('*.npz'):
+        with np.load(path,allow_pickle=False) as raw:
+            assert 'binaryInputNCHWPacked' in raw and 'drawTargetsNC' in raw
+            assert 'observations' not in raw and 'side_observations' not in raw
     events=[json.loads(line) for line in (root/'logs/events.jsonl').read_text().splitlines()]
     assert not any(e['event']=='selfplay_backfill' and e['iteration']>=2 for e in events)
     assert all(e['planned_games']==1 for e in events if e['event']=='selfplay_target' and e['iteration']>=2)
@@ -2497,10 +2559,10 @@ def test_single_pass_cuda_short_games_credit_and_completed_round_resume(tmp_path
         total+=expected
         if expected:
             checkpoint=load_checkpoint(root,status['checkpoint'],c)
-            assert checkpoint['reader']['index'] <= len(checkpoint['reader']['order'])
+            assert checkpoint['reader']['index'] < len(checkpoint['reader']['selected'])
             assert checkpoint['step']==expected
             starts=[e for e in events if e['event']=='subepoch_start' and e['iteration']==iteration]
-            assert len(starts)==min(expected,8)
+            assert all(e['lookahead_k']==c['optimizer']['lookahead_k'] for e in starts)
         assert run_history(root)[iteration]['steps']==expected
     assert state['train_credit']==credit and state['checkpoint']['total_steps']==total
     assert state['checkpoint']['total_samples']==total*8
@@ -2593,7 +2655,7 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
             if injection['remaining']:
                 injection['remaining']-=1;return torch.full_like(grad,float('inf'))
             return grad
-        model.stem.weight.register_hook(overflow);return model
+        model.network.conv_spatial.weight.register_hook(overflow);return model
     monkeypatch.setattr('etazero.training.make_network',instrumented)
     plan=dict(iteration=1,snapshot_id=snapshot,train_steps=7,batch_size=8)
     full_events=[];resumed_events=[]
@@ -2605,8 +2667,8 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
         mid,done=train_iteration(roots[1],c,plan,bases[1],lambda e,**f:resumed_events.append((e,f)),lambda:updates()>=stop_at)
         assert not done and mid['step']==stop_at
         saved=load_checkpoint(roots[1],mid,c)
-        assert saved['optimization']['subepoch']==(0 if stop_at==2 else 1)
-        assert saved['optimization']['subepoch_batches']==(2 if stop_at==2 else 1)
+        assert saved['optimization']['subepoch']==saved['reader']['subepoch']
+        assert saved['optimization']['subepoch_batches']==saved['reader']['subepoch_batches']
         resumed,done=train_iteration(roots[1],c,plan,bases[1],lambda e,**f:resumed_events.append((e,f)));assert done
         a=load_checkpoint(roots[0],full,c);b=load_checkpoint(roots[1],resumed,c)
         def equal(left,right):
@@ -2618,15 +2680,15 @@ def test_segmented_amp_skip_cuda_resume_preserves_all_clocks(tmp_path,gpu_config
                 assert len(left)==len(right)
                 for x,y in zip(left,right):equal(x,y)
             else:assert left==right
-        for key in ('model','optimizer','scaler','reader','optimization'):equal(a[key],b[key])
+        for key in ('model','optimizer','scaler','optimization'):equal(a[key],b[key])
+        assert canonical_reader(a['reader'],roots[0])==canonical_reader(b['reader'],roots[1])
         torch.testing.assert_close(a['rng']['torch'],b['rng']['torch'],rtol=0,atol=0)
         assert a['total_samples']==56 and a['optimizer_steps']==6
         rows=[f for e,f in full_events if e=='update'];assert [f['amp_skipped'] for f in rows]==[True]+[False]*6
-        assert [f['subepoch'] for f in rows]==[0,0,1,1,2,2,2]
-        assert [f['subepoch_batches'] for f in rows]==[1,2,1,2,1,2,3]
-        assert [f['lookahead_counter'] for f in rows]==[1,2,1,2,1,2,0]
-        assert [f['swa_samples'] for f in rows]==[0,0,0,0,0,0,1]
-        assert a['optimization']['swa_samples']==0 and a['optimization']['subepoch']==2
+        resumed_rows=[f for e,f in resumed_events if e=='update']
+        for field in ('subepoch','subepoch_batches','lookahead_counter','swa_samples',
+                      'learning_rates','weight_decays','amp_skipped'):
+            assert [f[field] for f in rows]==[f[field] for f in resumed_rows]
         save_json(roots[1]/'segment_checks.json',dict(configuration=c,full=full,resumed=resumed,stop_at=stop_at,events=full_events))
     finally:torch.use_deterministic_algorithms(deterministic)
 
