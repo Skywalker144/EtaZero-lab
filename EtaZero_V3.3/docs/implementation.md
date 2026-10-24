@@ -8,6 +8,28 @@
 
 外层按基准训练量与 replay ratio 规划 selfplay，按实际新增数据结转训练额度。同步阶段之间才更换 accepted 模型，不做局内换网。内部优化器 epoch/subepoch、完整文件选择、Lookahead、SWA、LR 和范数时钟独立于外层轮次，使用来源规则并跨轮保留。期望差异与共有机制的审查标准见 [定位与对齐目标](katago-target.md)。
 
+## 代码职责与依赖
+
+C++ 的头文件与实现放在同一职责目录，以 `cpp/` 为 include 根；公共接口通过职责路径引用。KataGo 派生且由 EtaZero 维护的代码也在相应目录，来源提交与适配范围统一记录在 [THIRD_PARTY.md](../THIRD_PARTY.md)，不再作为另一套引擎嵌套在第三方目录中。
+
+| 职责 | C++ 入口 | Python 入口 |
+|---|---|---|
+| 基础工具与公共定义 | `core/`；`game/` 中的布局与规则 | 根包中的 `config.py`、`games.py`、`schema.py`、`outcomes.py` |
+| 棋规与状态 | `game/`；围棋规则在 `game/go/` | `games.py`、`symmetry.py` |
+| 搜索 | `search/` 的公共数学、参数解析与结果处理；真实棋盘搜索和 `search/muzero/` 的 latent 搜索 | — |
+| 网络与推理 | `neuralnet/`；`neuralnet/muzero/` 负责 initial/recurrent 与 latent | `models/`；来源网络在 `models/katago/`，三组件在 `models/muzero/` |
+| 数据读写与选取 | `dataio/` 的 SGF、PositionSample 与训练记录 | `data/` 的目标、shuffle、文件选择和 reader |
+| 训练更新 | — | `train/` 的 learner、优化器与消费时钟；`train/muzero/` 的展开损失与参数角色 |
+| 程序编排 | `program/` 的配置建模、开局、采样与比赛 | `run/` 的逐轮运行和实验调度；`evaluation/` 的分析、比赛、Elo 与绘图 |
+| 命令与协议 | `command/` 的命令分发、GTP、Web 和公共 JSON 协议 | `__main__.py` 保持统一 CLI 入口 |
+| 第三方依赖 | `external/` 的 CUTLASS、cuDNN frontend、filesystem、half、JSON 和 Pikafish | `_vendor/` 保留未改写的 Muon、Elo 来源模块 |
+
+构建依赖由 [CMakeLists.txt](../cpp/CMakeLists.txt) 定义：基础工具只编译一次，棋规和特征支撑网络与搜索，公共搜索数学供两种算法使用，记录与程序编排再组合这些模块。CUDA 引擎依赖规则／特征与基础库，不依赖命令层；LibTorch 适配依赖推理接口。公共 [search_common.h](../cpp/search/search_common.h) 不包含 AlphaZero 私有节点布局。
+
+可共享逻辑有唯一实现：`searchparams.cpp` 解析临时访问、playout、时间预算与工作线程数；`searchresults.cpp` 和 `search_math.cpp` 维护共同的选择、聚合及目标数学；两类网络复用 `models/fused_swiglu.py` 的同一内核。真实棋盘图与 latent 状态的存储、生命周期和推理队列仍按各自语义实现。
+
+所有优化器使用 `data/source_reader.py` 与 `train/training_clock.py`。内部 epoch/subepoch 由**已消费的文件游标**推进，跨外层暂停与 checkpoint 恢复；普通优化器只改变其明确选择的更新配方。预取不推进消费状态，验证由内部 epoch 结束触发。
+
 ## 多棋类数据布局
 
 [games.py](../python/etazero/games.py) 是棋类输入与动作维度的代码定义。原始 NPZ 和 shuffle manifest 记录 `game/input_planes/global_features/action_count`，writer 以空间面积打包二值输入，以动作数保存 policy、visits、Q 和 MuZero 的逐步目标。Go pass 与象棋动作不能按 `canvas²` reshape。`GameSpec` 明确区分实际宽高／面积、棋盘存储 stride、网络 canvas 与动作数；象棋棋盘为 9×10，存储 stride 为 10。`Board` 显式携带 width/height/stride，会话与分析输出相同几何字段。原始 metadata 的逐局 `rule_options` 保留围棋规则、贴目及初始 FEN；围棋记录实际宽高和 SGF 起点；MuZero 或显式研究记录保存完整动作／观测，分片边界不截断历史。
@@ -41,7 +63,7 @@ flowchart LR
 
 ### 对局、搜索与推理
 
-[原生命令](../cpp/src/commands/main.cpp)为每个 worker 建立一个模型服务和多个对局线程。每局独立持有状态、搜索图和随机流，对局共享 evaluator。[Search](../cpp/src/search/search.cpp) 为每局保留搜索线程，逐手派发任务；单线程使用同一实现。
+[原生命令](../cpp/command/main.cpp)为每个 worker 建立一个模型服务和多个对局线程。每局独立持有状态、搜索图和随机流，对局共享 evaluator。[Search](../cpp/search/search.cpp) 为每局保留搜索线程，逐手派发任务；单线程使用同一实现。
 
 节点展开以 release/acquire 发布先验与 child 统计。遇到其他线程正在展开的节点时释放本路径预约，返回一次未计数 playout，由外层重试；不等待该节点的条件变量。并发回传通过 dirty counter 合并待重算次数，持有更新权的线程聚合已发布统计。合法动作全部保留，child 统计按 8、64、全部合法动作三档按需增长；选择扫描已激活 child，并通过排序先验求出未访问动作的最大分数和全部并列候选，不裁剪动作域。节点累计访问与在途数直接参与 PUCT，避免每次扫描全部合法动作求和。每个搜索线程复用状态、路径和候选暂存，AlphaZero 状态按原位复制重置。边分别保存完成访问和在途预约，图节点统计在多父之间共享；virtual loss使用共享子节点在途数，仅参与调度。回传或来源定义的访问追赶完成后增加正式访问。失败释放全部预约，搜索返回前等待该手全部任务结束，普通 PUCT 按完成访问／playout 检查预算，允许在途线程超额完成；Gumbel 保留严格分配；时间或显式停止时允许少于额度返回，已在途路径完成后释放所有 pending。
 
@@ -49,9 +71,9 @@ flowchart LR
 
 MuZero 也保留搜索工作线程；节点边锁与统计快照锁分开，推理在节点锁之外执行。搜索级控制锁只管理预算、停止和报告，不包围整条路径选择与回传。
 
-[BatchEvaluator](../cpp/src/inference/batcher.cpp) 的请求携带固定形状输入及独立结果通知。AlphaZero 入队采用 KataGo `forcePush` 语义；调用者入队后等待自己的推理结果，不设置队列容量或独立请求编号。MuZero 的有界队列通过 `muzero_queue_capacity` 控制背压。每个 evaluator 固定绑定模型、画布和推理精度，多个服务共同消费队列。服务数由 `inference.server_threads` 指定，设备由独立 worker 的 `devices.selfplay` 项确定。默认立即取队列最多 N 项；非零 `batch_wait_us` 可显式增加等待期限，属于性能和调度条件。关闭后拒绝新请求并排空已入队请求；失败唤醒当前批和队列内调用者，后续调用直接报错。
+[BatchEvaluator](../cpp/neuralnet/batcher.cpp) 的请求携带固定形状输入及独立结果通知。AlphaZero 入队采用 KataGo `forcePush` 语义；调用者入队后等待自己的推理结果，不设置队列容量或独立请求编号。MuZero 的有界队列通过 `muzero_queue_capacity` 控制背压。每个 evaluator 固定绑定模型、画布和推理精度，多个服务共同消费队列。服务数由 `inference.server_threads` 指定，设备由独立 worker 的 `devices.selfplay` 项确定。默认立即取队列最多 N 项；非零 `batch_wait_us` 可显式增加等待期限，属于性能和调度条件。关闭后拒绝新请求并排空已入队请求；失败唤醒当前批和队列内调用者，后续调用直接报错。
 
-[CudaBackend](../cpp/src/inference/cuda_backend.cpp) 使用固定来源 CUDA/cuDNN 实现及二进制模型描述，服务具有自己的 stream、输入和工作区。支持棋类输入、pass/象棋动作适配、四类概率、真实 HumanSL metadata。普通模型按实际 batch 前向；MuZero 另外接入三个组件和设备端 latent 内核。显式 CPU 或 `.pt` 参考模型使用 LibTorch，生产 `.bin` 不静默回退。
+[CudaBackend](../cpp/neuralnet/cuda_backend.cpp) 使用固定来源 CUDA/cuDNN 实现及二进制模型描述，服务具有自己的 stream、输入和工作区。支持棋类输入、pass/象棋动作适配、四类概率、真实 HumanSL metadata。普通模型按实际 batch 前向；MuZero 另外接入三个组件和设备端 latent 内核。显式 CPU 或 `.pt` 参考模型使用 LibTorch，生产 `.bin` 不静默回退。
 
 只有显式 `.pt` 的 LibTorch 参考路径按 1、2、4…batch bucket 捕获 CUDA Graph，并用首个有效输入补齐尾部；真实输出之外的补齐行不进入搜索。生产 `.bin` 后端按实际 batch 使用来源 CUDA/cuDNN 算子，无此补齐。模型加载和预热计入准备时间，不计入稳态测速。跨 batch/kernel 的舍入差异仍可能改变搜索轨迹。
 
@@ -63,11 +85,11 @@ MuZero 也保留搜索工作线程；节点边锁与统计快照锁分开，推�
 
 NN 缓存采用有界直接映射表与分段锁，保存不可变原始主/短期 optimistic logits、WDL 概率及误差标准差。键比较变换前五个二进制空间平面的全部位、六个全局浮点特征的原始字节、NN policy 温度及有效 optimism，朝向不入键，包含棋盘尺寸、Renju 执色、棋规和禁手特征开关；哈希只用于选槽，碰撞不会返回其他输入的结果。模型与精度由 evaluator 生命周期隔离。`inference.cache_entries = 0` 显式关闭缓存，空间输入必须为二进制，全局特征允许 Renju 黑方的 -1。缓存不合并同时在途的相同请求，也不缓存根噪声或搜索策略。optimism 使用精确 double 字节分键，无辅助能力或 metadata HumanSL 模型时归零；根/叶条件刷新及标准差到统计权重的转换见 [搜索修正](algorithms.md#误差加权optimistic-policy-与-noise-pruning)。Backend 声明的辅助能力须与实际输出一致，多服务必须使用同一能力契约。原生 analysis 同时输出 network_sample_weight、network_value_stdev、search_weight 和 search_weight_sq，用于区分访问数和加权统计。
 
-公共搜索遍历通过 [SearchState](../cpp/include/etazero/algorithm.h) 获得状态复制、动作域、叶评估、终局 WDL 值和转移后的视角符号（同方 +1、换方 -1）。该接口用于终局结果棋类搜索，不包含中间奖励和折扣。叶评估选项统一通过 `SearchEvaluation` 传递。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用某一棋类的规则。图共享默认要求 `graph_key` 包含 continuation 与 NN 输入条件；围棋显式声明 `graph_approximates_history()`，按 KataGo GraphHash 共享，并保留逐路径完整规则状态、下降前合法性复核和跳过 cache 的重评估。该能力由状态适配器提供，公共搜索不按棋类名称分支；没有共享身份实现的适配器明确拒绝图搜索。MuZero 使用独立 latent 搜索实现，按实际语义复用数学函数，见 [MuZero](muzero.md#网络与推理)。
+公共搜索遍历通过 [SearchState](../cpp/search/algorithm.h) 获得状态复制、动作域、叶评估、终局 WDL 值和转移后的视角符号（同方 +1、换方 -1）。该接口用于终局结果棋类搜索，不包含中间奖励和折扣。叶评估选项统一通过 `SearchEvaluation` 传递。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用某一棋类的规则。图共享默认要求 `graph_key` 包含 continuation 与 NN 输入条件；围棋显式声明 `graph_approximates_history()`，按 KataGo GraphHash 共享，并保留逐路径完整规则状态、下降前合法性复核和跳过 cache 的重评估。该能力由状态适配器提供，公共搜索不按棋类名称分支；没有共享身份实现的适配器明确拒绝图搜索。MuZero 使用独立 latent 搜索实现，按实际语义复用数学函数，见 [MuZero](muzero.md#网络与推理)。
 
 ### 轮次与设备
 
-[Python 控制器](../python/etazero/runtime.py)依次执行 selfplay → shuffle → train → export → 可选 gatekeeper。阶段内部保留对局并行、树内并行、后台 writer、shuffle worker 和文件预取，Shell 只负责薄启动。
+[Python 控制器](../python/etazero/run/runtime.py)依次执行 selfplay → shuffle → train → export → 可选 gatekeeper。阶段内部保留对局并行、树内并行、后台 writer、shuffle worker 和文件预取，Shell 只负责薄启动。
 
 bootstrap 为 iteration 0，只执行 selfplay，不 shuffle、不训练、不导出初始网络。iteration 1 补足有效训练行并完成首轮训练发布；后续四个阶段合为一次 `iteration`，完成模型发布与状态提交后才增加迭代编号。`.internal/state.json` 的 `iteration` 从 0 开始，表示当前未完成或下一次待处理的迭代；初始化 checkpoint 的迭代编号为 0。`.internal/iterations/<编号>/` 保存计划、阶段状态和 learner 进度，原始分片保存到 `selfplay/iteration_<编号>/`。checkpoint 的 `step` 是迭代内消费的 batch 数，`total_steps` 跨迭代累计消费；`total_samples` 包含 AMP 跳步消费，`optimizer_steps` 单独累计成功更新。`run.max_iteration` 是整个运行的累计完成目标，0 表示无限迭代；`--iterations` 可临时覆盖目标，时间限制与停止信号仍有效。
 
@@ -143,9 +165,9 @@ Python 保存完整生效配置及其 SHA-256 身份，生成 C++ 消费的 `con
 
 ### 原始对局分片
 
-[RecordWriter](../cpp/src/selfplay/record.cpp) 经有界队列接收完整对局，按随机取整后的最终训练行数写压缩 NPZ。一局按主局重复行、side重复行的顺序写出，可以跨文件拆分。首文件阈值采用来源公式 `maxRows-int(maxRows*(1-minProp)*U)`，`U` 均匀取自 `[0,1)`；`writer.first_file_min_random_proportion` 对应 mainb18 的 `firstFileRandMinProp`。后续满片恰好包含 `writer.shard_rows` 行，不按定时器提前发布；退出排空队列并发布未满尾片。数组在 flush 后复用，轨迹存储可随稀疏采样增长；不使用 pickle 对象数组。
+[RecordWriter](../cpp/dataio/record.cpp) 经有界队列接收完整对局，按随机取整后的最终训练行数写压缩 NPZ。一局按主局重复行、side重复行的顺序写出，可以跨文件拆分。首文件阈值采用来源公式 `maxRows-int(maxRows*(1-minProp)*U)`，`U` 均匀取自 `[0,1)`；`writer.first_file_min_random_proportion` 对应 mainb18 的 `firstFileRandMinProp`。后续满片恰好包含 `writer.shard_rows` 行，不按定时器提前发布；退出排空队列并发布未满尾片。数组在 flush 后复用，轨迹存储可随稀疏采样增长；不使用 pickle 对象数组。
 
-公共训练字段采用来源布局：`binaryInputNCHWPacked` 为高位优先 uint8 packed planes；`globalInputNC` 为 float32；`policyTargetsNCMove` 为 int16 `[N,2,A]`；`globalTargetsNC` 为 float32 `[N,80]`；`valueTargetsNCHW` 为 int8 `[N,5,H,W]`；`qValueTargetsNCMove` 为 int16 `[N,3,A]`。`drawTargetsNC[N,5]` 独立补充普通和棋，来源 W/L/NR 槽位不改语义。score/ownership/seki 的监督权重为零；future-position 使用来源空间槽位 2/3。真实策略熵、搜索熵、根访问数、棋局 hash、历史标记和 Go 规则元信息写入对应公共槽位。输入平面及动作数由棋类决定。
+公共训练字段采用来源布局：`binaryInputNCHWPacked` 为高位优先 uint8 packed planes；`globalInputNC` 为 float32；`policyTargetsNCMove` 为 int16 `[N,2,A]`；`globalTargetsNC` 为 float32 `[N,80]`；`valueTargetsNCHW` 为 int8 `[N,5,H,W]`；`qValueTargetsNCMove` 为 int16 `[N,3,A]`。`drawTargetsNC[N,5]` 独立补充普通和棋，来源 W/L/NR 槽位不改语义。score/ownership/seki 不参与损失；future-position 使用来源空间槽位 2/3。来源槽位 27 保留为 error、variance-time 和默认 optimistic policy 共用的 `value_aux_weight`，不启用 ownership 监督。主 policy、value、TD、future-position 分别消费槽位 26、`1−35`、`1−24`、33 的独立权重；槽位 25 是整行 loss 权重，62 仅表示主对局已结束。这些权重贯穿 AZ 和 MuZero 根／unroll 训练。真实策略熵、搜索熵、根访问数、棋局 hash、历史标记和 Go 规则元信息写入对应公共槽位。输入平面及动作数由棋类决定。
 
 AlphaZero 默认只写公共训练字段、metadata 和用于同步控制器／棋局留出划分的轻量计数，不重复保存完整私有训练数组。公共读取入口也接受没有私有 metadata 的来源式 NPZ；本地控制器 catalog 需要自己的局数／身份信息。`writer.research_records=true` 可附加下面的研究轨迹；MuZero 因连续展开始终保存它。
 
@@ -159,7 +181,7 @@ AlphaZero 默认只写公共训练字段、metadata 和用于同步控制器／�
 
 主局另存 `reanalyzed`、`reanalysis_used_outcome`、`reanalysis_original_visits`、`reanalysis_policy_surprise` 和 `reanalysis_value_surprise`。重分析只替换所选 cheap 手的训练搜索数组及轻量 NN/search WDL，不修改真实轨迹；原始预算/选择信息单独记录，surprise 在替换后重算。opponent 可用性同时检查末手和 outcome-target 开关。PDA 主局 flag 和 signed-half-d 在相邻玩家间翻号且全局保持同一优势；完整轨迹保留它，禁手 dropout 只修改原禁手字段。数据与模型不提供历史格式兼容。hint/fork在`initial_position_kind`单独标记ordinary/hint/earlyFork/gameFork/hintFork（0…4），`hint_actions`为canvas编号或-1。总prefix为balanced+policy+initial；initial prefix与开局搜索互斥，无搜索/频率监督，fork必须PDA0。
 
-[读取与检查](../python/etazero/data.py)正常链路核对类型、形状、offset、采样索引和训练行区间；显式 `read_raw(..., deep=True)` / `validate_raw` 另外核对交替视角、逐手棋盘、mask、访问数、策略与奖励。AlphaZero 价值目标由终局结果和该状态行棋方派生为 W/D/L/NR one-hot。训练视图展开各棋局的主局及side重复行，再按本片区间选择。SQLite catalog 可从原始分片重建；按 run/attempt/worker/game 身份核对轨迹指纹与总训练行数，拒绝重复或重叠区间，逐区间累加实际行数，局数只计一次。胜和负、完整局长和开局统计归属于包含该局第0个训练行的分片，零行棋局单独保留，跨片上下文不会重复计数。启动时扫描历史产物，运行中仅扫描当前 iteration；开局前缀不进入训练行数。近期窗口按实际文件mtime从新到旧选完整片，不用未选中的上下文行抵扣窗口或产样quota。
+[读取与检查](../python/etazero/data/targets.py)正常链路核对类型、形状、offset、采样索引和训练行区间；显式 `read_raw(..., deep=True)` / `validate_raw` 另外核对交替视角、逐手棋盘、mask、访问数、策略与奖励。AlphaZero 价值目标由终局结果和该状态行棋方派生为 W/D/L/NR one-hot。训练视图展开各棋局的主局及side重复行，再按本片区间选择。SQLite catalog 可从原始分片重建；按 run/attempt/worker/game 身份核对轨迹指纹与总训练行数，拒绝重复或重叠区间，逐区间累加实际行数，局数只计一次。胜和负、完整局长和开局统计归属于包含该局第0个训练行的分片，零行棋局单独保留，跨片上下文不会重复计数。启动时扫描历史产物，运行中仅扫描当前 iteration；开局前缀不进入训练行数。近期窗口按实际文件mtime从新到旧选完整片，不用未选中的上下文行抵扣窗口或产样quota。
 
 原始搜索Q目标随所有架构保存，启用Q的learner才计入loss。`q_visits`为int16[S,A]，S对应`sample_indices`的正采样位置；`q_values`为int16[R,A]，R为主局最终重复输出行数，对应`forbidden_input`。访问数按位置压缩，Q随机量化按输出行独立保存，重复行可以不同。side对应`side_q_visits` [D,A]及`side_q_values` [R_side,A]，零重复side仍保留访问数而没有Q输出行。启用 Q 时训练视图生成float32[N,A]的Q值（除32000）与访问数；D4、shuffle、reader与预取保持两者和观测配对。源契约由[schema.py](../python/etazero/schema.py)唯一维护，旧契约明确拒绝。
 
@@ -173,7 +195,7 @@ shuffle 使用 Linux spawn 进程池；worker 初始化时绑定控制器的 par
 
 正常运行以 catalog 累计行数计算窗口并查询窗口内分片；恢复核对历史产物。启用 validation 时，按来源脚本对原始文件名（basename）计算 MD5，前 13 位十六进制映射到 `[0,1)`，末 1% 作为验证文件。整片进入同一分区；同一棋局跨不同原始文件时可能跨分区，这是来源文件留出语义。
 
-[shuffler](../python/etazero/shuffle.py) 使用 KataGo 的 power-law 窗口。窗口累计 `N = min(random_rows,m) + postrandom_rows`，random身份来自原始数据的 `model_id = random:seed`（判断前缀`random:`）；该封顶只用于窗口，不改变真实累计产样和quota。按文件实际mtime从近期向前选择完整分片至窗口阈值，最后一片允许超额。相同mtime按catalog稳定输入顺序打破平局，不声称复现来源文件系统遍历顺序。
+[shuffler](../python/etazero/data/shuffle.py) 使用 KataGo 的 power-law 窗口。窗口累计 `N = min(random_rows,m) + postrandom_rows`，random身份来自原始数据的 `model_id = random:seed`（判断前缀`random:`）；该封顶只用于窗口，不改变真实累计产样和quota。按文件实际mtime从近期向前选择完整分片至窗口阈值，最后一片允许超额。相同mtime按catalog稳定输入顺序打破平局，不声称复现来源文件系统遍历顺序。
 
 令 `s = taper_scale`（0时取m）、`d = add_to_data_rows`、`x = N−m+s+d`，窗口为 `max(m, int(m + a·(x**p−s**p)/(p·s**(p−1))))`，设置 `max_rows` 时再截到上限。参数和非法范围由 [train.cfg](../configs/baseline/train.cfg) 与 [config.py](../python/etazero/config.py) 唯一维护。快照另存来源范围 `[raw_total+int(d)−actual_window_rows, raw_total+int(d)]`；其end是未封顶的真实累计，不能替代N或本地产样quota。
 
@@ -194,9 +216,9 @@ shuffle 使用 Linux spawn 进程池；worker 初始化时绑定控制器的 par
 
 `shuffle.snapshot_keep` 限制保留完整 payload 的已完成快照数量，其余只回收可重建的 `data/`，保留 manifest、配方、原始对局与 checkpoint。读取被回收快照时，在文件锁内用原来源、随机种子和资源计划恢复相同采样，核对文件名与行数后原子发布；无需反复计算全文件 SHA-256。当前未完成轮的快照不会被回收，旧配方重建主要用于显式读取历史快照。原始对局不按此配置删除。
 
-[BatchReader](../python/etazero/reader.py) 预取当前文件及depth个后续文件，保持紧凑布局，仅解包当前batch。learner 传入本轮剩余 batch 预算；reader 在开始前核对额度，预取不越过最后一个待消费文件，CPU batch 准备也在额度处停止。主 policy 和 opponent policy 在原始数据、派生视图缓存、shuffle 临时文件与最终训练文件中均保持 int16 权重；reader 只将当前消费 batch 的这两个目标转成 float32，learner 再按行和归一化，不重新量化。每文件只读取 `floor(rows/batch_size)·batch_size` 的前缀，尾部丢弃；低于batch的文件不供给样本，也不与其他文件凑batch。manifest记录每pass完整batch数、可消费行数和尾部丢弃行数。
+[BatchReader](../python/etazero/data/reader.py) 预取当前文件及depth个后续文件，保持紧凑布局，仅解包当前batch。learner 传入本轮剩余 batch 预算；reader 在开始前核对额度，预取不越过最后一个待消费文件，CPU batch 准备也在额度处停止。主 policy 和 opponent policy 在原始数据、派生视图缓存、shuffle 临时文件与最终训练文件中均保持 int16 权重；reader 只将当前消费 batch 的这两个目标转成 float32，learner 再按行和归一化，不重新量化。每文件只读取 `floor(rows/batch_size)·batch_size` 的前缀，尾部丢弃；低于batch的文件不供给样本，也不与其他文件凑batch。manifest记录每pass完整batch数、可消费行数和尾部丢弃行数。
 
-生产 learner 使用 [SourceBatchReader](../python/etazero/source_reader.py) 和来源 TrainingDataGenerator。每个子 epoch 以 `train_steps/sub_epochs` 为目标批数，按来源概率纳入最后一个完整文件；实际步数随文件大小浮动。生成器维护已用/未用队列、延迟重复、20 个目录历史和新目录合并顺序，允许重复读取；外层额度可暂停在任意完整 batch。选中的旧文件消费完后，下一次子 epoch 才选择新快照文件；必要时按保存配方恢复已回收 payload。不是常驻异步目录轮询。显式 plain 优化器消融与验证仍使用普通 BatchReader。
+生产 learner 使用 [SourceBatchReader](../python/etazero/data/source_reader.py) 和来源 TrainingDataGenerator。每个子 epoch 以 `train_steps/sub_epochs` 为目标批数，按来源概率纳入最后一个完整文件；实际步数随文件大小浮动。生成器维护已用/未用队列、延迟重复、20 个目录历史和新目录合并顺序，允许重复读取；外层额度可暂停在任意完整 batch。选中的旧文件消费完后，下一次子 epoch 才选择新快照文件；必要时按保存配方恢复已回收 payload。不是常驻异步目录轮询。显式 plain 优化器消融与验证仍使用普通 BatchReader。
 
 后台 batch 队列和 CUDA 上传 stream 有界。checkpoint 只保存已消费的游标：来源文件队列、所选子 epoch 文件、文件偏移、epoch/subepoch、实际消费数和 RNG；预取不能推进该状态。未消费预取可丢弃重读。两个 pinned 槽通过 event 防止 DMA 覆盖，record_stream 管理 GPU 生命周期，MuZero 递归索引按槽调整。
 
@@ -243,7 +265,7 @@ remaining_credit = available_credit - actual_steps * B
 
 ## 模型发布与恢复
 
-[learner](../python/etazero/training.py) 按实际额度暂停/续行来源 reader，支持 batch 级增强、SGD / AdamW / Muon / NorMuon / Aurora、来源参数组与更新时钟、Lookahead 和 SWA。配置以 `train.cfg` 及解析器为准；非有限 loss 明确失败，FP16 缩放溢出按下述规则跳过更新，消费数与成功更新数分开记录。
+[learner](../python/etazero/train/learner.py) 按实际额度暂停/续行来源 reader，支持 batch 级增强、SGD / AdamW / Muon / NorMuon / Aurora、来源参数组与更新时钟、Lookahead 和 SWA。配置以 `train.cfg` 及解析器为准；非有限 loss 明确失败，FP16 缩放溢出按下述规则跳过更新，消费数与成功更新数分开记录。
 
 `training.compile` 将网络与完整损失联合交给 torch.compile / Inductor，AlphaZero 使用 fullgraph 和静态 shape；MuZero 按有效 recurrent 行数使用动态图：learner 的根 batch 大小与画布固定，各网络结构、尺寸与精度使用各自的图。超过重编译限制时明确失败，避免长运行静默退回 eager；首次 shape / 精度编译有额外耗时。公共包入口在导入 PyTorch 前设置持久缓存，默认 `${XDG_CACHE_HOME:-$HOME/.cache}/etazero/compile-v1/{inductor,triton}`，尊重已有 `TORCHINDUCTOR_CACHE_DIR` 和 `TRITON_CACHE_DIR`；run、autoexp、直接 Python 调用和子进程遵循同一默认值。缓存按需创建并跨运行复用；重建时停止相关进程后整体更换目录，不迁移已损坏缓存。选择 AdamW 时 CUDA 使用 fused 实现，CPU 使用普通实现；SGD 使用 momentum 0.9。编译和融合可能改变浮点归约顺序，属于显式执行条件，不能据此声称与旧 eager 路径逐位一致。SGD momentum 或 AdamW 的一阶／二阶矩与 step 随 checkpoint 保存并恢复。
 
@@ -261,7 +283,7 @@ learner 装载各组件后释放临时 checkpoint 容器，避免模型、Lookah
 
 清理依据有界活跃 checkpoint 索引和 state 最终引用，先检查待保留文件，再删除已完成轮的中间 payload 和过期轮末 payload，随后原子更新索引。删除过程中中断可重复执行；启动时也补做清理。未提交轮的注册 checkpoint 保留。
 
-[exporter](../python/etazero/export.py) 有 SWA 样本时优先导出 SWA，否则导出当前模型。CUDA 模型包包含 model.bin 和 reference.pt；MuZero 另有 representation.bin、dynamics.bin；显式 CPU 包为 model.pt。各组件、manifest 先写临时目录再原子发布，并记录每个组件大小。候选经过可选 gatekeeper 后更新 accepted 指针；模型包不修改 learner checkpoint。
+[exporter](../python/etazero/models/export.py) 有 SWA 样本时优先导出 SWA，否则导出当前模型。CUDA 模型包包含 model.bin 和 reference.pt；MuZero 另有 representation.bin、dynamics.bin；显式 CPU 包为 model.pt。各组件、manifest 先写临时目录再原子发布，并记录每个组件大小。候选经过可选 gatekeeper 后更新 accepted 指针；模型包不修改 learner checkpoint。
 
 `.internal/state.json` 是整轮提交的唯一权威：完成自对弈、shuffle、训练和导出后原子推进 state；逐轮指标尽力保存，日志和绘图故障不阻止有效训练提交。启动核对模型 manifest、画布、路径、文件大小和 checkpoint 引用，按 state 修复发布指针；不重新哈希模型与 checkpoint。iteration 0 的 bootstrap 同样按完整轮提交。
 
@@ -340,7 +362,7 @@ ETAZERO_GPU_TESTS=1 conda run -n pytorch python -m pytest -q tests
 
 ## 训练图与性能图
 
-[plotting.py](../python/etazero/plotting.py) 根据已提交轮次的 status 记录及可选的 `logs/iterations/*.json` 指标绘图。AlphaZero 的 `training.png` 使用深色三行两列布局：顶部为胜负和局长，中部固定分为策略 loss 与价值 loss，底部为梯度范数和 NN 缓存命中率。策略组包含六项普通／对手、soft 和 optimistic policy；价值组包含主 value、三个 TD value、短期价值误差及启用时的 Q。两组图例在面板内分两列显示，分量全为正时使用对数纵轴；总 loss 和有效行数／局保留在日志中，不单独占用概览面板。总局长包含开局动作，有效行数排除开局并按采样次数计数；自对弈和缓存命中率横轴为迭代完成时的累计有效行数，包含 iteration 0 的 bootstrap，刻度采用 `1.2e5` 形式的紧凑科学计数。缓存命中率为该轮各 worker 的 cache hits 总数／submitted requests 总数，只显示有网络请求的已完成轮次，随机冷启动不填零。loss 与梯度横轴为轮末累计训练样本量，采用同样的紧凑科学计数法；样本量取已提交 checkpoint 的消费计数，重复训练同一样本和 AMP 跳步均计入，验证不计入。loss 按该轮已提交消费 batch 取算术均值，包含 AMP 跳步，无平滑；梯度均值只使用成功更新的有限范数，原始 overflow 范数在即时 `amp_overflow` 日志中，聚合同时记录跳步与有效梯度 batch 数、裁剪次数、最大 loss 和最大有限梯度范数。梯度范数为整个网络裁剪前平均 loss 的 L2 范数；每条 loss 曲线为已乘训练系数的 batch 均值，Q关闭时十一项之和等于总loss，Q开启时另有`q_winloss_loss`曲线并计入总loss；关闭时不伪造零值曲线。优化器解耦衰减不计入 loss。
+[plotting.py](../python/etazero/evaluation/plotting.py) 根据已提交轮次的 status 记录及可选的 `logs/iterations/*.json` 指标绘图。AlphaZero 的 `training.png` 使用深色三行两列布局：顶部为胜负和局长，中部固定分为策略 loss 与价值 loss，底部为梯度范数和 NN 缓存命中率。策略组包含六项普通／对手、soft 和 optimistic policy；价值组包含主 value、三个 TD value、短期价值误差及启用时的 Q。两组图例在面板内分两列显示，分量全为正时使用对数纵轴；总 loss 和有效行数／局保留在日志中，不单独占用概览面板。总局长包含开局动作，有效行数排除开局并按采样次数计数；自对弈和缓存命中率横轴为迭代完成时的累计有效行数，包含 iteration 0 的 bootstrap，刻度采用 `1.2e5` 形式的紧凑科学计数。缓存命中率为该轮各 worker 的 cache hits 总数／submitted requests 总数，只显示有网络请求的已完成轮次，随机冷启动不填零。loss 与梯度横轴为轮末累计训练样本量，采用同样的紧凑科学计数法；样本量取已提交 checkpoint 的消费计数，重复训练同一样本和 AMP 跳步均计入，验证不计入。loss 按该轮已提交消费 batch 取算术均值，包含 AMP 跳步，无平滑；梯度均值只使用成功更新的有限范数，原始 overflow 范数在即时 `amp_overflow` 日志中，聚合同时记录跳步与有效梯度 batch 数、裁剪次数、最大 loss 和最大有限梯度范数。梯度范数为整个网络裁剪前平均 loss 的 L2 范数；每条 loss 曲线为已乘训练系数的 batch 均值，Q关闭时十一项之和等于总loss，Q开启时另有`q_winloss_loss`曲线并计入总loss；关闭时不伪造零值曲线。优化器解耦衰减不计入 loss。
 
 `training.png` 的各进度面板顶部增加 `Elapsed time (h)` 辅助轴，按对应的样本计数标注最多四个实际轮末累计时间；刻度位置来自记录，不假设恒定吞吐。不增加样本的轮次在同一横坐标使用最近一次提交时间。时间口径与训练预算／Elo 相同，包含自对弈、shuffle、learner 和导出等轮次开销，排除编译、绘图、暂停与启动恢复；缺少计时记录时不伪造时间轴。
 
@@ -356,7 +378,7 @@ MuZero 概览保留逐展开步 loss 与全模型梯度统计；正常训练不�
 
 ## 自动实验
 
-[scripts/autoexp.sh](../scripts/autoexp.sh) 使用 Conda `pytorch` 运行 [experiment.py](../python/etazero/experiment.py)，不执行 `exp.cfg` 中的 shell 代码。示例为 [autoexp_example](../configs/autoexp_example/exp.cfg)，只提供两个相同的小规模工程验收臂，不定义研究对照或正式训练预算。
+[scripts/autoexp.sh](../scripts/autoexp.sh) 使用 Conda `pytorch` 运行 [experiment.py](../python/etazero/run/experiment.py)，不执行 `exp.cfg` 中的 shell 代码。示例为 [autoexp_example](../configs/autoexp_example/exp.cfg)，只提供两个相同的小规模工程验收臂，不定义研究对照或正式训练预算。
 
 实验伞目录包含 `exp.cfg` 和实验臂的直接子目录。每臂须有 `run.cfg`，可继承本版本 baseline 或其他配置，完整字段仍以 `config.py` 为准。`exp.cfg` 的 `[experiment]` 要求以下字段：
 
@@ -389,6 +411,6 @@ SIGINT/SIGTERM 停止排队，转发到运行中的 Python controller，由 cont
 
 ## 通用机制的数据与状态
 
-原始分片保存每局 `training_weights`，训练视图将其映射到主局／side／MuZero 展开行；行重复次数仍只由数据频率决定。未来棋盘和 variance-time 从完整真实轨迹构造，不能从 shuffle 后的随机邻行推导。访问预算及记录中的模拟次数使用 int64。数据字段、类型与校验集中在 [schema.py](../python/etazero/schema.py)、[data.py](../python/etazero/data.py) 和 [MuZero 数据适配](../python/etazero/muzero/data.py)。
+原始分片保存每局 `training_weights`，训练视图将其映射到主局／side／MuZero 展开行；行重复次数仍只由数据频率决定。未来棋盘和 variance-time 从完整真实轨迹构造，不能从 shuffle 后的随机邻行推导。访问预算及记录中的模拟次数使用 int64。数据字段、类型与校验集中在 [schema.py](../python/etazero/schema.py)、[data.py](../python/etazero/data/targets.py) 和 [MuZero 数据适配](../python/etazero/data/muzero.py)。
 
 优化状态除已有参数、moments、Lookahead、SWA 和 RNG 外，还保存 batch-renorm 当前界限／上次更新时间、LR 周期的已完成轮数和 weight-decay-floor 所需的初始化 RMS。具体配置组及适用边界见 [算法说明](algorithms.md#归一化与可选训练控制)。搜索内临时模式表、子树评估缓存和 latent 不作为训练 checkpoint 持久化，继续遵循每轮固定发布模型和按局恢复的约定。

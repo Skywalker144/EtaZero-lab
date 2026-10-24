@@ -26,7 +26,7 @@ bash scripts/run.sh analysis --json-stream --config-dir configs/az_g --run-dir d
 
 任务按 priority 从高到低执行，同优先级按提交顺序；EOF 排空有限任务。`query_version`、`query_models`、`clear_cache`、`terminate`、`terminate_all`、`set_focus` 对应来源控制接口；取消可限定 turns。每个分析时点有独立最终响应，进行中的报告带 `isDuringSearch: true`。`overrideSettings.humanSLProfile` 仅影响该请求，metadata 和 NN cache 按真实输入隔离。
 
-响应含 `rootInfo`、`moveInfos`，可附 policy、humanPolicy 和 PV visits；使用来源根剪枝聚合值、边访问／节点访问区分及对称等价着报告。四结果扩展 `drawRate`，不把普通和棋并入 NR。`rawVarTimeLeft` 仅在后端暴露 variance-time 输出时提供，参考 TorchScript 后端不伪造该值。score/ownership/seki 相关请求明确拒绝，响应省略这些预测量。
+响应含 `rootInfo`、`moveInfos`，可附 policy、humanPolicy 和 PV visits；存在 HumanSL 输出时，每个 `moveInfos` 项都含对应动作的 `humanPrior`，与 `includePolicy` 无关，并按对称等价着的实际坐标取值；使用来源根剪枝聚合值、边访问／节点访问区分及对称等价着报告。四结果扩展 `drawRate`，不把普通和棋并入 NR。`rawVarTimeLeft` 仅在后端暴露 variance-time 输出时提供，参考 TorchScript 后端不伪造该值。score/ownership/seki 相关请求明确拒绝，响应省略这些预测量。
 
 ## GTP
 
@@ -84,7 +84,7 @@ Gomoku／Hex／Go 公共动作编号为实际棋盘的零起始行优先索引�
 
 主变化最多 32 手，按最大访问延伸；图搜索防止循环，MuZero 只发布可在真实棋盘重放的合法前缀，不把重复 latent 动作当成合法棋步。Web／私有 JSON 的网络四头诊断只在正常结束后额外执行一次，不计入搜索耗时和 NN 请求数；被取消的搜索省略它。
 
-实现入口：[会话与协议](../cpp/src/commands/session.cpp)、[快照提取](../cpp/src/search/analysis.cpp)、[Web 引擎](../../web/engine.py)。
+实现入口：[会话与协议](../cpp/command/session.cpp)、[快照提取](../cpp/search/analysis.cpp)、[Web 引擎](../../web/engine.py)。
 
 ## 动作限制与 focus
 
@@ -116,3 +116,5 @@ JSON 提供同一状态接口：
 Ponder 使用独立 `max_visits_pondering`／`max_playouts_pondering`／`max_time_pondering`。配置 `pondering_enabled` 后，genmove 落子完成可自动在后台思考，下一条请求会取消正在运行的 ponder；明确的 `ponder` 命令返回搜索结果。停止和 EOF 会排空在途工作。MuZero 不跨真实步保留 latent，因此不会获得子树时间折算。
 
 更多开关及第二策略模型配置见 [通用搜索控制](search-controls.md)。胜负报告不包含模式惩罚；utility 报告反映实际搜索修正。
+
+公共配置接受 `numSearchThreadsPerAnalysisThread` 作为 `numSearchThreads` 的别名，两者不能同时出现（含 include 文件）。`nnCacheSizePowerOfTwo` 按来源指数转换为容量，`-1` 禁用缓存；未设置容量和锁池时按 analysis、GTP、match 模式取各自缺省。字段转换和缺省值见 [配置解析](../python/etazero/config_files.py) 与 [引擎配置](../python/etazero/engine_config.py)。
