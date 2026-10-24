@@ -35,7 +35,7 @@ bash scripts/run.sh analysis --config configs/baseline/analysis.cfg --model /pat
 
 每对模型使用正整数局数，每局独立生成开局。双方执色组成一个 shuffled round，随机打乱后逐局消费；下一轮重新打乱。五子棋／Hex 使用各自的平衡开局参数，不复用同一个开局交换双方。默认按真实规则结束；可在 match 配置中启用 `allow_resignation`，用 `resign_threshold` 和 `resign_consec_turns` 控制认输。判定使用连续搜索 W−L，且从开局结束后计数，满足来源最低落子数；认输结果记录独立终局原因。Gatekeeper 使用同一比赛路径；每局保存落子、胜者、终局原因、时间与根访问数。
 
-普通 `match` 与 `arena` 共用 [比赛执行器](../cpp/src/commands/match.cpp)，开局与对局使用同一独立游戏任务，无“全部开局完成后再比赛”的屏障。每个模型仍有独立推理状态和随机流。
+普通 `match` 与 `arena` 共用 [比赛执行器](../cpp/program/match.cpp)，开局与对局使用同一独立游戏任务，无“全部开局完成后再比赛”的屏障。每个模型仍有独立推理状态和随机流。
 
 每局的开局和结果分别原子落盘。恢复只安排未完成游戏，已保存开局可重用，中断半局重跑；同目录增加目标局数时保留已有结果。模型、种子或搜索条件变化使用新输出目录。
 
@@ -47,17 +47,17 @@ bash scripts/run.sh arena --data data/my_experiment --output data/my_elo
 bash scripts/run.sh arena --data data/my_experiment --output data/my_elo --fit-only
 ```
 
-`--data` 可以是包含各臂的父目录，也可以是单个运行目录。只发现 state 已提交的模型，模型与时间读取每轮 `.internal/iterations/<编号>/status.json` 的 `commit`，不依赖观测指标汇总；包含首个可用、按 `--stride` 间隔选择的模型以及最后模型。组内近邻与跨组邻近训练时间配对组成连通比较图。默认参数见 [arena.py](../python/etazero/arena.py)，`--dry-run` 不创建输出或启动比赛。固定的赛程重启续测；训练继续产生新模型后重新发现的赛程与旧赛程不同，应使用新的评估输出目录。
+`--data` 可以是包含各臂的父目录，也可以是单个运行目录。只发现 state 已提交的模型，模型与时间读取每轮 `.internal/iterations/<编号>/status.json` 的 `commit`，不依赖观测指标汇总；包含首个可用、按 `--stride` 间隔选择的模型以及最后模型。组内近邻与跨组邻近训练时间配对组成连通比较图。默认参数见 [arena.py](../python/etazero/evaluation/arena.py)，`--dry-run` 不创建输出或启动比赛。固定的赛程重启续测；训练继续产生新模型后重新发现的赛程与旧赛程不同，应使用新的评估输出目录。
 
 横轴为模型所属轮次的 `elapsed_seconds`，即已提交完整轮次扣除 `torch.compile` 编译后的累计训练墙钟。暂停和作废轮次不进入横轴；恢复后的重跑成功轮只计一次，编译前完成的自对弈仍计时。计时字段与历史结果口径限制见 [运行观测与证据](implementation.md#运行观测与证据)。图上连线用于展示实测模型点，不代表测量了中间时刻棋力，不向训练停止后外推。原始活动时间仍在训练事件日志中，不能与这个横轴混用。
 
-[Elo 拟合](../python/etazero/elo.py) 使用固定 KataGo 的 likelihood、每玩家先验、中心约束、协方差和 LOS 实现。`prior_games` 控制先验强度；共同先手优势只在 `estimate_first_player_advantage=true` 时拟合。图中范围为相对 anchor 的约一个标准误，不再使用配对 bootstrap 95% 区间。和棋及无结果按半分计入比赛点数，训练标签仍保持 D/NR 独立。整个指定赛程完成后才拟合。
+[Elo 拟合](../python/etazero/evaluation/elo.py) 使用固定 KataGo 的 likelihood、每玩家先验、中心约束、协方差和 LOS 实现。`prior_games` 控制先验强度；共同先手优势只在 `estimate_first_player_advantage=true` 时拟合。图中范围为相对 anchor 的约一个标准误，不再使用配对 bootstrap 95% 区间。和棋及无结果按半分计入比赛点数，训练标签仍保持 D/NR 独立。整个指定赛程完成后才拟合。
 
 输出 `elo.json`、`elo.csv`、`elo.png`、`elo.svg`；PNG 和 SVG 使用与 `training.png`、`loss.png` 相同的深色主题。评估目录保存模型／配置身份和二进制路径、赛程、逐开局和逐局原始记录。`--fit-only` 从已有赛果重建评分，不启动 GPU 比赛。
 
 ## 自动实验 Elo
 
-[scripts/autoelo.sh](../scripts/autoelo.sh) 使用 [autoelo.py](../python/etazero/autoelo.py) 规划固定训练时间采样与增量赛程，复用 arena 的 C++ 对战、逐局恢复、联合拟合和绘图。`autoexp` 在所有调度臂成功达到预算后默认运行；`exp.cfg` 的 `experiment.autoelo = false` 或 `AUTOELO=false` 可关闭。训练中断或失败时不启动 Elo。评估失败明确报错并单独保存状态，已完成训练不重跑；原命令重启会跳过完成训练并恢复评估。
+[scripts/autoelo.sh](../scripts/autoelo.sh) 使用 [autoelo.py](../python/etazero/evaluation/autoelo.py) 规划固定训练时间采样与增量赛程，复用 arena 的 C++ 对战、逐局恢复、联合拟合和绘图。`autoexp` 在所有调度臂成功达到预算后默认运行；`exp.cfg` 的 `experiment.autoelo = false` 或 `AUTOELO=false` 可关闭。训练中断或失败时不启动 Elo。评估失败明确报错并单独保存状态，已完成训练不重跑；原命令重启会跳过完成训练并恢复评估。
 
 ```bash
 # 在本版本目录执行：仅发现实际已训练的数据臂。

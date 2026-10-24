@@ -8,7 +8,7 @@ Hex 支持 AlphaZero / PUCT 与 MuZero / PUCT，并可与三种五子棋规则�
 
 采用普通 Hex 的实际连接定义。指定来源 Hex2024 的不限手数模式还将两个空连接点形成的 bridge 纳入提前判胜；EtaZero 不执行这种虚拟连接提前终局，也未接入来源的限手数和棋、特殊模板或随机铺子模式。它们会改变轨迹与监督语义，不能视作同一训练基线。连接几何与来源一致，参考提交与校验值见 [reference_sources.json](../reference_sources.json)。
 
-实际棋盘与原始对局始终使用固定坐标，动作仍是 `canvas` 上的零起始行优先编号；外部 CLI/网页用实际尺寸编号，并显式转换。规则与视角编码见 [schema.py](../python/etazero/schema.py)、[Game](../cpp/include/etazero/game.h)。
+实际棋盘与原始对局始终使用固定坐标，动作仍是 `canvas` 上的零起始行优先编号；外部 CLI/网页用实际尺寸编号，并显式转换。规则与视角编码见 [schema.py](../python/etazero/schema.py)、[Game](../cpp/game/game.h)。
 
 ## 网络坐标与对称
 
@@ -16,7 +16,7 @@ Hex 支持 AlphaZero / PUCT 与 MuZero / PUCT，并可与三种五子棋规则�
 
 网络边界按 KataGomo Hex2024 将白方空间输入转置，使根当前玩家的目标边统一朝上下；policy 和所有空间目标同步转换，输出恢复为实际坐标。WDL 始终是当前玩家 W/D/L，不因空间变换换序。原始轨迹和回放存储实际坐标，learner 在前向前转换；关闭随机增强仍执行白方规范化。
 
-Hex 对称组只有 identity 和 180°旋转，推理配置 `nn_symmetry` 使用组索引 0/1，根集成数量最多为 2。Gomoku 保留 D4。训练/验证的 batch 朝向随机抽样中，各 Hex 行只采用两种有效旋转，再执行白方转置；混合棋类 batch 的 Gomoku 行仍采用 D4。实现见 [symmetry.py](../python/etazero/symmetry.py)、[C++ 请求映射](../cpp/include/etazero/symmetry.h)。
+Hex 对称组只有 identity 和 180°旋转，推理配置 `nn_symmetry` 使用组索引 0/1，根集成数量最多为 2。Gomoku 保留 D4。训练/验证的 batch 朝向随机抽样中，各 Hex 行只采用两种有效旋转，再执行白方转置；混合棋类 batch 的 Gomoku 行仍采用 D4。实现见 [symmetry.py](../python/etazero/symmetry.py)、[C++ 请求映射](../cpp/game/symmetry.h)。
 
 MuZero 树和 K 步训练展开使用根观测确定的同一坐标系，全部 K 个动作与 K+1 组 policy/Q 目标按根映射转换；树内不随交替执色重新转置。latent 搜索不调用真实连接判定；真实终局和监督仍由实际 Game 给出。
 
