@@ -17,24 +17,24 @@ C++ 的头文件与实现放在同一职责目录，以 `cpp/` 为 include 根�
 | 基础工具与公共定义 | `core/`；`game/` 中的布局与规则 | 根包中的 `config.py`、`games.py`、`schema.py`、`outcomes.py` |
 | 棋规与状态 | `game/`；围棋规则在 `game/go/` | `games.py`、`symmetry.py` |
 | 搜索 | `search/` 的公共数学、参数解析与结果处理；真实棋盘搜索和 `search/muzero/` 的 latent 搜索 | — |
-| 网络与推理 | `neuralnet/`；`neuralnet/muzero/` 负责 initial/recurrent 与 latent | `models/`；来源网络在 `models/katago/`，三组件在 `models/muzero/` |
-| 数据读写与选取 | `dataio/` 的 SGF、PositionSample 与训练记录 | `data/` 的目标、shuffle、文件选择和 reader |
-| 训练更新 | — | `train/` 的 learner、优化器与消费时钟；`train/muzero/` 的展开损失与参数角色 |
+| 网络与推理 | `neuralnet/`；`neuralnet/muzero/` 负责 initial/recurrent 与 latent | `models/factory.py` 选择活动模型；`models/katago/` 为来源网络，`models/muzero/` 为三组件；`models/katago_configs.py` 和 `models/muzero/config.py` 提供不依赖可执行网络的配置解析 |
+| 数据读写与选取 | `dataio/` 的 SGF、PositionSample 与训练记录 | `data/` 的目标、shuffle、文件选择、reader 和规则回放校验 |
+| 训练更新 | — | `train/losses.py` 维护共有目标，`train/training.py` 组合 AlphaZero 前向；learner、优化器与消费时钟也在 `train/`，`train/muzero/` 负责展开 |
 | 程序编排 | `program/` 的配置建模、开局、采样与比赛 | `run/` 的逐轮运行和实验调度；`evaluation/` 的分析、比赛、Elo 与绘图 |
 | 命令与协议 | `command/` 的命令分发、GTP、Web 和公共 JSON 协议 | `__main__.py` 保持统一 CLI 入口 |
 | 第三方依赖 | `external/` 的 CUTLASS、cuDNN frontend、filesystem、half、JSON 和 Pikafish | `_vendor/` 保留未改写的 Muon、Elo 来源模块 |
 
 构建依赖由 [CMakeLists.txt](../cpp/CMakeLists.txt) 定义：基础工具只编译一次，棋规和特征支撑网络与搜索，公共搜索数学供两种算法使用，记录与程序编排再组合这些模块。CUDA 引擎依赖规则／特征与基础库，不依赖命令层；LibTorch 适配依赖推理接口。公共 [search_common.h](../cpp/search/search_common.h) 不包含 AlphaZero 私有节点布局。
 
-可共享逻辑有唯一实现：`searchparams.cpp` 解析临时访问、playout、时间预算与工作线程数；`searchresults.cpp` 和 `search_math.cpp` 维护共同的选择、聚合及目标数学；两类网络复用 `models/fused_swiglu.py` 的同一内核。真实棋盘图与 latent 状态的存储、生命周期和推理队列仍按各自语义实现。
+可共享逻辑有唯一实现：`searchparams.cpp` 解析临时访问、playout、时间预算与工作线程数；`searchresults.cpp` 和 `search_math.cpp` 维护共同的选择、聚合及目标数学；两类网络复用 `models/fused_swiglu.py` 的同一内核。`neuralnet/metadata.cpp` 统一 CUDA、Torch 和自对弈记录的 metadata；`Game` 与 `AlphaZeroState` 统一终局根的分析语义。版本号由根目录 `VERSION` 提供给 CMake 和 Python，独立来源检查从 `reference_sources.json` 读取固定 checkout 路径。真实棋盘图与 latent 状态的存储、生命周期和推理队列仍按各自语义实现。
 
-所有优化器使用 `data/source_reader.py` 与 `train/training_clock.py`。内部 epoch/subepoch 由**已消费的文件游标**推进，跨外层暂停与 checkpoint 恢复；普通优化器只改变其明确选择的更新配方。预取不推进消费状态，验证由内部 epoch 结束触发。
+所有优化器使用 `data/source_reader.py` 与 `train/training_clock.py`。内部 epoch/subepoch 由**已消费的文件游标**推进，跨外层暂停与 checkpoint 恢复；普通优化器只改变其明确选择的更新配方。预取不推进消费状态，验证由内部 epoch 结束触发。`training.no_repeat_files=true` 时不重新洗牌复用已用文件；不足一个 subepoch 时按来源放弃该次文件选择并保存去重状态，当前轮以实际更新数结算，零更新保留现有模型。新快照可以继续供给文件。
 
 ## 多棋类数据布局
 
 [games.py](../python/etazero/games.py) 是棋类输入与动作维度的代码定义。原始 NPZ 和 shuffle manifest 记录 `game/input_planes/global_features/action_count`，writer 以空间面积打包二值输入，以动作数保存 policy、visits、Q 和 MuZero 的逐步目标。Go pass 与象棋动作不能按 `canvas²` reshape。`GameSpec` 明确区分实际宽高／面积、棋盘存储 stride、网络 canvas 与动作数；象棋棋盘为 9×10，存储 stride 为 10。`Board` 显式携带 width/height/stride，会话与分析输出相同几何字段。原始 metadata 的逐局 `rule_options` 保留围棋规则、贴目及初始 FEN；围棋记录实际宽高和 SGF 起点；MuZero 或显式研究记录保存完整动作／观测，分片边界不截断历史。
 
-`read_raw(deep=True)` 对 Go／Xiangqi 调用同版本 `build/rules_replay` 重放规则并检查观测、合法目标及终局，可用 `ETAZERO_RULES_REPLAY` 指定路径。正常读取检查消费字段的边界。`Outcome` 使用 W/D/L/NR：普通和棋进入 D，围棋规则 no-result 进入 NR 并参与主局监督，二者搜索效用都是零。象棋重复、60 回合和子力不足保留真实裁定原因。规则配置由各入口显式选择，Renju feature dropout 只处理对应行。
+`read_raw(deep=True)` 通过 [数据规则校验](../python/etazero/data/rules_audit.py) 对 Go／Xiangqi 调用同版本 `build/rules_replay` 重放规则并检查观测、合法目标及终局，可用 `ETAZERO_RULES_REPLAY` 指定路径。正常读取检查消费字段的边界。`Outcome` 使用 W/D/L/NR：普通和棋进入 D，围棋规则 no-result 进入 NR 并参与主局监督，二者搜索效用都是零。象棋重复、60 回合和子力不足保留真实裁定原因。规则配置由各入口显式选择，Renju feature dropout 只处理对应行。
 
 模型 manifest 和 checkpoint 记录棋类布局。保存／恢复沿用现有模型、优化器、调度、scaler、reader、RNG 和回放池路径；不增加第二套 checkpoint 格式或重建假的棋盘状态。编译训练和 CUDA Graph 推理均使用该模型固定的输入与动作维度。
 
@@ -65,7 +65,7 @@ flowchart LR
 
 [原生命令](../cpp/command/main.cpp)为每个 worker 建立一个模型服务和多个对局线程。每局独立持有状态、搜索图和随机流，对局共享 evaluator。[Search](../cpp/search/search.cpp) 为每局保留搜索线程，逐手派发任务；单线程使用同一实现。
 
-节点展开以 release/acquire 发布先验与 child 统计。遇到其他线程正在展开的节点时释放本路径预约，返回一次未计数 playout，由外层重试；不等待该节点的条件变量。并发回传通过 dirty counter 合并待重算次数，持有更新权的线程聚合已发布统计。合法动作全部保留，child 统计按 8、64、全部合法动作三档按需增长；选择扫描已激活 child，并通过排序先验求出未访问动作的最大分数和全部并列候选，不裁剪动作域。节点累计访问与在途数直接参与 PUCT，避免每次扫描全部合法动作求和。每个搜索线程复用状态、路径和候选暂存，AlphaZero 状态按原位复制重置。边分别保存完成访问和在途预约，图节点统计在多父之间共享；virtual loss使用共享子节点在途数，仅参与调度。回传或来源定义的访问追赶完成后增加正式访问。失败释放全部预约，搜索返回前等待该手全部任务结束，普通 PUCT 按完成访问／playout 检查预算，允许在途线程超额完成；Gumbel 保留严格分配；时间或显式停止时允许少于额度返回，已在途路径完成后释放所有 pending。
+节点展开以 release/acquire 发布先验与 child 统计。真实终局叶在回传前等待当前在途 NN 批次的下一次完成；没有待处理推理时立即继续，避免终局叶在 NN 批次执行期间集中积累访问。遇到其他线程正在展开的节点时释放本路径预约，返回一次未计数 playout，由外层重试；不等待该节点的条件变量。并发回传通过 dirty counter 合并待重算次数，持有更新权的线程聚合已发布统计。合法动作全部保留，child 统计按 8、64、全部合法动作三档按需增长；选择扫描已激活 child，并通过排序先验求出未访问动作的最大分数和全部并列候选，不裁剪动作域。节点累计访问与在途数直接参与 PUCT，避免每次扫描全部合法动作求和。每个搜索线程复用状态、路径和候选暂存，AlphaZero 状态按原位复制重置。边分别保存完成访问和在途预约，图节点统计在多父之间共享；virtual loss使用共享子节点在途数，仅参与调度。回传或来源定义的访问追赶完成后增加正式访问。失败释放全部预约，搜索返回前等待该手全部任务结束，普通 PUCT 按完成访问／playout 检查预算，允许在途线程超额完成；Gumbel 保留严格分配；时间或显式停止时允许少于额度返回，已在途路径完成后释放所有 pending。
 
 对局线程跨对局复用 Search 和搜索线程，重置图与随机流。节点表拥有全部节点，根推进时复制统计及边并保留共享后继。停止所有搜索线程后标记根可达节点，未标记节点各自移交一个删除链表；大图使用已有搜索线程并行回收。标记阶段使用可达集合与队列，析构只删除本节点，不递归访问共享边。并发选择可能读取不同时间的原子统计并改变搜索顺序；单线程 PUCT 与动作并列时的抽样定义不变。
 
@@ -83,7 +83,7 @@ MuZero 也保留搜索工作线程；节点边锁与统计快照锁分开，推�
 
 单朝向默认随机 D4，cache 命中保留首次输出且不推进朝向 RNG；指定朝向覆盖未命中请求的默认随机行为；已有 cache 仍复用首次输出，绕 cache 才强制实际朝向。根多对称请求绕过缓存读写；raw 诊断指定 identity 并绕缓存。服务的朝向 RNG 独立于搜索与落子 RNG，共享服务请求次序仍依赖线程调度。
 
-NN 缓存采用有界直接映射表与分段锁，保存不可变原始主/短期 optimistic logits、WDL 概率及误差标准差。键比较变换前五个二进制空间平面的全部位、六个全局浮点特征的原始字节、NN policy 温度及有效 optimism，朝向不入键，包含棋盘尺寸、Renju 执色、棋规和禁手特征开关；哈希只用于选槽，碰撞不会返回其他输入的结果。模型与精度由 evaluator 生命周期隔离。`inference.cache_entries = 0` 显式关闭缓存，空间输入必须为二进制，全局特征允许 Renju 黑方的 -1。缓存不合并同时在途的相同请求，也不缓存根噪声或搜索策略。optimism 使用精确 double 字节分键，无辅助能力或 metadata HumanSL 模型时归零；根/叶条件刷新及标准差到统计权重的转换见 [搜索修正](algorithms.md#误差加权optimistic-policy-与-noise-pruning)。Backend 声明的辅助能力须与实际输出一致，多服务必须使用同一能力契约。原生 analysis 同时输出 network_sample_weight、network_value_stdev、search_weight 和 search_weight_sq，用于区分访问数和加权统计。
+NN 缓存采用有界直接映射表与分段锁，保存不可变原始主/短期 optimistic logits、WDL 概率、误差标准差及 variance-time。键比较变换前五个二进制空间平面的全部位、六个全局浮点特征的原始字节、NN policy 温度及有效 optimism，朝向不入键，包含棋盘尺寸、Renju 执色、棋规和禁手特征开关；哈希只用于选槽，碰撞不会返回其他输入的结果。模型与精度由 evaluator 生命周期隔离。`inference.cache_entries = 0` 显式关闭缓存，空间输入必须为二进制，全局特征允许 Renju 黑方的 -1。缓存不合并同时在途的相同请求，也不缓存根噪声或搜索策略。optimism 使用精确 double 字节分键，无辅助能力或 metadata HumanSL 模型时归零；根/叶条件刷新及标准差到统计权重的转换见 [搜索修正](algorithms.md#误差加权optimistic-policy-与-noise-pruning)。Backend 声明的辅助能力须与实际输出一致，多服务必须使用同一能力契约。原生 analysis 同时输出 network_sample_weight、network_value_stdev、search_weight 和 search_weight_sq，用于区分访问数和加权统计。
 
 公共搜索遍历通过 [SearchState](../cpp/search/algorithm.h) 获得状态复制、动作域、叶评估、终局 WDL 值和转移后的视角符号（同方 +1、换方 -1）。该接口用于终局结果棋类搜索，不包含中间奖励和折扣。叶评估选项统一通过 `SearchEvaluation` 传递。AlphaZeroState 提供真实棋盘适配；公共遍历不自行调用某一棋类的规则。图共享默认要求 `graph_key` 包含 continuation 与 NN 输入条件；围棋显式声明 `graph_approximates_history()`，按 KataGo GraphHash 共享，并保留逐路径完整规则状态、下降前合法性复核和跳过 cache 的重评估。该能力由状态适配器提供，公共搜索不按棋类名称分支；没有共享身份实现的适配器明确拒绝图搜索。MuZero 使用独立 latent 搜索实现，按实际语义复用数学函数，见 [MuZero](muzero.md#网络与推理)。
 
@@ -216,7 +216,7 @@ shuffle 使用 Linux spawn 进程池；worker 初始化时绑定控制器的 par
 
 `shuffle.snapshot_keep` 限制保留完整 payload 的已完成快照数量，其余只回收可重建的 `data/`，保留 manifest、配方、原始对局与 checkpoint。读取被回收快照时，在文件锁内用原来源、随机种子和资源计划恢复相同采样，核对文件名与行数后原子发布；无需反复计算全文件 SHA-256。当前未完成轮的快照不会被回收，旧配方重建主要用于显式读取历史快照。原始对局不按此配置删除。
 
-[BatchReader](../python/etazero/data/reader.py) 预取当前文件及depth个后续文件，保持紧凑布局，仅解包当前batch。learner 传入本轮剩余 batch 预算；reader 在开始前核对额度，预取不越过最后一个待消费文件，CPU batch 准备也在额度处停止。主 policy 和 opponent policy 在原始数据、派生视图缓存、shuffle 临时文件与最终训练文件中均保持 int16 权重；reader 只将当前消费 batch 的这两个目标转成 float32，learner 再按行和归一化，不重新量化。每文件只读取 `floor(rows/batch_size)·batch_size` 的前缀，尾部丢弃；低于batch的文件不供给样本，也不与其他文件凑batch。manifest记录每pass完整batch数、可消费行数和尾部丢弃行数。
+训练使用 [SourceBatchReader](../python/etazero/data/source_reader.py)，验证使用 [BatchReader](../python/etazero/data/reader.py)，两者复用文件解码和 batch 预取逻辑，预取当前文件及 depth 个后续文件，保持紧凑布局，仅解包当前batch。learner 传入本轮剩余 batch 预算；reader 在开始前核对额度，预取不越过最后一个待消费文件，CPU batch 准备也在额度处停止。主 policy 和 opponent policy 在原始数据、派生视图缓存、shuffle 临时文件与最终训练文件中均保持 int16 权重；reader 只将当前消费 batch 的这两个目标转成 float32，learner 再按行和归一化，不重新量化。每文件只读取 `floor(rows/batch_size)·batch_size` 的前缀，尾部丢弃；低于batch的文件不供给样本，也不与其他文件凑batch。manifest记录每pass完整batch数、可消费行数和尾部丢弃行数。
 
 生产 learner 使用 [SourceBatchReader](../python/etazero/data/source_reader.py) 和来源 TrainingDataGenerator。每个子 epoch 以 `train_steps/sub_epochs` 为目标批数，按来源概率纳入最后一个完整文件；实际步数随文件大小浮动。生成器维护已用/未用队列、延迟重复、20 个目录历史和新目录合并顺序，允许重复读取；外层额度可暂停在任意完整 batch。选中的旧文件消费完后，下一次子 epoch 才选择新快照文件；必要时按保存配方恢复已回收 payload。不是常驻异步目录轮询。显式 plain 优化器消融与验证仍使用普通 BatchReader。
 
