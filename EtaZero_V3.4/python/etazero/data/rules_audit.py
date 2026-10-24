@@ -8,9 +8,8 @@ import numpy as np
 from etazero.schema import RULES, unpack_observations
 
 
-def validate_games(a, require):
-    from etazero.data.targets import metadata
-    m=metadata(a); canvas=m['canvas']; planes=a['observations'].shape[1]
+def validate_games(a, require, metadata):
+    m=metadata; canvas=m['canvas']; planes=a['observations'].shape[1]
     binary=Path(os.environ.get('ETAZERO_RULES_REPLAY', Path(__file__).resolve().parents[3]/'build/rules_replay'))
     if not binary.is_file():
         raise ValueError('Deep Go/Xiangqi auditing needs build/rules_replay (or ETAZERO_RULES_REPLAY)')

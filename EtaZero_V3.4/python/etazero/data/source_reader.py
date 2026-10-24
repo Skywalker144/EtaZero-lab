@@ -17,7 +17,7 @@ from etazero.data.targets import TRAIN_POLICY_TARGETS
 
 class SourceBatchReader:
     def __init__(self, snapshot, batch_size, prefetch_depth, seed, epoch_steps, sub_epochs,
-                 state=None, max_batches=None):
+                 state=None, max_batches=None, no_repeat_files=False):
         self.snapshot = Path(snapshot).resolve()
         self.batch_size, self.depth = batch_size, prefetch_depth
         self.epoch_steps, self.sub_epochs = epoch_steps, sub_epochs
@@ -29,7 +29,7 @@ class SourceBatchReader:
         if not any(f['rows'] >= batch_size for f in self.manifest['files']):
             raise ValueError('Snapshot has no complete per-file batch')
         self.generator_state = {} if state is None else {k:list(v) for k,v in state['generator'].items()}
-        self.generator = TrainingDataGenerator(self.generator_state, False, self.random)
+        self.generator = TrainingDataGenerator(self.generator_state, no_repeat_files, self.random)
         self.selected = () if state is None else state['selected']
         self.index = 0 if state is None else state['index']
         self.offset = 0 if state is None else state['offset']
@@ -38,6 +38,8 @@ class SourceBatchReader:
         self.subepoch = 0 if state is None else state['subepoch']
         self.subepoch_batches = 0 if state is None else state['subepoch_batches']
         if state is not None:
+            if state.get('no_repeat_files', False) != no_repeat_files:
+                raise ValueError('Checkpoint file repetition mode mismatch')
             if (state['batch_size'],state['epoch_steps'],state['sub_epochs']) != (batch_size,epoch_steps,sub_epochs):
                 raise ValueError('Checkpoint source reader schedule mismatch')
             self.random.setstate(state['rng'])
@@ -77,9 +79,12 @@ class SourceBatchReader:
                 self.subepoch = 0
         selected = []
         batches = 0
+        found_enough = False
         target = self.epoch_steps / self.sub_epochs
         while True:
             filename = self.generator.peek()
+            if filename is None:
+                break
             info,_ = self._file_info(filename)
             count = info['rows'] // self.batch_size
             if count <= 0:
@@ -87,20 +92,24 @@ class SourceBatchReader:
                 continue
             if batches + count > target and batches > 0:
                 if self.random.random() <= (batches + count - target) / count:
+                    found_enough = True
                     break
             self.generator.pop()
             selected.append(filename)
             batches += count
             if batches >= target or len(selected)>100000:
+                found_enough = True
                 break
-        self.selected = tuple(selected)
-        self.subepoch_steps = batches
+        # Source declines an incomplete subepoch when no-repeat data runs out.
+        self.selected = tuple(selected) if found_enough else ()
+        self.subepoch_steps = batches if found_enough else 0
         self.index = self.offset = self.subepoch_batches = 0
         self._save_queue()
 
     def state(self):
         return dict(snapshot_id=self.manifest['id'], batch_size=self.batch_size,
                     epoch_steps=self.epoch_steps, sub_epochs=self.sub_epochs,
+                    no_repeat_files=self.generator.no_repeat_files,
                     generator=self.saved_generator, selected=self.selected,
                     index=self.index, offset=self.offset, subepoch_steps=self.subepoch_steps,
                     epoch=self.epoch, subepoch=self.subepoch, subepoch_batches=self.subepoch_batches,
@@ -117,6 +126,8 @@ class SourceBatchReader:
         if not self.selected or self.subepoch_batches == self.subepoch_steps:
             self.pending.clear()
             self._select_subepoch()
+            if not self.selected:
+                raise StopIteration('No unused training files remain')
         while True:
             filename = self.selected[self.index]
             info,manifest = self._file_info(filename)

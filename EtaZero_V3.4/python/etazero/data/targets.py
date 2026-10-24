@@ -1,5 +1,5 @@
 """Full-game records, checked AlphaZero views, and a derived unique-row catalog."""
-from etazero.data.source_data import DTYPES as SOURCE_DTYPES
+from etazero.data.source_data import DTYPES as SOURCE_DTYPES, OPTIONAL_DTYPES
 from etazero.games import spec_for_rule
 from etazero.outcomes import Reason, has_result, ordinary_wdl, terminal_wdl, REVERSE_OUTCOME
 import json
@@ -50,7 +50,7 @@ class _RawArrays(dict):
 
     def __missing__(self, key):
         value = self.archive[key]
-        dtype = 'int16' if key.startswith('trajectory_') else (SOURCE_DTYPES[key] if key in SOURCE_DTYPES else RAW_DTYPES[key])
+        dtype = 'int16' if key.startswith('trajectory_') else (SOURCE_DTYPES[key] if key in SOURCE_DTYPES else OPTIONAL_DTYPES[key] if key in OPTIONAL_DTYPES else RAW_DTYPES[key])
         if value.dtype != np.dtype(dtype):
             raise ValueError(f"{key}: raw dtype mismatch")
         self[key] = value
@@ -97,7 +97,7 @@ def validate_raw(a, source="record", *, deep=True):
             game_row_ranges(a)
         return
     extra = {'trajectory_policy', 'trajectory_q_values', 'trajectory_q_visits'} if muzero else set()
-    require(set(a) == set(RAW_DTYPES) | extra | set(SOURCE_DTYPES), "raw fields do not match schema")
+    require(set(a) == set(RAW_DTYPES) | extra | set(SOURCE_DTYPES) | (set(OPTIONAL_DTYPES)&set(a)), "raw fields do not match schema")
     from etazero.data.source_data import validate
     validate(a,m['rows'],m['canvas'],spec_for_metadata(m))
     for key, dtype in RAW_DTYPES.items():
@@ -257,8 +257,8 @@ def validate_raw(a, source="record", *, deep=True):
     side_row_games = np.repeat(a['side_game_indices'], a['side_row_repeats'])
     require(not a['side_forbidden_input'][a['rules'][side_row_games] != 2].any(), 'side forbidden outside Renju')
     if spec.name in ('go', 'xiangqi'):
-        from etazero.evaluation.rules_audit import validate_games
-        validate_games(a, require)
+        from etazero.data.rules_audit import validate_games
+        validate_games(a, require, m)
         return
     for i, g in enumerate(a['side_game_indices']):
         observation = unpack_observations(a['side_observations'][i:i+1],canvas)[0]

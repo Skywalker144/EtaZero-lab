@@ -26,7 +26,7 @@ def load_file(path, rows, manifest):
         validate_view(arrays, rows, manifest['canvas'], manifest['unroll_steps'],
                       manifest.get('targets', TRAIN_TARGETS), manifest)
         return arrays
-    if set(arrays) != {'obs', 'globals', *manifest.get('targets', TRAIN_TARGETS)} or len(arrays["value"]) != rows:
+    if set(arrays) != {'obs', 'globals', *manifest.get('targets', TRAIN_TARGETS)} | ({'metadata'} if 'metadata' in arrays else set()) or len(arrays["value"]) != rows:
         raise ValueError(f"Invalid training view: {path}")
     canvas = manifest["canvas"]
     spec = spec_for_metadata(manifest)
@@ -44,6 +44,7 @@ def load_file(path, rows, manifest):
                 "policy": ((rows,spec.actions(canvas)),np.int16),
                 "opponent_policy": ((rows,spec.actions(canvas)),np.int16),
                 "opponent_policy_weight": ((rows,),np.float32),"value": ((rows,4),np.float32)}
+    expected['metadata']=((rows,192),np.float32)
     for key in arrays:
         shape,dtype = expected[key]
         if arrays[key].shape != shape or arrays[key].dtype != dtype:

@@ -1,6 +1,7 @@
 """Strict, directory-based INI configuration. Native consumers receive resolved values."""
 import configparser
 from etazero.config_files import read_config_file
+from etazero.models.katago_configs import network_widths
 import hashlib
 import json
 import math
@@ -102,7 +103,7 @@ SOURCE_SEARCH_BOUNDS = {
     'max_time_pondering':(0,1e20),'lag_buffer':(0,3600),'tree_reuse_carry_over_time_factor':(0,1),
     'overallocate_time_factor':(.01,100),'midgame_time_factor':(.01,100),'midgame_turn_peak_time':(0,1000),
     'endgame_turn_time_decay':(0,1000),'obvious_moves_time_factor':(.01,1),'obvious_moves_policy_entropy_tolerance':(.001,2),'obvious_moves_policy_surprise_tolerance':(.001,2),
-    'playout_doubling_advantage':(0,math.log2(100)),
+    'playout_doubling_advantage':(-3,3),
 
     'visits':(1,2**50),'search_threads':(1,4096),'max_time':(0,1e20),
     'root_policy_temperature':(.01,100),'root_policy_temperature_early':(.01,100),
@@ -120,8 +121,6 @@ def validate_search_parameters(c):
     for key, (low, high) in SOURCE_SEARCH_BOUNDS.items():
         if key in c and not low <= c[key] <= high:
             raise ValueError(f'{key} must be in [{low},{high}]')
-    if c.get('human_sl_profile') and not c.get('human_model'):
-        raise ValueError('human_sl_profile requires human_model')
     if not -3<=c.get("avoid_repeated_pattern_utility",0)<=3: raise ValueError("Invalid repeated-pattern utility")
     auto_bounds={'utility':(-3,3),'lambda':(0,1),'min_turn_number':(0,1000000),
                  'max_turn_number':(0,1000000),'max_poses':(0,1000000000000),'save_chunk_size':(1,10000)}
@@ -228,7 +227,7 @@ FIELDS = {
     'lr_schedule': ('train', {key: type(value) for key, value in OPTION_DEFAULTS['lr_schedule'].items()}),
     'attention_penalty': ('train', {key: float for key in OPTION_DEFAULTS['attention_penalty']}),
     "training": ("train", {"use_tf32_matmul": boolean, "train_steps": int, "batch_size": int, "prefetch_depth": int,
-                           'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
+                           'no_repeat_files':boolean,'cuda_prefetch':boolean,'compile':boolean,'sub_epochs':int,'skip_validation':boolean,'randomize_validation_files':boolean,'max_validation_samples':int,
                            "log_every": int, "checkpoint_every": int, "checkpoint_keep": int, "amp": str, "gradient_clip": float,
                            "replay_ratio": float, "d4_augmentation": boolean, "soft_policy_weight_scale": float, "disable_optimistic_policy": boolean}),
     "optimizer": ("train", {"kind": str, "lr_scale": float, "lr_warmup": boolean,
@@ -303,24 +302,6 @@ FIELDS = {
 FILES = tuple(dict.fromkeys(v[0] for v in FIELDS.values()))
 
 
-def network_widths(channels, architecture='nbt'):
-    """Widths of the selected source preset; NBT retains its width scaling."""
-    if architecture == 'plain':
-        if channels != 128:
-            raise ValueError('plain requires b10c128-fson-mish: channels=128, blocks=10')
-        return dict(mid=128, gpool=32, policy=32, value=32, value_hidden=80)
-    if architecture == 'transformer':
-        if channels != 192:
-            raise ValueError('transformer requires b5c192h3nbttfrs: channels=192, blocks=5')
-        return dict(mid=96, gpool=32, policy=32, value=32, value_hidden=64)
-    if architecture != 'nbt':
-        raise ValueError(f'Unsupported network architecture: {architecture}')
-    if channels < 24 or channels % 2:
-        raise ValueError("NBT network.channels must be even and >= 24")
-    return {"mid": channels // 2, "gpool": 8 * ((channels + 47) // 48),
-            "policy": 8 * ((channels + 47) // 48), "value": 8 * ((channels + 47) // 48),
-            "value_hidden": 8 * ((5 * channels + 95) // 96)}
-
 
 def _read(directory, local=False):
     values = {}
@@ -376,7 +357,7 @@ def load_config(directory, run_dir=None):
                 if section == 'gumbel':
                     config[section][key] = GUMBEL_DEFAULTS[key]
                     continue
-                defaults = {("graph_search", "graph_search_rep_bound"): "11", ("run", "run_dir"): "", ("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
+                defaults = {("graph_search", "graph_search_rep_bound"): "11", ("run", "run_dir"): "", ("training", "no_repeat_files"): "false", ("training", "disable_optimistic_policy"): "false", ("policy_init", "policy_init_mean"): "12", ("policy_init", "policy_temperature"): "1",
                             ("policy_init", "policy_after"): "true", ("policy_init", "policy_on_failure"): "true"}
                 if (section,key) not in defaults:
                     raise ValueError(f"Missing required key: {section}.{key}")
@@ -503,7 +484,7 @@ def validate(c):
         if c['patterns']['avoid_repeated_pattern_utility'] or c['patterns']['pattern_corpora']!='[]': raise ValueError('Pattern bonuses require real-board AlphaZero search')
         if c['subtree_value_bias']['subtree_value_bias_factor'] != 0:
             raise ValueError('MuZero latent search requires subtree_value_bias_factor=0')
-        from etazero.models.muzero.network import network_config
+        from etazero.models.muzero.config import network_config
         network_config(c)
         if c['unroll']['steps'] < 1 or not 0 <= c['unroll']['hidden_gradient_scale'] <= 1:
             raise ValueError('MuZero unroll.steps must be positive, hidden_gradient_scale in [0,1]')
@@ -545,8 +526,6 @@ def validate(c):
     if named:
         preset = resolve(net['architecture'])
         validate_dimensions(preset)
-        if preset.get('metadata_encoder'):
-            raise ValueError('Ordinary RL requires a non-metadata preset; use metadata networks with explicit HumanSL profiles')
         for key, actual in (('channels', preset['trunk_num_channels']), ('blocks', len(preset['block_kind']))):
             if net[key] != actual:
                 raise ValueError(f"{net['architecture']} fixes network.{key}={actual}, got {net[key]}")

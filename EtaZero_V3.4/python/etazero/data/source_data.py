@@ -8,6 +8,7 @@ import numpy as np
 DTYPES = dict(binaryInputNCHWPacked='uint8', globalInputNC='float32',
               policyTargetsNCMove='int16', globalTargetsNC='float32',
               valueTargetsNCHW='int8', qValueTargetsNCMove='int16', drawTargetsNC='float32')
+OPTIONAL_DTYPES = dict(metadataInputNC='float32')
 
 
 def encode_targets(view, *, game_finished=0):
@@ -52,6 +53,7 @@ def encode_targets(view, *, game_finished=0):
 def encode_view(view):
     result=dict(binaryInputNCHWPacked=view['obs'],globalInputNC=view['globals'])
     result.update(encode_targets(view))
+    if "metadata" in view: result["metadataInputNC"]=view["metadata"]
     return result
 
 
@@ -78,6 +80,7 @@ def decode_targets(arrays,targets):
 def decode_view(arrays, targets):
     result=dict(obs=arrays['binaryInputNCHWPacked'],globals=arrays['globalInputNC'])
     result.update(decode_targets(arrays,targets))
+    if "metadataInputNC" in arrays: result["metadata"]=arrays["metadataInputNC"]
     if 'unroll_globalTargetsNC' in arrays:
         unroll=decode_targets({k.removeprefix('unroll_'):v for k,v in arrays.items() if k.startswith('unroll_')},targets)
         for key in targets:result[key]=np.concatenate((result[key][:,None],unroll[key]),axis=1)
@@ -89,6 +92,7 @@ def source_view(raw, targets):
     """Select native writer fields. Trajectories are only needed for MZ unrolls."""
     from etazero.data.targets import metadata, training_view
     result={key:raw[key] for key in DTYPES}
+    result.update((key,raw[key]) for key in OPTIONAL_DTYPES if key in raw)
     if metadata(raw).get('algorithm')=='muzero':
         sequence=training_view(raw,targets)
         future=encode_targets({key:sequence[key][:,1:] for key in targets},
@@ -103,6 +107,10 @@ def validate(arrays,rows,canvas,spec):
                   globalInputNC=(rows,spec.globals),policyTargetsNCMove=(rows,2,spec.actions(canvas)),
                   globalTargetsNC=(rows,80),drawTargetsNC=(rows,5),valueTargetsNCHW=(rows,5,canvas,canvas),
                   qValueTargetsNCMove=(rows,3,spec.actions(canvas)))
+    if "metadataInputNC" in arrays:
+        metadata=arrays["metadataInputNC"]
+        if metadata.shape!=(rows,192) or metadata.dtype!=np.float32 or not np.isfinite(metadata).all():
+            raise ValueError("Invalid metadataInputNC: expected finite float32 [N,192]")
     for key,shape in expected.items():
         if key not in arrays or arrays[key].shape!=shape or arrays[key].dtype!=np.dtype(DTYPES[key]):
             raise ValueError(f'Invalid source training field {key}: expected {shape}/{DTYPES[key]}')

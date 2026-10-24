@@ -219,6 +219,9 @@ def resource_plan(rows, max_raw_rows, groups, config, keep_prob=None):
         steps = config['unroll']['steps']
         train_bytes += steps * (12*actions + 56) + 8*steps + 9*(steps+1)
         raw_bytes += 6*actions
+    if config.get('network', {}).get('architecture', '').endswith('-meta'):
+        train_bytes += 192*4
+        raw_bytes += 192*4
     # Configuration determines the plan; estimates never shrink groups/buckets.
     group_rows=s['group_rows']
     nominal=s['training_shard_rows']
