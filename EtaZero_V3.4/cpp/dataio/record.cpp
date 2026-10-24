@@ -1,4 +1,5 @@
 #include "dataio/record.h"
+#include "neuralnet/metadata.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -256,7 +257,7 @@ struct RecordWriter::Buffers {
     std::vector<int16_t> trajectory_policy,trajectory_q_values,trajectory_q_visits;
     std::vector<float> opponent_policy_weights,temperatures,rewards;
     std::vector<uint8_t> binaryInputNCHWPacked;
-    std::vector<float> globalInputNC,globalTargetsNC,drawTargetsNC;
+    std::vector<float> globalInputNC,globalTargetsNC,drawTargetsNC,metadataInputNC;
     std::vector<int16_t> policyTargetsNCMove,qValueTargetsNCMove;
     std::vector<int8_t> valueTargetsNCHW;
     Buffers(int c,Rule rule,size_t rows) : canvas(c),actions_count(game_spec(rule).actions(c)),packed_area((c*c+7)/8),
@@ -273,7 +274,7 @@ struct RecordWriter::Buffers {
         game_offsets.reserve(row_capacity+1);obs_offsets.reserve(row_capacity+1);reset();
     }
     void reset() {
-        binaryInputNCHWPacked.clear();globalInputNC.clear();globalTargetsNC.clear();drawTargetsNC.clear();
+        binaryInputNCHWPacked.clear();globalInputNC.clear();metadataInputNC.clear();globalTargetsNC.clear();drawTargetsNC.clear();
         policyTargetsNCMove.clear();qValueTargetsNCMove.clear();valueTargetsNCHW.clear();
         trajectory_policy.clear();trajectory_q_values.clear();trajectory_q_visits.clear();
         row_begin=rows=0;options.clear();
@@ -366,6 +367,12 @@ void RecordWriter::append(const FinishedGame& g,size_t row_begin,size_t rows) {
         for(int c=0;c<b.planes;++c)for(int i=0;i<b.spatial_area;++i) {
             if(g.rule==Rule::RENJU && !use_features && c>=3)continue;
             if(obs[c*b.spatial_area+i])b.binaryInputNCHWPacked[start+c*b.packed_area+i/8]|=1<<(7-i%8);
+        }
+        if(source_.metadata_inputs) {
+            auto meta=selfplay_metadata(g.metadata_date);
+            size_t begin=b.metadataInputNC.size();b.metadataInputNC.resize(begin+192);
+            int area=std::lround(std::accumulate(obs.begin(),obs.begin()+b.spatial_area,0.0f));
+            SGFMetadata::fillMetadataRow(&meta,b.metadataInputNC.data()+begin,player==1?P_BLACK:P_WHITE,area);
         }
         b.globalInputNC.insert(b.globalInputNC.end(),obs.end()-b.global_count,obs.end());
         if(g.rule==Rule::RENJU && !use_features)b.globalInputNC[b.globalInputNC.size()-b.global_count+3]=0;
@@ -603,6 +610,7 @@ void RecordWriter::publish() {
     if (std::filesystem::exists(destination)) throw std::runtime_error("Refusing to overwrite raw data");
     Zip zip(temporary);
     zip.array("binaryInputNCHWPacked",b.binaryInputNCHWPacked,"|u1",{b.rows,static_cast<size_t>(b.planes),static_cast<size_t>(b.packed_area)});
+    if(source_.metadata_inputs)zip.array("metadataInputNC",b.metadataInputNC,"<f4",{b.rows,192});
     zip.array("globalInputNC",b.globalInputNC,"<f4",{b.rows,static_cast<size_t>(b.global_count)});
     zip.array("policyTargetsNCMove",b.policyTargetsNCMove,"<i2",{b.rows,2,static_cast<size_t>(actions_count)});
     zip.array("globalTargetsNC",b.globalTargetsNC,"<f4",{b.rows,80});

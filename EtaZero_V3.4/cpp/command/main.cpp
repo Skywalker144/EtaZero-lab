@@ -3,6 +3,7 @@
 #include "core/config.h"
 #include "dataio/record.h"
 #include "neuralnet/backend_factory.h"
+#include "neuralnet/metadata.h"
 #include "neuralnet/random_evaluator.h"
 #include "program/search_limits.h"
 #include "program/sampling.h"
@@ -99,7 +100,6 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
         }
         std::string profile_key=(mode=="infer"||mode=="selfplay"?"human_sl":prefix)+".human_sl_profile";
         std::string human_profile=c.contains(profile_key)?c.text(profile_key):"";
-        if(!human_profile.empty() && !is_cuda_model(path))throw std::runtime_error("Human SL profiles require a source CUDA metadata model");
         uint64_t seed=std::stoull(a.get("seed",prefix=="inference"?c.text("run.seed"):c.text(prefix+".seed")));
         if(secondary_algorithm=="alphazero") {
             std::vector<std::unique_ptr<Backend>> models;for(int i=0;i<c.integer(prefix+".server_threads");++i)models.push_back(make_backend(path,device,canvas,batch,precision,prepared_secondary,human_profile));
@@ -132,7 +132,8 @@ std::unique_ptr<InferenceService> evaluator(const Args& a, const Config& c, cons
     for (int i=0;i<c.integer(prefix+".server_threads");++i) {
         if(kind=="random")backends.push_back(std::make_unique<RandomBackend>(canvas,std::stoull(a.get("seed"))+i,random_spec));
         else backends.push_back(make_backend(a.get("model"),a.get("device"),canvas,batch,
-                                                         c.text(prefix+".inference_precision"),prepared));
+                                                         c.text(prefix+".inference_precision"),prepared,
+            (c.contains(prefix+".human_sl_profile") && (!c.contains(prefix+".human_model") || c.text(prefix+".human_model").empty()))?c.text(prefix+".human_sl_profile"):""));
     }
     return attach_secondary(std::make_unique<BatchEvaluator>(std::move(backends), a.get("model-id"), canvas,
                                           batch, c.integer(prefix+".batch_wait_us"),
@@ -169,6 +170,8 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
     Source source{a.get("run-id"),a.get("attempt-id"),a.get("model-id"),a.get("config-id"),a.get("source-id"),a.integer("iteration"),a.integer("worker")};
     if(c.text("agent.algorithm")=="muzero")source.unroll_steps=c.integer("unroll.steps");
     source.gumbel=c.text("agent.root_search_algo")=="gumbel";source.full_gumbel=c.text("agent.nonroot_search_algo")=="gumbel";
+    const auto architecture=c.text("network.architecture");
+    source.metadata_inputs=c.text("agent.algorithm")=="alphazero" && architecture.size()>=5 && architecture.compare(architecture.size()-5,5,"-meta")==0;
     source.research_records=c.contains("writer.research_records")&&c.boolean("writer.research_records");
     RecordWriter writer(a.get("output"),source,c.integer("writer.shard_rows"),c.integer("writer.writer_queue"),
                         c.number("writer.first_file_min_random_proportion"),std::stoull(a.get("seed"))^0xA0761D6478BD642FULL);
@@ -197,7 +200,7 @@ int selfplay(const Args& a,const Config& c,InferenceService& service,ForkPool& f
                 if(stop_requested || failure)break;
                 if(initial){size=initial->game.size();rule=initial->game.rule();}
                 Game game=initial?initial->game:Game(size,canvas,rule,game_options);search.reset(rng());
-                FinishedGame record{}; record.id=id; record.seed=game_seed; record.size=size; record.canvas=canvas; record.rule=rule;record.options=game.options();
+                FinishedGame record{}; record.id=id; record.seed=game_seed; record.size=size; record.canvas=canvas; record.rule=rule;record.options=game.options();record.metadata_date=game.date();
                 record.forbidden_feature_dropout_prob=c.number("environment.forbidden_feature_dropout_prob");
                 record.training_weight=initial?initial->training_weight:1.0;
                 InitialKind kind=initial?initial->kind:InitialKind::Ordinary;
@@ -324,8 +327,8 @@ int worker(const Args& base,const Config& config) {
 int analyze(const Args& a, const Config& c, bool raw) {
     Game game(a.integer("size"),c.integer("network.canvas"),parse_rule(a.get("rule")),rule_options(c,GameConfigMode::ANALYSIS));
     moves(game,a.get("moves",""));
-    if(!raw)game.set_pda(c.number("analysis.playout_doubling_advantage"),c.text("analysis.playout_doubling_advantage_player")=="black"?1:-1);
-    if (game.finished() && !raw) {
+    if(!raw)set_playout_advantage(game,c,"analysis");
+    if (!game.searchable_root() && !raw) {
         std::cout << "{\"terminal\":true,\"winner\":" << game.winner() << ",\"value\":" << game.terminal_value() << ",\"reason\":" << int(game.reason()) << "}\n";
         return 0;
     }
@@ -383,7 +386,7 @@ struct WebPolicyPlanes {
     torch::Tensor logits, probabilities, value_logits, wdl;
     std::string precision;
 };
-WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,const std::string& device_name,std::string precision) {
+WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,const std::string& device_name,std::string precision,const std::string& profile) {
     c10::InferenceMode inference_guard;
     torch::Device device(device_name);c10::cuda::OptionalCUDAGuard device_guard;
     if(device.is_cuda())device_guard.set_device(device);
@@ -405,7 +408,14 @@ WebPolicyPlanes web_policy_planes(torch::jit::Module& model,const Game& game,con
     observation=muzero::transform_observation(observation,canvas,spatial,game.spec());
     auto obs=torch::from_blob(observation.data(),{1,game.planes(),canvas,canvas},torch::kFloat32).to(device);
     auto globals=torch::from_blob(observation.data()+game.planes()*canvas*canvas,{1,game.globals()},torch::kFloat32).to(device);
-    auto output=model.get_method("raw")({obs,globals});
+    std::vector<torch::jit::IValue> inputs{obs,globals};
+    if(auto method=model.find_method("metadata_channels");method && (*method)({}).toInt()>0) {
+        auto meta=profile.empty()||profile=="selfplay"?selfplay_metadata(game.date()):SGFMetadata::getProfile(profile);
+        auto row=torch::empty({1,SGFMetadata::METADATA_INPUT_NUM_CHANNELS},torch::kFloat32);
+        SGFMetadata::fillMetadataRow(&meta,row.data_ptr<float>(),game.player()==1?P_BLACK:P_WHITE,game.width()*game.height());
+        inputs.push_back(row.to(device));
+    }
+    auto output=model.get_method("raw")(inputs);
     auto logits=output.toTuple()->elements()[0].toTensor();
     if(logits.dim()!=3 || logits.size(0)!=1 || logits.size(1)<6 || logits.size(2)!=area)
         throw std::runtime_error("Web policy output shape mismatch");
@@ -426,13 +436,13 @@ int analysis_session(const Args& a,const Config& c,const std::string& protocol) 
     torch::jit::Module model;
     auto eval=evaluator(a,c,"analysis",protocol=="katago"||protocol=="gtp"?nullptr:&model);
     auto factory=[&](const Json& overrides) {
-            Config effective=c;
+            Config effective=c;std::set<std::string> supplied;
             for(auto it=overrides.begin();it!=overrides.end();++it) {
                 if(it.key()=="reportAnalysisWinratesAs"||it.key()=="humanSLProfile"||it.key()=="alwaysComputePassAliveUnderSuicideRules"||it.key()=="excludeTerritoryAdjacentToAtari"||it.key()=="always_compute_pass_alive_under_suicide_rules"||it.key()=="exclude_territory_adjacent_to_atari")continue;
                 auto key=SOURCE_SEARCH_KEYS.find(it.key());if(key==SOURCE_SEARCH_KEYS.end())throw std::runtime_error("Unsupported overrideSettings key: "+it.key());
                 std::string text=it.value().is_string()?it.value().get<std::string>():it.value().dump();
-                if(key->second=="visit_cap_contempt_player"||key->second=="playout_doubling_advantage_player"){for(auto& c:text)c=std::tolower(c);if(key->second=="visit_cap_contempt_player"){if(text=="b"||text=="black")text="1";else if(text=="w"||text=="white")text="-1";else if(text=="unspecified")text="0";}else {if(text=="b")text="black";else if(text=="w")text="white";if(text!="black"&&text!="white")throw std::runtime_error("Invalid playout doubling advantage player");}}
-                effective.override_field("analysis."+key->second,text);
+                if(key->second=="visit_cap_contempt_player"||key->second=="playout_doubling_advantage_player"){for(auto& c:text)c=std::tolower(c);if(key->second=="visit_cap_contempt_player"){if(text=="b"||text=="black")text="1";else if(text=="w"||text=="white")text="-1";else if(text=="unspecified")text="0";}else {if(text=="b")text="black";else if(text=="w")text="white";playout_advantage_player(text,false);}}
+                supplied.insert(key->second);effective.override_field("analysis."+key->second,text);
                 auto name="analysis."+key->second;char type=SOURCE_SEARCH_TYPES.at(key->second);
                 if(type=='b')effective.boolean(name);
                 else if(type=='i'||type=='f'){
@@ -441,8 +451,13 @@ int analysis_session(const Args& a,const Config& c,const std::string& protocol) 
                     if(range!=SOURCE_SEARCH_RANGES.end()&&(value<range->second.first||value>range->second.second))throw std::runtime_error("overrideSettings value outside source range: "+it.key());
                 }
             }
+            resolve_source_defaults(effective,supplied);
             auto parameters=settings(effective,"analysis");
-            if(overrides.contains("humanSLProfile")){if(!eval->secondary)throw std::runtime_error("humanSLProfile requires a human model");parameters.human_evaluator=std::make_shared<ProfileEvaluator>(*eval->secondary,overrides["humanSLProfile"].get<std::string>());}
+            if(overrides.contains("humanSLProfile")) {
+                auto profile=overrides["humanSLProfile"].get<std::string>();
+                if(eval->secondary)parameters.human_evaluator=std::make_shared<ProfileEvaluator>(*eval->secondary,profile);
+                else parameters.primary_evaluator=std::make_shared<ProfileEvaluator>(*eval,profile);
+            }
             return search_for(*eval,parameters,std::stoull(a.get("seed","0")),effective,"analysis");
         };
     auto precision=c.text("analysis.inference_precision");
@@ -460,7 +475,7 @@ int analysis_session(const Args& a,const Config& c,const std::string& protocol) 
     if(protocol=="katago") {int code=source_analysis_session(*eval,c,models,factory,[]{return stop_requested.load();});eval->finish();return code;}
     auto search=search_for(*eval,settings(c,"analysis"),std::stoull(a.get("seed","0")),c,"analysis");
     auto raw=[&](const Game& game) {
-        auto planes=web_policy_planes(model,game,a.get("device"),c.text("analysis.inference_precision"));
+        auto planes=web_policy_planes(model,game,a.get("device"),c.text("analysis.inference_precision"),c.text("analysis.human_model").empty()?c.text("analysis.human_sl_profile"):"");
         Json result={{"precision",planes.precision},{"heads",Json::array()}};
         result["value_logits"]=std::vector<float>(planes.value_logits.data_ptr<float>(),planes.value_logits.data_ptr<float>()+4);
         result["wdl"]=std::vector<float>(planes.wdl.data_ptr<float>(),planes.wdl.data_ptr<float>()+4);
