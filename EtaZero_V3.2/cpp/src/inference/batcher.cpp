@@ -1,10 +1,26 @@
 #include "etazero/inference.h"
 #include "etazero/schema.h"
+#include "../../external/katago/neuralnet/sgfmetadata.h"
 #include "etazero/symmetry.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 namespace etazero {
+ProfileEvaluator::ProfileEvaluator(Evaluator& d,const std::string& profile):delegate_(d){spec_=d.spec();d.validate_human_profile(profile);profile_=std::make_shared<SGFMetadata>(SGFMetadata::getProfile(profile));}
+bool ProfileEvaluator::available() const {return profile_->initialized;}
+bool no_result_possible(const std::vector<float>& observation,GameSpec spec,int canvas) {
+    if(spec.kind!=GameKind::GO)return false;
+    size_t global=spec.planes*canvas*canvas;
+    return observation.at(global+6)==0 || observation.at(global+9)!=0;
+}
+WDL outcome_probabilities(WDL logits,bool allow_no_result) {
+    if(!allow_no_result)logits[3]=-std::numeric_limits<double>::infinity();
+    double maximum=*std::max_element(logits.begin(),logits.end()),sum=0;
+    for(auto& p:logits){p=std::exp(p-maximum);sum+=p;}
+    if(!std::isfinite(sum)||sum<=0)throw std::runtime_error("Invalid outcome logits");
+    for(auto& p:logits)p=static_cast<float>(p/sum);
+    return logits;
+}
 namespace {
 std::vector<float> transform_input(const std::vector<float>& obs,const std::vector<int>& mapping,GameSpec spec) {
     auto transformed=obs;size_t area=mapping.size();
@@ -49,7 +65,7 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, s
     if (backends_.empty() || model_.empty() || !max_batch || wait_us < 0 || symmetry<0 || symmetry>=8)
         throw std::runtime_error("Invalid inference service configuration");
     if(mutex_pool_power_of_two< -1 || mutex_pool_power_of_two>24)throw std::runtime_error("Invalid NN cache mutex pool power");
-    if(mutex_pool_power_of_two<0)cache_.clear();
+    if(mutex_pool_power_of_two<0 && !cache_.empty())throw std::runtime_error("Enabled NN cache requires a nonnegative mutex pool power");
     cache_locks_.resize(std::max<size_t>(1,std::min(cache_.size(),size_t(1)<<std::max(0,mutex_pool_power_of_two))));
     for (auto& b : backends_) if (!b) throw std::runtime_error("Null inference backend");
     for(const auto& backend:backends_)if(backend->supports_auxiliary()!=backends_[0]->supports_auxiliary())
@@ -57,7 +73,7 @@ BatchEvaluator::BatchEvaluator(std::vector<std::unique_ptr<Backend>> backends, s
     rows_by_server.resize(backends_.size(),0);
     // CUDA graph capture must finish before another service can dispatch CUDA work.
     for(auto& backend:backends_)backend->initialize();
-    spec_=backends_[0]->spec();input_size_=spec_.planes*canvas*canvas+spec_.globals;
+    spec_=backends_[0]->spec();input_size_=spec_.planes*canvas*canvas+spec_.globals+backends_[0]->metadata_channels();
     for(const auto& backend:backends_)if(!same_layout(spec_,backend->spec()))throw std::runtime_error("Inference server layout mismatch");
     for(int s=0;s<(spec_.symmetry==SymmetryKind::XIANGQI?12:8);++s)mappings_[s]=spatial_mapping(canvas,s);
     try {
@@ -83,6 +99,11 @@ void BatchEvaluator::reset_stats() {
     drain();requests=0;batches=0;max_observed_batch=0;cache_hits=0;submitted=0;
     std::fill(rows_by_server.begin(),rows_by_server.end(),0);
 }
+Evaluation BatchEvaluator::evaluate_position(const std::vector<float>& obs,int player,int symmetry,bool skip,double temperature,bool randomize,double optimism) {
+    if(!backends_[0]->metadata_channels())return evaluate_symmetry(obs,symmetry,skip,temperature,randomize,optimism);
+    auto input=obs;backends_[0]->append_metadata(input,player);
+    return evaluate_symmetry(input,symmetry,skip,temperature,randomize,optimism);
+}
 Evaluation BatchEvaluator::evaluate(const std::vector<float>& obs) {
     return evaluate_symmetry(obs,symmetry_,false,1,randomize_);
 }
@@ -91,10 +112,13 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     if(obs.size()!=input_size_)
         throw std::runtime_error("Inference input canvas mismatch");
     if(!std::isfinite(temperature) || temperature<=0)throw std::runtime_error("Invalid NN policy temperature");
-    input_symmetry(obs,spec_,symmetry);
+    std::vector<float> base;
+    const std::vector<float>* features=&obs;
+    if(backends_[0]->metadata_channels()) {base.assign(obs.begin(),obs.end()-backends_[0]->metadata_channels());features=&base;}
+    input_symmetry(*features,spec_,symmetry);
     if(!std::isfinite(optimism) || optimism<0 || optimism>1)throw std::runtime_error("Invalid policy optimism");
     // Unsupported backends have no optimistic output; match the source's absent-head condition.
-    if(!backends_[0]->supports_auxiliary())optimism=0;
+    if(!backends_[0]->supports_auxiliary() || backends_[0]->metadata_channels()>0)optimism=0;
     // evaluate() is synchronous: the caller owns its input until completion.
     // One thread-local request replaces per-query shared_ptr/promise allocations.
     thread_local Request local;
@@ -104,12 +128,12 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     if (request->use_cache) {
         // Pack binary spatial planes and append exact global float bytes. The
         // evaluator is bound to one model, precision, and canvas.
-        const size_t spatial = obs.size() - spec.globals;
+        const size_t spatial = spec.planes*canvas_*canvas_;
         request->cache_key.assign((spatial+7)/8, '\0');
         for (size_t i=0;i<spatial;++i) {
             if (obs[i]) request->cache_key[i/8] |= static_cast<char>(1 << (7-i%8));
         }
-        request->cache_key.append(reinterpret_cast<const char*>(obs.data()+spatial), spec.globals*sizeof(float));
+        request->cache_key.append(reinterpret_cast<const char*>(obs.data()+spatial), (obs.size()-spatial)*sizeof(float));
         // Orientation is excluded, as in KataGo's NNInputParams hash. NN temperature
         // is included even though this adapter stores canonical raw logits.
         request->cache_key.append(reinterpret_cast<const char*>(&temperature),sizeof(temperature));
@@ -136,9 +160,9 @@ Evaluation BatchEvaluator::evaluate_symmetry(const std::vector<float>& obs,int s
     }
     if(randomize) {
         std::lock_guard<std::mutex> lock(random_mutex_);
-        symmetry=std::uniform_int_distribution<int>(0,symmetry_count(obs,spec_)-1)(random_);
+        symmetry=std::uniform_int_distribution<int>(0,symmetry_count(*features,spec_)-1)(random_);
     }
-    request->symmetry=input_symmetry(obs,spec_,symmetry);
+    request->symmetry=input_symmetry(*features,spec_,symmetry);
     const auto& mapping=mappings_[request->symmetry];
     auto& transformed=request->transformed;transformed.resize(obs.size());
     const size_t area=mapping.size();
@@ -200,6 +224,7 @@ void BatchEvaluator::serve(size_t index) {
                 if(out.has_auxiliary && out.optimistic_logits.size()!=out.logits.size())
                     throw std::runtime_error("Invalid auxiliary inference output shape");
             }
+            for(auto& output:outputs)output.policy_optimism_allowed=backends_[index]->metadata_channels()==0;
             for(const auto& output:outputs)if(output.has_auxiliary!=backends_[index]->supports_auxiliary())
                 throw std::runtime_error("Backend auxiliary output violates capability contract");
             for(size_t i=0;i<outputs.size();++i)
@@ -234,5 +259,23 @@ void BatchEvaluator::serve(size_t index) {
             return;
         }
     }
+}
+}
+
+namespace etazero {
+
+void BatchEvaluator::clear_cache() {
+    for(size_t i=0;i<cache_.size();++i){std::lock_guard<std::mutex> lock(cache_locks_[i%cache_locks_.size()]);cache_[i]={};}
+    if(auto* service=dynamic_cast<InferenceService*>(secondary.get()))service->clear_cache();
+}
+}
+
+namespace etazero {
+ void BatchEvaluator::set_human_profile(const std::string& value) {drain();for(auto& b:backends_)b->set_human_profile(value);clear_cache();} }
+
+namespace etazero {
+
+Evaluation BatchEvaluator::evaluate_profile(const std::vector<float>& obs,int player,int symmetry,bool skip,double temperature,bool randomize,double optimism,const SGFMetadata& profile) {
+    auto input=obs;backends_[0]->append_profile(input,player,profile);return evaluate_symmetry(input,symmetry,skip,temperature,randomize,optimism);
 }
 }
