@@ -76,8 +76,8 @@ def window_sources(entries, replay, counts=None):
                               counts['raw_rows']+int(replay['add_to_data_rows'])])
 
 
-def validation_game(identity):
-    return int(hashlib.md5(identity.encode()).hexdigest()[:13],16)/2**52>=.99
+def validation_file(identity):
+    return int(hashlib.md5(Path(identity).name.encode()).hexdigest()[:13],16)/2**52>=.99
 
 
 def source_rows(entry):
@@ -86,27 +86,10 @@ def source_rows(entry):
 
 
 def split_sources(root, chosen):
-    """Keep every shard span and side/unroll target of a game in one partition."""
+    """Source shuffle.sh: reserve 1% of raw files by their MD5 basename fraction."""
     partitions = [], []
     for entry in chosen:
-        games = entry.get('game_rows')
-        if games is None:  # Standalone callers may supply uncatalogued raw sources.
-            with open_raw(root/entry['path']) as raw:
-                _, starts, ends = game_row_ranges(raw)
-                games = [(game_identity(entry['metadata'], game), int(end-start))
-                         for game, start, end in zip(raw['game_ids'], starts, ends)]
-        identities, counts = zip(*games)
-        offsets = np.r_[0, np.cumsum(counts)]
-        held_out = [validation_game(identity) for identity in identities]
-        for partition, sources in enumerate(partitions):
-            selected = [i for i, holdout in enumerate(held_out) if holdout == bool(partition) and offsets[i+1]>offsets[i]]
-            if not selected:
-                continue
-            source = dict(entry, row_ranges=[[int(offsets[i]), int(offsets[i+1])] for i in selected])
-            if 'weight_stats' in entry:
-                games = {identities[i] for i in selected}
-                source['weight_stats'] = [g for g in entry['weight_stats'] if g['id'] in games]
-            sources.append(source)
+        partitions[int(validation_file(str(root / entry['path'])))].append(entry)
     return partitions
 
 
@@ -150,7 +133,8 @@ def _source_view(path, source_id, cache, targets):
     if view_path.exists():
         return _load_view(view_path)
     with open_raw(path) as raw:
-        arrays = training_view(raw, targets)
+        from .source_data import source_view
+        arrays = source_view(raw, targets)
     atomic_write(view_path, lambda p: _temporary(p, arrays))
     return arrays
 
@@ -171,10 +155,10 @@ def _scatter(task):
     arrays = _concat(views)
     del views, view
     if keep_prob < 1:
-        count = int(round(len(arrays['value'])*keep_prob))
-        selection = rng.permutation(len(arrays['value']))[:count]
+        count = int(round(len(arrays['globalTargetsNC'])*keep_prob))
+        selection = rng.permutation(len(arrays['globalTargetsNC']))[:count]
         arrays = {k: v[selection] for k,v in arrays.items()}
-    order, offsets = partition_rows(len(arrays['value']), buckets, rng)
+    order, offsets = partition_rows(len(arrays['globalTargetsNC']), buckets, rng)
     counts = []
     for bucket in range(buckets):
         select = order[offsets[bucket]:offsets[bucket+1]]
@@ -195,7 +179,7 @@ def _merge_bucket(task):
         part = _load_view(path)
         if arrays is None:
             arrays = {k: np.empty((total, *v.shape[1:]), dtype=v.dtype) for k, v in part.items()}
-        n = len(part["value"])
+        n = len(part["globalTargetsNC"])
         if offset+n > total or set(part) != set(arrays):
             raise ValueError("Intermediate shuffle count/fields mismatch")
         for k, a in arrays.items():

@@ -1,4 +1,4 @@
-"""Round controller: plan -> selfplay -> snapshot -> single-pass training -> publication."""
+"""Round controller: plan -> selfplay -> snapshot -> credit-limited training -> publication."""
 import datetime
 from collections import deque
 import fcntl
@@ -127,7 +127,7 @@ def iteration_plan(state, config):
 
 
 def training_budget(plan, manifest, rows):
-    """Bound consumption by the baseline, earned credit and one snapshot pass."""
+    """Bound consumption by the baseline, earned credit and snapshot batch count."""
     batches = manifest['resource_plan']['complete_batches_per_pass']
     if not batches:
         raise ValueError('Snapshot has no complete per-file training batch')
@@ -229,13 +229,13 @@ class Controller:
         if 'elapsed_seconds' not in state:
             raise ValueError('Run predates whole-iteration commits; use a new run directory')
         if 'train_credit' not in state or 'replay_rows' not in state:
-            raise ValueError('Run predates single-pass training budgets; use a new run directory')
+            raise ValueError('Run lacks replay-credit training budgets; use a new run directory')
         if state['checkpoint'] and not (root/state['checkpoint']['path']).is_file():
             raise FileNotFoundError('Committed checkpoint is missing')
         if state['model']:
             verify_export(root,state['model'],c['network']['canvas'])
-            if state['model']['checkpoint'] != state['checkpoint']:
-                raise ValueError('Committed model/checkpoint mismatch')
+            if state['model']['checkpoint']['total_samples'] > state['checkpoint']['total_samples']:
+                raise ValueError('Published model is newer than committed learner state')
         # Keep the initial configuration immutable and record each effective
         # session before refreshing the native worker's current configuration.
         session_id = uuid.uuid4().hex
@@ -304,7 +304,19 @@ class Controller:
                     break
                 if status["phase"]=="export":
                     model=self.phase("export",iteration,lambda:export_model(root,c,status["checkpoint"]))
-                    status={**status,"phase":"completed","model":model};save_json(status_path,status)
+                    status={**status,"phase":"gatekeeper","candidate":model};save_json(status_path,status)
+                if status['phase']=='gatekeeper':
+                    from .gatekeeper import consider_candidate
+                    try:
+                        decision = self.phase('gatekeeper', iteration, lambda: consider_candidate(
+                            root, c, self.binary, state['model'], status['candidate'], lambda: self.stop))
+                    except InterruptedError:
+                        if self.stopping():
+                            break
+                        raise
+                    status={**status, 'phase':'completed', 'gatekeeper':decision,
+                            'model':status['candidate'] if decision['accepted'] else state['model']}
+                    save_json(status_path,status)
                 if status["phase"]!="completed":
                     raise ValueError(f'Unknown persisted phase: {status["phase"]}')
                 # Assign from the immutable plan; repeated recovery cannot add the target twice.
