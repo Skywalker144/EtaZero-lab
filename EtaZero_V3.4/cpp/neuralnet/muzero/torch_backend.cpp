@@ -186,14 +186,14 @@ std::vector<TorchBackend::Output> TorchBackend::recurrent(const std::vector<Acti
 std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result,
     const std::vector<std::shared_ptr<const std::vector<uint8_t>>>& masks,const std::vector<uint8_t>& allow_no_result) {
     auto tuple=result.toTuple();const auto& fields=tuple->elements();
-    if(fields.size()!=5)throw std::runtime_error("MuZero requires latent/policy/WDL/optimistic/error outputs");
+    if(fields.size()!=6)throw std::runtime_error("MuZero requires latent/policy/WDL/optimistic/error/variance-time outputs");
     auto hidden=fields[0].toTensor(),policy=fields[1].toTensor(),value=fields[2].toTensor();
-    auto optimistic=fields[3].toTensor(),error=fields[4].toTensor();
+    auto optimistic=fields[3].toTensor(),error=fields[4].toTensor(),variance=fields[5].toTensor();
     const int64_t n=masks.size(),area=action_count_;
     if(hidden.sizes()!=torch::IntArrayRef({n,latent_channels_+1,canvas_,canvas_}) ||
        hidden.scalar_type()!=torch::kFloat32 || hidden.device()!=policy.device() ||
        policy.sizes()!=torch::IntArrayRef({n,area}) || optimistic.sizes()!=policy.sizes() ||
-       value.sizes()!=torch::IntArrayRef({n,4}) || error.sizes()!=torch::IntArrayRef({n}))
+       value.sizes()!=torch::IntArrayRef({n,4}) || error.sizes()!=torch::IntArrayRef({n}) || variance.sizes()!=error.sizes())
         throw std::runtime_error("MuZero output shape/dtype mismatch");
     std::vector<Output> outputs(n);
     std::vector<torch::Tensor> sources,destinations;
@@ -212,12 +212,12 @@ std::vector<TorchBackend::Output> TorchBackend::unpack(const c10::IValue& result
     // this backend's stream. Numerical/mask parity is checked by development
     // tests, without extra GPU reductions or mask transfers in selfplay.
     auto cpu=torch::cat({policy.to(torch::kFloat32),value.to(torch::kFloat32),
-                        optimistic.to(torch::kFloat32),error.to(torch::kFloat32).unsqueeze(1)},1).to(torch::kCPU).contiguous();
-    const int64_t stride=2*area+5;
+                        optimistic.to(torch::kFloat32),error.to(torch::kFloat32).unsqueeze(1),variance.to(torch::kFloat32).unsqueeze(1)},1).to(torch::kCPU).contiguous();
+    const int64_t stride=2*area+6;
     for(int64_t i=0;i<n;++i) {
         auto row=cpu.data_ptr<float>()+i*stride;auto& e=outputs[i].evaluation;
         e.logits.assign(row,row+area);e.wdl=outcome_probabilities({row[area],row[area+1],row[area+2],row[area+3]},allow_no_result[i]);
-        e.optimistic_logits.assign(row+area+4,row+2*area+4);e.shortterm_value_stdev=row[2*area+4];e.has_auxiliary=has_auxiliary_;
+        e.optimistic_logits.assign(row+area+4,row+2*area+4);e.shortterm_value_stdev=row[2*area+4];e.variance_time=row[2*area+5];e.has_auxiliary=has_auxiliary_;
     }
     return outputs;
 }

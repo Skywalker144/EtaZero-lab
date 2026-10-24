@@ -8,8 +8,8 @@ import torch
 from torch import nn
 from etazero.models.katago import model_pytorch as source
 from etazero.models.katago_configs import resolve
-from etazero.models.katago_network import XiangqiPolicyHead, KataGoNet
-from etazero.config import network_widths
+from etazero.models.katago_network import XiangqiPolicyHead, KataGoNet, postprocess_auxiliary
+from etazero.models.katago_configs import network_widths
 from etazero.games import SPECS
 
 
@@ -98,6 +98,12 @@ class Prediction(nn.Module):
     def training_outputs(self,hidden):
         outputs=self.source_outputs(hidden)
         return (*KataGoNet.select_outputs(self,outputs,hidden[:,-1:]),outputs[6],outputs[2][:,3])
+
+    def inference_outputs(self, hidden):
+        policy, value, _, error, _, variance = self.training_outputs(hidden)
+        stdev, variance = postprocess_auxiliary(error, variance, self.body.config['version'],
+            self.body.shortterm_value_error_multiplier, self.body.variance_time_multiplier)
+        return policy[:, 0], value, policy[:, 5], stdev, variance
 
     def export_model(self):
         import copy
