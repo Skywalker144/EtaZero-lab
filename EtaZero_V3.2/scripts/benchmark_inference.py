@@ -1,6 +1,6 @@
-"""Compare AlphaZero networks through the production LibTorch CUDA Graph backend.
+"""Compare AlphaZero networks and production CUDA/cuDNN or LibTorch backends.
 
-Latency includes input packing, H2D, graph replay, blocking D2H and result
+Latency includes input packing, H2D, forward execution, blocking D2H and result
 construction. Loading, graph capture, warmup, search, queues and caches are
 excluded. Models use seeded initial weights; no training run is modified.
 """
@@ -24,7 +24,7 @@ from etazero.config import load_config
 from etazero.katago_configs import resolve
 from etazero.network import make_network, inference_network
 from etazero.runtime import provenance, source_snapshot
-from etazero.storage import save_json
+from etazero.storage import save_json, sha256
 from etazero.games import SPECS, spec_for_config
 
 
@@ -35,6 +35,7 @@ def main():
                         help='Include the AlphaZero network from an existing configuration directory')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--backends',nargs='+',choices=('cuda','torchscript'),default=['cuda'])
     parser.add_argument('--precision', choices=('float16', 'float32'), default='float16')
     parser.add_argument('--game', choices=tuple(SPECS), help='Game for named presets; otherwise use the config game or Gomoku')
     parser.add_argument('--canvas', type=int, default=15)
@@ -88,29 +89,34 @@ def main():
     manifest = dict(
         arguments={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         timing_scope=__doc__, source_id=source_snapshot(output),
-        binary=str(binary.resolve()), environment=provenance(), models=[],
+        binary=str(binary.resolve()), binary_sha256=sha256(binary), environment=provenance(), models=[],
         cpu=subprocess.check_output(['lscpu'], text=True),
         nvidia_smi=subprocess.check_output(['nvidia-smi'], text=True),
         cmake_cache=(ROOT / 'build/CMakeCache.txt').read_text(),
-        input_config=configured,
+        input_config=configured,game=game,canvas=args.canvas,algorithm='alphazero',
     )
     save_json(output / 'manifest.json', manifest)
-    for index, (architecture, config) in enumerate(specs):
+    for architecture, config in specs:
         torch.manual_seed(args.seed)
         model = make_network(config).eval()
-        path = output / f'model_{index}.pt'
-        started = time.perf_counter()
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', torch.jit.TracerWarning)
-            torch.jit.script(inference_network(model)).save(str(path))
-        manifest['models'].append(dict(
-            architecture=architecture, parameters=sum(p.numel() for p in model.parameters()),
-            config=getattr(model, 'source_config', config['network']),
-            file=path.name,
-            export_seconds=time.perf_counter()-started,
-        ))
-        save_json(output / 'manifest.json', manifest)
-        print(f'Exported {architecture}: {manifest["models"][-1]["parameters"]:,} parameters', flush=True)
+        for backend in args.backends:
+            index=len(manifest['models'])
+            path=output/f'model_{index}.{ "bin" if backend=="cuda" else "pt"}'
+            started=time.perf_counter()
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore',torch.jit.TracerWarning)
+                if backend=='cuda':
+                    from etazero.cuda_export import export_source
+                    import copy
+                    export_source(copy.deepcopy(model.network).cpu(),path,f'benchmark-{index}')
+                else:
+                    torch.jit.script(inference_network(model)).save(str(path))
+            manifest['models'].append(dict(architecture=architecture,backend=backend,
+                parameters=sum(p.numel() for p in model.parameters()),
+                config=getattr(model,'source_config',config['network']),file=path.name,
+                sha256=sha256(path),export_seconds=time.perf_counter()-started))
+            save_json(output/'manifest.json',manifest)
+            print(f'Exported {architecture} / {backend}',flush=True)
     command = [str(binary), args.device, args.precision, str(args.canvas),
                ','.join(map(str, args.batches)), str(args.repeats), str(args.seconds), str(args.warmup)]
     command += [str(output / model['file']) for model in manifest['models']]
@@ -128,7 +134,8 @@ def main():
             if process.wait():
                 raise RuntimeError(f'Native benchmark failed; see {output / "stderr.log"}')
     rows = []
-    for index, (architecture, _) in enumerate(specs):
+    for index, model_info in enumerate(manifest['models']):
+        architecture=model_info['architecture']
         for batch in args.batches:
             samples = [r for r in records if r['event'] == 'measure' and
                        r['model'] == index and r['batch'] == batch]
@@ -136,8 +143,8 @@ def main():
                 raise RuntimeError(f'Incomplete measurements: {architecture}, batch {batch}')
             rates = [r['positions_per_second'] for r in samples]
             rows.append(dict(
-                architecture=architecture, parameters=manifest['models'][index]['parameters'],
-                batch=batch, graph_batch=samples[0]['graph_batch'],
+                architecture=architecture,backend=model_info['backend'],parameters=model_info['parameters'],
+                batch=batch, executed_batch=samples[0]['executed_batch'],
                 median_batch_ms=statistics.median(r['batch_ms'] for r in samples),
                 median_positions_per_second=statistics.median(rates),
                 min_positions_per_second=min(rates), max_positions_per_second=max(rates),
