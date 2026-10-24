@@ -23,6 +23,7 @@ def test_named_raw_analysis_and_genmove(tmp_path,architecture,channels,blocks,de
     c=load_config(CONFIGS/'smoke_test')
     c['network'].update(canvas=6,architecture=architecture,channels=channels,blocks=blocks)
     model=make_network(c).eval().to(device)
+    if device=='cpu':model.network.use_flex_attention=False
     exported=torch.jit.script(inference_network(model))
     path=tmp_path/'model.pt';exported.save(str(path))
     # CPU load of a CUDA-traced graph also exercises tensor-derived devices in
@@ -56,7 +57,7 @@ def test_named_raw_analysis_and_genmove(tmp_path,architecture,channels,blocks,de
     assert replies['analysis']['state']['moves']==[0]
     assert replies['move']['played'] and len(replies['state']['state']['moves'])==2
     gtp=subprocess.run([str(ROOT/'build/etazero'),'gtp',*command[6:]],
-                       input='1 boardsize 5\n2 play b A1\n3 kata-raw-nn\n4 genmove w\n5 quit\n',
+                       input='1 boardsize 5\n2 play b A1\n3 kata-raw-nn 0\n4 genmove w\n5 quit\n',
                        text=True,capture_output=True,timeout=90)
     assert gtp.returncode==0 and '?3' not in gtp.stdout and '?4' not in gtp.stdout,gtp.stdout+gtp.stderr
     assert '=3' in gtp.stdout and '=4' in gtp.stdout

@@ -22,9 +22,13 @@ pytestmark=pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS')!='1',reason='H
 def model_and_profiles(tmp_path,request):
     torch.set_num_threads(1)
     config=load_config(CONFIGS/'smoke_test')
-    config['network'].update(canvas=11,channels=24,blocks=1)
+    config['network'].update(canvas=11,architecture='b2c16',channels=16,blocks=2)
     config['agent']['algorithm']=request.param
     if request.param=='muzero':
+        config['network'].update(architecture='nbt',channels=24,blocks=1)
+        config['search']['reuse_tree']=False
+        config['graph_search']['use_graph_search']=False
+        config['subtree_value_bias']['subtree_value_bias_factor']=0
         config['muzero']=dict(latent_channels=16,dynamics_channels=24,dynamics_blocks=1,
                               prediction_channels=24,prediction_blocks=1)
         config['unroll']=dict(steps=3,hidden_gradient_scale=.5)

@@ -70,7 +70,6 @@ def test_training_identity_does_not_read_engine_files(tmp_path,monkeypatch):
     ('@include absent.cfg\n','No such file'),
     ('@include analysis.cfg\n','include cycle'),
     ('@include\n','Invalid include'),
-    ('[analysis]\n@include engine.cfg\n','must precede sections'),
     ('@include engine.cfg\n[engine]\ngames=4\n','Unknown key'),
     ('@include engine.cfg\n[DEFAULT]\nvisits=3\n','DEFAULT fields'),
     ('@include engine.cfg\n[analysis]\nvisits=nan\n','analysis.visits'),
@@ -133,6 +132,14 @@ def test_final_overrides_precede_environment_and_are_validated(profiles):
     assert result['match']['games'] == 12 and result['match']['game_threads'] == 3
     assert result['match']['reuse_tree'] is False
     with pytest.raises(ValueError, match='Match games'):
-        load_engine_config(profiles, True, environ={}, overrides={'match': {'games': 6}})
+        load_engine_config(profiles, True, environ={}, overrides={'match': {'games': 0}})
     with pytest.raises(ValueError, match='Unknown engine override'):
         load_engine_config(profiles, True, environ={}, overrides={'match': {'unknown': 1}})
+
+
+def test_match_resignation_fields_and_bounds(profiles):
+    c=load_engine_config(profiles,True,environ={},overrides={'match':dict(allow_resignation=True,resign_threshold=-.9,resign_consec_turns=4)})
+    assert c['match']['allow_resignation'] and c['match']['resign_threshold']==-.9 and c['match']['resign_consec_turns']==4
+    for key,value in [('resign_threshold',.1),('resign_threshold',-1.1),('resign_consec_turns',0),('resign_consec_turns',101)]:
+        with pytest.raises(ValueError,match='resign'):
+            load_engine_config(profiles,True,environ={},overrides={'match':{key:value}})

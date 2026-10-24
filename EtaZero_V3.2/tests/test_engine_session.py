@@ -134,9 +134,11 @@ def test_gtp_framing_continuous_analysis_and_stop(session_setup):
         state = json.loads(response('11 showboard', '=11 ')[0][4:])
         assert len(state['moves']) == 2
         response('12 undo', '=12')
-        response('13 kata-raw-nn 1', '?13')
-        raw = json.loads(response('14 kata-raw-nn 0', '=14 ')[0].split(' ', 1)[1])
-        assert len(raw['heads']) == 4 and len(raw['wdl']) == 3 and sum(raw['wdl']) == pytest.approx(1)
+        assert response('13 kata-raw-nn 1', '=13 ')[0]=='=13 symmetry 1'
+        raw = response('14 kata-raw-nn 0', '=14 ')
+        assert raw[0]=='=14 symmetry 0' and 'policy' in raw
+        outcomes=[float(line.split()[1]) for line in raw if line.split()[0] in ('whiteWin','whiteLoss','draw','noResult')]
+        assert len(outcomes)==4 and sum(outcomes)==pytest.approx(1,abs=2e-6)
         send('15 kata-genmove_analyze w 1 visits 100000')
         assert lines.get(timeout=30) == '=15'
         assert lines.get(timeout=30).startswith('info move ')
