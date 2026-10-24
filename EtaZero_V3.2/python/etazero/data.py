@@ -1,6 +1,7 @@
 """Full-game records, checked AlphaZero views, and a derived unique-row catalog."""
+from .source_data import DTYPES as SOURCE_DTYPES
 from .games import spec_for_rule
-from .outcomes import Reason, has_result, ordinary_wdl, terminal_wdl
+from .outcomes import Reason, has_result, ordinary_wdl, terminal_wdl, REVERSE_OUTCOME
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,14 +12,19 @@ from .games import spec_for_metadata
 
 
 def metadata(arrays):
+    if 'metadata' not in arrays:
+        return {}
     return json.loads(arrays["metadata"].tobytes().decode())
 
 
 def game_row_ranges(a):
     """Resolve this file's span against full, game-ordered row multiplicities."""
     m = metadata(a)
-    totals = np.add.reduceat(a['row_repeats'], a['game_offsets'][:-1]).astype(np.int64)
-    totals += np.bincount(a['side_game_indices'], weights=a['side_row_repeats'], minlength=len(totals)).astype(np.int64)
+    if 'game_row_totals' in m:
+        totals = np.asarray(m['game_row_totals'], dtype=np.int64)
+    else:
+        totals = np.add.reduceat(a['row_repeats'], a['game_offsets'][:-1]).astype(np.int64)
+        totals += np.bincount(a['side_game_indices'], weights=a['side_row_repeats'], minlength=len(totals)).astype(np.int64)
     offsets = np.r_[0, np.cumsum(totals)]
     begin, count = m['row_begin'], m['rows']
     if (type(begin) is not int or type(count) is not int or begin < 0 or count < 0 or
@@ -39,9 +45,12 @@ class _RawArrays(dict):
         super().__init__()
         self.archive = archive
 
+    def __contains__(self, key):
+        return key in self.archive.files
+
     def __missing__(self, key):
         value = self.archive[key]
-        dtype = 'int16' if key.startswith('trajectory_') else RAW_DTYPES[key]
+        dtype = 'int16' if key.startswith('trajectory_') else (SOURCE_DTYPES[key] if key in SOURCE_DTYPES else RAW_DTYPES[key])
         if value.dtype != np.dtype(dtype):
             raise ValueError(f"{key}: raw dtype mismatch")
         self[key] = value
@@ -54,7 +63,7 @@ def open_raw(path):
     with np.load(path, allow_pickle=False) as archive:
         arrays = _RawArrays(archive)
         m = metadata(arrays)
-        if (m['games'] <= 0 or m['plies'] <= 0 or
+        if m and (m['games'] <= 0 or m['plies'] <= 0 or
                 not 5 <= m['canvas'] <= 25 or m.get('algorithm', 'alphazero') not in ('alphazero', 'muzero')):
             raise ValueError(f'Invalid raw identity/dimensions: {path}')
         yield arrays
@@ -75,8 +84,22 @@ def validate_raw(a, source="record", *, deep=True):
     require(m.get('algorithm', 'alphazero') in ('alphazero', 'muzero'), 'unknown raw algorithm')
     gumbel = m.get('root_search_algo', 'puct') == 'gumbel'
     muzero = m.get('algorithm') == 'muzero'
+    from .source_data import validate
+    if not m:
+        from .source_data import source_layout
+        rows,canvas,spec=source_layout(a)
+        validate(a,rows,canvas,spec)
+        return
+    validate(a,m['rows'],m['canvas'],spec_for_metadata(m))
+    if not muzero and 'observations' not in a:
+        # Public AZ rows are directly consumable without a duplicate trajectory.
+        if 'game_row_totals' in m:
+            game_row_ranges(a)
+        return
     extra = {'trajectory_policy', 'trajectory_q_values', 'trajectory_q_visits'} if muzero else set()
-    require(set(a) == set(RAW_DTYPES) | extra, "raw fields do not match schema")
+    require(set(a) == set(RAW_DTYPES) | extra | set(SOURCE_DTYPES), "raw fields do not match schema")
+    from .source_data import validate
+    validate(a,m['rows'],m['canvas'],spec_for_metadata(m))
     for key, dtype in RAW_DTYPES.items():
         require(a[key].dtype == np.dtype(dtype), f"{key}: dtype mismatch")
     m = metadata(a)
@@ -108,7 +131,7 @@ def validate_raw(a, source="record", *, deep=True):
                 "sample_indices": (s,), "forbidden_input": (int(a["row_repeats"].sum()),), "policies": (s, actions_count), "visits": (s, actions_count),
                 "opponent_policies": (s, actions_count), "opponent_policy_weights": (s,),
                 "q_values": (len(a['forbidden_input']),actions_count), "q_visits": (s,actions_count),
-                "network_wdl": (t,3), "search_wdl": (t,3)}
+                "network_wdl": (t,4), "search_wdl": (t,4)}
     for key in ("game_ids", "seeds", "sizes", "rules", "winners", "reasons", "opening_moves", "balanced_moves", "policy_moves",
                 "opening_attempts", "opening_status", "start_values", "initial_position_moves", "initial_position_kind", "hint_actions", 'training_weights'):
         expected[key] = (n,)
@@ -120,7 +143,7 @@ def validate_raw(a, source="record", *, deep=True):
     d = len(a['side_players'])
     side_shapes = {'side_observations': (d,planes,(canvas*canvas+7)//8),
                    'side_globals': (d,globals_count), 'side_policies': (d,actions_count),
-                   'side_visits': (d,actions_count), 'side_wdl': (d,3),
+                   'side_visits': (d,actions_count), 'side_wdl': (d,4),
                    'side_q_values': (int(a['side_row_repeats'].sum()),actions_count),
                    'side_q_visits': (d,actions_count),
                    'side_forbidden_input': (int(a['side_row_repeats'].sum()),)}
@@ -161,7 +184,7 @@ def validate_raw(a, source="record", *, deep=True):
     require(np.isfinite(a['training_weights']).all() and (a['training_weights']>=0).all(), 'invalid game loss weight')
     require(((kind==0) <= (a['initial_position_moves']==0)).all() and
             ((kind>0) <= ((a['balanced_moves']==0) & ((kind==5) | (a['policy_moves']==0)) & (a['opening_attempts']==0))).all(), 'initial prefix split')
-    require(((kind==1)==(hint>=0)).all() and ((hint>=-1)&(hint<actions_count)).all(), 'hint action/kind')
+    require(((hint>=0)<=(kind==1)).all() and ((hint>=-1)&(hint<actions_count)).all(), 'hint action/kind')
     require(((kind<2) | (kind==5) | (a['initial_position_moves']>0)).all(), 'fork prefix length')
     require(np.isin(a["opening_status"], [0, 1, 2]).all() and (a["opening_attempts"] >= 0).all() and
             np.isfinite(a["start_values"]).all() and (np.abs(a["start_values"]) <= 1).all(), "opening result")
@@ -208,7 +231,7 @@ def validate_raw(a, source="record", *, deep=True):
     d = len(a['side_players'])
     side_shapes = {'side_observations': (d,planes,(canvas*canvas+7)//8),
                    'side_globals': (d,globals_count), 'side_policies': (d,actions_count),
-                   'side_visits': (d,actions_count), 'side_wdl': (d,3),
+                   'side_visits': (d,actions_count), 'side_wdl': (d,4),
                    'side_q_values': (int(a['side_row_repeats'].sum()),actions_count),
                    'side_q_visits': (d,actions_count),
                    'side_forbidden_input': (int(a['side_row_repeats'].sum()),)}
@@ -333,13 +356,13 @@ def validate_raw(a, source="record", *, deep=True):
 def trajectory_td_targets(search_wdl, players, terminal, area):
     """Finite horizon in fixed Black perspective, then restore each row's player."""
     fixed = search_wdl.astype(np.float64).copy()
-    fixed[players == -1] = fixed[players == -1, ::-1]
+    fixed[players == -1] = fixed[players == -1][:, REVERSE_OUTCOME]
     factors = 1.0 / (1.0 + area * np.array([0.176, 0.056, 0.016]))
-    future = np.broadcast_to(terminal, (3, 3)).copy().astype(np.float64)
-    targets = np.empty((len(fixed), 3, 3), np.float32)
+    future = np.broadcast_to(terminal, (3, 4)).copy().astype(np.float64)
+    targets = np.empty((len(fixed), 3, 4), np.float32)
     for i in range(len(fixed) - 1, -1, -1):
         future = factors[:, None] * fixed[i] + (1.0 - factors[:, None]) * future
-        targets[i] = future if players[i] == 1 else future[:, ::-1]
+        targets[i] = future if players[i] == 1 else future[:, REVERSE_OUTCOME]
     return targets
 
 
@@ -360,18 +383,21 @@ def training_view(a, targets=TRAIN_TARGETS):
     if metadata(a).get('algorithm') == 'muzero':
         from .muzero.data import training_view as sequence_view
         return sequence_view(a, targets)
-    return alphazero_training_view(a, targets)
+    if 'observations' in a:
+        return alphazero_training_view(a, targets)
+    from .source_data import decode_view
+    return decode_view(a, targets)
 
 
 def full_trajectory_td(a):
     """Compute each complete trajectory once, shared by root and unroll targets."""
-    td = np.empty((len(a['actions']), 3, 3), np.float32)
+    td = np.empty((len(a['actions']), 3, 4), np.float32)
     for g, size in enumerate(a['sizes']):
         lo, hi = a['game_offsets'][g:g+2]
         ol = a['observation_offsets'][g]
         winner = a['winners'][g]
         terminal = terminal_wdl(winner, a['reasons'][g], dtype=np.float64)
-        td[lo:hi] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, spec_for_rule(RULES[a['rules'][g]]).area(int(size)))
+        td[lo:hi] = trajectory_td_targets(a['search_wdl'][lo:hi], a['players'][ol:ol+hi-lo], terminal, int(np.unpackbits(a['observations'][ol,0],bitorder='big')[:metadata(a)['canvas']**2].sum()))
     return td
 
 
@@ -426,10 +452,9 @@ def alphazero_training_view(a, targets=TRAIN_TARGETS, *, td=None, auxiliary=None
     # through ix so every repeated output row receives the same gate.
     full_game_weight = ((a['reanalyzed'][ix] == 0) |
                         (a['reanalysis_used_outcome'][ix] != 0)).astype(np.float32)
-    # No-result main rows have zero repeats at the writer boundary.
     main = {"obs": obs, "globals": globals,
             "policy": a['policies'][rows],
-            "value": ordinary_wdl(result)}
+            "value": terminal_wdl(a["winners"][games], a["reasons"][games], a["players"][obs_ix])}
     if 'training_weight' in targets:
         main['training_weight'] = a['training_weights'][games]
     if 'opponent_policy' in targets:
@@ -488,7 +513,7 @@ def game_weight_statistics(a):
     result=[]
     for g,game in enumerate(a['game_ids']):
         lo,hi=a['game_offsets'][g:g+2]
-        valid=a['train_mask'][lo:hi].astype(bool) & has_result(a['reasons'][g])
+        valid=a['train_mask'][lo:hi].astype(bool)
         result.append({'id':game_identity(m, game),
                        'sum':float(a['target_weights'][lo:hi][valid].sum(dtype=np.float64)),
                        'count':int(valid.sum())})

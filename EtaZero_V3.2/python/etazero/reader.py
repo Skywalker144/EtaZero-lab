@@ -15,6 +15,40 @@ from .games import spec_for_metadata
 from .data import TRAIN_TARGETS, TRAIN_POLICY_TARGETS
 
 
+def load_file(path, rows, manifest):
+    with np.load(path, allow_pickle=False) as file:
+        arrays = {key: file[key] for key in file.files}
+    from .source_data import validate,decode_view
+    validate(arrays,rows,manifest['canvas'],spec_for_metadata(manifest))
+    arrays=decode_view(arrays,manifest.get('targets',TRAIN_TARGETS))
+    if manifest.get('algorithm') == 'muzero':
+        from .muzero.data import validate_view
+        validate_view(arrays, rows, manifest['canvas'], manifest['unroll_steps'],
+                      manifest.get('targets', TRAIN_TARGETS), manifest)
+        return arrays
+    if set(arrays) != {'obs', 'globals', *manifest.get('targets', TRAIN_TARGETS)} or len(arrays["value"]) != rows:
+        raise ValueError(f"Invalid training view: {path}")
+    canvas = manifest["canvas"]
+    spec = spec_for_metadata(manifest)
+    expected = {"obs": ((rows,spec.planes,(canvas*canvas+7)//8),np.uint8),
+                "globals": ((rows,spec.globals),np.float32),
+                "td_value": ((rows,3,4),np.float32),
+                "full_game_weight": ((rows,),np.float32),
+                'future_positions': ((rows,2,canvas,canvas),np.float32),
+                'variance_time': ((rows,),np.float32),
+                'training_weight': ((rows,),np.float32),
+                "q_values": ((rows,spec.actions(canvas)),np.float32),
+                "q_visits": ((rows,spec.actions(canvas)),np.float32),
+                "policy": ((rows,spec.actions(canvas)),np.int16),
+                "opponent_policy": ((rows,spec.actions(canvas)),np.int16),
+                "opponent_policy_weight": ((rows,),np.float32),"value": ((rows,4),np.float32)}
+    for key in arrays:
+        shape,dtype = expected[key]
+        if arrays[key].shape != shape or arrays[key].dtype != dtype:
+            raise ValueError(f"Invalid training {key} layout: {path}")
+    return arrays
+
+
 class BatchReader:
     def __init__(self,snapshot,batch_size,prefetch_depth,seed,state=None,split="train",shuffle_files=True,max_batches=None):
         self.snapshot = Path(snapshot)
@@ -82,34 +116,7 @@ class BatchReader:
     def _load(self, index):
         info = self.files[self.order[index]]
         path = self.directory/info["path"]
-        with np.load(path, allow_pickle=False) as file:
-            arrays = {key: file[key] for key in file.files}
-        if self.manifest.get('algorithm') == 'muzero':
-            from .muzero.data import validate_view
-            validate_view(arrays, info['rows'], self.manifest['canvas'], self.manifest['unroll_steps'],
-                          self.manifest.get('targets', TRAIN_TARGETS), self.manifest)
-            return arrays
-        if set(arrays) != {'obs', 'globals', *self.manifest.get('targets', TRAIN_TARGETS)} or len(arrays["value"]) != info["rows"]:
-            raise ValueError(f"Invalid training view: {path}")
-        canvas = self.manifest["canvas"]
-        spec = spec_for_metadata(self.manifest)
-        expected = {"obs": ((info["rows"],spec.planes,(canvas*canvas+7)//8),np.uint8),
-                    "globals": ((info["rows"],spec.globals),np.float32),
-                    "td_value": ((info["rows"],3,3),np.float32),
-                    "full_game_weight": ((info["rows"],),np.float32),
-                    'future_positions': ((info['rows'],2,canvas,canvas),np.float32),
-                    'variance_time': ((info['rows'],),np.float32),
-                    'training_weight': ((info['rows'],),np.float32),
-                    "q_values": ((info['rows'],spec.actions(canvas)),np.float32),
-                    "q_visits": ((info['rows'],spec.actions(canvas)),np.float32),
-                    "policy": ((info["rows"],spec.actions(canvas)),np.int16),
-                    "opponent_policy": ((info["rows"],spec.actions(canvas)),np.int16),
-                    "opponent_policy_weight": ((info["rows"],),np.float32),"value": ((info["rows"],3),np.float32)}
-        for key in arrays:
-            shape,dtype = expected[key]
-            if arrays[key].shape != shape or arrays[key].dtype != dtype:
-                raise ValueError(f"Invalid training {key} layout: {path}")
-        return arrays
+        return load_file(path, info['rows'], self.manifest)
 
     def next(self):
         while True:
