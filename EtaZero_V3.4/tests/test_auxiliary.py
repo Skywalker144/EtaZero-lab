@@ -9,7 +9,9 @@ import numpy as np
 import pytest
 import torch
 from etazero.data.targets import trajectory_td_targets, training_view, validate_raw
-from etazero.models.network import auxiliary_losses, error_variance, make_network, inference_network, TrainingForward
+from etazero.train.losses import auxiliary_losses, error_variance
+from etazero.models.factory import make_network, inference_network
+from etazero.train.training import TrainingForward
 from etazero.schema import RAW_DTYPES, pack_observations
 from test_python import winning_record, config, source_fields
 
@@ -231,7 +233,7 @@ def test_pda_globals_and_reanalysis_outcome_gate(use_outcome,compact):
 @pytest.mark.parametrize('use_outcome',[False,True])
 @pytest.mark.parametrize('disable',[False,True])
 def test_reanalysis_outcome_gate_reaches_loss_gradients(use_outcome,disable):
-    from etazero.models.network import losses
+    from etazero.train.losses import losses
     from etazero.schema import unpack_observations
     a,m=winning_record(2)
     a['cheap_search'][2]=a['reanalyzed'][2]=1

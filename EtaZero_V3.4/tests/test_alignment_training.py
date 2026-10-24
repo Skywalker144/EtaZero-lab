@@ -14,7 +14,8 @@ from etazero.train.brenorm import BoundsSchedule
 from etazero.data.targets import full_trajectory_auxiliary, training_view
 from etazero.games import SPECS
 from etazero.train.lr_schedule import effective_scale
-from etazero.models.network import continuation_losses, make_network
+from etazero.train.losses import continuation_losses
+from etazero.models.factory import make_network
 from etazero.schema import unpack_observations
 from etazero.symmetry import mask_history
 from etazero.train.learner import training_forward, forward_batch
@@ -213,25 +214,22 @@ def test_optional_muon_kernels_restore_next_update(kind,polar,monkeypatch):
 
 
 def test_attention_bound_hinge_and_gradient_matches_norm_bound():
-    from etazero.train.attention_penalty import configure, metrics
-    from etazero.models.transformer import Attention
+    from etazero.models.katago.model_pytorch import TransformerAttentionBlock, ATTN_LOGIT_UB
     torch.set_num_threads(1)
-    model=Attention(2)
+    model=TransformerAttentionBlock('test',96,dict(transformer_heads=3),'silu',2)
     x=torch.randn(4,96,2,2);mask=torch.ones(4,1,2,2)
-    configure(model,dict(cap=0,batch_fraction=.5))
-    model(x,mask)
-    # RoPE is orthogonal; its FP32 norm agrees with the pre-rotation reference.
-    tokens=model.norm(x.flatten(2).transpose(1,2))
+    shared={ATTN_LOGIT_UB:dict(num_batch_items=2,ubs=[])}
+    model(x,mask,mask.sum((2,3),keepdim=True),mask.sum(),None,shared)
+    # Orthogonal RoPE preserves norms; calculate the bound before rotation.
+    tokens=model.norm1(x.flatten(2).transpose(1,2))
     q=model.q_proj(tokens).reshape(4,4,3,32).transpose(1,2)[:2]
     k=model.k_proj(tokens).reshape(4,4,3,32).transpose(1,2)[:2]
     expected=(q.square().sum(-1).amax(-1)*k.square().sum(-1).amax(-1)).clamp(min=1).sqrt()/math.sqrt(32)
-    penalty,bound=metrics(model,0)
-    torch.testing.assert_close(penalty,expected.mean())
-    torch.testing.assert_close(bound,expected.max())
-    penalty.backward()
+    actual=shared[ATTN_LOGIT_UB]['ubs'][0]
+    torch.testing.assert_close(actual,expected)
+    actual.mean().backward()
     assert model.q_proj.weight.grad.norm()>0 and model.k_proj.weight.grad.norm()>0
     assert model.v_proj.weight.grad is None or not model.v_proj.weight.grad.any()
-    copy.deepcopy(model) # No retained autograd graph after collecting the penalty.
 
 
 def test_attention_penalty_requires_an_attention_trunk():
@@ -256,7 +254,7 @@ def test_muon_auxiliary_lr_and_decay_floor_resume():
 @pytest.mark.parametrize('architecture', ['transformer','b7c96h6kv3qk32v16tflrs-fson-silu'])
 def test_attention_training_metrics_and_export(architecture):
     from etazero.models.export import export_model, example_inputs
-    from etazero.models.network import inference_network
+    from etazero.models.factory import inference_network
     c=load_config(CONFIGS/'smoke_test');c['network'].update(architecture=architecture,channels=192 if architecture=='transformer' else 96,blocks=5 if architecture=='transformer' else 14)
     c['attention_penalty'].update(cap=0,batch_fraction=.5)
     a,m=winning_record(1);batch=training_view(a);batch['obs']=unpack_observations(batch['obs'],m['canvas']).astype(np.float32)
@@ -318,7 +316,7 @@ def test_cuda_optional_training_controls_and_resume(tmp_path,kind,architecture):
 @pytest.mark.parametrize('device',['cpu',pytest.param('cuda:0',marks=pytest.mark.skipif(__import__('os').environ.get('ETAZERO_GPU_TESTS')!='1',reason='Host CUDA required'))])
 def test_native_secondary_model_clock_and_constraints(tmp_path,algorithm,device):
     import subprocess
-    from etazero.models.network import inference_network
+    from etazero.models.factory import inference_network
     from etazero.engine_config import load_engine_config
     from etazero.config import write_native
     from test_muzero_pipeline import small_config

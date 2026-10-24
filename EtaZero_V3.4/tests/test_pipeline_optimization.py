@@ -210,7 +210,7 @@ def test_inactive_targets_preserve_rows_actions_losses_and_gradients(algorithm):
     from etazero.schema import unpack_observations
     from etazero.data.muzero import prepare_batch
     from etazero.train.learner import training_forward, forward_batch, augment_training_batch
-    from etazero.models.network import make_network
+    from etazero.models.factory import make_network
     import random
     from test_muzero_pipeline import small_config
     from test_raw_muzero import small_raw_config

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from etazero.config import ROOT, load_config, validate
-from etazero.models.network import make_network
+from etazero.models.factory import make_network
 from etazero.train.optimization import Optimization, group_settings, inference_weights, optimizer_for, parameter_groups, warmup_factor
 from etazero.symmetry import apply_symmetry, augment_batch
 

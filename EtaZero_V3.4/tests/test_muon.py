@@ -7,7 +7,7 @@ import torch
 from config_samples import CONFIGS
 from etazero.config import load_config, validate
 from etazero.train.muon import Muon
-from etazero.models.network import make_network
+from etazero.models.factory import make_network
 from etazero.train.optimization import group_settings, optimization_for, optimizer_for
 
 

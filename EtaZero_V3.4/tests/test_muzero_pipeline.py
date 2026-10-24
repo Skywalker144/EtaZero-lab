@@ -11,7 +11,7 @@ import torch
 
 from etazero.config import ROOT, load_config, validate
 from etazero.data.targets import read_raw, metadata, training_view, game_weight_statistics
-from etazero.models.network import make_network
+from etazero.models.factory import make_network
 from etazero.run.runtime import run_training
 from etazero.schema import GLOBALS
 from etazero.storage import load_json, sha256
