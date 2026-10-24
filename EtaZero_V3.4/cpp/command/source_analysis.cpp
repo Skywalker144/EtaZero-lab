@@ -1,5 +1,7 @@
 #include "command/session.h"
-#include "core/version.h"
+#include "program/setup.h"
+#include "etazero/version.h"
+#include "etazero/source_config.h"
 #include "game/go_position.h"
 #include "neuralnet/nninputs.h"
 #include <algorithm>
@@ -96,7 +98,7 @@ class AnalysisServer {
             }
         }
         output["moveInfos"]=std::move(infos);
-        if(input.value("includePolicy",false)){std::vector<double> policy;for(int a=0;a<g.local_actions();++a){int native=g.native_action(a);policy.push_back(g.legal(native)?result.network_policy[native]:-1);}output["policy"]=std::move(policy);if(!result.human_policy.empty()){std::vector<double> human;for(int a=0;a<g.local_actions();++a){int native=g.native_action(a);human.push_back(g.legal(native)?result.human_policy[native]:-1);}output["humanPolicy"]=std::move(human);}}
+        if(input.value("includePolicy",false)){std::vector<double> policy;for(int a=0;a<g.local_actions();++a){int native=g.native_action(a);policy.push_back(g.search_legal(native)?result.network_policy[native]:-1);}output["policy"]=std::move(policy);if(!result.human_policy.empty()){std::vector<double> human;for(int a=0;a<g.local_actions();++a){int native=g.native_action(a);human.push_back(g.search_legal(native)?result.human_policy[native]:-1);}output["humanPolicy"]=std::move(human);}}
         return output;
     }
     void worker() {
@@ -185,9 +187,12 @@ class AnalysisServer {
             if(priorities.count(turn)){
                 auto game=game_from_go_history(history,canvas);
                 double pda=config_.number("analysis.playout_doubling_advantage");std::string pda_player=config_.text("analysis.playout_doubling_advantage_player");
-                for(auto key:{"playoutDoublingAdvantage","playout_doubling_advantage"})if(overrides.contains(key)){auto v=overrides[key];pda=v.is_string()?std::stod(v.get<std::string>()):v.get<double>();}
-                for(auto key:{"playoutDoublingAdvantagePla","playout_doubling_advantage_player"})if(overrides.contains(key))pda_player=overrides[key].get<std::string>();
-                game.set_pda(pda,player(pda_player)==P_BLACK?1:-1);
+                for(auto it=overrides.begin();it!=overrides.end();++it) {
+                    auto key=SOURCE_SEARCH_KEYS.find(it.key());if(key==SOURCE_SEARCH_KEYS.end())continue;
+                    if(key->second=="playout_doubling_advantage")pda=it.value().is_string()?std::stod(it.value().get<std::string>()):it.value().get<double>();
+                    if(key->second=="playout_doubling_advantage_player"){pda_player=it.value().get<std::string>();playout_advantage_player(pda_player,false);}
+                }
+                set_playout_advantage(game,pda,playout_advantage_player(pda_player));
                 auto job=std::make_shared<Job>(input,std::move(game),turn,priorities[turn],sequence_++);job->overrides=overrides;focus(*job,input);
                 bool prune=config_.boolean("analysis.root_symmetry_pruning");
                 for(auto key:{"rootSymmetryPruning","root_symmetry_pruning"})if(overrides.contains(key)) {

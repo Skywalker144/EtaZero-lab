@@ -4,7 +4,7 @@ import sys
 if __package__ in (None, ''):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from etazero.config_files import SOURCE_KEYS
-from etazero.engine_config import ENGINE_FIELDS
+from etazero.engine_config import ENGINE_FIELDS, CONDITIONAL_SEARCH_DEFAULTS
 from etazero.config import SEARCH_PARAMETERS, SOURCE_SEARCH_BOUNDS, boolean
 fields=set(SEARCH_PARAMETERS)|set('visits search_threads c_puct virtual_loss reuse_tree temperature temperature_early use_fpu fpu_reduction_max root_fpu_reduction_max fpu_parent_weight_by_visited_policy_pow use_lcb lcb_stdevs min_visit_prop_for_lcb policy_target_pruning'.split())
 fields|={'playout_doubling_advantage','playout_doubling_advantage_player','root_noise_enabled','noise_fraction','dirichlet_total_concentration','shaped_dirichlet_noise','root_desired_per_child_visits_coeff'}
@@ -14,7 +14,8 @@ aliases={k:k for k in fields}
 for key in fields:
     words=key.split('_');aliases[words[0]+''.join(w.capitalize() for w in words[1:])]=key
 aliases.update({k:v for k,v in SOURCE_KEYS.items() if v in fields})
-lines=['#pragma once','#include <map>','#include <string>','namespace etazero {',
+lines=['#pragma once','#include "core/config.h"','#include <set>','#include <algorithm>','#include <iomanip>','#include <map>','#include <string>','namespace etazero {',
+       'inline std::string source_default_number(double value) {std::ostringstream out;out<<std::setprecision(17)<<value;return out.str();}',
        'inline const std::map<std::string,std::string> SOURCE_SEARCH_KEYS = {']
 lines.extend('    {"'+k+'","'+v+'"},' for k,v in sorted(aliases.items()))
 lines.extend(['};','inline const std::map<std::string,char> SOURCE_SEARCH_TYPES = {'])
@@ -24,5 +25,18 @@ for key in sorted(fields):
 lines.extend(['};','inline const std::map<std::string,std::pair<double,double>> SOURCE_SEARCH_RANGES = {'])
 for key,(low,high) in sorted(SOURCE_SEARCH_BOUNDS.items()):
     if key in fields:lines.append('    {"'+key+'",{'+str(float(low))+','+str(float(high))+'}},')
-lines.extend(['};','}'])
+lines.append('};')
+lines.extend(['inline void resolve_source_defaults(Config& config,const std::set<std::string>& supplied) {',
+              '    const std::string key="analysis.inherited_search_defaults";',
+              '    if(!config.contains(key))return;',
+              '    std::string remaining;',
+              '    for(const auto& child:config.list(key)) {',
+              '        if(supplied.count(child))continue;'])
+for child,(parent,transform) in CONDITIONAL_SEARCH_DEFAULTS.items():
+    expression = {'identity': f'config.text("analysis.{parent}")',
+                  'optimism': f'source_default_number(std::min(config.number("analysis.{parent}"),.2))',
+                  'fpu': f'(config.boolean("analysis.{parent}")?"0":"0.1")'}[transform]
+    lines.append(f'        if(child=="{child}")config.override_field("analysis.{child}",{expression});')
+lines.extend(['        if(!remaining.empty())remaining+=",";', '        remaining+=child;',
+              '    }', '    config.override_field(key,remaining);', '}', '}'])
 Path(sys.argv[1]).write_text('\n'.join(lines)+'\n')

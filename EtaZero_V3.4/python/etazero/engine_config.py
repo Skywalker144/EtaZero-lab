@@ -28,7 +28,7 @@ RESIGNATION_FIELDS = dict(allow_resignation=boolean,resign_threshold=float,resig
 # no source analogue are local defaults; explicit experiment profiles override all.
 ENGINE_DEFAULTS = dict(report_analysis_winrates_as='SIDETOMOVE',always_compute_pass_alive_under_suicide_rules='auto',exclude_territory_adjacent_to_atari='auto',analysis_wide_root_noise=.04,analysis_ignore_pre_root_history=False,seed=0,board_size=19,rule='go',device='cuda:0',cpu_threads=1,
     use_non_buggy_lcb=True,root_noise_enabled=False,noise_fraction=.25,dirichlet_total_concentration=10.83,shaped_dirichlet_noise=True,root_desired_per_child_visits_coeff=0,board_width=0,board_height=0,delay_move_scale=0,delay_move_max=1000000,
-    visits=2**50,c_puct=1,virtual_loss=3,reuse_tree=True,temperature=.1,temperature_early=.5,
+    visits=2**50,c_puct=1,virtual_loss=1,reuse_tree=True,temperature=.1,temperature_early=.5,
     max_batch=16,server_threads=1,inference_precision='auto',batch_wait_us=0,
     muzero_queue_capacity=1024,use_fpu=True,fpu_reduction_max=.2,root_fpu_reduction_max=.1,
     fpu_parent_weight_by_visited_policy=True,fpu_parent_weight_by_visited_policy_pow=2,
@@ -41,9 +41,25 @@ ENGINE_DEFAULTS = dict(report_analysis_winrates_as='SIDETOMOVE',always_compute_p
     temperature_only_below_prob=1,use_graph_search=True,graph_search_catch_up_leak_prob=0,
     use_uncertainty=True,uncertainty_coeff=.25,uncertainty_exponent=1,uncertainty_max_weight=8,
     policy_optimism=1,root_policy_optimism=.2,use_noise_pruning=True,noise_prune_utility_scale=.15,
-    noise_pruning_cap=1e50,subtree_value_bias_factor=0,subtree_value_bias_free_prop=.8,
-    subtree_value_bias_weight_exponent=.5,subtree_value_bias_table_num_shards=65536,
-    max_playouts=2**50,max_time=1e20,playout_doubling_advantage=0,playout_doubling_advantage_player='black')
+    noise_pruning_cap=1e50,subtree_value_bias_factor=.45,subtree_value_bias_free_prop=.8,
+    subtree_value_bias_weight_exponent=.85,subtree_value_bias_table_num_shards=65536,
+    max_playouts=2**50,max_time=1e20,playout_doubling_advantage=0,playout_doubling_advantage_player='unspecified')
+
+# Retain which values were inherited so GTP/JSON parent overrides re-resolve them.
+CONDITIONAL_SEARCH_DEFAULTS = {
+    'root_policy_temperature_early': ('root_policy_temperature', 'identity'),
+    'root_fpu_loss_prop': ('fpu_loss_prop', 'identity'),
+    'root_policy_optimism': ('policy_optimism', 'optimism'),
+    'root_fpu_reduction_max': ('root_noise_enabled', 'fpu'),
+}
+
+
+def conditional_search_default(c, parent, transform):
+    value = c[parent]
+    if transform == 'optimism': return min(value, .2)
+    if transform == 'fpu': return 0.0 if value else .1
+    return value
+
 
 def load_engine_config(source, match=False, environ=None, *, overrides=None, gtp=False):
     result = _load_profile(source, match, environ, overrides=overrides, gtp=gtp)
@@ -170,20 +186,32 @@ def _load_profile(source, match, environ, *, groups=None, overrides=None, gtp=Fa
             for key in ('playout_doubling_advantage_player','visit_cap_contempt_player'):
                 value=result[group][key]
                 if key=='playout_doubling_advantage_player':result[group][key]={'b':'black','w':'white'}.get(str(value).lower(),str(value).lower())
-            # Source defaults inherit explicitly supplied parent parameters.
-            for child,parent in [('root_policy_temperature_early','root_policy_temperature'),('root_fpu_loss_prop','fpu_loss_prop')]:
-                if ((group,child) not in values and child not in common and prefix+child.upper() not in env
-                        and 'ENGINE_'+child.upper() not in env and child not in overrides.get(group,{})):
-                    result[group][child]=result[group][parent]
-            if ((group,'root_policy_optimism') not in values and 'root_policy_optimism' not in common
-                    and prefix+'ROOT_POLICY_OPTIMISM' not in env and 'ENGINE_ROOT_POLICY_OPTIMISM' not in env
-                    and 'root_policy_optimism' not in overrides.get(group,{})):
-                result[group]['root_policy_optimism']=min(result[group]['policy_optimism'],.2)
+            explicit = {key for key in keys if ((group,key) in values or key in common
+                        or prefix+key.upper() in env or 'ENGINE_'+key.upper() in env
+                        or key in overrides.get(group,{}))}
+            if ('playout_doubling_advantage_player' in explicit
+                    and result[group]['playout_doubling_advantage_player'] not in ('black','white')):
+                raise ValueError('playoutDoublingAdvantagePla must be BLACK or WHITE')
+            resolve_engine_defaults(result[group], explicit)
             if result[group]['auto_avoid_repeat_dir']:
                 for suffix in ('utility','lambda','min_turn_number','max_turn_number','max_poses'):
                     key='auto_avoid_repeat_'+suffix
                     if ((group,key) not in values and key not in common and prefix+key.upper() not in env and 'ENGINE_'+key.upper() not in env and key not in overrides.get(group,{})):result[group].pop(key,None)
     return result
+
+
+def resolve_engine_defaults(c, explicit):
+    """Source conditional defaults, after file/include/environment overrides."""
+    inherited = []
+    for child, (parent, transform) in CONDITIONAL_SEARCH_DEFAULTS.items():
+        if child not in explicit:
+            c[child] = conditional_search_default(c, parent, transform)
+            inherited.append(child)
+    c['inherited_search_defaults'] = ','.join(inherited)
+    # The source Go default applies only where this real-board mechanism exists.
+    from etazero.games import spec_for_rule
+    if 'subtree_value_bias_factor' not in explicit and not spec_for_rule(c['rule']).subtree_value_bias:
+        c['subtree_value_bias_factor'] = 0.0
 
 
 def validate_engine_config(config, match=False):
@@ -197,7 +225,7 @@ def validate_engine_config(config, match=False):
     for group, values in config.items():
         for key, value in values.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if not math.isfinite(value) or (value < 0 and key not in ('komi','nn_mutex_pool_power_of_two','visit_cap_contempt_player','resign_threshold','avoid_repeated_pattern_utility','auto_avoid_repeat_utility')):
+                if not math.isfinite(value) or (value < 0 and key not in ('komi','nn_mutex_pool_power_of_two','visit_cap_contempt_player','resign_threshold','avoid_repeated_pattern_utility','auto_avoid_repeat_utility','playout_doubling_advantage')):
                     raise ValueError(f'Invalid {group}.{key}')
     if not 0 <= c['seed'] < 2**64 or not (2 if c['rule']=='go' else 5) <= c['board_size'] <= 25:
         raise ValueError('Invalid engine seed or board size')
@@ -215,7 +243,7 @@ def validate_engine_config(config, match=False):
         raise ValueError('Engine requires visits >= 1 and positive execution/search sizes')
     if c['lcb_stdevs'] <= 0 or c['fpu_parent_weight_by_visited_policy_pow'] < 0 or c['min_visit_prop_for_lcb'] > 1:
         raise ValueError('Invalid engine FPU/LCB settings')
-    if not 0<=c['playout_doubling_advantage']<=math.log2(100) or c['playout_doubling_advantage_player'] not in ('black','white'):
+    if c['playout_doubling_advantage_player'] not in ('black','white','unspecified'):
         raise ValueError('Invalid engine PDA condition')
     if c['report_analysis_winrates_as'].upper() not in ('BLACK','WHITE','SIDETOMOVE'):raise ValueError('Invalid reportAnalysisWinratesAs')
     if not 1<=c['analysis_pv_len']<=1000 or not 0<=c['analysis_wide_root_noise']<=5:raise ValueError('Invalid analysis report settings')
