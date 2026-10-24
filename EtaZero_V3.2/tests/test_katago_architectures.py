@@ -65,16 +65,17 @@ def test_named_dimensions_can_be_omitted(tmp_path):
 
 
 @pytest.mark.parametrize('name', ['b1c6nbt-fson-mish', 'b2c16-fson-mish-rvgl-bnh',
-                                 'b2c16-brng-gelu-tcg-trbnr-ih-meta',
+                                 'b2c16-brng-gelu-tcg-trbnr-ih',
                                  'b7c96h6kv3qk32v16tflrs-fson-silu'])
 def test_real_training_heads_and_variable_batch_export(name):
     torch.set_num_threads(2)
     model = KataGoNet(name, 6)
+    model.network.use_flex_attention=False
     obs = torch.randn(2, 5, 6, 6); obs[:, 0] = 0; obs[:, 0, :5, :5] = 1
     globals = torch.randn(2, 8)
     heads = model.training_outputs(obs, globals)
     assert len(heads) == len(model.head_loss_weights)
-    loss = sum(weight * sum(t.square().mean() for t in head)
+    loss = sum(weight * sum(t.clamp(-1e10,1e10).square().mean() for t in head)
                for weight, head in zip(model.head_loss_weights, heads))
     loss.backward()
     if len(heads) == 2:
@@ -107,7 +108,7 @@ def test_intermediate_loss_source_default_weighting_and_repvgg_gradient_scale():
     obs = torch.randn(2, 5, 6, 6); obs[:, 0] = 1
     globals = torch.randn(2, 8)
     policy = torch.full((2, 36), 1/36)
-    value = torch.tensor([[1., 0., 0.], [0., 0., 1.]])
+    value = torch.tensor([[1., 0., 0., 0.], [0., 0., 1., 0.]])
     td = value[:, None].expand(-1, 3, -1)
     args = (policy, policy, torch.ones(2), value, td, torch.ones(2))
     model.eval()
@@ -123,7 +124,7 @@ def test_intermediate_loss_source_default_weighting_and_repvgg_gradient_scale():
     assert parameter.grad[:, :, 0, 0].eq(1).all()
 
 
-def test_batch_renorm_schedule_and_metadata_default():
+def test_batch_renorm_schedule_and_missing_metadata_rejected():
     model = KataGoNet('b2c16-brng-meta', 6)
     from etazero.brenorm import BoundsSchedule
     schedule = BoundsSchedule(model, dict(avg_momentum=.01, target_rmax=3., target_dmax=2., adjustment_scale=10.))
@@ -135,7 +136,8 @@ def test_batch_renorm_schedule_and_metadata_default():
         assert norm.renorm_avg_momentum == .01
     assert isinstance(model.network.metadata_encoder.act1, torch.nn.ReLU)
     obs = torch.zeros(1, 5, 6, 6); obs[:, 0] = 1
-    assert all(torch.isfinite(value).all() for value in model.forward_all(obs, torch.zeros(1, 8)))
+    with pytest.raises(ValueError,match='requires explicit metadata'):
+        model.forward_all(obs,torch.zeros(1,8))
 
 
 def test_batch_renorm_config_is_validated_and_part_of_resume_identity():
@@ -187,3 +189,12 @@ def test_complex_depthwise_export_preserves_source_convolution_and_rng(dilation)
     torch.testing.assert_close(actual[:, :3], expected.real, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(actual[:, 3:], expected.imag, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(actual, source(x), rtol=0, atol=0)
+
+
+def test_source_cuda_rejects_unloadable_tiny_training_preset(tmp_path):
+    from etazero.cuda_export import export_source
+    from etazero.katago_network import KataGoNet
+    model=KataGoNet('b1c6nbt-brn',6).eval()
+    with pytest.raises(ValueError,match='positive trunk, mid, regular and gpool'):
+        export_source(model.network,tmp_path/'model.bin','tiny')
+    assert not (tmp_path/'model.bin').exists()

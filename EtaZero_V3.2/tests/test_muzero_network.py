@@ -14,7 +14,8 @@ from etazero.config import ROOT, load_config, validate
 from etazero.muzero.network import (NetworkConfig, MuZeroNet, inference_network,
                                     normalize_hidden_state, scale_gradient)
 from etazero.muzero.optimization import parameter_groups, optimizer_for
-from etazero.network import PolicyHead, ValueHead, losses
+from etazero.network import losses
+from etazero._vendor.katago.model_pytorch import PolicyHead,ValueHead
 from etazero.optimization import Optimization
 from etazero.schema import GLOBALS
 
@@ -97,7 +98,7 @@ def test_independent_trunks_complete_heads_and_mask(dimensions, q, architecture)
     model = MuZeroNet(c).eval()
     assert isinstance(model.prediction.policy_head, PolicyHead)
     assert isinstance(model.prediction.value_head, ValueHead)
-    assert [len(getattr(model, part).trunk.blocks) for part in
+    assert [len(getattr(model, part).body.blocks) for part in
             ('representation', 'dynamics', 'prediction')] == [1, 2, 1]
     obs, globals = inputs()
     with torch.no_grad():
@@ -110,7 +111,7 @@ def test_independent_trunks_complete_heads_and_mask(dimensions, q, architecture)
             assert hidden[0, :-1, 5].eq(0).all() and hidden[0, :-1, :, 5].eq(0).all()
             policy, wdl, td, error = model.prediction(hidden)
             assert policy.shape == (2, 6 + q, 36)
-            assert wdl.shape == (2, 3) and td.shape == (2, 3, 3) and error.shape == (2,)
+            assert wdl.shape == (2, 4) and td.shape == (2, 3, 4) and error.shape == (2,)
             parent = hidden.clone()
             # Includes an occupied point and repeats it: recurrent sees no real legality.
             hidden = model.dynamics(hidden, torch.tensor([0, 0]))
@@ -154,13 +155,13 @@ def test_optimizer_roles_and_no_alpha_runtime_fallback(dimensions):
     model = MuZeroNet(dimensions)
     roles = {id(p): g['group_name'] for g in parameter_groups(model) for p in g['params']}
     assert len(roles) == len(list(model.parameters()))
-    assert roles[id(model.representation.stem.weight)] == 'input'
-    assert roles[id(model.dynamics.stem.weight)] == 'input'
-    assert roles[id(model.dynamics.trunk.norm.weight)] == 'normal_gamma'
-    assert roles[id(model.prediction.trunk.norm.weight)] == 'output'
-    assert roles[id(model.prediction.value_head.out.weight)] == 'output'
+    assert roles[id(model.representation.body.conv_spatial.weight)] == 'input'
+    assert roles[id(model.dynamics.body.conv_spatial.weight)] == 'input'
+    assert roles[id(model.dynamics.body.norm_trunkfinal.gamma)] == 'normal_gamma'
+    assert roles[id(model.prediction.body.norm_trunkfinal.gamma)] == 'output'
+    assert roles[id(model.prediction.value_head.linear_valuehead.weight)] == 'output'
     model.extra = torch.nn.Parameter(torch.ones(1))
-    with pytest.raises(ValueError, match='every model parameter'):
+    with pytest.raises(ValueError, match='every parameter'):
         parameter_groups(model)
     config = load_config(CONFIGS / 'smoke_test')
     config['agent']['algorithm'] = 'muzero'
@@ -173,7 +174,7 @@ def update(model, optimizer, optimization, device):
     optimizer.zero_grad(set_to_none=True)
     obs, globals = inputs(device)
     policy = obs[:, 0].flatten(1)
-    target = torch.tensor([[1., 0., 0.], [0., 1., 0.]], device=device)
+    target = torch.tensor([[1., 0., 0., 0.], [0., 1., 0., 0.]], device=device)
     hidden = model.representation(obs, globals)
     total = torch.zeros((), device=device)
     for step in range(3):
@@ -189,7 +190,8 @@ def update(model, optimizer, optimization, device):
             hidden = model.dynamics(hidden, torch.tensor([1, 7], device=device))
     total.backward()
     for part in ('representation', 'dynamics', 'prediction'):
-        gradients = [p.grad for p in getattr(model, part).parameters()]
+        gradients = [p.grad for p in getattr(model, part).parameters() if p.grad is not None]
+        assert gradients  # Excluded Go-only prediction heads have no gradient.
         assert all(g is not None and torch.isfinite(g).all() for g in gradients)
         assert sum(g.abs().sum() for g in gradients) > 0
     optimization.configure()
@@ -239,8 +241,8 @@ def test_native_multistep_parity_and_guards(tmp_path, dimensions, device, precis
     with torch.no_grad():
         if architecture == 'nbt':
             for part in (model.representation, model.dynamics, model.prediction):
-                part.trunk.norm.running_mean.uniform_(-.3, .3)
-                part.trunk.norm.running_std.uniform_(.5, 1.5)
+                part.body.norm_trunkfinal.running_mean.uniform_(-.3, .3)
+                part.body.norm_trunkfinal.running_std.uniform_(.5, 1.5)
     inference = inference_network(model)
     path = tmp_path / 'model.pt'; torch.jit.script(inference).save(str(path))
     result = subprocess.run([str(binary), str(path), device, precision], capture_output=True, text=True, check=True)
@@ -303,8 +305,8 @@ def test_eager_scripted_multistep_rounding(tmp_path, dimensions, device, precisi
     with torch.no_grad():
         if architecture=='nbt':
             for part in (model.representation,model.dynamics,model.prediction):
-                part.trunk.norm.running_mean.uniform_(-.3,.3)
-                part.trunk.norm.running_std.uniform_(.5,1.5)
+                part.body.norm_trunkfinal.running_mean.uniform_(-.3,.3)
+                part.body.norm_trunkfinal.running_std.uniform_(.5,1.5)
     inference=inference_network(model)
     path=tmp_path/'model.pt';torch.jit.script(inference).save(str(path))
     scripted=torch.jit.load(str(path),map_location=device).eval()
