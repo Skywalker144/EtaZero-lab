@@ -20,7 +20,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 ## 网络与推理
 
-[网络](../python/etazero/muzero/network.py) 使用独立 representation、dynamics、prediction；`nbt` 与 `resnet` 分别采用来源 NBT 与 regular 卷积块及 fson/Mish。三段宽度和深度、latent 投影按 MuZero 配置保留，其归一化、初始化、池化与输出头来自 [source_components.py](../python/etazero/muzero/source_components.py)。每段拥有独立参数和统计；没有另行使用逐样本 MaskedNorm 的私有主干。
+[网络](../python/etazero/models/muzero/network.py) 使用独立 representation、dynamics、prediction；`nbt` 与 `resnet` 分别采用来源 NBT 与 regular 卷积块及 fson/Mish。三段宽度和深度、latent 投影按 MuZero 配置保留，其归一化、初始化、池化与输出头来自 [source_components.py](../python/etazero/models/muzero/source_components.py)。每段拥有独立参数和统计；没有另行使用逐样本 MaskedNorm 的私有主干。
 
 主干归一化完全遵循选用的来源组件。训练态的 BatchNorm 可依赖同一批内其他样本；推理态使用保存的 running statistics。latent min/max 是另外的 MuZero 状态归一化，不能与主干归一化混为一谈。
 
@@ -33,9 +33,9 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 [原生 CUDA 对照](../tests/test_muzero_cuda_backend.py) 比较 PyTorch 与三个 CUDA 组件的根、连续展开和旧父 latent 再次使用，覆盖四棋类、FP16/FP32 与不同 batch。测试检查 latent、policy、四类概率、optimistic 和 stdev；误差阈值仅适用于已测样例。参考 TorchScript 路径另由 [组件测试](../tests/test_muzero_network.py) 覆盖。
 
-[推理服务](../cpp/src/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
+[推理服务](../cpp/neuralnet/muzero/batcher.cpp) 分别组批 initial 与 recurrent 请求。initial 可以交给任一服务，recurrent 路由回创建 latent 的后端，禁止跨模型/设备误用；请求队列有容量限制、失败传播和排空机制。latent 保留在设备上，每个节点拥有独立 tensor 存储。可选 initial cache 按已变换的完整输入缓存 latent 和预测，包含固定朝向及全局条件；`muzero` 默认关闭缓存，避免沿用 AlphaZero 的大容量预测缓存而占用过多显存。
 
-[原生 CUDA 后端](../cpp/src/muzero/cuda_backend.cpp) 加载 representation.bin、dynamics.bin、model.bin 三个来源格式组件。latent 位于 GPU，每个节点持有独立存储；动作编码、父状态打包、masked min/max 都由 CUDA 内核完成，事件保证不同组件 stream 的依赖。CPU 仅接收搜索需要的预测输出，诊断接口才显式取回 latent。
+[原生 CUDA 后端](../cpp/neuralnet/muzero/cuda_backend.cpp) 加载 representation.bin、dynamics.bin、model.bin 三个来源格式组件。latent 位于 GPU，每个节点持有独立存储；动作编码、父状态打包、masked min/max 都由 CUDA 内核完成，事件保证不同组件 stream 的依赖。CPU 仅接收搜索需要的预测输出，诊断接口才显式取回 latent。
 
 原生 CUDA 使用实际 batch，无二次幂补齐。initial/recurrent 队列保留各自组批和后端归属，父节点在多次 recurrent 及不同批量之后仍可复用。生产路径不依赖 TorchScript CUDA Graph；CPU 和显式 `.pt` 模型使用参考后端。
 
@@ -43,7 +43,7 @@ CONFIG_DIR=configs/mz_g bash scripts/run.sh
 
 ## 搜索与子树加权开关
 
-[MuZero 搜索](../cpp/src/muzero/search.cpp) 的根使用真实合法动作。根以下只使用该棋类的固定动作集合，允许重复选择同一动作，不调用真实落子和终局判断。每次真实落子后丢弃旧树，以新观测的 representation 开始搜索。整棵树固定一个该棋类允许的朝向，动作映射到该朝向，预测映射回真实坐标；不旋转或平均 latent。
+[MuZero 搜索](../cpp/search/muzero/search.cpp) 的根使用真实合法动作。根以下只使用该棋类的固定动作集合，允许重复选择同一动作，不调用真实落子和终局判断。每次真实落子后丢弃旧树，以新观测的 representation 开始搜索。整棵树固定一个该棋类允许的朝向，动作映射到该朝向，预测映射回真实坐标；不旋转或平均 latent。
 
 每个节点的首次预测记为一次访问，子节点价值转换到父视角后聚合。根访问预算包含初始预测；无图共享、跨手复用或已有访问。时间限制包含根推理，但至少完成两个新 playout（根预测及一次 recurrent）后才生效；显式停止和访问／playout 上限优先，不为满足这个时间下限越过硬上限。并行选择使用虚拟损失，推理在搜索锁外执行，完成后在锁内回传。设备 latent 随清树释放；模型失败唤醒请求与搜索线程。
 
@@ -64,11 +64,11 @@ Go 和 Xiangqi 的根合法动作使用真实规则；根以下仅使用固定�
 
 ## 连续数据与展开训练
 
-[writer](../cpp/src/selfplay/record.cpp) 保留完整真实对局，新增所有可训练位置的 policy/Q/visits，包括重复次数为零的 cheap 位置。开局前缀不产生监督。原始文件标识 `algorithm=muzero` 和展开长度，不能将 AlphaZero 分片作为 MuZero 数据。
+[writer](../cpp/dataio/record.cpp) 保留完整真实对局，新增所有可训练位置的 policy/Q/visits，包括重复次数为零的 cheap 位置。开局前缀不产生监督。原始文件标识 `algorithm=muzero` 和展开长度，不能将 AlphaZero 分片作为 MuZero 数据。
 
 `unroll.steps` 为正整数，按实际 K 动态分配，不设固定 32 步上限；内存和计算量随 K 增长。
 
-[数据视图](../python/etazero/muzero/data.py) 的一行是一个真实起点，包含一份起点输入、K 个动作和 K+1 份完整 targets。真实棋盘只用于生成监督与校验记录，learner 从不使用未来观测代替 dynamics。分片可以切开重复起点，但完整轨迹保证未来目标、TD 和终局不被分片截断。
+[数据视图](../python/etazero/data/muzero.py) 的一行是一个真实起点，包含一份起点输入、K 个动作和 K+1 份完整 targets。真实棋盘只用于生成监督与校验记录，learner 从不使用未来观测代替 dynamics。分片可以切开重复起点，但完整轨迹保证未来目标、TD 和终局不被分片截断。
 
 - 起点由既有 PCR、Reduce Visits、surprise 和随机重复次数决定，根权重为 1，避免重复计权。真实后续步使用该位置 target weight，除以 snapshot 中所选完整主轨迹的平均权重；同一局跨分片只计一次。零权重步仍保留动作转移。
 - 主 value 是终局结果，按每步执色翻转；TD 使用整局搜索 WDL 与终局结果生成的 EtaZero 三时域目标。各真实展开步监督完整 heads，reanalysis 的 outcome gate 保持原有定义。Q 目标保留每动作子节点访问，未搜索动作不参与 Q loss。
@@ -76,9 +76,9 @@ Go 和 Xiangqi 的根合法动作使用真实规则；根以下仅使用固定�
 - side 独立位置只有根预测目标，后续全部 mask，不能伪造终局。learner 在根预测后移除这些行，不让虚构转移参与 recurrent BatchNorm。
 - 一个 batch 共用一次随机对称选择，再按棋类允许的变换与起点执色处理；空间输入、全部步的 policy/Q 和动作同步变换。forbidden dropout 只作用于 Renju 真实起点输入，监督不随输入 dropout 改变。
 
-[learner](../python/etazero/muzero/training.py) 采用来源中的梯度边界：根 loss 梯度系数 1，未来各步为 `1/K`；第二次及以后 dynamics 前按 `unroll.hidden_gradient_scale` 缩放 hidden 梯度，首次 representation→dynamics 不缩放。前向 loss 日志记录未缩放的各步损失和，反向系数不改变日志值。KataGo 优化器模式保留 batch 总和反传，普通优化器模式使用 batch 均值；consumed samples 计真实起点，不能当作展开状态数与 AlphaZero 比较。
+[learner](../python/etazero/train/muzero/training.py) 采用来源中的梯度边界：根 loss 梯度系数 1，未来各步为 `1/K`；第二次及以后 dynamics 前按 `unroll.hidden_gradient_scale` 缩放 hidden 梯度，首次 representation→dynamics 不缩放。前向 loss 日志记录未缩放的各步损失和，反向系数不改变日志值。KataGo 优化器模式保留 batch 总和反传，普通优化器模式使用 batch 均值；consumed samples 计真实起点，不能当作展开状态数与 AlphaZero 比较。
 
-编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。两种主干的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/muzero/optimization.py)，共用 SGD/AdamW/Muon/NorMuon/Aurora、Lookahead 和 SWA；NBT representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组；ResNet 主干中的归一化属于内部组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
+编译训练允许因 side 行筛选而出现动态图边界，神经网络与 loss 仍使用 `torch.compile`。两种主干的 KataGo 优化模式采用独立的 [参数分组](../python/etazero/train/muzero/optimization.py)，共用 SGD/AdamW/Muon/NorMuon/Aurora、Lookahead 和 SWA；NBT representation/dynamics 的末端归一化属于内部组，prediction 的末端归一化和 heads 属于输出组；ResNet 主干中的归一化属于内部组。普通优化模式对两种主干使用统一 LR/weight decay，不使用分组 LR/WD 调度、Lookahead 或 SWA；选择 Muon 时仍按主干矩阵与辅助 Adam 划分更新方式，ResNet 的归一化参数使用辅助 Adam。两种主干均接入 AMP、checkpoint 和验证调度。Muon 的更新和执行条件见 [学习与数据使用](algorithms.md#学习与数据使用) 与 [发布与恢复](implementation.md#模型发布与恢复)。
 
 ## KataGo 工程机制的适用边界
 

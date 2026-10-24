@@ -1,6 +1,6 @@
 # KataGo 网络配置
 
-AlphaZero 的 `network.architecture` 可直接填写固定 KataGo 来源的网络名称。名称与架构来自 [手写预设](../python/etazero/_vendor/katago/modelconfigs.py)；[解析器](../python/etazero/katago_configs.py) 按来源相同的阶段和约束解析后缀，不在启动时展开整张派生配置表。来源版本及文件校验值见 [reference_sources.json](../reference_sources.json)。
+AlphaZero 的 `network.architecture` 可直接填写固定 KataGo 来源的网络名称。名称与架构来自 [手写预设](../python/etazero/models/katago/modelconfigs.py)；[解析器](../python/etazero/models/katago_configs.py) 按来源相同的阶段和约束解析后缀，不在启动时展开整张派生配置表。来源版本及文件校验值见 [reference_sources.json](../reference_sources.json)。
 
 输入／输出适配取决于 `environment.rules`：Go 保留来源 22／19 输入和 pass head；象棋采用 113／8 输入及 50 位移通道 gather 2086 动作；其余棋类保留原有布局。主干结构不因棋类更换。六项 policy、纯 WDL、TD 和误差目标共用；Go 的分数／所有权 head 不进入目标。native 读取模型 manifest（`.pt` 使用 `game_name()`），依据共享的 [棋类定义](../python/etazero/games.py) 分配输入和动作缓冲。
 
@@ -20,11 +20,11 @@ predict_q_values = false
 查看全部手写名称与一个名称的实际配置：
 
 ```bash
-PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs
-PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b10c384h6nbttflrs-fson-silu-rsnh
+PYTHONPATH=python conda run -n pytorch python -m etazero.models.katago_configs
+PYTHONPATH=python conda run -n pytorch python -m etazero.models.katago_configs --name b10c384h6nbttflrs-fson-silu-rsnh
 ```
 
-手写预设覆盖 regular、bottleneck、长 bottleneck、NBT2/NBT3、空洞 NBT、普通/嵌套 Transformer、卷积与 Transformer 混合主干，以及 GQA、独立 Q/K/V head 维度、可学习 RoPE、QK normalization、inline registers、GAB、TAB、frequency mixing TAB 和 depthwise FFN。层定义由 [来源网络](../python/etazero/_vendor/katago/model_pytorch.py) 构建，没有按网络大小替换成其他实现。
+手写预设覆盖 regular、bottleneck、长 bottleneck、NBT2/NBT3、空洞 NBT、普通/嵌套 Transformer、卷积与 Transformer 混合主干，以及 GQA、独立 Q/K/V head 维度、可学习 RoPE、QK normalization、inline registers、GAB、TAB、frequency mixing TAB 和 depthwise FFN。层定义由 [来源网络](../python/etazero/models/katago/model_pytorch.py) 构建，没有按网络大小替换成其他实现。
 
 后缀按来源顺序选择，可跳过阶段，每阶段最多一个：
 
@@ -42,13 +42,15 @@ PYTHONPATH=python conda run -n pytorch python -m etazero.katago_configs --name b
 
 ## 架构与棋类适配
 
-[适配器](../python/etazero/katago_network.py) 保留固定来源的主干、归一化、初始化、attention/GAB/TAB 与参数分组。输入按棋类适配，Go 保留 pass，象棋使用 2086 动作 gather。主价值头及三个 TD 头公开顺序为 W/D/L/NR；来源文件保留 W/L/NR 位置，新增 draw 输出。非围棋屏蔽 NR；围棋在非简单劫且非数目规则下同样屏蔽 NR，屏蔽发生在推理 softmax 前，其余 W/D/L 重新归一化。MuZero 从真实根输入保存规则条件，后续 latent 推理沿用该条件。普通和棋不拆成半胜半负。六项策略、价值、短期误差、future-position、variance-time 和可选 v17 纯 W−L Q 进入监督；score、ownership、seki 不进入监督。
+[适配器](../python/etazero/models/katago_network.py) 保留固定来源的主干、归一化、初始化、attention/GAB/TAB 与参数分组。输入按棋类适配，Go 保留 pass，象棋使用 2086 动作 gather。主价值头及三个 TD 头公开顺序为 W/D/L/NR；来源文件保留 W/L/NR 位置，新增 draw 输出。非围棋屏蔽 NR；围棋在非简单劫且非数目规则下同样屏蔽 NR，屏蔽发生在推理 softmax 前，其余 W/D/L 重新归一化。MuZero 从真实根输入保存规则条件，后续 latent 推理沿用该条件。普通和棋不拆成半胜半负。六项策略、价值、短期误差、future-position、variance-time 和可选 v17 纯 W−L Q 进入监督；score、ownership、seki 不进入监督。
 
 `ih` 的两组头使用来源缺省的 0.5/0.5 loss 权重；`bnh` 使用主头 0.2、BN 头 0.8，推理读取主头。各头均参与其对应 loss，checkpoint 与 SWA 保存完整参数和统计。
 
 `meta` 保留来源的 192 维编码器，但普通 RL 配置必须选择无 metadata 的预设。HumanSL 第二模型通过 `human_sl_profile` 生成来源 SGFMetadata，包含实际执色、等级和棋盘面积，并进入缓存身份；缺少必要 metadata 时明确报错，不填零向量。
 
 AlphaZero 的 `nbt`、`plain`、`transformer` 仅是固定来源名称的别名，分别解析为 `b5c192nbt-fson-mish`、`b10c128-fson-mish` 和 `b5c192h3nbttfrs`。不允许按别名任意缩放主干。MuZero 的三段宽度、深度和 latent 投影是必要的算法适配；其卷积块、归一化、初始化、池化、heads 与参数角色复用来源组件。
+
+深度卷积 FFN 预设（`-dwc`）支持默认 NSC 序列布局：仅在 depthwise 卷积处将棋盘 token 和 mask 恢复为空间布局，再转换回序列。参数和卷积计算与来源 NCHW 路径一致，无需关闭 `KATAGO_TRANSFORMER_NHWC`。该预设可使用 PyTorch／CUDA 训练及 TorchScript 参考导出；固定来源的原生二进制 exporter 不支持 depthwise FFN，因此不支持原生 CUDA 自对弈，可显式配置 CPU 自对弈配合 CUDA learner。
 
 ## 训练与推理
 
