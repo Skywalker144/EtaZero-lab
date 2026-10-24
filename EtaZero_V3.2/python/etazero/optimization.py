@@ -159,13 +159,13 @@ class Optimization:
         from .muon import configure_floors
         self.initial_rms = configure_floors(model, optimizer, self.options, state)
         self.lookahead_k = self.options['lookahead_k']
-        if round_steps is not None:
-            segments = min(config['training']['sub_epochs'], round_steps)
-            # A quota-limited round must reach at least one slow-weight update.
-            # Derive this from the immutable plan on resume; ordinary rounds
-            # keep KataGo's cadence and incomplete-cycle discard unchanged.
-            longest_segment = (round_steps + segments - 1) // segments
-            self.lookahead_k = min(self.lookahead_k, longest_segment)
+        # Target epoch size selects whole files; actual boundaries come from
+        # the source file generator and may straddle outer data rounds.
+        self.epoch_steps = config['training']['train_steps']
+        segments = config['training']['sub_epochs']
+        if segments > self.epoch_steps:
+            raise ValueError('Optimizer subepochs require at least one batch each')
+        self.epoch_end = False
         self.period = self.options['swa_period_samples'] or max(1, config['training']['train_steps'] * self.batch_size // 2)
         self.baselines = model_norms(optimizer.param_groups) if state is None else state['baselines']
         self.norms = {} if state is None else state['norms']
@@ -209,12 +209,23 @@ class Optimization:
         return int(self.swa.n_averaged.item())
 
     def begin_round(self):
-        """Map a local round to the source epoch; resumed batches retain its clock."""
-        self.round_batches = 0
-        self.subepoch=-1
-        self.begin_subepoch()
-        self.configure()
-        self.brenorm.update(self.consumed_samples)
+        """Resume the fixed optimizer epoch across an outer data round."""
+        if self.consumed_samples == 0:
+            self.configure()
+            self.brenorm.update(self.consumed_samples)
+
+    def prepare_batch(self, clock):
+        """Apply boundaries from the consumed reader cursor, never prefetch."""
+        self.epoch_end = clock['epoch_end']
+        if clock['subepoch_batches'] == 1:
+            if clock['subepoch'] == 0:
+                self.round_batches = 0
+                self.subepoch = -1
+                self.configure()
+                self.brenorm.update(self.consumed_samples)
+            self.begin_subepoch()
+        if self.completed_rounds != clock['epoch'] or self.subepoch != clock['subepoch']:
+            raise ValueError('Optimizer and consumed file subepoch clocks differ')
 
     def begin_subepoch(self):
         # Source resets the counter, without copying fast weights to slow here.
@@ -282,6 +293,8 @@ class Optimization:
         if self.swa_samples >= self.period and synced:
             self.swa.update_parameters(self.model)
             self.swa_samples = 0
+        if self.epoch_end:
+            self.finish_round()
 
     @torch.no_grad()
     def finish_round(self):

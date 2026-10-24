@@ -12,6 +12,7 @@ from .config import resume_config
 from .network import make_network, TrainingForward
 from .optimization import optimization_for, optimizer_for
 from .reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
+from .source_reader import SourceBatchReader
 from .storage import atomic_write, load_json, save_json, sync_directory
 from .symmetry import augment_batch
 from .training_metrics import TrainingMetrics
@@ -151,10 +152,18 @@ def prune_checkpoints(run_dir, keep):
     return removed
 
 
+def configure_training_numerics(config, device):
+    if device.type == 'cuda':
+        # train.py enables cuDNN autotuning; TF32 matmul is a separate opt-in.
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision('high' if config['training']['use_tf32_matmul'] else 'highest')
+
+
 def initialize(run_dir, config, weights=None):
     seed = config["run"]["seed"]
     random.seed(seed); np.random.seed(seed % 2**32); torch.manual_seed(seed)
     device = device_check(config["devices"]["train"])
+    configure_training_numerics(config, device)
     model = make_network(config).to(device)
     if config['optimizer'].get('wd_floor_frac', 0):
         from .muon import initialization_rms
@@ -278,6 +287,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
         raise ValueError('Learner checkpoint snapshot differs from the iteration plan')
     reference = progress["checkpoint"] if progress else base
     device = device_check(config["devices"]["train"])
+    configure_training_numerics(config, device)
     checkpoint = load_checkpoint(root,reference,config,device)
     if progress and (checkpoint["iteration"] != iteration or checkpoint["step"] > plan["train_steps"]):
         raise ValueError("Learner checkpoint belongs to a different iteration or exceeds its budget")
@@ -289,25 +299,23 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
         from torch._inductor import config as compiler_config
         compiler_config.compile_threads=config['run']['cpu_threads']
         torch._dynamo.config.fail_on_recompile_limit_hit=True
-        # Learner batches have a fixed canvas and batch size. Keep separate
-        # graphs for different network/precision runs instead of auto-generalizing.
-        # The Transformer uses the source's NCHW/SDPA path. In torch 2.12,
-        # automatic channels-last rewriting corrupts its BF16 attention
-        # backward (finite gradients around 1e36, versus ~2.6 in eager).
-        # Preserve that storage layout while retaining full-graph compilation.
-        from .katago_configs import is_preset
-        options={'layout_optimization':False} if model.architecture=='transformer' or is_preset(model.architecture) else None
         muzero = config['agent']['algorithm'] == 'muzero'
-        forward=torch.compile(forward,fullgraph=not muzero,dynamic=muzero,options=options)
+        forward=torch.compile(forward,fullgraph=not muzero,dynamic=muzero)
     optimizer = optimizer_for(model,config); optimizer.load_state_dict(checkpoint["optimizer"])
     optimization = optimization_for(model, config, optimizer, checkpoint['optimization'], round_steps=plan['train_steps'])
     scaler = torch.amp.GradScaler("cuda", enabled=config["training"]["amp"] == "float16")
     scaler.load_state_dict(checkpoint["scaler"])
     restore_rng(checkpoint["rng"], device)
     step, total = (checkpoint["step"] if progress else 0), checkpoint["total_steps"]
-    reader = BatchReader(root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
-                         config["run"]["seed"]+iteration, checkpoint["reader"] if progress else None,
-                         max_batches=plan['train_steps']-step)
+    source_clock = hasattr(optimization, 'epoch_steps')
+    reader_args = (root/"snapshots"/plan["snapshot_id"],plan["batch_size"],config["training"]["prefetch_depth"],
+                   config["run"]["seed"] + (0 if source_clock else iteration))
+    if source_clock:
+        reader = SourceBatchReader(*reader_args, config['training']['train_steps'],config['training']['sub_epochs'],
+                                   checkpoint['reader'],max_batches=plan['train_steps']-step)
+    else:
+        reader = BatchReader(*reader_args, checkpoint['reader'] if progress else None,
+                             max_batches=plan['train_steps']-step)
     round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
     del checkpoint
     if round_metrics.state['steps'] != step:
@@ -322,15 +330,11 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             log('update', **last_fields, **window_metrics.summary(), round_metrics=round_metrics.summary())
             window_metrics = TrainingMetrics()
 
-    ends=subepoch_ends(plan['train_steps'],min(config['training']['sub_epochs'],plan['train_steps']))
+    ends = None if source_clock else subepoch_ends(plan['train_steps'], min(config['training']['sub_epochs'], plan['train_steps']))
     if not progress:
         optimization.begin_round()
-    if optimization.consumed_samples != total * plan["batch_size"] or optimization.round_batches != step:
+    if optimization.consumed_samples != total * plan["batch_size"]:
         raise ValueError("Learner consumption counters differ from optimization state")
-    expected_segment=sum(step>end for end in ends[:-1])
-    segment_start=0 if expected_segment==0 else ends[expected_segment-1]
-    if optimization.subepoch!=expected_segment or optimization.subepoch_batches!=step-segment_start:
-        raise ValueError('Learner segment counters differ from the consumed batch cursor')
     amp = config["training"]["amp"]
     if device.type != "cuda" and amp != "off":
         raise ValueError("AMP training requires a CUDA device")
@@ -343,12 +347,6 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
         if device.type=='cuda' and config['training']['cuda_prefetch']:
             prefetch=CudaBatchPrefetcher(prepared,device)
         while step < plan["train_steps"] and not stopping():
-            if step==ends[optimization.subepoch]:
-                optimization.begin_subepoch()
-            if optimization.subepoch_batches==0:
-                log('subepoch_start',iteration=iteration,subepoch=optimization.subepoch,
-                    consumed_step=step,end_step=ends[optimization.subepoch],lookahead_counter=optimization.counter,
-                    lookahead_k=getattr(optimization, 'lookahead_k', None))
             if prefetch:
                 tensors,consumed_state = prefetch.next(prefetch_next=step+1<plan["train_steps"])
             else:
@@ -358,6 +356,14 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                     if device.type == "cuda":
                         tensor = tensor.pin_memory()
                     tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
+            if source_clock:
+                optimization.prepare_batch(consumed_state)
+            elif step==ends[optimization.subepoch]:
+                optimization.begin_subepoch()
+            if optimization.subepoch_batches==0:
+                log('subepoch_start',iteration=iteration,subepoch=optimization.subepoch,
+                    consumed_step=step,end_step=(step+consumed_state['subepoch_steps'] if source_clock else ends[optimization.subepoch]),
+                    lookahead_counter=optimization.counter,lookahead_k=getattr(optimization,'lookahead_k',None))
             symmetry = int(torch.randint(8, ()).item()) if config['training']['d4_augmentation'] else 0
             # White Hex canonicalization also applies when augmentation is off.
             tensors = augment_training_batch(tensors, symmetry, spec)
@@ -409,7 +415,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                     grad_norm=values[len(components)])
             optimization.after_step(successful=not skipped)
             step += 1; total += 1
-            if step == plan['train_steps']:
+            if not source_clock and step == plan['train_steps']:
                 optimization.finish_round()
             unsaved = True
             diagnostics={}
@@ -432,7 +438,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
             if step % config['training']['log_every'] == 0 or save_due:
                 flush_metrics()
             del loss,pl,opl,spl,sopl,vl,components,tensors,step_losses
-            if step==plan['train_steps']:
+            if (consumed_state['epoch_end'] if source_clock else step==plan['train_steps']):
                 validate_epoch(reader.snapshot,model,forward,config,iteration,device,log)
             if save_due:
                 reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization,round_metrics)
