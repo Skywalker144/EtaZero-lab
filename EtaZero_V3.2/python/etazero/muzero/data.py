@@ -5,7 +5,7 @@ real-row weights are normalized by the snapshot's mean main-row weight; roots
 already reflect writer multiplicity. Absorbing actions are drawn by the reader's
 checkpointed RNG, while absent side continuations are fully masked.
 """
-from ..outcomes import terminal_wdl
+from ..outcomes import terminal_wdl, REVERSE_OUTCOME
 import math
 import numpy as np
 
@@ -70,6 +70,7 @@ def training_view(a, targets=TARGETS):
         # Normalizable masked targets also keep loss evaluation finite when a
         # side-only batch has no recurrent rows.
         mask = static_action_mask(RULES[a['rules'][g]], int(a['sizes'][g]), m['canvas'])
+        if RULES[a['rules'][g]]=='go':mask=np.concatenate((np.unpackbits(root['obs'][row,0],bitorder='big')[:m['canvas']**2],np.ones(1,np.uint8)))
         # Unit integer weights normalize to the same on-board uniform policy.
         result['policy'][row, 1:] = mask
         if 'opponent_policy' in targets:
@@ -86,7 +87,7 @@ def training_view(a, targets=TARGETS):
             if not step:
                 continue
             perspective = player * (-1 if step % 2 else 1)
-            terminal = outcomes[g, ::perspective]
+            terminal = outcomes[g] if perspective == 1 else outcomes[g, list(REVERSE_OUTCOME)]
             result['value'][row, step] = terminal
             if auxiliary is not None:
                 result['future_positions'][row, step] = (auxiliary[0][current] if current < hi
@@ -139,7 +140,7 @@ def validate_view(arrays, rows, canvas, steps, targets=TARGETS, game_metadata=No
               'actions': (rows, steps), 'step_weights': (rows, steps+1),
               'sequence_mask': (rows, steps+1), 'absorbing': (rows, steps+1)}
     for key in targets:
-        trailing = (spec.actions(canvas),) if key in ('policy', 'opponent_policy', 'q_values', 'q_visits') else (3,3) if key == 'td_value' else (3,) if key == 'value' else ()
+        trailing = (spec.actions(canvas),) if key in ('policy', 'opponent_policy', 'q_values', 'q_visits') else (3,4) if key == 'td_value' else (4,) if key == 'value' else ()
         if key == 'future_positions': trailing = (2, canvas, canvas)
         shapes[key] = (rows, steps+1, *trailing)
     if set(arrays) != set(shapes):

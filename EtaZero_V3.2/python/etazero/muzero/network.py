@@ -16,11 +16,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..config import network_widths
-from ..network import (NestedBottleneckBlock, MaskedBatchNorm, PolicyHead,
-                       ValueHead, InferenceNormalization, init_weights)
 from ..schema import PLANES, GLOBALS
 from ..games import SPECS, XIANGQI_MOVES, spec_for_config
-from .resnet import IdentityStem, ResidualTrunk, StemNormAct
 
 
 @dataclass(frozen=True)
@@ -74,114 +71,37 @@ def scale_gradient(tensor: torch.Tensor, scale: float) -> torch.Tensor:
     return tensor * scale + tensor.detach() * (1.0 - scale)
 
 
-class NBTTrunk(nn.Module):
-    def __init__(self, channels: int, blocks: int):
-        super().__init__()
-        widths = network_widths(channels, 'nbt')
-        self.blocks = nn.ModuleList([
-            NestedBottleneckBlock(channels, widths['mid'], i,
-                                  widths['gpool'] if i % 2 else 0)
-            for i in range(blocks)
-        ])
-        self.norm = MaskedBatchNorm(channels, 1.0 / math.sqrt(blocks + 1.0))
-        self.act = nn.Mish()
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        for block in self.blocks:
-            x = block(x, mask)
-        return self.act(self.norm(x, mask))
-
-
-def projection(inputs: int, outputs: int, architecture: str = 'nbt') -> nn.Module:
-    if inputs == outputs:
-        return nn.Identity()
-    layer = nn.Conv2d(inputs, outputs, 1, bias=False)
-    if architecture == 'nbt':
-        init_weights(layer.weight)
-    return layer
+from .source_components import Body,Prediction,component_config
 
 
 class Representation(nn.Module):
-    def __init__(self, c: NetworkConfig):
+    def __init__(self,c):
         super().__init__()
-        self.stem = nn.Conv2d(SPECS[c.game].planes, c.representation_channels, 3, padding=1, bias=False)
-        self.linear_global = nn.Linear(SPECS[c.game].globals, c.representation_channels, bias=False)
-        if c.architecture == 'nbt':
-            init_weights(self.stem.weight, 0.8)
-            init_weights(self.linear_global.weight, 0.6)
-        self.stem_act = StemNormAct(c.representation_channels) if c.architecture == 'resnet' else IdentityStem()
-        trunk = ResidualTrunk if c.architecture == 'resnet' else NBTTrunk
-        self.trunk = trunk(c.representation_channels, c.representation_blocks)
-        self.hidden_projection = projection(c.representation_channels, c.latent_channels, c.architecture)
+        self.body=Body(component_config(c.representation_channels,c.representation_blocks,c.architecture),
+                       c.canvas,SPECS[c.game].planes,SPECS[c.game].globals,c.latent_channels)
 
-    def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> torch.Tensor:
-        mask = obs[:, :1].float()
-        x = self.stem(obs * mask) + self.linear_global(globals).unsqueeze(-1).unsqueeze(-1)
-        x = self.stem_act(x, mask)
-        x = self.hidden_projection(self.trunk(x, mask))
-        return torch.cat((normalize_hidden_state(x, mask), mask), dim=1)
+    def forward(self,obs,globals):
+        mask=obs[:,:1].float()
+        return torch.cat((normalize_hidden_state(self.body(obs,globals),mask),mask),1)
 
 
 class Dynamics(nn.Module):
-    def __init__(self, c: NetworkConfig):
-        super().__init__()
-        self.canvas, self.game = c.canvas, c.game
-        moves = [(y*c.canvas+x, v*c.canvas+u) for x,y,u,v in XIANGQI_MOVES] if c.game=='xiangqi' else []
-        self.register_buffer('move_squares', torch.tensor(moves, dtype=torch.long), persistent=False)
-        self.stem = nn.Conv2d(c.latent_channels + (2 if c.game=='xiangqi' else 1), c.dynamics_channels, 3, padding=1, bias=False)
-        if c.architecture == 'nbt':
-            init_weights(self.stem.weight, 0.8)
-        self.stem_act = StemNormAct(c.dynamics_channels) if c.architecture == 'resnet' else IdentityStem()
-        trunk = ResidualTrunk if c.architecture == 'resnet' else NBTTrunk
-        self.trunk = trunk(c.dynamics_channels, c.dynamics_blocks)
-        self.hidden_projection = projection(c.dynamics_channels, c.latent_channels, c.architecture)
+    def __init__(self,c):
+        super().__init__();self.game=c.game;self.canvas=c.canvas
+        moves=[(y*c.canvas+x,v*c.canvas+u) for x,y,u,v in XIANGQI_MOVES] if c.game=='xiangqi' else []
+        self.register_buffer('move_squares',torch.tensor(moves,dtype=torch.long),persistent=False)
+        self.body=Body(component_config(c.dynamics_channels,c.dynamics_blocks,c.architecture),
+                       c.canvas,c.latent_channels+(2 if c.game=='xiangqi' else 1)+1,0,c.latent_channels)
 
-    def forward(self, hidden: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        mask = hidden[:, -1:]
-        area = self.canvas * self.canvas
-        if self.game == 'xiangqi':
-            squares = self.move_squares.index_select(0, actions)
-            action_plane = F.one_hot(squares, area).to(hidden.dtype).reshape(-1, 2, self.canvas, self.canvas)
-        elif self.game == 'go':
-            action_plane = F.one_hot(actions, area+1)[:, :area].to(hidden.dtype).reshape(-1, 1, self.canvas, self.canvas)
-        else:
-            action_plane = F.one_hot(actions, area).to(hidden.dtype).reshape(-1, 1, self.canvas, self.canvas)
-        x = self.stem(torch.cat((hidden[:, :-1] * mask, action_plane * mask), dim=1))
-        x = self.stem_act(x, mask)
-        x = self.hidden_projection(self.trunk(x, mask))
-        return torch.cat((normalize_hidden_state(x, mask), mask), dim=1)
-
-
-class Prediction(nn.Module):
-    def __init__(self, c: NetworkConfig):
-        super().__init__()
-        widths = network_widths(c.prediction_channels, 'nbt')
-        self.projection = projection(c.latent_channels, c.prediction_channels, c.architecture)
-        trunk = ResidualTrunk if c.architecture == 'resnet' else NBTTrunk
-        self.trunk = trunk(c.prediction_channels, c.prediction_blocks)
-        self.policy_head = PolicyHead(c.prediction_channels, widths['policy'], predict_q_values=c.predict_q_values, game=c.game, canvas=c.canvas)
-        self.value_head = ValueHead(c.prediction_channels, widths['value'], widths['value_hidden'])
-        self.fp32_heads = True
-
-    def forward(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        policy, value, _ = self.head_outputs(hidden)
-        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
-
-    def head_outputs(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mask = hidden[:, -1:]
-        x = self.trunk(self.projection(hidden[:, :-1] * mask), mask)
-        if self.fp32_heads:
-            with torch.autocast('cuda', enabled=False):
-                policy = self.policy_head(x.float(), mask.float())
-                value, future = self.value_head.training_outputs(x.float(), mask.float())
-        else:
-            policy = self.policy_head(x, mask)
-            value, future = self.value_head.training_outputs(x, mask)
-        return policy, value, future
-
-    def training_outputs(self, hidden):
-        policy, value, future = self.head_outputs(hidden)
-        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12], future, value[:, 13]
+    def forward(self,hidden,actions):
+        mask=hidden[:,-1:];area=self.canvas*self.canvas
+        if self.game=='xiangqi':
+            squares=self.move_squares.index_select(0,actions)
+            action=F.one_hot(squares,area).to(hidden.dtype).reshape(-1,2,self.canvas,self.canvas)
+        elif self.game=='go':action=F.one_hot(actions,area+1)[:,:area].to(hidden.dtype).reshape(-1,1,self.canvas,self.canvas)
+        else:action=F.one_hot(actions,area).to(hidden.dtype).reshape(-1,1,self.canvas,self.canvas)
+        x=self.body(torch.cat((mask,hidden[:,:-1],action),1))
+        return torch.cat((normalize_hidden_state(x,mask),mask),1)
 
 
 class MuZeroNet(nn.Module):
@@ -192,7 +112,7 @@ class MuZeroNet(nn.Module):
         self.latent_channels = config.latent_channels
         self.predict_q_values = config.predict_q_values
         self.auxiliary_losses = auxiliary_losses
-        self.norm_kind = 'fixscaleonenorm' if config.architecture == 'nbt' else 'masked_layernorm'
+        self.norm_kind = 'fixscaleonenorm'
         self.architecture = config.architecture
         self.representation = Representation(config)
         self.dynamics = Dynamics(config)
@@ -224,15 +144,12 @@ class InferenceMuZeroNet(nn.Module):
         self.model = model
         self.has_auxiliary = model.auxiliary_losses
 
-    @torch.jit.export
     def game_name(self) -> str:
         return self.model.game
 
-    @torch.jit.export
     def metadata(self) -> tuple[int, str, int]:
         return self.model.canvas, 'muzero', self.model.latent_channels
 
-    @torch.jit.export
     def raw(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         policy, value, _, _ = self.model.prediction(self.model.representation(obs, globals))
         return policy, value
@@ -242,11 +159,9 @@ class InferenceMuZeroNet(nn.Module):
         stdev = 0.5 * F.softplus(error.float() * 0.5)
         return hidden, policy[:, 0], value, policy[:, 5], stdev
 
-    @torch.jit.export
     def initial(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.predict(self.model.representation(obs, globals))
 
-    @torch.jit.export
     def recurrent(self, hidden: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.predict(self.model.dynamics(hidden, actions))
 
@@ -254,12 +169,32 @@ class InferenceMuZeroNet(nn.Module):
         return self.initial(obs, globals)
 
 
-def inference_network(model: MuZeroNet) -> InferenceMuZeroNet:
-    if model.training:
-        raise ValueError('Inference normalization conversion requires evaluation mode')
-    result = copy.deepcopy(model)
-    result.prediction.fp32_heads = False
-    if model.architecture == 'nbt':
-        for part in (result.representation, result.dynamics, result.prediction):
-            part.trunk.norm = InferenceNormalization(part.trunk.norm)
-    return InferenceMuZeroNet(result)
+class SerializedMuZero(nn.Module):
+    def __init__(self,graph,model):
+        super().__init__();self.graph=graph;self.canvas=model.canvas;self.game=model.game;self.latent_channels=model.latent_channels
+        self.has_auxiliary=model.auxiliary_losses
+
+    @torch.jit.export
+    def game_name(self)->str:return self.game
+    @torch.jit.export
+    def metadata(self)->tuple[int,str,int]:return self.canvas,'muzero',self.latent_channels
+    @torch.jit.export
+    def initial(self,obs:torch.Tensor,globals:torch.Tensor):return self.graph.initial(obs,globals)
+    @torch.jit.export
+    def recurrent(self,hidden:torch.Tensor,actions:torch.Tensor):return self.graph.recurrent(hidden,actions)
+    @torch.jit.export
+    def raw(self,obs:torch.Tensor,globals:torch.Tensor):return self.graph.raw(obs,globals)
+    def forward(self,obs:torch.Tensor,globals:torch.Tensor):return self.initial(obs,globals)
+
+
+def inference_network(model: MuZeroNet):
+    if model.training:raise ValueError('Inference export requires evaluation mode')
+    result=InferenceMuZeroNet(copy.deepcopy(model))
+    spec=SPECS[model.game];device=next(model.parameters()).device;n=model.canvas
+    obs=torch.zeros((2,spec.planes,n,n),device=device);obs[:,0]=1
+    globals=torch.zeros((2,spec.globals),device=device)
+    hidden=torch.zeros((2,model.latent_channels+1,n,n),device=device);hidden[:,-1]=1
+    actions=torch.zeros(2,dtype=torch.long,device=device)
+    with torch.no_grad():
+        graph=torch.jit.trace_module(result,{'initial':(obs,globals),'recurrent':(hidden,actions),'raw':(obs,globals)},check_trace=False)
+    return SerializedMuZero(graph,model)
