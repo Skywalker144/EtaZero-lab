@@ -1,5 +1,6 @@
 #pragma once
 #include "game.h"
+#include "config.h"
 #include <unordered_map>
 #include <unordered_set>
 namespace etazero {
@@ -11,6 +12,9 @@ public:
     size_t size() const {return entries_.size();}
     void add(const Game&,int action,double bonus,bool external,std::unordered_set<std::string>& seen);
     void add_game(const Game&,double bonus,int only_player=0);
+    void merge(const PatternBonusTable& other) {for(const auto& entry:other.entries_)entries_[entry.first]+=entry.second;}
+    static std::shared_ptr<const PatternBonusTable> load_auto(const Config&,const std::string& prefix,int canvas,const RuleOptions&);
+    static bool save_auto(const std::vector<std::string>& samples,const Config&,const std::string& prefix);
     static std::shared_ptr<const PatternBonusTable> load(const std::string& json_sources,int canvas,const RuleOptions&);
 };
 }
