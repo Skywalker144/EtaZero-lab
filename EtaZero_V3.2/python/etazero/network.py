@@ -208,7 +208,7 @@ class ValueHead(nn.Module):
         self.bias = BiasMask(width)
         self.pool = ValuePool()
         self.hidden = nn.Linear(3 * width, hidden)
-        self.out = nn.Linear(hidden, 14)
+        self.out = nn.Linear(hidden, 18)
         self.future = nn.Conv2d(channels, 2, 1, bias=False)
         self.act = nn.ReLU() if activation == 'relu' else nn.Mish()
         init_weights(self.conv.weight, activation=activation)
@@ -283,7 +283,7 @@ class PolicyValueNet(nn.Module):
     def forward_all(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Six policies, WDL, three TD WDLs and raw error; current-player W/D/L."""
         policy, value, _ = self.head_outputs(obs, globals)
-        return policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12]
+        return policy, value[:, :4], value[:, 4:16].reshape(-1, 3, 4), value[:, 16]
 
     def head_outputs(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mask = obs[:, 0:1]
@@ -304,7 +304,7 @@ class PolicyValueNet(nn.Module):
 
     def training_outputs(self, obs, globals):
         policy, value, future = self.head_outputs(obs, globals)
-        return ((policy, value[:, :3], value[:, 3:12].reshape(-1, 3, 3), value[:, 12], future, value[:, 13]),)
+        return ((policy, value[:, :4], value[:, 4:16].reshape(-1, 3, 4), value[:, 16], future, value[:, 17]),)
 
     def forward(self, obs: torch.Tensor, globals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         policy, value, _, _ = self.forward_all(obs, globals)
@@ -317,11 +317,11 @@ def make_network(config):
         return MuZeroNet(network_config(config), config.get('muzero_training', {}).get('auxiliary_losses', True))
     from .games import spec_for_config
     game = spec_for_config(config).name
-    from .katago_configs import is_preset
-    if is_preset(config['network']['architecture']):
-        from .katago_network import KataGoNet
-        return KataGoNet(**config['network'], game=game)
-    return PolicyValueNet(**config["network"], game=game)
+    from .katago_configs import source_architecture
+    from .katago_network import KataGoNet
+    options = dict(config['network'])
+    options['architecture'] = source_architecture(options['architecture'], options.get('channels'), options.get('blocks'))
+    return KataGoNet(**options, game=game)
 
 
 def action_mask(obs: torch.Tensor, actions: int, layout: str = 'points') -> torch.Tensor:
@@ -338,7 +338,7 @@ def row_mean(value, weight=None):
 
 
 def base_losses(logits, value, obs, policy, opponent_policy, opponent_policy_weight, target, soft_policy_weight_scale, row_weight=None, action_layout='points', value_scale=0.6):
-    """Float targets on the logits' device: policy/opponent [N,A], weight [N], WDL [N,3].
+    """Float targets on the logits' device: policy/opponent [N,A], weight [N], W/D/L/NR [N,4].
 
     Training logits are [N,heads,A], with the game's fixed action count A. Reduce every weighted component
     over the full batch, including zero-weight terminal opponent rows.
@@ -394,7 +394,7 @@ class VarianceTimeSoftplus(torch.autograd.Function):
 
 
 def continuation_losses(future_logits, raw_variance_time, obs, future_target, variance_target,
-                        full_game_weight, row_weight=None, variance_scale=1.0):
+                        full_game_weight, value_aux_weight, row_weight=None, variance_scale=1.0):
     mask = obs[:, :1]
     error = (torch.tanh(future_logits.float()) - future_target).square() * mask
     error = error[:, 0].sum((1, 2)) + 0.25 * error[:, 1].sum((1, 2))
@@ -402,13 +402,19 @@ def continuation_losses(future_logits, raw_variance_time, obs, future_target, va
     predicted = 40.0 * VarianceTimeSoftplus.apply(raw_variance_time.float())
     difference = (predicted - (variance_target + 1e-5)).abs()
     huber = torch.where(difference <= 50, 0.5 * difference.square(), 50 * (difference - 25))
-    variance = row_mean(0.0003 * variance_scale * full_game_weight * huber, row_weight)
+    variance = row_mean(0.0003 * variance_scale * value_aux_weight * huber, row_weight)
     return future, variance
 
 
 def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_target,
                      full_game_weight, disable_optimistic_policy, row_weight=None, action_layout='points', td_scales=(0.6, 0.6, 0.6)):
-    """Row multiplicity is already resolved; complete-game gate is independent of TD."""
+    """Source ownership gate without ownership targets: complete and non-NR.
+
+    Main value/TD and future positions retain their independent supervision.
+    Terminal identity is already present in the four-outcome target, including
+    MuZero recurrent/absorbing steps, so no extra stored mask is needed.
+    """
+    value_aux_weight = full_game_weight * (target[:, 3] == 0)
     td_logp = torch.log_softmax(td_logits.float(), dim=2)
     entropy = -(td_target * torch.log(td_target + 1e-30)).sum(2)
     td = 1.20 * row_mean(-(td_target * td_logp).sum(2) - entropy, row_weight)
@@ -420,13 +426,13 @@ def auxiliary_losses(logits, td_logits, raw_error, obs, policy, target, td_targe
     difference = (variance - error_target).abs()
     # KataGo's Huber is unnormalized, unlike torch smooth_l1_loss.
     huber = torch.where(difference <= 0.4, 0.5 * difference.square(), 0.4 * (difference - 0.2))
-    error_loss = row_mean(2.0 * full_game_weight * huber, row_weight)
+    error_loss = row_mean(2.0 * value_aux_weight * huber, row_weight)
     if disable_optimistic_policy:
         long_weight = torch.full_like(full_game_weight, 0.5)
         short_weight = long_weight
     else:
-        long_weight = (target[:, 0] + 0.5 * target[:, 1]).square() * full_game_weight
-        short_weight = torch.sigmoid(3.0 * ((actual - predicted) / torch.sqrt(variance.detach() + 0.0001) - 1.5)) * full_game_weight
+        long_weight = (target[:, 0] + 0.5 * target[:, 1]).square() * value_aux_weight
+        short_weight = torch.sigmoid(3.0 * ((actual - predicted) / torch.sqrt(variance.detach() + 0.0001) - 1.5)) * value_aux_weight
     mask = action_mask(obs, logits.size(-1), action_layout).bool()
     logp = torch.log_softmax(logits[:, 4:6].float().masked_fill(~mask[:, None], -1e9), dim=2)
     normalized = policy / policy.sum(1, keepdim=True)
@@ -465,7 +471,8 @@ def losses(logits, value, td_logits, raw_error, obs, policy, opponent_policy,
         extra = (qloss,)
     if future_target is not None:
         extra += continuation_losses(future_logits, raw_variance_time, obs, future_target,
-                                     variance_target, full_game_weight, row_weight, variance_scale)
+                                     variance_target, full_game_weight, full_game_weight * (target[:, 3] == 0),
+                                     row_weight, variance_scale)
     return (base[0] + sum(auxiliary) + sum(extra), *base[1:], *auxiliary, *extra)
 
 
@@ -501,7 +508,7 @@ class TrainingForward(nn.Module):
                 weights = (self.options['main_head_scale'],)
             if len(weights) == 2:
                 weights = (self.options.get('main_head_scale', -1), self.options.get('intermediate_head_scale', -1))
-                weights = tuple(default if scale < 0 else scale for scale, default in zip(weights, self.model.head_loss_weights))
+                weights = self.model.head_loss_weights if weights == (-1, -1) else (1.0 if weights[0] < 0 else weights[0], weights[1])
             result = tuple(sum(weight * value for weight, value in zip(weights, values)) for values in zip(*components))
             if self.attention_cap >= 0:
                 from .attention_penalty import metrics

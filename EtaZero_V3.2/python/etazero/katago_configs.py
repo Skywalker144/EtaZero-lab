@@ -72,6 +72,18 @@ def resolve(name):
     return config
 
 
+def source_architecture(name, channels=None, blocks=None):
+    aliases = {'nbt': ('b5c192nbt-fson-mish', 192, 5),
+               'plain': ('b10c128-fson-mish', 128, 10),
+               'transformer': ('b5c192h3nbttfrs', 192, 5)}
+    if name not in aliases:
+        return name
+    preset, width, depth = aliases[name]
+    if (channels is not None and channels != width) or (blocks is not None and blocks != depth):
+        raise ValueError(f'{name} is an alias for the fixed source preset {preset}; choose a named KataGo preset')
+    return preset
+
+
 def is_preset(name):
     return name not in ('nbt', 'plain', 'transformer', 'resnet')
 

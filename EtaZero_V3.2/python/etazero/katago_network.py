@@ -1,8 +1,8 @@
 """Source KataGo architectures with the EtaZero game input/output contract.
 
 All source heads remain present. Go-only outputs are not supervised by EtaZero.
-Metadata encoders accept explicit Python inputs; the game pipeline uses the
-neutral all-zero metadata vector because it has no SGF/player metadata.
+Metadata encoders require real player/game metadata. Ordinary RL uses presets
+without a metadata encoder; HumanSL inference supplies a selected source profile.
 """
 import copy
 import math
@@ -62,14 +62,11 @@ class KataGoNet(nn.Module):
             self.network.policy_head = XiangqiPolicyHead(self.network, canvas)
             if self.network.has_intermediate_head:
                 self.network.intermediate_policy_head = XiangqiPolicyHead(self.network, canvas)
-        # Select the source's public NCHW/SDPA execution path, shared by eager,
-        # compiled training and LibTorch export. Keep architecture and masks.
-        self.network.transformer_seq_layout = False
-        self.network.transformer_skip_redundant_masks = False
-        self.network.use_flex_attention = False
-        for module in self.network.modules():
-            if isinstance(module, source.NormMask):
-                module.skip_mask = False
+        for head in (self.network.value_head,) + ((self.network.intermediate_value_head,) if self.network.has_intermediate_head else ()):
+            hidden = head.linear_valuehead.in_features
+            head.linear_valuehead = nn.Linear(hidden, 4)
+            head.linear_miscvaluehead = nn.Linear(hidden, 12)
+            head.linear_moremiscvaluehead = nn.Linear(hidden, 9)
         self.network.initialize()
         self.network.set_brenorm_params(0.001, 1.0, 0.0)
 
@@ -86,7 +83,7 @@ class KataGoNet(nn.Module):
 
     def source_outputs(self, obs, globals, metadata=None):
         if self.network.metadata_encoder is not None and metadata is None:
-            metadata = obs.new_zeros((obs.shape[0], 192))
+            raise ValueError('Metadata network requires explicit metadataInputNC; ordinary RL must use a non-metadata preset')
         return self.network(obs * obs[:, 0:1], globals, input_meta=metadata)
 
     def select_outputs(self, outputs, mask):
@@ -94,17 +91,20 @@ class KataGoNet(nn.Module):
         count = 7 if self.predict_q_values else 6
         # Scalar selects avoid CPU index-tensor constants in traced CUDA Graphs.
         selected = policy[:, :count] if self.game in ('go', 'xiangqi') else policy[:, :count, :-1] * mask.flatten(2)
+        # Finite in FP16 as well: exp(-10000) is zero without inf*0 in CE.
+        nr = value[:,2] if self.game=='go' else torch.full_like(value[:,2],-10000.0)
+        td_nr = (misc[:,6],misc[:,9],more[:,4]) if self.game=='go' else (nr,nr,nr)
         return (selected,
-                torch.stack((value[:, 0], value[:, 2], value[:, 1]), 1),
-                torch.stack((torch.stack((misc[:, 4], misc[:, 6], misc[:, 5]), 1),
-                             torch.stack((misc[:, 7], misc[:, 9], misc[:, 8]), 1),
-                             torch.stack((more[:, 2], more[:, 4], more[:, 3]), 1)), 1),
+                torch.stack((value[:, 0], value[:, 3], value[:, 1], nr), 1),
+                torch.stack((torch.stack((misc[:, 4], misc[:, 10], misc[:, 5], td_nr[0]), 1),
+                             torch.stack((misc[:, 7], misc[:, 11], misc[:, 8], td_nr[1]), 1),
+                             torch.stack((more[:, 2], more[:, 8], more[:, 3], td_nr[2]), 1)), 1),
                 more[:, 0])
 
-    def training_outputs(self, obs, globals):
+    def training_outputs(self, obs, globals, metadata=None):
         mask = obs[:, 0:1]
         return tuple((*self.select_outputs(head, mask), head[6], head[2][:, 3])
-                     for head in self.source_outputs(obs, globals))
+                     for head in self.source_outputs(obs, globals, metadata))
 
     def forward_all(self, obs, globals):
         return self.select_outputs(self.source_outputs(obs, globals)[0], obs[:, 0:1])
@@ -204,6 +204,13 @@ def inference_network(model):
         raise ValueError('KataGo inference export requires evaluation mode')
     result = copy.deepcopy(model)
     result.prepare_compile()
+    # LibTorch reference export uses the source's public tensor-only branch.
+    # Training keeps the source-selected layout and fused attention execution.
+    result.network.transformer_seq_layout = False
+    result.network.transformer_skip_redundant_masks = False
+    for module in result.network.modules():
+        if isinstance(module, source.NormMask):
+            module.skip_mask = False
     result.network.has_intermediate_head = False
     result.network.use_flex_attention = False
     for module in result.modules():
