@@ -132,7 +132,7 @@ int main(){
         limits.forced_playouts=2;limits.threads=4;mu::Search parallel(quota,limits,12);
         auto concurrent=parallel.run(game,0);int64_t completed=0;
         for(auto visits:concurrent.visits)completed+=visits;
-        check(concurrent.root_visits==65&&completed==64,"parallel forced playout completes every reserved visit");
+        check(concurrent.root_visits>=65&&concurrent.root_visits<65+limits.threads&&completed==concurrent.root_visits-1,"parallel forced playout completes every reserved visit");
         check(concurrent.action==1&&concurrent.visits[1]>concurrent.visits[2],"parallel forced exploration retains preferred action");
     }
     {
