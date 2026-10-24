@@ -1,6 +1,6 @@
 #include "etazero/schema.h"
-#include "etazero/torch_backend.h"
-#include "etazero/muzero/torch_backend.h"
+#include "neuralnet/torch_backend.h"
+#include "neuralnet/muzero/torch_backend.h"
 #include <ATen/Parallel.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <iomanip>

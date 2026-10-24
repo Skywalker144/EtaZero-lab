@@ -1,7 +1,7 @@
-#include "etazero/search.h"
-#include "etazero/gumbel_search.h"
-#include "etazero/time_budget.h"
-#include "etazero/random_evaluator.h"
+#include "search/search.h"
+#include "search/gumbel_search.h"
+#include "search/time_budget.h"
+#include "neuralnet/random_evaluator.h"
 #include <iostream>
 #include <numeric>
 #include <set>
@@ -92,13 +92,26 @@ int main(){try {
     // FPU cache survives clearing the tree, is refreshed between searches, and reset clears it.
     s=settings();s.graph_search=true;s.use_eval_cache=true;s.eval_cache_min_visits=2;Probe cache(s,4);
     cache.run(state,0);check(cache.cached()>1,"cache records searched subtrees");
-    SearchRun fresh;fresh.clear_before_search=true;fresh.max_playouts=1;cache.run(state,0,fresh);
-    near(cache.cached_root_value(),0,"root retrieves previous immutable eval entry");cache.reset(4);check(cache.cached()==0,"cache clear on new game");
+    SearchRun fresh;fresh.clear_before_search=true;
+    cache.run(state,0,fresh);
+    near(cache.cached_root_value(),0,"unchanged settings retrieve prior evaluation");
+    for(int condition=0;condition<4;++condition) {
+        SearchRun changed=fresh;
+        if(condition==0)changed.max_playouts=1;
+        if(condition==1)changed.max_visits=1;
+        if(condition==2)changed.remove_root_noise=true;
+        if(condition==3)changed.max_time=0;
+        cache.run(state,0,changed);
+        near(cache.cached_root_value(),100,"changed search conditions isolate evaluation cache");
+        cache.run(state,0,fresh);
+        near(cache.cached_root_value(),0,"returning conditions reuse their own cache");
+    }
+    cache.reset(4);check(cache.cached()==0,"cache clear on new game");
     // Capped-side provenance is part of the evaluation-cache key.
     s=settings();s.graph_search=true;s.use_eval_cache=true;s.eval_cache_min_visits=2;
     s.visit_cap_contempt=4;s.visit_cap_contempt_player=0;Probe cap_cache(s,4);
-    SearchRun serving;serving.search_for_player=1;cap_cache.run(state,0,serving);
-    serving.search_for_player=-1;serving.max_playouts=1;cap_cache.run(state,0,serving);
+    SearchRun serving;serving.clear_before_search=true;serving.search_for_player=1;cap_cache.run(state,0,serving);
+    serving.search_for_player=-1;cap_cache.run(state,0,serving);
     near(cap_cache.cached_root_value(),100,"Changed capped side must not reuse the other side's cached FPU");
     serving.search_for_player=1;cap_cache.run(state,0,serving);
     near(cap_cache.cached_root_value(),0,"Returning capped side can reuse its own immutable entry");

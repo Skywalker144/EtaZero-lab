@@ -1,5 +1,5 @@
-#include "etazero/backend_factory.h"
-#include "etazero/search.h"
+#include "neuralnet/backend_factory.h"
+#include "search/search.h"
 #include <iostream>
 #include <iomanip>
 using namespace etazero;

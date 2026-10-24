@@ -1,5 +1,5 @@
-#include "etazero/muzero/cuda_backend.h"
-#include "etazero/game.h"
+#include "neuralnet/muzero/cuda_backend.h"
+#include "game/game.h"
 #include <fstream>
 #include <iostream>
 #include <iomanip>

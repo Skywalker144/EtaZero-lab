@@ -1,5 +1,6 @@
-#include "etazero/record.h"
-#include "etazero/search_limits.h"
+#include "search/search.h"
+#include "dataio/record.h"
+#include "program/search_limits.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>

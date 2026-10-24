@@ -1,6 +1,6 @@
-#include "etazero/go_position.h"
-#include "etazero/sampling.h"
-#include "etazero/pattern_bonus.h"
+#include "game/go_position.h"
+#include "program/sampling.h"
+#include "search/pattern_bonus.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>

@@ -1,5 +1,5 @@
-#include "etazero/record.h"
-#include "etazero/search.h"
+#include "dataio/record.h"
+#include "search/search.h"
 #include <iostream>
 #include <limits>
 using namespace etazero;

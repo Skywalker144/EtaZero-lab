@@ -1,5 +1,6 @@
-#include "etazero/gumbel_search.h"
-#include "etazero/random_evaluator.h"
+#include "search/muzero/gumbel_search.h"
+#include "search/gumbel_search.h"
+#include "neuralnet/random_evaluator.h"
 #include <cmath>
 #include <iostream>
 #include <numeric>
@@ -29,8 +30,36 @@ struct TestMuBackend : muzero::Backend {
         std::vector<muzero::InferenceOutput> out;for(const auto& in:inputs)out.push_back(output(std::dynamic_pointer_cast<const State>(in.latent)->depth+1));return out;
     }
 };
+struct HumanPolicy : Evaluator {
+    Evaluation evaluate(const std::vector<float>&) override {
+        Evaluation e;e.logits.assign(36,0);e.logits[2]=5;return e;
+    }
+};
+template<class SearchType,class EvaluatorType> void human_target_check(EvaluatorType& evaluator) {
+    Game game(5,6,Rule::FREESTYLE);
+    SearchSettings s{17,1,1,1,0,1,false};s.value_weight_exponent=0;s.human_evaluator=std::make_shared<HumanPolicy>();
+    for(bool sample:{false,true})for(int budget:{0,1,4,17}) {
+        GumbelSettings g;g.noise_scale=0;g.sample_visits=sample;
+        SearchRun options;options.max_visits=budget+1;options.collect_analysis=true;
+        s.human_sl_chosen_move_proportion=0;SearchType original(evaluator,s,g,12);
+        auto before=original.run(game,2,options);
+        s.human_sl_chosen_move_proportion=.75;SearchType mixed(evaluator,s,g,12);
+        auto after=mixed.run(game,2,options);
+        check(before.visits==after.visits,"HumanSL behavior must not change Gumbel visits");
+        check(before.policy==after.policy&&before.policy_target==after.policy_target,
+              "HumanSL must preserve dense Gumbel improved policy and quantization");
+        check(before.policy_surprise==after.policy_surprise,"HumanSL must preserve Gumbel surprise");
+        check(before.move_policy!=after.move_policy,"HumanSL changes Gumbel behavior");
+        check(before.statistics_policy==after.statistics_policy,"Gumbel statistics use improved policy");
+        if(sample&&budget>0)for(size_t a=0;a<before.visits.size();++a)
+            check(std::abs(before.move_policy[a]-double(before.visits[a])/budget)<1e-12,
+                  "Gumbel stores untempered selection weights before HumanSL mixture");
+        check(game.legal(after.action),"HumanSL sampled action legal");
+    }
+}
 template<bool Full> void alpha() {
     struct Uniform : Evaluator {Evaluation evaluate(const std::vector<float>&) override{return {std::vector<double>(36,0),{0,1,0}};}} evaluator;
+    human_target_check<GumbelSearch<Full>>(evaluator);
     SearchSettings s{36,4,1,1,0,1,false};s.value_weight_exponent=0;
     GumbelSettings g;g.noise_scale=0;g.max_num_considered_actions=3;g.rescale_q_values=false;g.c_scale=.1;
     GumbelSearch<Full> search(evaluator,s,g,17);Bandit state;
@@ -76,6 +105,7 @@ template<bool Full> void alpha() {
 template<bool Full> void muzero_case() {
     std::vector<std::unique_ptr<muzero::Backend>> backends;backends.push_back(std::make_unique<TestMuBackend>());
     muzero::BatchEvaluator evaluator(std::move(backends),6,8,0,0,false,0,17);
+    human_target_check<muzero::GumbelSearch<Full>>(evaluator);
     SearchSettings s{36,4,1,1,0,1,false};s.value_weight_exponent=0;GumbelSettings g;g.noise_scale=0;
     muzero::GumbelSearch<Full> search(evaluator,s,g,17);
     for(Rule rule:{Rule::FREESTYLE,Rule::RENJU,Rule::HEX})for(int budget:{0,1,2,7,17,31}) {

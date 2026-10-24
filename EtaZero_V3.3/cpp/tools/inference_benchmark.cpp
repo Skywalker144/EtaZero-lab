@@ -1,6 +1,6 @@
-#include "etazero/game.h"
+#include "game/game.h"
 // Time the production inference path, including packing, transfers and outputs.
-#include "etazero/backend_factory.h"
+#include "neuralnet/backend_factory.h"
 #include "etazero/schema.h"
 #include <ATen/Parallel.h>
 #include <algorithm>

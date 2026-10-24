@@ -1,6 +1,6 @@
-#include "etazero/game.h"
-#include "etazero/game_config.h"
-#include "etazero/algorithm.h"
+#include "game/game.h"
+#include "program/game_config.h"
+#include "search/algorithm.h"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>

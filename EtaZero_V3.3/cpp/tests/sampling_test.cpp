@@ -1,4 +1,5 @@
-#include "etazero/sampling.h"
+#include "search/search.h"
+#include "program/sampling.h"
 #include <iostream>
 #include <mutex>
 using namespace etazero;

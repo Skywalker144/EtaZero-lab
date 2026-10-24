@@ -1,7 +1,7 @@
-#include "etazero/hex.h"
-#include "etazero/game.h"
-#include "etazero/opening.h"
-#include "etazero/algorithm.h"
+#include "game/hex.h"
+#include "game/game.h"
+#include "program/opening.h"
+#include "search/algorithm.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>

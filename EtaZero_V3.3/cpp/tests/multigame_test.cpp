@@ -1,9 +1,10 @@
-#include "etazero/game.h"
-#include "etazero/record.h"
-#include "etazero/random_evaluator.h"
-#include "etazero/muzero/search.h"
-#include "etazero/gumbel_search.h"
-#include "etazero/sampling.h"
+#include "search/muzero/gumbel_search.h"
+#include "game/game.h"
+#include "dataio/record.h"
+#include "neuralnet/random_evaluator.h"
+#include "search/muzero/search.h"
+#include "search/gumbel_search.h"
+#include "program/sampling.h"
 #include <iostream>
 using namespace etazero;
 void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}

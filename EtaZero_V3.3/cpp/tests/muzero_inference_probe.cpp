@@ -1,6 +1,6 @@
 #include "etazero/schema.h"
 // Development parity probe; deliberately not an application search/runtime path.
-#include "etazero/muzero/torch_backend.h"
+#include "neuralnet/muzero/torch_backend.h"
 #include "etazero/schema.h"
 #include <ATen/Parallel.h>
 #include <iostream>

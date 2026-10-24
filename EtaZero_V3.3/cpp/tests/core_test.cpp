@@ -1,6 +1,7 @@
-#include "etazero/gomoku.h"
-#include "etazero/record.h"
-#include "etazero/random_evaluator.h"
+#include "search/search.h"
+#include "game/gomoku.h"
+#include "dataio/record.h"
+#include "neuralnet/random_evaluator.h"
 #include <iostream>
 #include <filesystem>
 #include <limits>

@@ -1,5 +1,5 @@
-#include "etazero/opening.h"
-#include "etazero/random_evaluator.h"
+#include "program/opening.h"
+#include "neuralnet/random_evaluator.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>

@@ -1,5 +1,5 @@
-#include "etazero/muzero/search.h"
-#include "etazero/gumbel_search.h"
+#include "search/muzero/search.h"
+#include "search/muzero/gumbel_search.h"
 #include <cmath>
 #include <iostream>
 using namespace etazero;
@@ -76,7 +76,54 @@ struct PolicyMassBackend : QuotaBackend {
         return result;
     }
 };
+struct CoordinateBackend : mu::Backend {
+    int canvas;
+    CoordinateBackend(GameSpec spec,int n):Backend(spec),canvas(n){}
+    mu::InferenceOutput output() {
+        Evaluation e;e.logits.assign(spec_.actions(canvas),0);return {std::make_shared<State>(),e};
+    }
+    std::vector<mu::InferenceOutput> initial(const InferenceInputs& inputs) override {
+        return std::vector<mu::InferenceOutput>(inputs.size(),output());
+    }
+    std::vector<mu::InferenceOutput> recurrent(const std::vector<mu::InferenceAction>& inputs) override {
+        return std::vector<mu::InferenceOutput>(inputs.size(),output());
+    }
+};
+struct CoordinateHuman : Evaluator {
+    int canvas;std::vector<float> input;
+    CoordinateHuman(GameSpec spec,int n):canvas(n){spec_=spec;}
+    Evaluation evaluate(const std::vector<float>& obs) override {
+        input=obs;Evaluation e;e.logits.resize(spec_.actions(canvas));
+        for(size_t a=0;a<e.logits.size();++a)e.logits[a]=double(a%17)/4;
+        return e;
+    }
+};
+void human_coordinates() {
+    for(Rule rule:{Rule::HEX,Rule::XIANGQI}) {
+        int n=rule==Rule::XIANGQI?10:6;Game game(rule==Rule::XIANGQI?10:5,n,rule);
+        for(int a:game.static_actions())if(game.legal(a)){game.play(a);break;}
+        check(game.player()==-1,"asymmetric second-player fixture");
+        auto human=std::make_shared<CoordinateHuman>(game.spec(),n);
+        std::vector<std::unique_ptr<mu::Backend>> backends;
+        backends.push_back(std::make_unique<CoordinateBackend>(game.spec(),n));
+        mu::BatchEvaluator evaluator(std::move(backends),n,8,0,0,false,0,1);
+        for(int symmetry=0;symmetry<game.spec().symmetries;++symmetry) {
+            auto direct=human->evaluate_position(game.observation(),game.player(),symmetry);
+            auto expected_input=human->input;
+            std::vector<int> legal;for(int a:game.static_actions())if(game.legal(a))legal.push_back(a);
+            auto expected=source_policy_probabilities(direct,legal,1,0);
+            SearchSettings settings{1,1,1,1,0,1,false};settings.human_evaluator=human;
+            settings.nn_randomize=false;settings.nn_symmetry=symmetry;
+            mu::Search search(evaluator,settings,12);SearchRun options;options.collect_analysis=true;options.max_playouts=1;
+            auto actual=search.run(game,0,options);
+            check(expected_input==human->input,"secondary AZ gets exactly one player/symmetry transform");
+            for(int a:legal)check(std::abs(actual.human_policy[a]-expected[a])<1e-12,
+                                  "secondary AZ policy restored once to real action coordinates");
+        }
+    }
+}
 int main(){
+    human_coordinates();
     Game game(5,6,Rule::FREESTYLE);game.play(0);
     SearchSettings settings{79,1,1000,1,0,.3,false};settings.value_weight_exponent=0;
     Probe probe;auto evaluator=service(probe);mu::Search search(*evaluator,settings,12);
@@ -164,15 +211,24 @@ int main(){
         auto build=[](){std::vector<std::unique_ptr<mu::Backend>> models;models.push_back(std::make_unique<QuotaBackend>());return std::make_shared<mu::BatchEvaluator>(std::move(models),6,8,0,0,false,0,5);};
         auto primary=build(),secondary=build();primary->secondary=secondary;
         SearchSettings s{64,1,2,1,0,1,false};s.value_weight_exponent=0;s.human_sl_root_weightless=1;s.human_sl_opponent_weightful=1;s.human_sl_chosen_move_proportion=1;
-        mu::Search human(*primary,s,9);auto r=human.run(game,0);
+        mu::Search human(*primary,s,9);SearchRun report;report.collect_analysis=true;auto r=human.run(game,0,report);
+        bool visited=false;for(const auto& c:r.analysis)if(c.node_visits>0){
+            visited=true;check(c.node_weight>0&&c.weight==0&&r.visits[c.action]==0,
+                               "weightless node visits must report zero edge weight");
+            for(size_t i=1;i<c.pv_edge_visits.size();++i)
+                check(c.pv_edge_visits[i]>0,"PV follows visited edges, excluding weightless-only descendants");}
+        check(visited,"weightless analysis includes evaluated nodes");
         check(r.new_playouts==65&&r.root_visits==1&&r.q_visits[1]>r.visits[1],"MuZero secondary latent weightless backup");
         s.human_sl_root_weightless=0;s.human_sl_opponent_weightful=0;s.human_sl_chosen_move_proportion=0;
         for(int algorithm=0;algorithm<3;++algorithm){std::unique_ptr<GameSearch> controlled;
             if(algorithm==0)controlled=std::make_unique<mu::Search>(*primary,s,9);
             else if(algorithm==1)controlled=std::make_unique<mu::GumbelSearch<false>>(*primary,s,GumbelSettings{},9);
             else controlled=std::make_unique<mu::GumbelSearch<true>>(*primary,s,GumbelSettings{},9);
-            controlled->set_root_focus({1},{1},.8);r=controlled->run(game,0);
+            controlled->set_root_focus({1},{1},.8);r=controlled->run(game,0,report);
             check(r.new_playouts==65&&r.q_visits[1]>r.visits[1],"MuZero focus descendants don't consume root budget");
+            for(const auto& c:r.analysis)if(c.node_visits>0)
+                check(std::abs(c.weight-c.node_weight*double(r.visits[c.action])/c.node_visits)<1e-12,
+                      "focus analysis scales edge weight by completed edge/node visits");
             SearchRun constraints;constraints.avoid_until[game.player()==1?0:1].assign(36,1);constraints.avoid_until[game.player()==1?0:1][2]=0;
             controlled->set_root_focus({}, {},0);r=controlled->run(game,0,constraints);
             check(r.visits[2]==64&&r.action==2,"MuZero constrained root across search algorithms");

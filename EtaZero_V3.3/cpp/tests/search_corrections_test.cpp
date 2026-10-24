@@ -1,5 +1,5 @@
-#include "etazero/search.h"
-#include "../external/katago/neuralnet/nninputs.h"
+#include "search/search.h"
+#include "neuralnet/nninputs.h"
 #include <cmath>
 #include <iostream>
 using namespace etazero;

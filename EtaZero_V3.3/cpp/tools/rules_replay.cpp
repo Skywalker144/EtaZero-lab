@@ -1,5 +1,5 @@
 // Offline trajectory audit uses the same complete rule state as selfplay.
-#include "etazero/game.h"
+#include "game/game.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
 using namespace etazero;

@@ -1,4 +1,5 @@
-#include "etazero/gumbel_search.h"
+#include "search/muzero/search.h"
+#include "search/gumbel_search.h"
 #include <cmath>
 #include <iostream>
 #include <numeric>

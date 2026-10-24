@@ -1,7 +1,7 @@
-#include "etazero/gomoku.h"
+#include "game/gomoku.h"
 // Built only by tests/reference/check_katagomo_rules.py against the fixed external source.
 #include "ForbiddenPointFinder.h"
-#include "etazero/rules.h"
+#include "game/rules.h"
 #include <iostream>
 #include <random>
 #include <map>
