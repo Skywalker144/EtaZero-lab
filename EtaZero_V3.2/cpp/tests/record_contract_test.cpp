@@ -54,7 +54,7 @@ int main(int argc,char** argv) {
     }
     size_t limit=shards && argc>3?std::stoull(argv[3]):1000;
     double first_min=shards && argc>4?std::stod(argv[4]):1;
-    RecordWriter writer(path,{"test","2","model","config","source",1,0},limit,1,first_min,123);
+    RecordWriter writer(path,{"test","2","model","config","source",1,0,0,false,false,true},limit,1,first_min,123);
     int games=shards && argc>5?std::stoi(argv[5]):1;
     for(int g=0;g<games;++g) {record.id=g;record.seed=7+13*g;writer.enqueue(record);}
     writer.finish();
@@ -62,7 +62,7 @@ int main(int argc,char** argv) {
         // Storage has no board-area bound; legality belongs to the game implementation.
         while(record.steps.size()<=static_cast<size_t>(record.canvas*record.canvas))
             record.steps.push_back(record.steps.front());
-        RecordWriter longer(path/"long",{"test","long","model","config","source",1,0},1000,1,1,123);
+        RecordWriter longer(path/"long",{"test","long","model","config","source",1,0,0,false,false,true},1000,1,1,123);
         longer.enqueue(record);longer.finish();
         std::filesystem::remove_all(path);
     }

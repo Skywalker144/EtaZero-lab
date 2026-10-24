@@ -160,10 +160,10 @@ int main() {
         double expected_probability=(1-0.0002)*2/26+0.0002/25;
         check(std::abs(preferred-draws*expected_probability)<5*std::sqrt(draws*expected_probability*(1-expected_probability)),
               "Policy initialization samples temperature-transformed network probabilities");
-        // Select a seed whose source-sized rare coin fires. A logit gap 200
-        // makes an ordinary policy move deterministic; a different first move
-        // therefore demonstrates the uniform outlier branch.
-        settings.policy_temperature=1;PolicyBiased peaked(200);bool rare=false;
+        // A gap of 80 retains positive FP32 probabilities, while making an
+        // ordinary draw effectively deterministic. Only the rare uniform
+        // branch can select another action in this fixture.
+        settings.policy_temperature=1;PolicyBiased peaked(80),underflowed(200);bool rare=false;
         constexpr uint64_t mask=(1ULL<<53)-1;
         for(int seed=0;seed<200000 && !rare;++seed) {
             std::mt19937_64 probe(seed);double first=static_cast<double>(probe()&mask)/static_cast<double>(1ULL<<53);
@@ -172,12 +172,20 @@ int main() {
             Game game(5,5,Rule::FREESTYLE);std::mt19937_64 rng(seed);
             auto prefix=initialize_opening(game,settings,peaked,rng);
             rare=!prefix.actions.empty() && prefix.actions.front()!=0;
+            if(rare) {
+                Game tiny(5,5,Rule::FREESTYLE);std::mt19937_64 same_rng(seed);
+                auto tiny_prefix=initialize_opening(tiny,settings,underflowed,same_rng);
+                check(!tiny_prefix.actions.empty() && tiny_prefix.actions.front()==0,
+                      "Uniform outlier excludes probabilities that underflow to zero in FP32");
+            }
         }
         check(rare,"Policy initialization retains .0002 uniform outlier branch");
         Game position(5,7,Rule::STANDARD);auto input=position.observation();
         RandomBackend a(7,7),b(7,7),other(7,8);
         auto batch=a.evaluate({&input,&input});auto single=b.evaluate({&input})[0];
-        check(batch[0].logits==batch[1].logits && batch[0].logits==single.logits && batch[0].wdl==single.wdl,"Random evaluator independent of batching");
+        auto next=b.evaluate({&input})[0];
+        check(batch[0].logits!=batch[1].logits && batch[0].logits==single.logits && batch[0].wdl==single.wdl &&
+              batch[1].logits==next.logits && batch[1].wdl==next.wdl,"Random server advances per request across batch boundaries");
         check(batch[0].logits!=other.evaluate({&input})[0].logits,"Random evaluator seed changes output");
         check(std::isfinite(single.value()) && std::abs(single.value())<=1,"Random value is bounded");
         std::filesystem::remove(path);

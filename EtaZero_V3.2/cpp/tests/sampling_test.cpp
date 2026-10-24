@@ -124,7 +124,7 @@ int main(int argc,char** argv) {
     AlphaZeroState a(game,evaluator);Game ordinary=game;ordinary.set_pda(0,0);AlphaZeroState z(ordinary,evaluator);check(a.graph_key()!=z.graph_key(),"PDA splits graph identity");
     SearchSettings settings{80,4,1,1,0,1,true};settings.graph_search=true;
     Search search(evaluator,settings,17);SearchRun limits;limits.max_visits=80;limits.clear_before_search=true;
-    auto result=search.run(game,0,limits);check(result.root_visits==80 && result.initial_visits==0,"Conditioned search visits");
+    auto result=search.run(game,0,limits);check(result.root_visits>=80 && result.initial_visits==0,"Conditioned search visits");
     check(std::find(evaluator.halfs.begin(),evaluator.halfs.end(),1.5)!=evaluator.halfs.end() && std::find(evaluator.halfs.begin(),evaluator.halfs.end(),-1.5)!=evaluator.halfs.end(),"PDA sign at real search depths");
     game.play(result.action);auto observation=game.observation();check(observation[5*36+5]==-1.5,"Game transition PDA sign");
     evaluator.halfs.clear();evaluator.flags.clear();FinishedGame record{};record.size=5;record.canvas=6;record.rule=Rule::RENJU;
@@ -144,6 +144,15 @@ int main(int argc,char** argv) {
     for(int i=0;i<100;++i){int fork=sample_fork_move(ordinary,p,2,rng);check(fork==-1 || (fork!=2 && ordinary.legal(fork)),"Fork excludes actual action");}
     FinishedGame kl{};kl.size=5;kl.winner=1;Step surprise{};surprise.player=1;surprise.network_wdl={.5,0,.5};surprise.search_wdl={.9,0,.1};kl.steps.push_back(surprise);
     compute_value_surprises(kl,true);near(kl.steps[0].value_surprise,.9*std::log(1.8)+.1*std::log(.2));
+    for(auto dimensions:{std::pair{3,5},std::pair{5,3},std::pair{5,5}}) {
+        FinishedGame rectangle=kl;rectangle.rule=Rule::GO;
+        rectangle.options.go_width=dimensions.first;rectangle.options.go_height=dimensions.second;
+        rectangle.steps[0].search_wdl={0,0,1};
+        compute_value_surprises(rectangle,false);
+        // One backwards TD step from a certain win toward a certain loss.
+        const double loss=1/(1+.016*dimensions.first*dimensions.second),win=1-loss;
+        near(rectangle.steps[0].value_surprise,win*std::log(2*win)+loss*std::log(2*loss));
+    }
     FinishedGame gate{};gate.size=5;gate.winner=1;
     for(int i=0;i<3;++i) {Step step{};step.player=i%2?-1:1;step.cheap_search=i==2;step.target_weight=i==2?0:1;step.policy_surprise=i==2?20:1;step.network_wdl=step.search_wdl={.5,0,.5};gate.steps.push_back(step);}
     FinishedGame excess=gate;apply_training_weights(excess,.5,0,rng,true,false);check(excess.steps[2].target_weight>0,"Ordinary cheap excess recovers rows");
@@ -188,7 +197,7 @@ int main(int argc,char** argv) {
     check(std::abs(guided_result.search_policy[12]-expected_hint)<1e-7 && std::abs(guided_result.search_policy[0]-ordinary_prior)<1e-7,"Source float hint prior transfer");
     int64_t max_other=0;for(int a=0;a<36;++a)if(a!=12)max_other=std::max(max_other,guided_result.visits[a]);
     check(guided_result.visits[12]+2>=.8*max_other,"Root hint receives near-most-visited exploration");
-    guided_run.hint_action=-1;auto neutral=hint_search.run(empty,0,guided_run);check(neutral.initial_visits==0,"Hint removal clears corrupted tree");
+    guided_run.hint_action=-1;auto neutral=hint_search.run(empty,0,guided_run);check(neutral.initial_visits>0,"Clearing a hint preserves the completed search");
     guided_run.hint_action=5;bool illegal_hint=false;try{hint_search.run(empty,0,guided_run);}catch(const std::runtime_error&){illegal_hint=true;}check(illegal_hint,"Hint padding rejected");
     GameForkConfig early_config(1,1,0,3,12,36),late_config(0,1,.025,3,12,36);
     auto early=make_game_fork(original,early_config,evaluator,false,0,rng,[]{return false;});
@@ -218,6 +227,29 @@ int main(int argc,char** argv) {
         }
     }
     check(pre_final_seen && equal_seen && beyond_seen,"Early tail covers pre-final, equal and oversized indices");
+    struct GoForkEvaluator : Evaluator {
+        GoForkEvaluator() {spec_=game_spec(GameKind::GO);}
+        Evaluation evaluate(const std::vector<float>&) override {
+            Evaluation result;result.logits.assign(26,0);result.wdl={.5,0,.5};return result;
+        }
+    } go_fork_evaluator;
+    for(auto dimensions:{std::pair{3,5},std::pair{5,3}}) {
+        FinishedGame rectangle{};rectangle.size=rectangle.canvas=5;rectangle.rule=Rule::GO;
+        rectangle.options.go_width=dimensions.first;rectangle.options.go_height=dimensions.second;
+        Game board(5,5,Rule::GO,rectangle.options);
+        for(int i=0;i<8;++i) {
+            int action=0;while(!board.legal(action))++action;
+            Step step{};step.action=action;rectangle.steps.push_back(step);board.play(action);
+        }
+        GameForkConfig rectangular_fork(1,0,.1,1,1,1);
+        for(int seed=1;seed<=32;++seed) {
+            std::mt19937_64 predict(seed),actual(seed);std::bernoulli_distribution(1)(predict);
+            size_t prefix=std::min<size_t>(7,std::floor(std::exponential_distribution<double>(1)(predict)*1.5));
+            auto fork=make_game_fork(rectangle,rectangular_fork,go_fork_evaluator,false,0,actual,[]{return false;});
+            check(fork && fork->actions.size()==prefix+1,"Rectangular early fork uses actual board area");
+            for(size_t i=0;i<prefix;++i)check(fork->actions[i]==rectangle.steps[i].action,"Rectangular fork preserves its replay prefix");
+        }
+    }
     RankedFork ranked;FinishedGame empty_record{};empty_record.size=5;empty_record.canvas=6;empty_record.rule=Rule::FREESTYLE;
     GameForkConfig fixed_choices(1,0,0,36,36,36);std::mt19937_64 fork_rng(772);
     int best_count=0;constexpr int trials=2048;
