@@ -52,7 +52,7 @@ def test_shuffle_parent_death_race_exits_before_work():
 def exported(root):
     path=root/'models/fixed/model.pt';path.parent.mkdir(parents=True);path.write_bytes(b'complete artifact')
     info={'id':'fixed','path':'models/fixed/model.pt','canvas':6,
-          'checkpoint':{'id':'fixed'},'weights':'model','bytes':path.stat().st_size}
+          'checkpoint':{'id':'fixed'},'weights':'model','backend':'torchscript','algorithm':'alphazero','files':{'model.pt':path.stat().st_size},'bytes':path.stat().st_size}
     save_json(path.parent/'manifest.json',info)
     return path,info
 

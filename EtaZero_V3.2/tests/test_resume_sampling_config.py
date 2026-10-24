@@ -155,7 +155,7 @@ def test_python_and_native_reject_invalid_sampling_fields(tmp_path,enabled,secti
         validate(c)
     result=native_selfplay(tmp_path,c)
     assert result.returncode!=0
-    assert 'Invalid opening' in result.stderr or 'Invalid early/game fork' in result.stderr,result.stderr
+    assert 'Invalid opening' in result.stderr or 'Invalid early/game fork' in result.stderr or f'Invalid number: {section}.{key}' in result.stderr,result.stderr
 
 
 def test_disabled_sampling_accepts_valid_boundaries_and_generates_games(tmp_path):

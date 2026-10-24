@@ -16,11 +16,12 @@ from etazero.shuffle import build_snapshot,desired_window,window_sources,_groups
 from etazero.storage import save_npz,save_json,sha256
 from etazero.network import make_network,TrainingForward
 from etazero.training import validate_epoch
-from test_python import winning_record
+from test_python import winning_record, source_fields
+from etazero.source_data import encode_view,decode_view
 
 
 @pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
-def test_game_holdout_keeps_split_trajectories_and_side_rows_together(tmp_path, monkeypatch, algorithm):
+def test_file_holdout_partitions_complete_source_shards_with_side_rows(tmp_path, monkeypatch, algorithm):
     from collections import Counter
     import subprocess
     from etazero.config import write_native
@@ -40,34 +41,29 @@ def test_game_holdout_keeps_split_trajectories_and_side_rows_together(tmp_path, 
                     '--games','4','--output',str(tmp_path/'selfplay'),'--run-id','test','--attempt-id','test',
                     '--config-id','test','--source-id','test','--iteration','1','--worker','0','--seed','734'],
                    check=True,capture_output=True,text=True,timeout=60)
-    entries=[];games={};targets=training_targets(c);side_rows=0
+    from etazero.source_data import source_view
+    entries=[];files={};targets=training_targets(c);side_rows=0
     def fingerprints(view):
-        return Counter(tuple(view[key][i].tobytes() for key in sorted(view)) for i in range(len(view['value'])))
+        return Counter(tuple(view[key][i].tobytes() for key in sorted(view)) for i in range(len(view['globalTargetsNC'])))
     for path in sorted((tmp_path/'selfplay').glob('*.npz')):
-        raw=read_raw(path);m=metadata(raw);view=training_view(raw,targets)
+        raw=read_raw(path);m=metadata(raw)
         entries.append(dict(path=str(path.relative_to(tmp_path)),metadata=m,weight_stats=game_weight_statistics(raw)))
-        _,starts,ends=game_row_ranges(raw);offsets=np.r_[0,np.cumsum(ends-starts)]
+        files[str(path)]=fingerprints(source_view(raw,targets))
         side_rows+=len(raw['side_players'])
-        for i,game in enumerate(raw['game_ids']):
-            identity=game_identity(m,game)
-            games.setdefault(identity,[]).append({k:v[offsets[i]:offsets[i+1]] for k,v in view.items()})
-    assert side_rows and len(games)==4 and all(len(parts)>1 for parts in games.values())
-    held_out=sorted(games)[0]
-    monkeypatch.setattr('etazero.shuffle.validation_game',lambda identity:identity==held_out)
+    assert side_rows and len(files)>4
+    held_out=sorted(files)[0]
+    monkeypatch.setattr('etazero.shuffle.validation_file',lambda path:path==held_out)
     expected=[Counter(),Counter()]
-    for identity,parts in games.items():
-        for view in parts:expected[identity==held_out].update(fingerprints(view))
+    for path,rows in files.items():expected[path==held_out].update(rows)
     snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,entries,c)
     manifest=json.loads((snapshot/'manifest.json').read_text())
+    assert len(manifest['validation_sources'])==1
     for partition, key in enumerate(('files','validation_files')):
         actual=Counter()
         for info in manifest[key]:
             path=snapshot/'data'/('validation' if partition else '')/info['path']
             with np.load(path) as arrays:actual.update(fingerprints(dict(arrays)))
         assert actual==expected[partition]
-    if algorithm=='muzero':
-        stats=[g for e in manifest['sources'] for g in e['weight_stats']]
-        assert held_out not in {g['id'] for g in stats}
     hashes={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
     prune_derived(tmp_path,[snapshot.name],set());restore_snapshot(snapshot)
     assert hashes=={str(p.relative_to(snapshot)):sha256(p) for p in (snapshot/'data').rglob('*.npz')}
@@ -80,7 +76,8 @@ def id_snapshot(root,counts,validation=False):
         arrays={k:v[np.arange(n)%len(v)].copy() for k,v in base.items()}
         ids=np.arange(n)+index*100
         arrays['globals'][:,5]=ids
-        arrays['q_values'][:,0]=ids
+        arrays['q_values'][:,0]=ids/32000
+        arrays=encode_view(arrays)
         filename=f'{index:03}.npz';save_npz(directory/filename,arrays)
         info={'path':filename,'rows':n,'sha256':sha256(directory/filename)};files.append(info)
         if validation:
@@ -144,7 +141,7 @@ def test_complete_file_prefixes_no_repeat_exhaustion_resume_and_prefetch(tmp_pat
                 except StopIteration:break
                 other=resumed.next()
                 for key in batch:np.testing.assert_array_equal(batch[key],other[key])
-                np.testing.assert_array_equal(batch['globals'][:,5],batch['q_values'][:,0])
+                np.testing.assert_allclose(batch['globals'][:,5],batch['q_values'][:,0]*32000,rtol=1e-7)
                 actual.append(batch['globals'][:,5].tolist())
             for _ in range(2):
                 with pytest.raises(StopIteration):resumed.next()
@@ -193,11 +190,15 @@ def test_capped_random_and_actual_mtime_window_range():
 
 def holdout_entries(root,copies=12):
     entries=[];train_ids=[];val_ids=[]
-    for i in range(5000):
-        value=int(hashlib.md5(f'test:holdout:0:{i}'.encode()).hexdigest()[:13],16)/2**52
-        (val_ids if value>=.99 else train_ids).append(i)
-    for index,game in enumerate(train_ids[:copies]+val_ids[:copies]):
-        name=f'raw_{index:05}.npz'
+    i=0
+    while len(train_ids)<copies or len(val_ids)<copies:
+        path=Path(root)/'selfplay'/f'raw_{i:05}.npz'
+        value=int(hashlib.md5(path.name.encode()).hexdigest()[:13],16)/2**52
+        selected=val_ids if value>=.99 else train_ids
+        if len(selected)<copies:selected.append(i)
+        i+=1
+    for index,game in enumerate(train_ids+val_ids):
+        name=f'raw_{game:05}.npz'
         raw,meta=winning_record(index%3);meta.update(shard_id=name,attempt_id='holdout')
         raw['game_ids'][0]=game
         raw['metadata']=np.frombuffer(json.dumps(meta).encode(),np.uint8)
@@ -206,7 +207,7 @@ def holdout_entries(root,copies=12):
     return entries
 
 
-def test_validation_game_holdout_shared_probability_across_snapshots_and_rebuild(tmp_path):
+def test_validation_file_holdout_shared_probability_across_snapshots_and_rebuild(tmp_path):
     c=load_config(CONFIGS / 'smoke_test');c['training']['skip_validation']=False
     c['replay'].update(min_rows=9,taper_exponent=1,expand_per_row=1,keep_target_rows=108)
     c['shuffle'].update(group_rows=18,bucket_rows=16,training_shard_rows=8,waves=3)
@@ -256,7 +257,7 @@ def test_validation_raw_eval_d4_cap_and_training_state_unchanged(tmp_path):
     for info in json.loads((snapshot/'manifest.json').read_text())['validation_files']:
         path=snapshot/'data/validation'/info['path']
         with np.load(path) as f:arrays={k:f[k] for k in f.files}
-        arrays['q_values'].fill(0);save_npz(path.with_suffix('.new.npz'),arrays);os.replace(path.with_suffix('.new.npz'),path)
+        arrays['qValueTargetsNCMove'][:,0].fill(0);save_npz(path.with_suffix('.new.npz'),arrays);os.replace(path.with_suffix('.new.npz'),path)
     m=json.loads((snapshot/'manifest.json').read_text())
     for info in m['validation_files']:info['sha256']=sha256(snapshot/'data/validation'/info['path'])
     (snapshot/'manifest.json').write_text(json.dumps(m))
@@ -273,22 +274,22 @@ def test_validation_raw_eval_d4_cap_and_training_state_unchanged(tmp_path):
 def test_scatter_row_ids_pairing_rounding_and_independent_wave_streams(tmp_path):
     from etazero.shuffle import _scatter,_merge_bucket
     source=tmp_path/'input.npz';ids=np.arange(12,dtype=np.float32)
-    save_npz(source,dict(value=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
+    save_npz(source,dict(globalTargetsNC=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
     # Source round tie: 12*0.375=4.5 rounds to 4 (ties-to-even).
     root=tmp_path/'scatter';outputs=_scatter((0,[(str(source),None)],False,str(root),4,(17,2,0),str(tmp_path),.375,True,()))
     selected=[]
     for bucket,path,n in outputs:
         with np.load(path) as a:
-            np.testing.assert_array_equal(a['marker'][:,0],a['value'][:,0]);selected.extend(a['marker'][:,0].tolist())
+            np.testing.assert_array_equal(a['marker'][:,0],a['globalTargetsNC'][:,0]);selected.extend(a['marker'][:,0].tolist())
     assert len(outputs)==4 and len(selected)==len(set(selected))==4
     # Equal source groups assigned to different waves must not reuse permutations.
     orders=[]
     for wave in range(3):
         path=tmp_path/f'merge_input_{wave}.npz'
-        save_npz(path,dict(value=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
+        save_npz(path,dict(globalTargetsNC=np.stack([ids,ids+100,ids+200],axis=1),marker=ids[:,None]))
         files=_merge_bucket(([str(path)],12,str(tmp_path),str(tmp_path/f'out_{wave}'),1,(17,3,wave,0),str(wave),True))
         with np.load(tmp_path/f'out_{wave}'/files[0]['path']) as a:
-            orders.append(a['marker'][:,0].tolist());np.testing.assert_array_equal(a['marker'][:,0],a['value'][:,0])
+            orders.append(a['marker'][:,0].tolist());np.testing.assert_array_equal(a['marker'][:,0],a['globalTargetsNC'][:,0])
         assert sorted(orders[-1])==ids.tolist()
     assert len({tuple(order) for order in orders})==3
 
@@ -304,6 +305,7 @@ def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves)
     # Int16 boundaries and nontrivial opponent targets catch truncation or
     # premature normalization; compare paired rows through the full pipeline.
     raw['policies'][0]=0;raw['policies'][0,0]=30000;raw['policies'][0,1]=17
+    source_fields(raw)
     expected=training_view(raw)
     for key in TRAIN_POLICY_TARGETS:
         assert expected[key].dtype==np.int16
@@ -311,14 +313,16 @@ def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves)
     entry=dict(path=str(path.relative_to(tmp_path)),metadata=meta,sha256=sha256(path))
     snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,[entry],c)
     cache=tmp_path/'.internal/training_views'/(view_key(entry,training_targets(c))+'.npz')
-    with np.load(cache) as stored:
+    with np.load(cache) as disk:
+        stored=decode_view(disk,training_targets(c))
         for key in TRAIN_POLICY_TARGETS:
             assert stored[key].dtype==np.int16
             np.testing.assert_array_equal(stored[key],expected[key])
     manifest=json.loads((snapshot/'manifest.json').read_text())
     pairs=[]
     for info in manifest['files']:
-        with np.load(snapshot/'data'/info['path']) as stored:
+        with np.load(snapshot/'data'/info['path']) as disk:
+            stored=decode_view(disk,training_targets(c))
             for key in TRAIN_POLICY_TARGETS:assert stored[key].dtype==np.int16
             pairs.extend(zip(stored['policy'].tolist(),stored['opponent_policy'].tolist()))
     expected_pairs=list(zip(expected['policy'].tolist(),expected['opponent_policy'].tolist()))
@@ -333,3 +337,14 @@ def test_integer_policies_survive_cache_shuffle_and_float_reader(tmp_path,waves)
         with pytest.raises(StopIteration):reader.next()
     finally:reader.close()
     assert sorted(actual)==sorted(expected_pairs)
+
+
+def test_holdout_is_basename_stable_across_directories():
+    from etazero.shuffle import validation_file
+    # Concrete prior regression: full-path hash selected validation for this name.
+    old='/tmp/pytest-of-sky/pytest-60/test_shuffle_conservation_and_1/selfplay/0.npz'
+    assert not validation_file(old)
+    for i in range(1000):
+        name=f'{i}.npz'
+        expected=int(hashlib.md5(name.encode()).hexdigest()[:13],16)/2**52>=.99
+        assert validation_file('/original/'+name)==validation_file('/relocated/'+name)==expected

@@ -66,7 +66,7 @@ def test_catalog_rejects_bad_fragments_without_counting_them(tmp_path,corruption
         bad={key:value.copy() for key,value in fragments[0].items()}
         m=metadata(bad);m.update(shard_id='corrupt',row_begin=2,rows=2)
         if corruption=='duplicate':m.update(row_begin=0,rows=6)
-        if corruption=='trajectory':bad['search_wdl'][0]=[.5,0,.5]
+        if corruption=='trajectory':bad['search_wdl'][0]=[.5,0,.5,0]
         bad['metadata']=np.frombuffer(json.dumps(m).encode(),np.uint8)
         save_npz(directory/'corrupt.npz',bad)
         with pytest.raises((ValueError,sqlite3.IntegrityError)):
