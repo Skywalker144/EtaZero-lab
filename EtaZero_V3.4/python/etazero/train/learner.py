@@ -9,7 +9,8 @@ import warnings
 import numpy as np
 import torch
 from etazero.config import resume_config
-from etazero.models.network import make_network, TrainingForward
+from etazero.models.factory import make_network
+from etazero.train.training import TrainingForward
 from etazero.train.optimization import optimization_for, optimizer_for
 from etazero.data.reader import BatchReader, BatchPrefetcher, CudaBatchPrefetcher
 from etazero.data.source_reader import SourceBatchReader
@@ -52,7 +53,7 @@ def forward_batch(forward, tensors):
     if 'actions' in tensors:
         keys += ('actions', 'step_weights', 'recurrent_indices')
         return forward(*(tensors.get(key) for key in keys))
-    return forward(*(tensors.get(key) for key in keys)), None
+    return forward(*(tensors.get(key) for key in keys), metadata=tensors.get("metadata")), None
 
 
 def augment_training_batch(tensors, symmetry, spec=SPECS['gomoku']):
@@ -305,7 +306,8 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     reader = SourceBatchReader(root/"snapshots"/plan["snapshot_id"], plan["batch_size"],
                                config["training"]["prefetch_depth"], config["run"]["seed"],
                                config['training']['train_steps'], config['training']['sub_epochs'],
-                               checkpoint['reader'], max_batches=plan['train_steps']-step)
+                               checkpoint['reader'], max_batches=plan['train_steps']-step,
+                               no_repeat_files=config['training'].get('no_repeat_files',False))
     round_metrics = TrainingMetrics(checkpoint['training_metrics'] if progress else None)
     del checkpoint
     if round_metrics.state['steps'] != step:
@@ -327,6 +329,7 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
     amp = config["training"]["amp"]
     if device.type != "cuda" and amp != "off":
         raise ValueError("AMP training requires a CUDA device")
+    exhausted = False
     unsaved = False
     consumed_state = reader.state()
     prepared=BatchPrefetcher(reader,config['training']['prefetch_depth'])
@@ -336,15 +339,23 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
         if device.type=='cuda' and config['training']['cuda_prefetch']:
             prefetch=CudaBatchPrefetcher(prepared,device)
         while step < plan["train_steps"] and not stopping():
-            if prefetch:
-                tensors,consumed_state = prefetch.next(prefetch_next=step+1<plan["train_steps"])
-            else:
-                batch,consumed_state = prepared.next();tensors = {}
-                for key,array in batch.items():
-                    tensor = torch.from_numpy(array).to(dtype=torch.int64 if key in ('actions','recurrent_indices') else torch.float32)
-                    if device.type == "cuda":
-                        tensor = tensor.pin_memory()
-                    tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
+            try:
+                if prefetch:
+                    tensors,consumed_state = prefetch.next(prefetch_next=step+1<plan["train_steps"])
+                else:
+                    batch,consumed_state = prepared.next();tensors = {}
+                    for key,array in batch.items():
+                        tensor = torch.from_numpy(array).to(dtype=torch.int64 if key in ('actions','recurrent_indices') else torch.float32)
+                        if device.type == "cuda":
+                            tensor = tensor.pin_memory()
+                        tensors[key] = tensor.to(device, non_blocking=device.type == "cuda")
+            except StopIteration:
+                if not config['training'].get('no_repeat_files',False):
+                    raise
+                exhausted = True
+                consumed_state = reader.state()
+                log('training_data_exhausted',iteration=iteration,step=step)
+                break
             optimization.prepare_batch(consumed_state)
             if optimization.subepoch_batches==0:
                 log('subepoch_start',iteration=iteration,subepoch=optimization.subepoch,
@@ -432,14 +443,14 @@ def train_iteration(run_dir, config, plan, base, log, stopping=lambda:False):
                 save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
                 unsaved = False
         # Commit consumed batches, including scaler skips, at a normal stop.
-        if unsaved:
+        if unsaved or exhausted:
             flush_metrics()
             reference = commit_checkpoint(root,config,model,optimizer,scaler,iteration,step,total,consumed_state,optimization,round_metrics)
             log("checkpoint",iteration=iteration,checkpoint=reference)
             if hasattr(log,'flush'):
                 log.flush()
             save_json(progress_path,{"checkpoint":reference,"snapshot_id":plan["snapshot_id"]})
-        return reference, step == plan["train_steps"]
+        return reference, exhausted or step == plan["train_steps"]
     finally:
         try:
             if prefetch:

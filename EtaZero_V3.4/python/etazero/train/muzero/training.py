@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 
-from etazero.models.network import losses, row_mean, action_mask
+from etazero.train.losses import losses, row_mean, action_mask
 from etazero.models.muzero.network import scale_gradient
 
 

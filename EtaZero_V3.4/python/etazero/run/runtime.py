@@ -296,7 +296,11 @@ class Controller:
                         checkpoint,done=self.phase("train",iteration,lambda:train_iteration(root,c,train_plan,plan["input_checkpoint"],self.journal,self.stopping))
                         if not done:
                             break
-                        status={**status,"phase":"export","checkpoint":checkpoint}
+                        status={**status,"checkpoint":checkpoint,"train_steps":checkpoint['step']}
+                        if checkpoint['step']:
+                            status["phase"]="export"
+                        else:
+                            status.update(phase="completed",model=state['model'])
                     else:
                         status={**status,"phase":"completed","checkpoint":state['checkpoint'],"model":state['model']}
                     save_json(status_path,status)

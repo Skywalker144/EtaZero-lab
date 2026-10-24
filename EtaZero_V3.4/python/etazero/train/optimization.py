@@ -2,7 +2,6 @@
 import math
 import torch
 from torch.optim.swa_utils import AveragedModel
-from etazero.models.network import FixedScaleMask, BiasMask
 from etazero.train.lr_schedule import effective_scale
 from etazero.train.training_clock import TrainingClock
 
@@ -10,35 +9,7 @@ from etazero.train.training_clock import TrainingClock
 def parameter_groups(model):
     if hasattr(model, 'parameter_groups'):
         return model.parameter_groups()
-    groups = {name: [] for name in ('input', 'normal', 'normal_attn', 'normal_gamma', 'noreg', 'output', 'output_noreg')}
-    groups['input'] += [model.stem.weight, model.linear_global.weight]
-    for block in model.blocks:
-        for layer in block.modules():
-            if isinstance(layer, (torch.nn.Conv2d, torch.nn.Linear)):
-                groups[getattr(layer,'parameter_group','normal')].append(layer.weight)
-            elif isinstance(layer, FixedScaleMask):
-                groups['normal_gamma'].append(layer.weight)
-                groups['noreg'].append(layer.bias)
-            elif isinstance(layer, BiasMask):
-                groups['noreg'].append(layer.bias)
-            elif isinstance(layer, torch.nn.RMSNorm):
-                groups['noreg'].append(layer.weight)
-    # Final fson BN belongs to the output groups in KataGo, like the heads.
-    if hasattr(model.trunk_norm,'weight'):
-        groups['output'].append(model.trunk_norm.weight)
-    groups['output_noreg'].append(model.trunk_norm.bias)
-    for head in (model.policy_head, model.value_head):
-        for layer in head.modules():
-            if isinstance(layer, (torch.nn.Conv2d, torch.nn.Linear)):
-                groups['output'].append(layer.weight)
-                if layer.bias is not None:
-                    groups['output_noreg'].append(layer.bias)
-            elif isinstance(layer, BiasMask):
-                groups['output_noreg'].append(layer.bias)
-    registered = [id(p) for params in groups.values() for p in params]
-    if len(registered) != len(set(registered)) or set(registered) != {id(p) for p in model.parameters()}:
-        raise ValueError('Optimizer groups must contain every model parameter exactly once')
-    return [{'group_name': name, 'params': params} for name, params in groups.items() if params]
+    raise TypeError(f"Model has no parameter roles: {type(model).__name__}")
 
 
 def model_norms(groups):
