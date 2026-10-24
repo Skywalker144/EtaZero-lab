@@ -40,6 +40,7 @@ def small_config():
     c = load_config(CONFIGS / 'smoke_test')
     defaults = load_config(CONFIGS / 'muzero')
     c['agent'] = defaults['agent']
+    c['network'].update(architecture='nbt',channels=24,blocks=1)
     c['muzero'] = dict(latent_channels=16, dynamics_channels=24, dynamics_blocks=1,
                        prediction_channels=24, prediction_blocks=1)
     c['unroll'] = dict(steps=3, hidden_gradient_scale=.5)
@@ -93,8 +94,9 @@ def test_cuda_complete_pipeline_and_resume(tmp_path, compiled, architecture, kat
     assert 0<steps<=2*c['training']['train_steps'] and state['checkpoint']['total_steps']==steps
     assert saved['algorithm'] == 'muzero' and saved['muzero_config'] == c['muzero']
     initial = load_checkpoint(root, load_json(root/'.internal/iterations/000001/plan.json')['input_checkpoint'], c)
-    for key in ('representation.stem.weight','dynamics.stem.weight','prediction.policy_head.out.weight'):
-        assert not torch.equal(initial['model'][key], saved['model'][key])
+    for component in ('representation.','dynamics.','prediction.'):
+        weights=[key for key in saved['model'] if key.startswith(component) and key.endswith('.weight')]
+        assert weights and any(not torch.equal(initial['model'][key],saved['model'][key]) for key in weights),component
     files = {p: sha256(p) for p in (root/'selfplay').rglob('*.npz')}
     absorbing = side = cheap = 0
     for path in files:
@@ -209,7 +211,9 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path, 
     c['unroll']['steps'] = unroll_steps; validate(c)
     c['writer'].update(shard_rows=8, first_file_min_random_proportion=.15)
     c['parallelism'].update(game_threads=1, search_threads=1)
-    c['inference']['muzero_queue_capacity'] = 1
+    # Random backends have separate RNG streams, so use one server to make
+    # this sampling fixture independent of inference-worker scheduling.
+    c['inference'].update(muzero_queue_capacity=1, server_threads=1)
     c['side_positions']['side_position_prob'] = .6
     c['reanalysis']=dict(use_reanalyze=True,reanalyze_prop=.5,reanalyze_policy_surprise_weight=1,
                         reanalyze_value_surprise_weight=0,reanalyze_surprise_exponent=1,reanalyze_use_outcome_targets=False)
@@ -254,8 +258,13 @@ def test_native_sequences_survive_zero_repeat_split_and_reader_resume(tmp_path, 
                         expected[:size,:size]=1/(size*size)
                         np.testing.assert_allclose(counts/counts.sum(),expected,rtol=1e-7,atol=0)
                 outcome=int(a['winners'][g])*int(a['players'][ol+start-lo])*(-1)**step
-                assert v['value'][row,step].tolist() == [float(outcome==1),float(outcome==0),float(outcome==-1)]
-    assert sides and absorbing and zero
+                assert v['value'][row,step].tolist() == [float(outcome==1),float(outcome==0),float(outcome==-1),0.]
+    assert sides and zero
+    # Short unrolls need not reach the end: terminal-near starts can all have
+    # zero repeats. The 40-step case exceeds either board's maximum game
+    # length and therefore guarantees absorbing coverage for sampled starts.
+    if unroll_steps >= max(map(int,c['environment']['sizes'].split(',')))**2:
+        assert absorbing
     snapshot=tmp_path/'snapshots'/build_snapshot(tmp_path,1,entries,c)
     reader=BatchReader(snapshot,4,1,17); reader.next(); cursor=reader.state(); expected=reader.next(); reader.close()
     restored=BatchReader(snapshot,4,1,17,cursor); actual=restored.next(); restored.close()

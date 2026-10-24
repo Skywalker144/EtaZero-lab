@@ -65,13 +65,13 @@ def test_parameter_group_coverage_and_roles(config):
     groups = {g['group_name']: g['params'] for g in parameter_groups(model)}
     ids = [id(p) for params in groups.values() for p in params]
     assert len(ids) == len(set(ids)) == len(list(model.parameters()))
-    assert {id(p) for p in groups['input']} == {id(model.stem.weight), id(model.linear_global.weight)}
-    assert id(model.blocks[0].pre.norm.weight) in {id(p) for p in groups['normal_gamma']}
-    assert id(model.blocks[0].pre.norm.bias) in {id(p) for p in groups['noreg']}
-    assert id(model.value_head.out.bias) in {id(p) for p in groups['output_noreg']}
-    assert id(model.trunk_norm.weight) in {id(p) for p in groups['output']}
+    assert {id(p) for p in groups['input']} == {id(model.network.conv_spatial.weight), id(model.network.linear_global.weight)}
+    assert id(model.network.blocks[0].normactconv1.norm.gamma) in {id(p) for p in groups['normal_gamma']}
+    assert id(model.network.blocks[0].normactconv1.norm.beta) in {id(p) for p in groups['noreg']}
+    assert id(model.network.value_head.linear_valuehead.bias) in {id(p) for p in groups['output_noreg']}
+    assert id(model.network.norm_trunkfinal.gamma) in {id(p) for p in groups['output']}
     model.extra = torch.nn.Parameter(torch.ones(1))
-    with pytest.raises(ValueError, match='every model parameter'):
+    with pytest.raises(ValueError, match='every parameter'):
         parameter_groups(model)
 
 
@@ -127,28 +127,28 @@ def test_lookahead_swa_and_round_boundary(config):
         for p in model.parameters():
             p.zero_()
     optimization = Optimization(model, config, optimizer_for(model, config))
-    parameter = model.stem.weight
+    parameter = model.network.conv_spatial.weight
     with torch.no_grad():
         parameter.fill_(2)
     optimization.after_step()
     assert optimization.swa.n_averaged == 0
     with torch.no_grad():
         parameter.fill_(6)
-        model.trunk_norm.running_mean.fill_(7)
+        model.network.norm_trunkfinal.running_mean.fill_(7)
     optimization.after_step()
     torch.testing.assert_close(parameter, torch.full_like(parameter, 3))
-    torch.testing.assert_close(optimization.swa.module.stem.weight, torch.full_like(parameter, 3))
+    torch.testing.assert_close(optimization.swa.module.network.conv_spatial.weight, torch.full_like(parameter, 3))
     assert optimization.swa.n_averaged == 1
     with torch.no_grad():
         parameter.fill_(10)
     optimization.after_step()
     with torch.no_grad():
         parameter.fill_(15)
-        model.trunk_norm.running_mean.fill_(11)
+        model.network.norm_trunkfinal.running_mean.fill_(11)
     optimization.after_step()
     torch.testing.assert_close(parameter, torch.full_like(parameter, 9))
-    torch.testing.assert_close(optimization.swa.module.stem.weight, torch.full_like(parameter, 4.5))
-    torch.testing.assert_close(optimization.swa.module.trunk_norm.running_mean, torch.full_like(model.trunk_norm.running_mean, 11))
+    torch.testing.assert_close(optimization.swa.module.network.conv_spatial.weight, torch.full_like(parameter, 4.5))
+    torch.testing.assert_close(optimization.swa.module.network.norm_trunkfinal.running_mean, torch.full_like(model.network.norm_trunkfinal.running_mean, 11))
     with torch.no_grad():
         parameter.fill_(99)
     optimization.after_step()
@@ -156,7 +156,7 @@ def test_lookahead_swa_and_round_boundary(config):
     assert optimization.counter == 0
     torch.testing.assert_close(parameter, torch.full_like(parameter, 9))
     saved = {'model': model.state_dict(), 'optimization': optimization.state_dict()}
-    torch.testing.assert_close(inference_weights(saved)['stem.weight'], torch.full_like(parameter, 4.5))
+    torch.testing.assert_close(inference_weights(saved)['network.conv_spatial.weight'], torch.full_like(parameter, 4.5))
 
 
 def test_optimizer_validation(config):
@@ -207,28 +207,23 @@ def small_optimization(config):
     return model, optimizer, Optimization(model, config, optimizer)
 
 
-@pytest.mark.parametrize('steps,segments,k,effective', [(1,1,6,1),(5,1,6,5),(5,3,6,2),(7,3,3,3),(20,1,6,6)])
-def test_short_round_learns_and_resumes_lookahead(config, steps, segments, k, effective):
-    from etazero.training import subepoch_ends
-    config['training']['sub_epochs'] = segments
-    config['optimizer'].update(lookahead_k=k, lookahead_alpha=.5)
-    model, optimizer, _ = small_optimization(config)
-    control = Optimization(model, config, optimizer, round_steps=steps)
-    assert control.lookahead_k == effective
+@pytest.mark.parametrize('steps,k', [(1,6),(5,6),(7,3),(20,6)])
+def test_short_outer_round_keeps_fast_weights_and_fixed_lookahead(config,steps,k):
+    config['optimizer'].update(lookahead_k=k,lookahead_alpha=.5)
+    model,optimizer,control=small_optimization(config)
     control.begin_round()
-    ends = subepoch_ends(steps, segments)
+    assert control.lookahead_k==k
     for step in range(steps):
-        if step in ends[:-1]:control.begin_subepoch()
-        control.before_step()
-        # Actual SGD updates with a known direction; no mutation of slow weights.
-        optimizer.zero_grad();model.weight.sum().backward();optimizer.step()
-        control.after_step()
-        if step == steps//2:
-            control = Optimization(model, config, optimizer, copy.deepcopy(control.state_dict()), round_steps=steps)
+        control.prepare_batch(dict(epoch=0,subepoch=0,subepoch_batches=step+1,epoch_end=False))
+        control.before_step();optimizer.zero_grad();model.weight.sum().backward();optimizer.step();control.after_step()
+        if step==steps//2:
+            control=Optimization(model,config,optimizer,copy.deepcopy(control.state_dict()),round_steps=steps)
+            control.begin_round()
+    assert model.weight.item()<1
+    assert control.completed_rounds==0 and control.counter==steps%k
+    assert control.consumed_samples==steps*config['training']['batch_size']
     control.finish_round()
-    assert model.weight.item() < 1
-    assert control.optimizer_steps == steps and control.consumed_samples == steps*config['training']['batch_size']
-    torch.testing.assert_close(model.weight, control.slow['weight'])
+    torch.testing.assert_close(model.weight,control.slow['weight'])
 
 
 @pytest.mark.parametrize('kind,base', [('sgd', 2500), ('adamw', 11000)])
@@ -246,7 +241,7 @@ def test_warmup_refresh_uses_post_consumption_and_next_batch(config, threshold):
     config['training']['batch_size'] = 128
     _, optimizer, optimization = small_optimization(config)
     optimization.consumed_samples = threshold - 3*128
-    optimization.begin_round()
+    optimization.prepare_batch(dict(epoch=0,subepoch=0,subepoch_batches=1,epoch_end=False))
     old_lr = optimizer.param_groups[0]['lr']
     for batch in range(1, 6):
         optimization.before_step()

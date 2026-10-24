@@ -17,7 +17,7 @@ def muon_config(algorithm='alphazero', architecture='nbt', plain=False):
         config = small_config()
     else:
         config = load_config(CONFIGS/'smoke_test')
-    config['network']['architecture'] = architecture
+    config['network']['architecture'] = 'b2c16-fson-mish' if algorithm=='alphazero' and architecture=='nbt' else architecture
     if architecture == 'plain':
         config['network'].update(channels=128, blocks=10)
     elif architecture == 'transformer':
@@ -56,14 +56,14 @@ def test_model_parameter_routing_and_fixed_plain_rates(algorithm, architecture, 
     assert len(registered) == len(set(registered)) == len(list(model.parameters()))
     uses_muon = {id(p): group['use_muon'] for group in optimizer.param_groups for p in group['params']}
     if algorithm == 'alphazero':
-        assert not uses_muon[id(model.stem.weight)]
-        head = model.policy_head
-        trunk = model.blocks
+        assert not uses_muon[id(model.network.conv_spatial.weight)]
+        head = model.network.policy_head
+        trunk = model.network.blocks
     else:
-        assert not uses_muon[id(model.representation.stem.weight)]
-        assert not uses_muon[id(model.dynamics.stem.weight)]
+        assert not uses_muon[id(model.representation.body.conv_spatial.weight)]
+        assert not uses_muon[id(model.dynamics.body.conv_spatial.weight)]
         head = model.prediction.policy_head
-        trunk = model.dynamics.trunk.blocks
+        trunk = model.dynamics.body.blocks
     assert all(not uses_muon[id(p)] for p in head.parameters())
     assert any(uses_muon[id(p)] for p in trunk.parameters())
     for layer in trunk.modules():

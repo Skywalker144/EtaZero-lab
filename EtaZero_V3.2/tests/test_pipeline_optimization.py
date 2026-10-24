@@ -99,7 +99,7 @@ def test_muzero_shares_full_trajectory_td_between_root_and_unroll(monkeypatch):
                 np.testing.assert_array_equal(view['td_value'][row,step], calls[0][row+step])
             else:
                 player = raw['players'][row] * (-1 if step % 2 else 1)
-                expected = np.tile([player == 1, False, player == -1], (3,1))
+                expected = np.tile([player == 1, False, player == -1, False], (3,1))
                 np.testing.assert_array_equal(view['td_value'][row,step], expected)
     calls.clear()
     training_view(raw, ('policy', 'value'))
@@ -196,8 +196,8 @@ def test_disabled_options_and_superlinear_window_are_valid():
     c = load_config(CONFIGS/'smoke_test')
     c['search'].update(cheap_search_probs=0, cheap_search_visits=1000, cheap_search_target_weight=2)
     c['reduce_visits'].update(reduce_visits=False, reduced_visits_min=1000)
-    c['uncertainty'].update(use_uncertainty=False, uncertainty_coeff=0)
-    c['noise_pruning'].update(use_noise_pruning=False, noise_prune_utility_scale=0)
+    c['uncertainty'].update(use_uncertainty=False, uncertainty_coeff=.0001)
+    c['noise_pruning'].update(use_noise_pruning=False, noise_prune_utility_scale=.001)
     c['replay']['taper_exponent'] = 1.5
     validate(c)
     c['search']['cheap_search_probs'] = .5

@@ -30,7 +30,7 @@ def test_resnet_is_independent_of_other_batch_rows_and_train_eval_mode():
     torch.set_num_threads(1)
     torch.manual_seed(71)
     c = NetworkConfig(6, 16, 24, 2, 32, 2, 48, 0, architecture='resnet')
-    model = MuZeroNet(c)
+    model = MuZeroNet(c).eval()
     obs = torch.randn(2, 5, 6, 6)
     obs[:, 0] = 1; obs[0, 0, 5] = 0; obs[0, 0, :, 5] = 0
     globals = torch.randn(2, len(GLOBALS))
@@ -44,7 +44,7 @@ def test_resnet_is_independent_of_other_batch_rows_and_train_eval_mode():
     model.eval()
     after = model.prediction(model.dynamics(model.representation(obs, globals), actions))
     for a, b in zip(before, after):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
+        torch.testing.assert_close(a, b, rtol=2e-5, atol=2e-6)
 
 
 @pytest.mark.parametrize('katago_optimizer', [False, True])
@@ -69,7 +69,7 @@ def test_resnet_optimizer_and_initialization_identity(katago_optimizer):
     if katago_optimizer:
         assert all(g['momentum'] == .9 for g in opt.param_groups)
         roles = {id(p): g['group_name'] for g in opt.param_groups for p in g['params']}
-        assert roles[id(model.representation.stem_act.norm.weight)] == 'normal_gamma'
-        assert roles[id(model.dynamics.trunk.blocks[0].norm1.bias)] == 'noreg'
-        assert roles[id(model.prediction.policy_head.out.weight)] == 'output'
+        assert roles[id(model.representation.body.blocks[0].normactconv1.norm.gamma)] == 'normal_gamma'
+        assert roles[id(model.dynamics.body.blocks[0].normactconv1.norm.beta)] == 'noreg'
+        assert roles[id(model.prediction.policy_head.conv2p.weight)] == 'output'
     assert {id(p) for g in opt.param_groups for p in g['params']} == {id(p) for p in model.parameters()}

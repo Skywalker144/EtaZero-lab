@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import numpy as np
 import pytest
@@ -94,7 +95,7 @@ def test_continuation_loss_coefficients_gates_and_gradient_floor():
     future=torch.zeros(2,2,2,2,requires_grad=True)
     raw=torch.tensor([-100.,0.],requires_grad=True)
     targets=torch.ones_like(future);gate=torch.tensor([1.,0.])
-    fl,vl=continuation_losses(future,raw,obs,targets,torch.tensor([100.,0.]),gate)
+    fl,vl=continuation_losses(future,raw,obs,targets,torch.tensor([100.,0.]),gate,gate)
     assert fl.item() == pytest.approx(.25*(4+1)/2/2)
     difference=100+1e-5
     assert vl.item() == pytest.approx(.0003*50*(difference-25)/2,rel=1e-6)
@@ -122,11 +123,13 @@ def test_continuation_losses_and_gradients_match_source_functions():
     ref_future, ref_raw = future.detach().clone().requires_grad_(), raw.detach().clone().requires_grad_()
     target = torch.randint(-1,2,future.shape).float();time_target = torch.rand(6)*500
     gate = torch.tensor([1.,0.,1.,.5,1.,1.]);row_weight = torch.tensor([1.,2.,0.,.25,1.,3.])
-    local = continuation_losses(future,raw,obs,target,time_target,gate,row_weight)
+    # NR retains future boards but has no variance-time target weight.
+    value_gate = gate.clone();value_gate[2]=0
+    local = continuation_losses(future,raw,obs,target,time_target,gate,value_gate,row_weight)
     metrics = SimpleNamespace(num_futurepos_values=2,pos_len=5)
     source_future = env['loss_futurepos_samplewise'](metrics,ref_future,target,gate,obs[:,0],obs[:,0].sum((1,2)),row_weight).mean()
     prediction = env['SoftPlusWithGradientFloorFunction'].apply(ref_raw,.05,False)*40
-    source_time = env['loss_variance_time_samplewise'](metrics,prediction,time_target,gate,row_weight).mean()
+    source_time = env['loss_variance_time_samplewise'](metrics,prediction,time_target,value_gate,row_weight).mean()
     torch.testing.assert_close(torch.stack(local),torch.stack((source_future,source_time)))
     sum(local).backward();(source_future+source_time).backward()
     torch.testing.assert_close(future.grad,ref_future.grad)
@@ -134,10 +137,18 @@ def test_continuation_losses_and_gradients_match_source_functions():
 
 
 @pytest.mark.parametrize('algorithm', ['alphazero','muzero'])
-def test_real_targets_reach_heads_and_backpropagate(algorithm):
+@pytest.mark.parametrize('no_result', [False, True])
+@pytest.mark.parametrize('device', ['cpu', 'cuda'])
+def test_real_targets_reach_heads_and_backpropagate(algorithm,no_result,device):
+    if device=='cuda':
+        if os.environ.get('ETAZERO_GPU_TESTS')!='1':pytest.skip('Enable ETAZERO_GPU_TESTS=1 with host CUDA access')
+        assert torch.cuda.is_available()
     torch.set_num_threads(1)
     c=load_config(CONFIGS/'smoke_test')
     a,m=winning_record(2)
+    if no_result:
+        from etazero.outcomes import Reason
+        a['winners'][:]=0;a['reasons'][:]=Reason.NO_RESULT;a['search_wdl'][:]=[0,0,0,1]
     if algorithm == 'muzero':
         from test_muzero_pipeline import small_config
         from etazero.muzero.data import prepare_batch
@@ -149,17 +160,30 @@ def test_real_targets_reach_heads_and_backpropagate(algorithm):
             a[target]=a[source].copy()
     batch=training_view(a)
     batch['obs']=unpack_observations(batch['obs'],m['canvas']).astype(np.float32)
-    if algorithm == 'muzero': batch=prepare_batch(batch,1.,random.Random(13))
-    tensors={k:torch.from_numpy(v).to(torch.int64 if k in ('actions','recurrent_indices') else torch.float32) for k,v in batch.items()}
-    model=make_network(c)
+    if no_result:
+        # Synthetic complete NR targets need a Go head with an active NR logit.
+        # Preserve the board-mask/future tensors while adapting the input layout.
+        c['environment'].update(rules='go',rule_weights='1')
+        obs=np.zeros((len(batch['obs']),SPECS['go'].planes,m['canvas'],m['canvas']),np.float32)
+        obs[:,:3]=batch['obs'][:,:3];batch['obs']=obs
+        batch['globals']=np.zeros((len(obs),SPECS['go'].globals),np.float32)
+        for key in ('policy','opponent_policy','q_values','q_visits'):
+            batch[key]=np.pad(batch[key],[(0,0)]*(batch[key].ndim-1)+[(0,1)])
+    if algorithm == 'muzero': batch=prepare_batch(batch,1.,random.Random(13),SPECS['go' if no_result else 'gomoku'])
+    tensors={k:torch.from_numpy(v).to(device=device,dtype=torch.int64 if k in ('actions','recurrent_indices') else torch.float32) for k,v in batch.items()}
+    model=make_network(c).to(device)
     forward=training_forward(model,c)
     values,_=forward_batch(forward,tensors)
     assert len(values) == 14
     torch.testing.assert_close(values[0],sum(values[1:]))
     values[0].backward()
-    head=model.value_head if algorithm=='alphazero' else model.prediction.value_head
-    assert head.future.weight.grad.abs().sum() > 0
-    assert head.out.weight.grad[13].abs().sum() > 0
+    head=model.network.value_head if algorithm=='alphazero' else model.prediction.value_head
+    assert head.conv_futurepos.weight.grad.abs().sum() > 0
+    if no_result:
+        assert values[11].item()==0 and values[13].item()==0
+        assert not head.linear_miscvaluehead.weight.grad[3].any()
+    else:
+        assert head.linear_miscvaluehead.weight.grad[3].abs().sum() > 0
 
 
 def test_learning_rate_source_boundaries_and_sqrt_cycle():
@@ -237,7 +261,7 @@ def test_attention_training_metrics_and_export(architecture):
     c['attention_penalty'].update(cap=0,batch_fraction=.5)
     a,m=winning_record(1);batch=training_view(a);batch['obs']=unpack_observations(batch['obs'],m['canvas']).astype(np.float32)
     tensors={k:torch.from_numpy(v[:2]).float() for k,v in batch.items()}
-    model=make_network(c);forward=training_forward(model,c);values,_=forward_batch(forward,tensors)
+    model=make_network(c);model.network.use_flex_attention=False;forward=training_forward(model,c);values,_=forward_batch(forward,tensors)
     assert len(values)==16 and values[-2]>0 and values[-1]>0
     torch.testing.assert_close(values[0],sum(values[1:-2]))
     (values[0]+.001*values[-2]).backward()
@@ -266,7 +290,7 @@ def test_external_start_and_per_game_loss_weight_reach_reader(tmp_path,monkeypat
     assert result.returncode!=0 and 'zero sampling weight' in result.stderr
 
 @pytest.mark.skipif(__import__('os').environ.get('ETAZERO_GPU_TESTS')!='1',reason='Host CUDA required')
-@pytest.mark.parametrize('kind,architecture', [('normuon','b1c6nbt-brn'),('aurora','transformer')])
+@pytest.mark.parametrize('kind,architecture', [('normuon','b2c16-brn'),('aurora','transformer')])
 def test_cuda_optional_training_controls_and_resume(tmp_path,kind,architecture):
     from etazero.runtime import run_training
     from etazero.training import load_checkpoint
@@ -275,7 +299,7 @@ def test_cuda_optional_training_controls_and_resume(tmp_path,kind,architecture):
     torch.set_num_threads(1)
     assert torch.cuda.is_available()
     c=load_config(CONFIGS/'smoke_test');c['training'].update(compile=False,amp='bfloat16',train_steps=2,skip_validation=True)
-    c['network'].update(architecture=architecture,channels=6 if kind=='normuon' else 192,blocks=1 if kind=='normuon' else 5)
+    c['network'].update(architecture=architecture,channels=16 if kind=='normuon' else 192,blocks=2 if kind=='normuon' else 5)
     c['optimizer'].update(kind=kind,wd_floor_frac=.25,ns_steps=3,use_polar_express=True,lr_scale=1)
     c['lr_schedule'].update(mode='piecewise',points='(0,1),(16,0.5)')
     if kind=='aurora':c['attention_penalty'].update(cap=1,batch_fraction=.5)
