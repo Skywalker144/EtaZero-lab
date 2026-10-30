@@ -141,3 +141,20 @@ def test_native_xiangqi_bundle_rejects_other_game_components_before_device_creat
         if 'MuZero native inference currently requires the CUDA, Eigen or OpenCL backend' in result.stderr:
             pytest.skip('native MuZero backend was not built')
         assert result.returncode != 0 and 'game layouts differ' in result.stderr, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('game', ['go', 'renju', 'hex', 'xiangqi'])
+def test_heads_only_export_has_no_dummy_trunk(tmp_path, game):
+    body = component_config(game, 'nbt')
+    prediction = deepcopy(body)
+    prediction.update(block_kind=[], trunk_num_channels=6)
+    model = MuZeroModel(MuZeroConfig(game, 6, body, body, prediction), 10 if game == 'xiangqi' else 5)
+    model.initialize()
+    export_components(model, tmp_path/'model', 'heads-only')
+    path = tmp_path/'model/prediction.bin'
+    desc = native_desc(path)
+    assert desc['convolutions'] == 4  # policy p1/g1/p2 and value v1; training-only heads are omitted.
+    assert not desc['scale8']
+    data = path.read_bytes()
+    assert b'model.conv_spatial' not in data and b'model.norm_trunkfinal' not in data
+    assert desc['role'] == 3 and desc['latent_channels'] == 6
