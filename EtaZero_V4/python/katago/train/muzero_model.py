@@ -119,7 +119,8 @@ class MuZeroModel(nn.Module):
         self.dynamics = LatentBody(config.dynamics, pos_len,
             self.latent_channels + 2 + int(self.game == 'xiangqi'), 0, self.latent_channels)
         self.prediction = Model(deepcopy(config.prediction), pos_len,
-                                num_bin_features=self.latent_channels + 1, num_global_features=0)
+                                num_bin_features=self.latent_channels + 1, num_global_features=0,
+                                heads_only=not config.prediction["block_kind"])
 
     def initialize(self):
         self.representation.initialize()
