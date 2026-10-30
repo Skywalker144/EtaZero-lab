@@ -30,7 +30,8 @@ def ieee_reference():
 @pytest.mark.parametrize('fp16', [False, True])
 @pytest.mark.parametrize('game,variant', [('go', 'regular'), ('renju', 'nbt'), ('hex', 'mixed_transformer'),
                                         ('renju', 'constant'), ('go', 'small_span'), ('go', 'metadata'),
-                                        ('xiangqi', 'regular'), ('xiangqi', 'nbt'), ('xiangqi', 'mixed_transformer')])
+                                        ('xiangqi', 'regular'), ('xiangqi', 'nbt'), ('xiangqi', 'mixed_transformer'), ('go', 'heads_only'), ('renju', 'heads_only'),
+                                        ('hex', 'heads_only'), ('xiangqi', 'heads_only')])
 def test_native_initial_recurrent_matches_pytorch(tmp_path, game, variant, fp16):
     check_native_initial_recurrent(tmp_path, game, variant, fp16)
 
@@ -41,6 +42,8 @@ def check_native_initial_recurrent(tmp_path, game, variant, fp16, *, binary=None
                                       'nbt' if variant == 'nbt' else 'regular')
     dynamics = component_config(game, 'nbt')
     prediction = component_config(game, 'regular')
+    if variant == 'heads_only':
+        prediction.update(block_kind=[], trunk_num_channels=6)
     if variant == 'metadata':
         representation['metadata_encoder'] = dict(meta_encoder_version=1, internal_num_channels=16)
     canvas = (12 if variant == 'nbt' else 10) if game == 'xiangqi' else 5
