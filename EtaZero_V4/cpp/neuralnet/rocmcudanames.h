@@ -27,6 +27,7 @@ using cudnnTensorDescriptor_t = miopenTensorDescriptor_t;
 constexpr auto cudaSuccess = hipSuccess;
 constexpr auto cudaMemcpyHostToDevice = hipMemcpyHostToDevice;
 constexpr auto cudaMemcpyDeviceToHost = hipMemcpyDeviceToHost;
+constexpr auto cudaMemcpyDeviceToDevice = hipMemcpyDeviceToDevice;
 constexpr auto cudaStreamNonBlocking = hipStreamNonBlocking;
 constexpr auto cudaHostAllocPortable = hipHostMallocPortable;
 constexpr auto CUBLAS_OP_N = HIPBLAS_OP_N;
@@ -55,6 +56,10 @@ static inline hipError_t cudaStreamDestroy(hipStream_t stream) { return hipStrea
 static inline hipError_t cudaStreamSynchronize(hipStream_t stream) { return hipStreamSynchronize(stream); }
 static inline hipError_t cudaMemcpyAsync(void* dst, const void* src, size_t size, hipMemcpyKind kind, hipStream_t stream) {
   return hipMemcpyAsync(dst, src, size, kind, stream);
+}
+static inline hipError_t cudaMemcpy2DAsync(void* dst, size_t dpitch, const void* src, size_t spitch,
+                                          size_t width, size_t height, hipMemcpyKind kind, hipStream_t stream) {
+  return hipMemcpy2DAsync(dst, dpitch, src, spitch, width, height, kind, stream);
 }
 static inline hipError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) {
   return hipHostMalloc(ptr, size, flags);
