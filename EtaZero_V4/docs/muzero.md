@@ -6,13 +6,13 @@ MuZero 的三组件网络、逐步 source loss、组件导出、原生描述器�
 
 representation、dynamics、prediction 使用三个独立的来源 `Model`，分别拥有参数和归一化统计。配置直接使用 KataGo 的网络配置字典，可分别选择深度、宽度、块类型及归一化。Go、Freestyle/Standard/Renju、Hex 和象棋已贯通三组件网络、展开 loss、组件导出、原生 CUDA initial/recurrent、局面适配、PUCT/Gumbel latent 搜索、轨迹 writer/shuffle/reader/learner、GameRunner/selfplay 与逐轮调度。`MuZeroConfig` 保存三个配置及 latent 通道数，运行时不依赖旧版 EtaZero。
 
-来源 `Model` 增加仅输出 trunk、自定义空间通道以及无 global 输入的入口。默认 AlphaZero 构造方式不变。两个 latent body 不建立未使用的预测 heads；prediction 保留来源主头、可选中间头及全部适用辅助输出。卷积/NBT/attention、register、共享 attention 数据、归一化、初始化和 trunk 更新在原来的调用位置执行，没有另写一个简化的 block 循环。各来源优化路径的设备适用条件仍然有效。
+来源 `Model` 增加仅输出 trunk、自定义空间通道、无 global 输入以及 MuZero 零主干 prediction 的入口。默认 AlphaZero 构造方式不变。两个 latent body 不建立未使用的预测 heads；prediction 保留来源主头及全部适用辅助输出；有主干时可按来源配置启用中间头。卷积/NBT/attention、register、共享 attention 数据、归一化、初始化和 trunk 更新在原来的调用位置执行，没有另写一个简化的 block 循环。各来源优化路径的设备适用条件仍然有效。
 
 representation 接收该棋类的真实观测、global 输入和可选 metadata。latent 为 FP32 `[B,C+1,H,W]`：前 C 通道是 learned state，末通道为不可变的有效棋盘 mask。每个样本在有效格点和所有特征通道上做 min/max；跨度小于 `1e-5` 时，分母为跨度加 `1e-5`，否则使用原跨度。棋盘外归零，常量 latent 归零。来源与许可证见 [reference_sources.json](../reference_sources.json) 的 MiniZero、EtaZero_MuZero 项。
 
 dynamics 只接收 latent 和 int64 `[B]` 动作。落子棋动作编码为棋盘 one-hot；Go 的 pass 编码为全零动作平面。象棋使用固定 2086 项联合动作表，编码为起点和终点两个 one-hot 平面，dynamics 的空间输入宽度为 C+3（mask、C 个 latent 通道、两个动作通道）。动作、latent 始终使用根的固定朝向，允许重复动作；不得在这里使用真实后继棋盘、占用状态、超级劫或终局规则。输入数据与推理调用方负责保证 mask 非空、动作处于该棋类的有效静态域。
 
-prediction 只读取 latent，输出沿用来源 policy、W/D/L/NR、三组 TD、Q、future-position、variance-time 和短期误差 heads。非围棋训练经 `postprocess_output` 按模型版本 18/19 的路径屏蔽 NR，原始 head logits 尚未应用该屏蔽。象棋沿用版本 19 的联合策略 head，policy/Q 按起点与位移 gather 为 2086 项，没有 pass 分支或分别归一化的起终点分布。价值预测对应当前 latent 步的行动方，空间输出与动作始终使用固定根坐标；后续搜索在边上交换 W/L，训练数据按每步真实执色提供目标。棋类没有中间奖励，本接口不添加 reward 或 terminal predictor。
+prediction 只读取 latent。目录配置的 `prediction_blocks` 默认 0，对应原生组件字典的空 `block_kind`：hidden 特征直接进入 heads，mask 用于掩码和池化，不额外经过输入卷积、归一化或激活。设为正整数时使用所选 KataGo 预设的输入卷积、指定数量的主干块和末端归一化，再进入 heads；配置说明见 [网络配置](configuration.md)。输出沿用来源 policy、W/D/L/NR、三组 TD、Q、future-position、variance-time 和短期误差 heads。非围棋训练经 `postprocess_output` 按模型版本 18/19 的路径屏蔽 NR，原始 head logits 尚未应用该屏蔽。象棋沿用版本 19 的联合策略 head，policy/Q 按起点与位移 gather 为 2086 项，没有 pass 分支或分别归一化的起终点分布。价值预测对应当前 latent 步的行动方，空间输出与动作始终使用固定根坐标；后续搜索在边上交换 W/L，训练数据按每步真实执色提供目标。棋类没有中间奖励，本接口不添加 reward 或 terminal predictor。
 
 ## 展开与 loss
 
@@ -22,7 +22,7 @@ prediction 只读取 latent，输出沿用来源 policy、W/D/L/NR、三组 TD�
 
 反向系数为根 1、未来各步 `1/K`，日志保存未施加该反向系数的 forward loss。第一次 representation→dynamics 不缩放 hidden 梯度，第二次及以后按 `hidden_gradient_scale` 缩放。该函数不推进 epoch、优化器、Lookahead 或 SWA 时钟；正式入口由来源 `python/train.py` 管理这些机制。
 
-参数分组来自各组件的 `Model.add_reg_dict`。representation/dynamics 的末端归一化属于内部参数，将来源末端的 output/output_noreg 角色分别映射为 normal_gamma/noreg；latent 投影属于 normal。prediction 的末端归一化和 heads 保留来源输出角色。没有 global 输入的组件不建立虚假的 global 参数。构造、调用 `initialize()`、再加载 state dict 的顺序与来源加载流程一致；初始化还设置不在 state dict 中的固定尺度。
+参数分组来自各组件的 `Model.add_reg_dict`。representation/dynamics 的末端归一化属于内部参数，将来源末端的 output/output_noreg 角色分别映射为 normal_gamma/noreg；latent 投影属于 normal。prediction 的 heads 保留来源输出角色；有主干时，其末端归一化也保留来源输出角色。没有 global 输入的组件不建立虚假的 global 参数。构造、调用 `initialize()`、再加载 state dict 的顺序与来源加载流程一致；初始化还设置不在 state dict 中的固定尺度。
 
 ## 完整轨迹与来源数据管线
 
@@ -80,9 +80,9 @@ PCR/cheap、reduce visits、surprise、主线 reanalysis、side 搜索、fork/hi
 
 `python/export_muzero.py::export_components` 接收已选定权重的 `MuZeroModel`，在新的目录中写出 representation、dynamics、prediction 三个 `.bin` 和最后写入的 `model.json`。命令入口通过 `-checkpoint`、`-pos-len`、`-export-dir` 和 `-model-name` 导出正式 learner checkpoint，`-use-swa` 明确选择 SWA，未保存 SWA 时会报错。导出目录必须不存在，失败的部分目录保留，不可发布；自对弈发布由外层控制器负责。导出使用 CPU/eval 副本，来源 FFN 剪枝和 attention logit 上界检查作用于各组件，不修改训练模型。
 
-三组件与普通 AlphaZero 共用 `export_model_pytorch.py` 的二进制层 writer。来源模型头的预留 G/H 槽分别记录 latent 宽度及组件职责；普通模型仍为零。representation/dynamics 只写来源 trunk 和 1×1 latent 投影，prediction 写适用的 policy/value heads。没有 global 输入的组件不写虚假矩阵。原生组件导出当前要求模型版本至少为 15；落子棋使用 18，象棋三个组件均使用 19，分别要求 113/8、C+3/0、C+1/0 个空间／全局输入通道。棋类、组件版本与 latent 宽度必须一致。
+三组件与普通 AlphaZero 共用 `export_model_pytorch.py` 的二进制层 writer。来源模型头的预留 G/H 槽分别记录 latent 宽度及组件职责；普通模型仍为零。representation/dynamics 只写来源 trunk 和 1×1 latent 投影，prediction 写适用的 policy/value heads。零主干 prediction 的 trunk 只记录宽度和零块数，不写虚假的输入卷积或末端归一化；描述器仅对 MuZero prediction 接受这一布局。CUDA／Eigen／OpenCL 在此路径直接取出输入中的 latent 特征，不执行卷积；CUDA 保留 FP32／FP16 及 NCHW／NHWC 布局转换。没有 global 输入的组件不写虚假矩阵。原生组件导出当前要求模型版本至少为 15；落子棋使用 18，象棋三个组件均使用 19，分别要求 113/8、C+3/0、C+1/0 个空间／全局输入通道。棋类、组件版本与 latent 宽度必须一致。
 
-`cpp/neuralnet/desc.cpp` 复用来源层描述器解析组件，检查职责、输入和投影尺寸，支持来源权重变换、参数统计与释放。若来源 scale8 优化适用，latent 投影补偿 trunk 的 1/8 尺度，保留 min/max 小跨度保护所依赖的绝对单位。普通棋盘 evaluator 的加载入口拒绝组件文件；CUDA／Eigen／OpenCL 组件执行由下述专用入口接入。
+`cpp/neuralnet/desc.cpp` 复用来源层描述器解析组件，检查职责、输入和投影尺寸，支持来源权重变换、参数统计与释放。零主干 prediction 不使用 trunk scale8，避免改变直接输入 hidden 的数值。若来源 scale8 优化适用，latent 投影补偿 trunk 的 1/8 尺度，保留 min/max 小跨度保护所依赖的绝对单位。普通棋盘 evaluator 的加载入口拒绝组件文件；CUDA／Eigen／OpenCL 组件执行由下述专用入口接入。
 
 ## 原生 CUDA 执行
 
