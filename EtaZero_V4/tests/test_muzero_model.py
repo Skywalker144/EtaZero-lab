@@ -336,3 +336,39 @@ def test_muzero_cuda_amp_update_and_reload(tmp_path, game):
     assert not torch.equal(before_resume, model.representation.projection.weight)
     for name, expected in model.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('game', ['go', 'renju', 'hex', 'xiangqi'])
+def test_heads_only_prediction_is_direct_hidden_to_heads(game):
+    body = component_config(game, 'nbt')
+    prediction = deepcopy(body)
+    prediction.update(block_kind=[], trunk_num_channels=6)
+    model = MuZeroModel(MuZeroConfig(game, 6, body, body, prediction), 10 if game == 'xiangqi' else 5)
+    model.initialize()
+    assert model.prediction.conv_spatial is None
+    assert model.prediction.norm_trunkfinal is None
+    assert not model.prediction.blocks
+    assert all(name.startswith(('policy_head.', 'value_head.')) for name, _ in model.prediction.named_parameters())
+    from katago.train.muzero_learner import initialize_component_baselines, weight_decay_context
+    state = {}; initialize_component_baselines(model, state)
+    assert 'normal' not in state['muzero_modelnorm_baselines']['prediction']
+    _, prediction_state, _ = weight_decay_context(model, state, {}, 'prediction')
+    assert prediction_state['modelnorm_normal_baseline'] is None
+    root, targets = batch_for(model)
+    hidden = model.representation(root['binaryInputNCHW'], root['globalInputNC']).detach().requires_grad_()
+    mask = hidden[:, -1:]
+    kwargs = dict(mask=mask, mask_sum_hw=mask.sum((2,3), keepdim=True), mask_sum=mask.sum(), extra_outputs=None)
+    expected = (model.prediction.policy_head(hidden[:, :-1], **kwargs),
+                *model.prediction.value_head(hidden[:, :-1], input_global=hidden.new_empty((3,0)), **kwargs))
+    actual = model.predict(hidden)[0]
+    for a, e in zip(actual, expected):
+        torch.testing.assert_close(a, e, rtol=2e-5, atol=2e-7)
+    torch.testing.assert_close(torch.autograd.grad(actual[0].sum()+actual[1].sum(), hidden, retain_graph=True)[0],
+                               torch.autograd.grad(expected[0].sum()+expected[1].sum(), hidden)[0])
+    groups = {}; model.add_reg_dict(groups)
+    assert {id(p) for group in groups.values() for p in group} == {id(p) for p in model.parameters()}
+    loss = sum(step.outputs[0][1].square().sum() for step in model.unroll(
+        root['binaryInputNCHW'], root['globalInputNC'], torch.zeros(3,5,dtype=torch.int64)))
+    loss.backward()
+    for component in model.training_components().values():
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in component.parameters())
