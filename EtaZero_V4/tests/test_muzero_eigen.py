@@ -28,7 +28,8 @@ def cpu_threads():
 @pytest.mark.parametrize('game,variant', [('go', 'regular'), ('freestyle', 'regular'), ('standard', 'regular'),
                                         ('renju', 'nbt'), ('hex', 'mixed_transformer'), ('renju', 'constant'),
                                         ('go', 'small_span'), ('go', 'metadata'), ('xiangqi', 'regular'),
-                                        ('xiangqi', 'nbt'), ('xiangqi', 'mixed_transformer')])
+                                        ('xiangqi', 'nbt'), ('xiangqi', 'mixed_transformer'), ('go', 'heads_only'), ('renju', 'heads_only'),
+                                        ('hex', 'heads_only'), ('xiangqi', 'heads_only')])
 def test_initial_recurrent_against_pytorch(tmp_path, game, variant):
     check_native_initial_recurrent(tmp_path, game, variant, False, binary=BINARY,
                                    tensor_device='cpu', inputs_nhwc=True)
@@ -74,3 +75,11 @@ def test_two_round_training_publication_and_resume(tmp_path, monkeypatch, game, 
     # check usable without a GPU, including the learner's zero-sample startup.
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '')
     check_muzero_two_rounds(tmp_path, game, algorithm, interior, weights, False, binary=BINARY, fp16=False)
+
+
+@pytest.mark.parametrize('game,algorithm,weights', [('go','muzero','ordinary'), ('xiangqi','gumbel_muzero','swa')])
+def test_heads_only_two_round_training_and_resume(tmp_path, monkeypatch, game, algorithm, weights):
+    from test_muzero_controller import check_muzero_two_rounds
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '')
+    check_muzero_two_rounds(tmp_path, game, algorithm, 'gumbel' if 'gumbel' in algorithm else 'puct',
+                           weights, False, binary=BINARY, fp16=False, heads_only=True)
