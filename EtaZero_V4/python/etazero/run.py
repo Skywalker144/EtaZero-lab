@@ -302,7 +302,11 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist):
             progress['selfplay_requested'] = remaining
             progress['selfplay_attempt_target'] = progress['selfplay_target']
             receipt = directory / f'selfplay-{attempt + 1}.json'
-            stage('selfplay', [binary, 'selfplay', '-config', config.selfplay_config,
+            selfplay_config = config.selfplay_config
+            if config.native_selfplay is not None:
+                selfplay_config = root / 'selfplay.resolved.cfg'
+                selfplay_config.write_text(config.native_selfplay)
+            stage('selfplay', [binary, 'selfplay', '-config', selfplay_config,
                 '-models-dir', models, '-output-dir', output, '-max-games-total', remaining,
                 '-result-file', receipt,
                 '-override-config', f'game={config.game},dataBoardLen={config.canvas},switchNetsMidGame=false,'
