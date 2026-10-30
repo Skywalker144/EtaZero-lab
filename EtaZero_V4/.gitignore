@@ -1,0 +1,13 @@
+/build/
+/build-*/
+/data/
+/runs/
+/tmp/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.cfg.local
+/cpp/tests/scratch/
+/cpp/program/gitinfo.h
+CMakeCache.txt
+CMakeFiles/
