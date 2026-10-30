@@ -57,6 +57,19 @@ def test_muzero_settings_are_owned_by_the_selected_algorithm(config):
             replace(mu, **changed).validate()
 
 
+def test_shuffle_window_may_be_smaller_than_epoch_when_source_repeats_files(config):
+    assert replace(config, shuffle_keep_rows=config.batch_size,
+                   samples_per_epoch=config.batch_size * 10).validate()
+    with pytest.raises(ValueError, match='at least one batch'):
+        replace(config, shuffle_keep_rows=config.batch_size - 1).validate()
+
+
+def test_epoch_target_need_not_be_divisible_by_batch_size(config):
+    assert replace(config, samples_per_epoch=config.batch_size * 3 + 1).validate()
+    with pytest.raises(ValueError, match='at least one batch'):
+        replace(config, samples_per_epoch=config.batch_size - 1).validate()
+
+
 def test_failed_stage_preserves_artifacts_and_retries_same_round(tmp_path, config):
     root = tmp_path / 'run'
     with pytest.raises(RuntimeError, match='see .*selfplay.log'):
