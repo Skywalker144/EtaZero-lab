@@ -33,7 +33,13 @@ bash scripts/autoexp.sh --config-dir /absolute/path/to/experiment \
 
 一臂失败会停止启动排队臂并中断正在运行的其他臂。SIGINT/SIGTERM 同样停止队列并通知整个臂进程组；最多等待 10 秒后强制结束仍存活的进程，恢复范围依各来源阶段的实际提交点确定，不承诺信号期间完成整轮。实验目录锁由控制器及其来源子进程继承，调度器异常退出而子进程仍在写入时，不允许新的调度器接管。
 
-可选 `[evaluation]` 指定独立原生 match 配置与 autoelo 选点／拟合设置，全部臂完成后在第一个 GPU 槽位执行自动 Elo。评估状态另存 `elo_status.json`；评估失败后重试不会重复已完成训练，原生已提交对局可以复用。省略该节时只训练。autoelo 当前逐对加载两个模型；独立 match／arena 已有驻留窗口，autoelo 跨配对共享驻留尚未接入，见 [历史模型评估](evaluation.md)。
+可选 `[evaluation]` 指定独立原生 match 配置与 autoelo 选点／拟合设置，全部臂完成后在第一个 GPU 槽位执行自动 Elo。评估状态另存 `elo_status.json`；评估失败后重试不会重复已完成训练，原生已提交对局可以复用。省略该节时只训练。autoelo 将多对比赛交给同一个原生进程，外围按 `max_loaded_models` 编排驻留窗口，跨配对复用已加载的模型服务；逐对缓存、缺局恢复和独立 match／arena 的驻留语义见 [历史模型评估](evaluation.md)。
+
+## 验证数据
+
+来源 learner 已保留完整的验证流程，读取当前 shuffle 快照的 `val/`。来源 [shuffle.sh](../python/selfplay/shuffle.sh) 使用 `shuffle.py` 的 `-only-include-md5-path-prop-lbound`／`-only-include-md5-path-prop-ubound`，按原始文件路径哈希把数据划分为 train 与 val；来源 [synchronous_loop.sh](../python/selfplay/synchronous_loop.sh) 则在小规模同步运行中显式设置 `SKIP_VALIDATE=1`。
+
+V4 逐轮控制器当前仅生成 `train/` 和 `train.json`，没有接入可选的验证集准备步骤。因此通过 `run.sh` 正常启动时 learner 跳过验证，验证 loss 留空；不是验证 head、loss 或 reader 被删除。独立使用原生工具可以准备验证数据，MuZero 的验证快照还需自己的 `val.json` 展开元数据。若接入自动验证，划分与 shuffle 编排应留在外围，继续调用原生 shuffler 和 learner；不能把训练样本复制成验证样本。
 
 ## Replay-ratio 额度
 
@@ -53,7 +59,7 @@ bash scripts/autoexp.sh --config-dir /absolute/path/to/experiment \
 
 正常轮完成计划游戏数后不继续追补行数缺口，实际产样变化由训练额度吸收。两轮均无有效行、无法估计产样率时，会警告并使用 `games_per_round` 再做一批校准；不会虚构正的产样率或额度。
 
-**训练额度以完整来源 epoch 为粒度。** V4 不沿用 V3.4 的 batch 边界截断，也不以快照的一遍 batch 数封顶：来源 reader 仍按其文件顺序、随机整文件选择和重复文件设置工作。`S` 是目标量，实际消费可能超出它；超额记为负额度，之后的轮次先偿还。额度不足一个 epoch 时，仍完成 selfplay 和 shuffle，但不调用 learner、不推进训练时钟、不重新导出模型，继续使用上一轮模型。新游戏全部为零训练行时也可以完成这样的轮次，已有回放数据保留。
+**训练额度以完整来源 epoch 为粒度。** V4 不沿用 V3.4 的 batch 边界截断，也不以快照的一遍 batch 数封顶：来源 reader 仍按其文件顺序、随机整文件选择和重复文件设置工作。允许重复文件时，`keep-target-rows` 可以小于 `samples-per-epoch`；启用 `no-repeat-files` 后则须提供足够数据完成请求的 epoch。`S` 是目标量，实际消费可能超出它；超额记为负额度，之后的轮次先偿还。额度不足一个 epoch 时，仍完成 selfplay 和 shuffle，但不调用 learner、不推进训练时钟、不重新导出模型，继续使用上一轮模型。新游戏全部为零训练行时也可以完成这样的轮次，已有回放数据保留。
 
 产样计划在 selfplay 前保存；训练前保存本轮 epoch 数和可用额度；新剩余额度只在轮次最终提交时生效。恢复不会按新增 shard 再次发放同一笔额度，也不会重复已提交 epoch。记录的 `actual_replay_ratio` 是累计实际消费样本数除以累计有效根行数，包含冷启动；它与正常阶段的额度账本口径不同，不能解释为每一轮都严格等于配置的 R。来源自带的 train-bucket 限制不能同时通过 `train_args` 设置第二套额度所有权。
 
