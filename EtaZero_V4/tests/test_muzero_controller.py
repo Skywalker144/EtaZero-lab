@@ -30,7 +30,7 @@ def test_muzero_two_round_publication_and_resume(tmp_path, game, algorithm, inte
     check_muzero_two_rounds(tmp_path, game, algorithm, interior, weights, compiled)
 
 
-def check_muzero_two_rounds(tmp_path, game, algorithm, interior, weights, compiled, *, binary=None, fp16=True, backend_config=None):
+def check_muzero_two_rounds(tmp_path, game, algorithm, interior, weights, compiled, *, binary=None, fp16=True, backend_config=None, heads_only=False):
     cfg = tmp_path / 'selfplay.cfg'
     cfg.write_text(f'''@include {os.path.relpath(ROOT / 'configs/checks/source_go.cfg', tmp_path)}
 game = {game}
@@ -55,8 +55,11 @@ cudaUseFP16 = {str(fp16).lower()}
             options = dict(inputsUseNHWC='true', numNNServerThreadsPerModel=2, eigenUseFP16='false')
             options.update(backend_config or {})
             stream.write('\n' + ''.join(f'{key} = {value}\n' for key, value in options.items()))
+    network = asdict(make_model(game, pos_len=canvas).network_config)
+    if heads_only:
+        network['prediction'].update(block_kind=[], trunk_num_channels=network['latent_channels'])
     config = RunConfig(selfplay_config=str(cfg), game=game, algorithm=algorithm,
-        muzero_network=asdict(make_model(game, pos_len=canvas).network_config), muzero_unroll_steps=3,
+        muzero_network=network, muzero_unroll_steps=3,
         publish_weights=weights, canvas=canvas, batch_size=4, games_per_round=4, samples_per_epoch=8,
         shuffle_rows_per_file=128, shuffle_keep_rows=512, shuffle_args=('-min-rows', '1'),
         train_args=('-use-adamw', *(('-use-fp16',) if fp16 else ()), '-lookahead-k', '2', '-swa-period-samples', '8',
