@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EtaZero · 原生工作台</title><link rel="icon" href="data:,">
+  <script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/native.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<header class="header"><div class="brand">EtaZero <span id="version"></span><h1>原生工作台</h1></div>
+  <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">连接中</span>
+  <select id="theme" aria-label="配色主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
+</header>
+<div id="error" class="error" role="alert" hidden></div>
+<main class="workspace">
+  <aside class="setup panel" aria-label="模型与会话配置"><details class="setup-details" id="setup-details" open>
+    <summary class="setup-toggle">会话配置<span>展开 / 收起</span></summary><div class="setup-content">
+    <div class="panel-heading"><h2>模型与棋局</h2><button id="refresh-models">刷新模型</button></div>
+    <form id="settings">
+      <label class="field">运行目录<select id="run" required></select></label>
+      <label class="field">发布模型<select id="model" required></select></label>
+      <div id="model-summary" class="model-summary"></div><p id="config-path" class="muted path"></p>
+      <details class="inspector"><summary>初始局面 <span>可选覆盖</span></summary>
+        <p class="muted">留空使用原生配置。尺寸、棋规和贴目只在创建棋局时生效。</p>
+        <div class="field-row"><label class="field">宽<input id="size-x" type="number" min="2" placeholder="配置值"></label><label class="field">高<input id="size-y" type="number" min="2" placeholder="配置值"></label></div>
+        <label class="field">原生棋规<input id="rules" placeholder="如 tromp-taylor、renju、hex"></label>
+        <label class="field">贴目<input id="komi" type="number" step="0.5" placeholder="配置值"></label>
+        <label class="field">象棋 FEN<input id="fen" placeholder="留空为标准开局"></label>
+      </details>
+      <details class="inspector" id="sgf-panel"><summary>导入 SGF <span>创建棋局时生效</span></summary>
+        <label class="field">选择棋谱文件<input id="sgf-file" type="file" accept=".sgf,text/plain"></label>
+        <label class="field">或粘贴棋谱<textarea id="sgf" rows="4" spellcheck="false" placeholder="(;GM[1]…)"></textarea></label>
+        <label class="field">载入至第几手后<input id="sgf-turn" type="number" min="0" step="1" placeholder="留空载入全部；0 为初始局面"></label>
+        <p class="muted">棋谱提供尺寸、棋规和起点，请清空上方初始局面覆盖。按原生 SGF 读取器选择主线，支持历史回看与继续分支。请求上限 4 MiB。</p>
+      </details>
+      <details class="inspector" id="opening-panel"><summary>平衡开局 <span>五子棋 / Hex</span></summary>
+        <label class="check"><input id="balanced-opening" type="checkbox">创建时按当前模型生成平衡开局</label>
+        <label class="field">开局参数（JSON，可留空）<textarea id="opening-options" rows="3" spellcheck="false" placeholder="{}"></textarea></label>
+        <p class="muted">支持 balanceOpeningDropPow，Hex 另支持 minAcceptRate。留空使用配置值或原生缺省值。生成时可以停止；不能与 SGF 或 FEN 合用。</p>
+      </details>
+      <label class="field">操作模式<select id="mode"><option value="play">人机对弈</option><option value="manual">局面研究 · 手动双方</option></select></label>
+      <label class="field">人类执子<select id="human"><option value="B">黑方 / 象棋红方</option><option value="W">白方 / 象棋黑方</option></select></label>
+      <label class="field">maxVisits <small>留空沿用原生配置</small><input id="visits" type="number" min="1" step="1" placeholder="原生访问预算"></label>
+      <details class="inspector"><summary>其他搜索参数 <span>原生字段</span></summary><label class="field" for="parameters">要修改的参数（JSON 对象）</label><textarea id="parameters" rows="5" spellcheck="false">{}</textarea><p class="muted">仅提交填入的字段，具体约束由引擎校验。</p></details>
+      <button id="new-game" type="submit" class="primary wide">创建棋局</button>
+      <button id="apply-settings" type="button" class="wide" disabled>应用模式 / 执子 / 参数</button>
+    </form>
+    <details class="inspector"><summary>发布信息</summary><pre id="model-info"></pre></details>
+    <details class="inspector"><summary>实际参数与模型</summary><pre id="engine-config"></pre></details>
+    <p id="catalog-errors" class="muted"></p>
+    </div></details>
+  </aside>
+  <section class="position panel" aria-label="棋盘与历史">
+    <div class="panel-heading"><h2>局面 <span id="rule-badge" class="badge"></span></h2><span id="session-mode" class="muted">未创建</span></div>
+    <div class="status-line"><span id="status" role="status">选择模型，创建棋局</span><span id="move-count"></span></div>
+    <p id="session-info" class="session-info"></p>
+    <p id="opening-info" class="muted" hidden></p>
+    <div class="actions"><button id="analyze" class="primary" disabled>开启分析 <kbd>A</kbd></button><button id="step" disabled>AI 单步 <kbd>S</kbd></button><button id="stop" hidden>停止搜索</button><button id="pass" hidden>停一手</button><button id="undo" disabled>撤回 <kbd>U</kbd></button><button id="retry" hidden>重试 AI</button></div>
+    <div class="board-surround"><div id="board" class="board" role="group" aria-label="棋盘"><p class="empty-state">创建棋局后显示原生局面</p></div></div>
+    <div class="board-footer"><label class="check"><input id="numbers" type="checkbox" checked>手数</label><label class="overlay-label">叠加<select id="overlay"><option value="candidates">候选得分</option><option value="prior">候选先验</option><option value="visits">候选访问</option><option value="none">无</option></select></label><span id="board-coordinate" class="mono">—</span></div>
+    <div class="candidate-controls"><label>Top K <input id="candidate-top" type="number" min="1" value="10"></label><label>最低访问 % <input id="candidate-min" type="number" min="0" max="100" value="1" step="0.1"></label></div>
+    <p id="view-note" class="view-note" hidden></p><button id="branch" class="wide" hidden>从此处继续 · 撤回后续落子</button>
+    <div class="history-heading"><h2>落子记录</h2><small id="history-count"></small></div>
+    <div class="replay-toolbar"><button id="first" aria-label="初始局面">|‹</button><button id="prev" aria-label="上一手">‹</button><input id="timeline" aria-label="回看手数" type="range" min="0" max="0" value="0"><button id="next" aria-label="下一手">›</button><button id="live">当前</button></div>
+    <div id="history" class="history"></div><p id="rule-note" class="muted"></p>
+  </section>
+  <aside class="analysis panel" aria-label="搜索分析">
+    <div class="panel-heading"><h2>搜索分析</h2><span id="analysis-status" class="muted">—</span></div>
+    <div id="analysis-empty" class="empty-state"><strong>查看引擎如何选择</strong><p>创建棋局后按 A 开启持续分析。<br>按 Esc 停止；落子或悔棋后会继续分析。</p></div>
+    <div id="analysis-data" hidden>
+      <div class="analysis-context"><span id="analysis-context"></span><button id="show-analysis">定位局面</button></div>
+      <div class="metrics"><div><small>根访问</small><strong id="completed"></strong></div><div><small>得分率</small><strong id="winrate"></strong></div><div><small>W−L</small><strong id="value"></strong></div></div>
+      <p id="perspective" class="metric-note"></p>
+      <div class="wdl-bar" aria-hidden="true"><i id="wdl-win"></i><i id="wdl-draw"></i><i id="wdl-loss"></i><i id="wdl-no-result"></i></div>
+      <p id="wdl" class="mono metric-note"></p><p id="network-wdl" class="mono metric-note muted"></p>
+      <label class="field">候选排序<select id="sort"><option value="order">原生顺序</option><option value="visits">访问</option><option value="prior">先验</option><option value="winrate">得分率</option></select></label>
+      <div class="table-toolbar"><label class="check"><input id="visited-only" type="checkbox">仅已访问</label><span id="candidate-count" class="muted"></span></div>
+      <div class="table-scroll"><table><thead><tr><th>着法</th><th>得分 %</th><th>访问</th><th>边访问</th><th>先验 %</th><th>和棋 %</th><th>NR %</th><th>LCB</th><th>效用</th><th>选点值</th></tr></thead><tbody id="candidates"></tbody></table></div>
+      <p id="candidate-detail" class="heatmap-detail">悬停或选择候选，查看主变化。</p>
+      <p class="muted">得分率 = W + ½(D + NR)。LCB 为来源报告的诊断值；选点值保留原始尺度，不能直接当作概率或 Gumbel 改进策略。MuZero 的主变化属于 latent 搜索。</p>
+      <details class="inspector" id="policy-panel"><summary>原生策略</summary>
+        <label class="field">策略来源<select id="policy-source"><option value="policy">主模型 · policy</option><option value="humanPolicy">HumanSL · humanPolicy</option></select></label>
+        <p id="policy-note" class="muted"></p><div id="policy-map" class="heat-grid"></div><div id="policy-list" class="native-policy-list"></div>
+      </details>
+      <details class="inspector" id="raw-panel"><summary>原始分析 JSON</summary><pre id="raw-analysis"></pre></details>
+    </div>
+    <details class="inspector" id="nn-panel"><summary>原生网络诊断</summary>
+      <p class="muted">按需执行一次原生推理。策略已做合法性处理，显示概率；原生命令不提供 logits 或全部训练策略头。</p>
+      <div class="field-row">
+        <label class="field">模型<select id="nn-source"><option value="main">主模型</option><option value="human">次级 HumanSL</option></select></label>
+        <label class="field">对称<select id="nn-symmetry"></select></label>
+        <label class="field">Policy optimism<input id="nn-optimism" type="number" min="0" max="1" step="any" value="0" required></label>
+      </div>
+      <button id="diagnose" disabled>读取当前局面网络输出</button>
+      <p class="muted">optimism 0 / 1 分别请求普通／乐观策略；实际可用输出由模型决定。切换选项后需重新读取。</p>
+      <p id="nn-empty" class="muted">尚未读取网络诊断。</p>
+      <div id="nn-data" hidden>
+        <div class="analysis-context"><span id="nn-context"></span><button id="show-nn">定位局面</button></div>
+        <p id="nn-command" class="mono metric-note"></p><p id="nn-values" class="mono metric-note"></p>
+        <p class="muted">保留原生文本精度；— 表示原生 NAN 屏蔽。热图颜色按当前最大概率缩放，不重新归一化。</p>
+        <div id="nn-map" class="heat-grid"></div><div id="nn-list" class="native-policy-list"></div>
+        <details class="inspector"><summary>原始网络文本</summary><pre id="nn-text"></pre></details>
+      </div>
+    </details>
+  </aside>
+</main>
+<footer><span id="state-version">单会话 · 服务端保存</span><span>A 分析　S 单步　U 撤回　← → 回看　End 当前</span></footer>
+</body></html>

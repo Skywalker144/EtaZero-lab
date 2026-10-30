@@ -1,0 +1,14 @@
+textarea {box-sizing:border-box;width:100%;padding:10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--text);font:12px ui-monospace,monospace;resize:vertical}
+.native-policy-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;max-height:300px;overflow:auto}
+.native-policy-list button {font-size:11px;padding:5px}.path {overflow-wrap:anywhere}
+#policy-list>select,#policy-list>.native-policy-list {grid-column:1/-1;width:100%}
+#apply-settings {margin-top:8px}#policy-map {margin:10px 0}#catalog-errors {white-space:pre-wrap;overflow-wrap:anywhere}
+#board .empty-state {position:absolute;inset:0;display:grid;place-content:center;margin:0}
+.board-point .xiangqi-piece {font-size:clamp(13px,3.4cqw,30px)}
+#policy-map .heat-cell {padding:2px;border-radius:2px;min-height:0;font-size:10px;aspect-ratio:1}
+#analysis-data .metrics strong {font-size:22px}#candidate-detail {white-space:normal;overflow-wrap:anywhere}
+#nn-map {margin:10px 0}
+#nn-map .heat-cell {display:grid;place-items:center;padding:2px;font-size:10px;aspect-ratio:1;box-sizing:border-box}
+#nn-list>select,#nn-list>.native-policy-list {grid-column:1/-1;width:100%}
+.nn-entry {padding:5px;font:11px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px}
+#nn-context,#nn-command,#nn-values {overflow-wrap:anywhere}
