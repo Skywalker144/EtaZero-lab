@@ -136,7 +136,7 @@ class Metrics:
         reg_dict: Dict[str,List] = {}
         raw_model.add_reg_dict(reg_dict)
 
-        device = reg_dict["normal"][0].device
+        device = next(raw_model.parameters()).device
         dtype = torch.float32
 
         with torch.no_grad():
