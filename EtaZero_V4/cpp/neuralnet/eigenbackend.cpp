@@ -1867,7 +1867,7 @@ struct Trunk {
   const int modelVersion;
   const int trunkNormKind;
 
-  const ConvLayer initialConv;
+  std::unique_ptr<ConvLayer> initialConv;
   const MatMulLayer initialMatMul;
   std::unique_ptr<SGFMetadataEncoder> sgfMetadataEncoder;
   const BlockStack blocks;
@@ -1882,10 +1882,11 @@ struct Trunk {
     : name(desc.name),
       modelVersion(desc.modelVersion),
       trunkNormKind(desc.trunkNormKind),
-      initialConv(desc.initialConv,nnX,nnY),
       initialMatMul(desc.initialMatMul),
       blocks(desc.blocks,desc.numBlocks,nnX,nnY)
   {
+    if(desc.numBlocks == 0) return;
+    initialConv = std::make_unique<ConvLayer>(desc.initialConv,nnX,nnY);
     if(desc.trunkNormKind == TRUNK_NORM_KIND_STANDARD) {
       trunkTipBN = std::make_unique<BatchNormLayer>(desc.trunkTipBN, desc.trunkTipActivation);
     }
@@ -1902,8 +1903,9 @@ struct Trunk {
   }
 
   size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    if(!initialConv) return 0;
     return std::max(
-      initialConv.requiredConvWorkspaceElts(maxBatchSize),
+      initialConv->requiredConvWorkspaceElts(maxBatchSize),
       blocks.requiredConvWorkspaceElts(maxBatchSize)
     );
   }
@@ -1919,13 +1921,19 @@ struct Trunk {
     const float* maskSum,
     float* convWorkspace
   ) const {
+    if(!initialConv) {
+      Eigen::array<Eigen::Index,4> offsets = {1,0,0,0};
+      Eigen::array<Eigen::Index,4> extents = {trunk->dimension(0),trunk->dimension(1),trunk->dimension(2),trunk->dimension(3)};
+      *trunk = input->slice(offsets,extents);
+      return;
+    }
     int batchSize = trunk->dimension(3);
-    SizedBuf<float*> trunkScratchBuf(scratch->allocator, scratch->getBufSizeXY(initialConv.outChannels));
+    SizedBuf<float*> trunkScratchBuf(scratch->allocator, scratch->getBufSizeXY(initialConv->outChannels));
     SizedBuf<float*> inputMatMulOutBuf(scratch->allocator, scratch->getBufSize(initialMatMul.outChannels));
-    TENSORMAP4 trunkScratch(trunkScratchBuf.buf, initialConv.outChannels, handle->nnXLen, handle->nnYLen, batchSize);
+    TENSORMAP4 trunkScratch(trunkScratchBuf.buf, initialConv->outChannels, handle->nnXLen, handle->nnYLen, batchSize);
     TENSORMAP2 inputMatMulOut(inputMatMulOutBuf.buf, initialMatMul.outChannels, batchSize);
 
-    initialConv.apply(handle, input, &trunkScratch, convWorkspace, false);
+    initialConv->apply(handle, input, &trunkScratch, convWorkspace, false);
     // MuZero dynamics/prediction have no global-input layer, as in CUDA.
     if(initialMatMul.inChannels > 0) {
       initialMatMul.apply(inputGlobal, &inputMatMulOut);
