@@ -56,7 +56,9 @@ def weight_decay_context(model, train_state, running_metrics, component_name):
     if not component_name:
         return model, train_state, running_metrics
     baseline = train_state['muzero_modelnorm_baselines'][component_name]
-    state = dict(train_state, modelnorm_normal_baseline=baseline['normal'], modelnorm_input_baseline=baseline['input'])
+    # Heads-only prediction has neither group; source adaptive decay only reads
+    # a baseline when that group's norm metric exists.
+    state = dict(train_state, modelnorm_normal_baseline=baseline.get('normal'), modelnorm_input_baseline=baseline.get('input'))
     prefix = component_name + '_'
     metrics = {kind: {key[len(prefix):]: value for key, value in values.items() if key.startswith(prefix)}
                for kind, values in running_metrics.items()}
