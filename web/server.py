@@ -1,11 +1,8 @@
 import argparse
-import json
-import mimetypes
 from threading import Thread
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 from etazero.config import ROOT
 from etazero.engine_config import load_engine_config, load_match_opening_config, load_match_hex_opening_config
@@ -13,69 +10,16 @@ from etazero.build import verify_build
 from etazero.evaluation.analysis import model_info
 from etazero.storage import load_json
 from .app import App, Conflict
+from .http import make_server as make_http_server
 
 
 STATIC = Path(__file__).resolve().parent / 'static'
 
 
 def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def send(self, status: int, data: bytes, content_type: str):
-            try:
-                self.send_response(status)
-                self.send_header('Content-Type', content_type)
-                self.send_header('Content-Length', str(len(data)))
-                self.send_header('Cache-Control', 'no-store')
-                self.send_header('X-Content-Type-Options', 'nosniff')
-                self.end_headers()
-                self.wfile.write(data)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        def json(self, status: int, value):
-            self.send(status, json.dumps(value, ensure_ascii=False).encode(), 'application/json; charset=utf-8')
-
-        def do_GET(self):
-            url = urlsplit(self.path)
-            if url.path == '/api/state':
-                try:
-                    since = int(parse_qs(url.query).get('since', ['-1'])[0])
-                except ValueError:
-                    return self.json(400, dict(error='无效版本号'))
-                return self.json(200, app.snapshot(since))
-            if url.path == '/api/catalog':
-                return self.json(200, app.catalog())
-            files = {'/': 'index.html', '/app.js': 'app.js', '/theme.js': 'theme.js', '/styles.css': 'styles.css'}
-            if url.path in files:
-                path = STATIC / files[url.path]
-                return self.send(200, path.read_bytes(), (mimetypes.guess_type(path)[0] or 'text/plain') + '; charset=utf-8')
-            self.json(404, dict(error='页面不存在'))
-
-        def do_POST(self):
-            origin = self.headers.get('Origin')
-            if origin and urlsplit(origin).netloc != self.headers.get('Host'):
-                return self.json(403, dict(error='请求来源不匹配'))
-            try:
-                length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 16384:
-                    raise ValueError('无效请求长度')
-                payload = json.loads(self.rfile.read(length))
-                if not isinstance(payload, dict):
-                    raise ValueError('请求必须是对象')
-                operations = {f'/api/{name}': name for name in
-                              ('new', 'play', 'undo', 'retry', 'analyze', 'step', 'branch', 'configure', 'refresh', 'stop')}
-                if self.path not in operations:
-                    return self.json(404, dict(error='未知接口'))
-                self.json(202, app.submit(operations[self.path], payload))
-            except Conflict as error:
-                self.json(409, dict(error=str(error)))
-            except (ValueError, TypeError) as error:
-                self.json(400, dict(error=str(error)))
-
-    return ThreadingHTTPServer((host, port), Handler)
+    files = {'/': STATIC / 'index.html', **{f'/{name}': STATIC / name
+             for name in ('app.js', 'theme.js', 'styles.css')}}
+    return make_http_server(app, host, port, files=files, conflict=Conflict)
 
 
 def discover_models(models_dir: Path, model: Path | None = None) -> dict[str, Path]:

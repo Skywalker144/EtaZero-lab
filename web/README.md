@@ -8,6 +8,27 @@ bash web/webui.sh
 
 脚本使用 Conda `pytorch`，按版本号各段数值选择最新的 `EtaZero_V*` 主线目录，在 <http://127.0.0.1:8766> 提供单用户工作台并自动打开浏览器。启动时执行 CMake 增量构建，由构建系统检查原生依赖并复用未变更的产物。`--rebuild` 强制执行构建，用于更改工具链或构建选项后；`--no-open` 禁用自动打开。已经处于 `pytorch` 环境时直接启动，否则只进入一次 Conda 环境。
 
+`--version EtaZero_V<版本号>` 可显式选择版本，不会自动回退。V4 使用 KataGo 原生 GTP 会话与独立页面；V3.4 使用其原有工作台，通过 `bash web/webui.sh --version EtaZero_V3.4` 启动。
+
+## V4 原生工作台
+
+V4 页面支持六种棋类、AlphaZero／Gumbel AlphaZero／MuZero／Gumbel MuZero 的原生模型，提供人机对弈、手动研究、持续分析、历史回看与分支、参数设置、SGF 导入和模型切换。模型目录来自训练提交记录，搜索报告直接展示来源 JSON；Elo 评估仍由独立原生 match 与来源拟合工具完成。
+
+```bash
+bash web/webui.sh --version EtaZero_V4 --models-dir /absolute/path/to/runs \
+  --config /absolute/path/to/gtp.cfg
+bash web/webui.sh --version EtaZero_V4 --model /absolute/path/to/model.bin.gz \
+  --config-dir /absolute/path/to/inference-config
+```
+
+普通模型使用 `.bin`／`.bin.gz`，MuZero 使用三组件 bundle 目录。独立配置使用 KataGo 原生 `gtp.cfg`；没有对应配置时显示未配置，需要显式指定或在配置目录补齐。可从 [来源 GTP 示例](../EtaZero_V4/cpp/configs/gtp_example.cfg) 建立自己的配置。`--human-model` 提供次级 HumanSL。算法与棋类约束、目录发现、原生统计口径和验证见 [V4 Web 文档](../EtaZero_V4/docs/web.md)。
+
+V4 的平衡开局调用原生开局算法；“原生网络诊断”按需调用原生 raw-NN 命令，显示主／次级模型的合法策略概率、四结果值和原始文本。原生命令不提供 logits 或全部训练策略头；象棋逐手动画尚未接入，不能将下述旧版功能全部视为 V4 已完成。
+
+## V3 工作台
+
+以下描述 V3 页面及其私有模型与配置格式，运行时显式选择对应版本。
+
 默认递归扫描该版本整个 `data/`，发现包含 `config/effective.json` 或 `models/` 的运行目录，包括实验伞目录下的嵌套运行。先选择“配置目录”，再选择“权重代数”；代数对应训练 iteration，按数值倒序排列，默认选择 `models/current.json` 指向的当前发布权重，没有发布指针时选择最新一代。尚未发布权重的目录显示“暂无权重”，不能创建棋局。存在可用的 `checks/minimal_test` 时默认选中它，否则选择首个有权重的目录；`--model` 可指定初始选择。
 
 支持 AlphaZero 和 MuZero 已发布模型；V3 的围棋与中国象棋通过模型 manifest 的棋类布局选择。围棋可设规则／贴目并停一手；象棋显示九路十行和中文棋子，先选起点再选合法终点，可从 FEN 开始。象棋手动走子、AI 应手和单步回看／撤回时，棋子平滑移到落点，吃子在到达时淡出；人机连续走子按顺序播放，合并收到的更新也逐手显示，播放期间不能在棋盘上走下一手。重开与跨多手回看跳转直接显示目标局面，遵循系统“减少动态效果”设置。历史回看、悔棋和继续分支使用 native 保存的实际棋盘，保留提子与移子结果。象棋策略以起终点动作列表显示，原始网络面板可按起点查看全部 2086 动作，不能把它们当成格点概率。
@@ -54,11 +75,11 @@ Hex 使用六角格棋盘，黑方连接上下边、白方连接左右边；按�
 
 ```bash
 # 指定模型：同目录必须包含 manifest.json。
-bash web/webui.sh --model "EtaZero_V1/data/<运行目录>/models/<模型目录>/model.pt"
+bash web/webui.sh --version EtaZero_V3.4 --model "EtaZero_V3.4/data/<运行目录>/models/<模型目录>/model.pt"
 # 限定扫描到目标版本中的某个运行或实验伞目录。
-bash web/webui.sh --models-dir "EtaZero_V1/data/<运行目录>" --port 8766
+bash web/webui.sh --version EtaZero_V3.4 --models-dir "EtaZero_V3.4/data/<运行目录>" --port 8766
 # 独立评估配置，支持 ANALYSIS_* 环境覆盖。
-ANALYSIS_SEARCH_THREADS=8 ANALYSIS_DEVICE=cuda:0 bash web/webui.sh
+ANALYSIS_SEARCH_THREADS=8 ANALYSIS_DEVICE=cuda:0 bash web/webui.sh --version EtaZero_V3.4
 ```
 
 实现入口：[server.py](server.py)、[app.py](app.py)、[engine.py](engine.py)、[原生共享会话](../EtaZero_V2.7/cpp/src/commands/session.cpp)、[GTP / JSON 协议](../EtaZero_V2.7/docs/engine.md)、[界面](static/)。启动参数以 `python -m web.server --help` 为准。
@@ -78,7 +99,7 @@ conda run --no-capture-output -n pytorch python -m unittest discover -s web/test
 浏览器检查需要已有 Playwright 和 Chromium，会重开、回退并完成棋局，应对独立测试服务执行：
 
 ```bash
-bash web/webui.sh --port 8767
+bash web/webui.sh --version EtaZero_V3.4 --port 8767
 ETAZERO_WEB_TEST_URL=http://127.0.0.1:8767 \
 conda run --no-capture-output -n pytorch python -m unittest discover -s web/tests -p test_browser.py -v
 ```
