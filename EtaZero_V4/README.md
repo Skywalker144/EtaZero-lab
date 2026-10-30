@@ -92,7 +92,9 @@ bash scripts/run.sh run --config configs/checks/source_go \
 
 `samples_per_epoch` 沿用来源的整文件选取语义，是 epoch 的目标量；实际消费可能超过目标。控制器记录 checkpoint 中的实际样本计数，不截断来源内部文件消费来凑固定步数。 配置 `replay_ratio` 后，按近期每局行数规划产样，以完整来源 epoch 分配训练额度；不足额度的轮次只产样，不重新发布模型。冷启动、负额度和统计口径见 [调度与恢复](docs/controller.md)。
 
-配置目录由 `run.cfg` 管理 EtaZero 外层调度，`selfplay.cfg` 保留 KataGo 原生字段和 include；`train.cfg`、`shuffle.cfg` 使用来源命令行参数名。普通网络使用 `model-kind`，MuZero 使用 `muzero-config` 和 `muzero-unroll-steps`。`run.sh` 默认启动单臂，`autoexp.sh` 从 `exp.cfg` 调度多臂；支持 `CONFIG_DIR`、`--config-dir` 与启动前 `--dry-run`。文件组织、路径和字段所有权见 [配置与启动](docs/configuration.md)。
+配置目录按职责拆分：`env.cfg` 管棋类和画布，`net.cfg` 管普通／MuZero 网络，`selfplay.cfg` 按组管理算法、原生搜索参数、采样与执行，`train.cfg`、`shuffle.cfg` 使用原生命令行参数名，`run.cfg` 管外围调度。`configs/baseline/` 保存完整公共参数，`games/` 和 `algorithms/` 分别保存环境和算法差异，各运行目录显式 include。外围转换层生成原生 `selfplay.resolved.cfg`、learner 参数和 MuZero 三组件配置；引擎与 learner 核心保持原有接口。`run.sh`、`autoexp.sh`、`autoelo.sh` 提供单臂、多臂和评估入口，支持 `CONFIG_DIR`、`.local` 与 `--dry-run`。用法、字段归属及与原生同步循环的差异见 [配置与启动](docs/configuration.md)。
+
+原生 learner 的验证流程保留；当前逐轮控制器只生成训练快照，正常运行不产生验证 loss。来源验证数据划分方式和当前接入边界见 [验证数据](docs/controller.md#验证数据)。
 
 外层支持**按实际提交点恢复中断轮次**：保留已发布自对弈 shard，补足剩余产样；复用已发布 shuffle／模型目录；learner 只补足尚未提交的 epoch。单设备完整 checkpoint 保存 reader 与 learner 的 RNG/scaler。未提交的内存工作需要重做，自对弈在途状态不恢复；恢复边界、锁与计时限制见 [调度与恢复](docs/controller.md)。
 
