@@ -3843,6 +3843,7 @@ struct Trunk {
   const int nnYLen;
   const bool usingFP16;
   const bool usingNHWC;
+  const bool inputsUsingNHWC;
   // MIOpen and the cuDNN Xiangqi input need matching layouts for the first conv.
   const bool inputsRequireLayoutConversion;
 
@@ -3876,6 +3877,7 @@ struct Trunk {
     nnYLen(nnY),
     usingFP16(useFP16),
     usingNHWC(useNHWC),
+    inputsUsingNHWC(inputsUseNHWC),
 #ifdef KATAGO_GPU_HIP
     inputsRequireLayoutConversion(inputsUseNHWC != useNHWC),
 #else
@@ -3886,6 +3888,7 @@ struct Trunk {
     blocks(cudaHandles,manager,desc->numBlocks,desc->trunkNumChannels,desc->blocks,nnX,nnY,useFP16,useNHWC),
     trunkNormKind(desc->trunkNormKind)
   {
+    if(desc->numBlocks == 0) return;
     int midNumChannels = desc->midNumChannels;
     int regularNumChannels = desc->regularNumChannels;
     int gpoolNumChannels = desc->gpoolNumChannels;
@@ -3932,6 +3935,7 @@ struct Trunk {
     CudaHandles* cudaHandles,
     int batchSize
   ) const {
+    if(!initialConv) return 0;
     size_t bytes = 0;
     size_t b;
 
@@ -3966,6 +3970,33 @@ struct Trunk {
     void* workspaceBuf,
     size_t workspaceBytes
   ) const {
+
+    if(!initialConv) {
+      // Strip the mask channel, preserving latent values; convert layout only if needed.
+      const int xy = nnXLen*nnYLen;
+      const size_t elementBytes = usingFP16 ? sizeof(half) : sizeof(float);
+      const size_t channelStride = inputsUsingNHWC ? 1 : xy;
+      const size_t widthBytes = trunkNumChannels * channelStride * elementBytes;
+      const size_t rows = inputsUsingNHWC ? (size_t)batchSize*xy : batchSize;
+      const bool convert = inputsUsingNHWC != usingNHWC;
+      SizedBuf<void*> packed(scratch->allocator,convert ? scratch->getBufSizeXY(trunkNumChannels) : 1);
+      void* destination = convert ? packed.buf : trunkBuf;
+      CUDA_ERR(name.c_str(),cudaMemcpy2DAsync(destination,widthBytes,
+        (const char*)inputBuf+channelStride*elementBytes,(trunkNumChannels+1)*channelStride*elementBytes,
+        widthBytes,rows,cudaMemcpyDeviceToDevice,cudaHandles->stream));
+      if(convert) {
+        if(usingNHWC) {
+          if(usingFP16) customCudaCopyNCHWtoNHWC((const half*)packed.buf,(half*)trunkBuf,batchSize,trunkNumChannels,xy,cudaHandles->stream);
+          else customCudaCopyNCHWtoNHWC((const float*)packed.buf,(float*)trunkBuf,batchSize,trunkNumChannels,xy,cudaHandles->stream);
+        }
+        else {
+          if(usingFP16) customCudaCopyNHWCtoNCHW((const half*)packed.buf,(half*)trunkBuf,batchSize,trunkNumChannels,xy,cudaHandles->stream);
+          else customCudaCopyNHWCtoNCHW((const float*)packed.buf,(float*)trunkBuf,batchSize,trunkNumChannels,xy,cudaHandles->stream);
+        }
+        CUDA_ERR(name.c_str(),cudaPeekAtLastError());
+      }
+      return;
+    }
 
     SizedBuf<void*> trunkScratch(scratch->allocator, scratch->getBufSizeXY(trunkNumChannels));
 
@@ -4608,7 +4639,7 @@ struct Model {
     }
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
-    CudaUtils::debugPrint3D(string("Initial bin features"), inputBuf, batchSize, trunk->initialConv->inChannels, nnXLen*nnYLen, inputsUsingNHWC, usingFP16);
+    CudaUtils::debugPrint3D(string("Initial bin features"), inputBuf, batchSize, numInputChannels, nnXLen*nnYLen, inputsUsingNHWC, usingFP16);
     if(trunk->initialMatMul) CudaUtils::debugPrint2D(string("Initial global features"), inputGlobalBuf, batchSize, trunk->initialMatMul->inChannels, usingFP16);
     if(trunk->sgfMetadataEncoder != nullptr) {
       assert(inputMetaBuf != NULL);
