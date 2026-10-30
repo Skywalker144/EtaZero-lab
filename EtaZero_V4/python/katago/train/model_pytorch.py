@@ -3081,11 +3081,16 @@ def compute_attn_logit_dataless_bounds(model) -> Dict[str, float]:
 
 class Model(torch.nn.Module):
     def __init__(self, config: modelconfigs.ModelConfig, pos_len: int, *,
-                 num_bin_features=None, num_global_features=None, trunk_only=False):
+                 num_bin_features=None, num_global_features=None, trunk_only=False, heads_only=False):
         super(Model, self).__init__()
 
         self.config = config
         self.trunk_only = trunk_only
+        self.heads_only = heads_only
+        if heads_only and (trunk_only or config["block_kind"] or num_global_features != 0
+                           or num_bin_features != config["trunk_num_channels"] + 1
+                           or config.get("has_intermediate_head", False)):
+            raise ValueError("Heads-only prediction requires mask + latent channels and no trunk/global/intermediate layers")
         if num_bin_features is None:
             num_bin_features = modelconfigs.get_num_bin_input_features(config)
         if num_global_features is None:
@@ -3117,7 +3122,7 @@ class Model(torch.nn.Module):
         self.shortterm_value_error_multiplier = 0.25
 
         self.trunk_normless = "trunk_normless" in config and config["trunk_normless"]
-        self.trunk_final_rmsnorm = "trunk_final_rmsnorm" in config and config["trunk_final_rmsnorm"]
+        self.trunk_final_rmsnorm = not heads_only and config.get("trunk_final_rmsnorm", False)
 
         if not trunk_only and "has_intermediate_head" in config and config["has_intermediate_head"]:
             self.has_intermediate_head = True
@@ -3128,7 +3133,9 @@ class Model(torch.nn.Module):
 
         self.activation = "relu" if "activation" not in config else config["activation"]
 
-        if config["initial_conv_1x1"]:
+        if heads_only:
+            self.conv_spatial = None
+        elif config["initial_conv_1x1"]:
             self.conv_spatial = torch.nn.Conv2d(num_bin_features, self.c_trunk, kernel_size=1, padding="same", bias=False)
         else:
             self.conv_spatial = torch.nn.Conv2d(num_bin_features, self.c_trunk, kernel_size=3, padding="same", bias=False)
@@ -3408,7 +3415,7 @@ class Model(torch.nn.Module):
 
         # Trunk channel gating: per-channel learned gate that interpolates between
         # trunk and residual at each block.
-        self.use_trunk_channel_gate = config.get("use_trunk_channel_gate", False)
+        self.use_trunk_channel_gate = not heads_only and config.get("use_trunk_channel_gate", False)
         if self.use_trunk_channel_gate:
             num_blocks = len(self.blocks)
             self.trunk_channel_gate_logits = torch.nn.ParameterList()
@@ -3421,7 +3428,7 @@ class Model(torch.nn.Module):
         # sigmoid gate. Later blocks (and the final trunk output) can subtract a per-channel
         # sigmoid-gated amount of the backout trunk from the main trunk input to effectively
         # "back out" the influence of earlier blocks.
-        self.use_trunk_residual_backout = config.get("use_trunk_residual_backout", False)
+        self.use_trunk_residual_backout = not heads_only and config.get("use_trunk_residual_backout", False)
         self.trunk_residual_backout_noreg = config.get("trunk_residual_backout_noreg", False)
         if self.use_trunk_residual_backout:
             num_blocks = len(self.blocks)
@@ -3448,7 +3455,7 @@ class Model(torch.nn.Module):
             # the final trunk norm+act feeding into the heads. Same -2 init rationale.
             self.backout_use_logit_final = torch.nn.Parameter(torch.full((1, self.c_trunk, 1, 1), -2.0))
 
-        self.num_rw_registers = config.get("attention_num_rw_registers", 0)
+        self.num_rw_registers = 0 if heads_only else config.get("attention_num_rw_registers", 0)
         self.use_rw_registers = self.num_rw_registers > 0
         self.inline_registers = config.get("inline_registers", False)
         if self.use_rw_registers and self.inline_registers:
@@ -3490,7 +3497,8 @@ class Model(torch.nn.Module):
         #
         # Neither changes any parameter or on-board output. Both can be toggled freely for an existing checkpoint.
         trunk_is_plain_transformer = (
-            all(bk[1] in _TRANSFORMER_SEQ_LAYOUT_KINDS for bk in self.block_kind)
+            bool(self.block_kind)
+            and all(bk[1] in _TRANSFORMER_SEQ_LAYOUT_KINDS for bk in self.block_kind)
             and not self.use_trunk_channel_gate
             and not self.use_trunk_residual_backout
             and not self.use_rw_registers
@@ -3539,7 +3547,9 @@ class Model(torch.nn.Module):
         # regular path.
         self.compile_per_block_trunk = False
 
-        if self.trunk_final_rmsnorm:
+        if heads_only:
+            self.norm_trunkfinal = None
+        elif self.trunk_final_rmsnorm:
             spatial = config.get("trunk_rmsnorm_spatial", False)
             cgroup_size = config.get("rmsnorm_spatial_cgroup_size", None) if spatial else None
             self.norm_trunkfinal = RMSNormMask(self.c_trunk, self.config, spatial=spatial, cgroup_size=cgroup_size)
@@ -3547,7 +3557,7 @@ class Model(torch.nn.Module):
             self.norm_trunkfinal = BiasMask(self.c_trunk, self.config, is_after_batchnorm=True)
         else:
             self.norm_trunkfinal = NormMask(self.c_trunk, self.config, fixup_use_gamma=False, is_last_batchnorm=True)
-        self.act_trunkfinal = act(self.activation)
+        self.act_trunkfinal = None if heads_only else act(self.activation)
 
         self.policy_head = None
         self.value_head = None
@@ -3590,13 +3600,14 @@ class Model(torch.nn.Module):
 
     @property
     def device(self):
-        return self.conv_spatial.weight.device
+        return next(self.parameters()).device
 
     def initialize(self):
         with torch.no_grad():
             spatial_scale = 0.8
             global_scale = 0.6
-            init_weights(self.conv_spatial.weight, self.activation, scale=spatial_scale)
+            if self.conv_spatial is not None:
+                init_weights(self.conv_spatial.weight, self.activation, scale=spatial_scale)
             if self.linear_global is not None:
                 init_weights(self.linear_global.weight, self.activation, scale=global_scale)
 
@@ -3608,13 +3619,14 @@ class Model(torch.nn.Module):
                 self.tab_module.initialize()
 
             if self.norm_kind == "fixup":
-                fixup_scale = 1.0 / math.sqrt(self.num_total_blocks)
+                fixup_scale = 1.0 / math.sqrt(max(1, self.num_total_blocks))
                 for block in self.blocks:
                     block.initialize(fixup_scale=fixup_scale)
             elif self.norm_kind == "fixscale" or self.norm_kind == "fixbrenorm" or self.norm_kind == "fixscaleonenorm":
                 for i, block in enumerate(self.blocks):
                     block.initialize(fixup_scale=1.0 / math.sqrt(i+1.0))
-                self.norm_trunkfinal.set_scale(1.0 / math.sqrt(self.num_total_blocks+1.0))
+                if self.norm_trunkfinal is not None:
+                    self.norm_trunkfinal.set_scale(1.0 / math.sqrt(self.num_total_blocks+1.0))
             else:
                 for block in self.blocks:
                     block.initialize(fixup_scale=1.0)
@@ -3651,7 +3663,8 @@ class Model(torch.nn.Module):
         reg_dict["output"] = []
         reg_dict["output_noreg"] = []
 
-        reg_dict["input"].append(self.conv_spatial.weight)
+        if self.conv_spatial is not None:
+            reg_dict["input"].append(self.conv_spatial.weight)
         if self.linear_global is not None:
             reg_dict["input"].append(self.linear_global.weight)
         if self.metadata_encoder is not None:
@@ -3680,7 +3693,8 @@ class Model(torch.nn.Module):
             reg_dict["normal_gamma"].append(self.rw_reg_readout_norm.weight)
             reg_dict["normal"].append(self.rw_reg_readout_proj1.weight)
             reg_dict["normal"].append(self.rw_reg_readout_proj2.weight)
-        self.norm_trunkfinal.add_reg_dict(reg_dict)
+        if self.norm_trunkfinal is not None:
+            self.norm_trunkfinal.add_reg_dict(reg_dict)
         if not self.trunk_only:
             self.policy_head.add_reg_dict(reg_dict)
             self.value_head.add_reg_dict(reg_dict)
@@ -3693,7 +3707,8 @@ class Model(torch.nn.Module):
     def set_brenorm_params(self, renorm_avg_momentum: float, rmax: float, dmax: float):
         for block in self.blocks:
             block.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
-        self.norm_trunkfinal.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
+        if self.norm_trunkfinal is not None:
+            self.norm_trunkfinal.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
         if not self.trunk_only:
             self.policy_head.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
             self.value_head.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
@@ -3705,7 +3720,8 @@ class Model(torch.nn.Module):
     def add_brenorm_clippage(self, upper_rclippage, lower_rclippage, dclippage):
         for block in self.blocks:
             block.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
-        self.norm_trunkfinal.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
+        if self.norm_trunkfinal is not None:
+            self.norm_trunkfinal.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
         if not self.trunk_only:
             self.policy_head.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
             self.value_head.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
@@ -3806,7 +3822,7 @@ class Model(torch.nn.Module):
         orig_mask_sum = mask_sum
         _, _, orig_H, orig_W = mask.shape
 
-        x_spatial = self.conv_spatial(input_spatial)
+        x_spatial = input_spatial[:, 1:] if self.heads_only else self.conv_spatial(input_spatial)
         if self.linear_global is not None:
             x_global = self.linear_global(input_global).unsqueeze(-1).unsqueeze(-1)
             out = x_spatial + x_global
@@ -4042,8 +4058,9 @@ class Model(torch.nn.Module):
             self.attn_logit_ub_batch_max = ubs.detach().amax()
 
         # Use original mask for final norm and heads (NCHW format)
-        out = self.norm_trunkfinal(out, mask=orig_mask, mask_sum_hw=orig_mask_sum_hw, mask_sum=orig_mask_sum)
-        out = self.act_trunkfinal(out)
+        if not self.heads_only:
+            out = self.norm_trunkfinal(out, mask=orig_mask, mask_sum_hw=orig_mask_sum_hw, mask_sum=orig_mask_sum)
+            out = self.act_trunkfinal(out)
 
         if extra_outputs is not None:
             extra_outputs.report("trunkfinal", out)
@@ -4135,7 +4152,8 @@ class Model(torch.nn.Module):
 
     def supports_per_block_compile(self) -> bool:
         return (
-            all(bk[1] in _TRANSFORMER_SEQ_LAYOUT_KINDS for bk in self.block_kind)
+            bool(self.block_kind)
+            and all(bk[1] in _TRANSFORMER_SEQ_LAYOUT_KINDS for bk in self.block_kind)
             and not self.has_intermediate_head
             and not self.use_trunk_channel_gate
             and not self.use_trunk_residual_backout
