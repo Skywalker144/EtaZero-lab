@@ -21,7 +21,8 @@ pytestmark = pytest.mark.skipif(os.environ.get('ETAZERO_OPENCL_TESTS') != '1',
 @pytest.mark.parametrize('game,variant', [('go', 'regular'), ('freestyle', 'regular'), ('standard', 'regular'),
                                         ('renju', 'nbt'), ('hex', 'mixed_transformer'), ('renju', 'constant'),
                                         ('go', 'small_span'), ('go', 'metadata'), ('xiangqi', 'regular'),
-                                        ('xiangqi', 'nbt'), ('xiangqi', 'mixed_transformer')])
+                                        ('xiangqi', 'nbt'), ('xiangqi', 'mixed_transformer'), ('go', 'heads_only'), ('renju', 'heads_only'),
+                                        ('hex', 'heads_only'), ('xiangqi', 'heads_only')])
 def test_initial_and_recurrent_against_pytorch(tmp_path, binary, precision, game, variant):
     fp16, config = precision
     check_native_initial_recurrent(tmp_path, game, variant, fp16, binary=binary,
