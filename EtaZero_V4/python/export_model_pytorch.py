@@ -665,6 +665,8 @@ def write_model_binary(model, f, model_name, *, export_14_as_15=False,
             writeln(0)
             writeln(0)
 
+        if model.heads_only:
+            return
         write_conv("model.conv_spatial", model.conv_spatial)
         if model.linear_global is not None:
             write_matmul("model.linear_global", model.linear_global.weight)
