@@ -1746,6 +1746,9 @@ base_config_of_name = {
 
     # Tiny convnets
     "b10c128": b10c128,      # Historic katago architecture
+    "b5c128nbt": {**b5c192nbt, "trunk_num_channels": 128, "mid_num_channels": 64,
+                   "gpool_num_channels": 24, "p1_num_channels": 24, "g1_num_channels": 24,
+                   "v1_num_channels": 24, "v2_size": 56},
     "b5c192nbt": b5c192nbt,  # Probably better (nbt architecture is better)
 
     "b8c192nbt": b8c192nbt,
