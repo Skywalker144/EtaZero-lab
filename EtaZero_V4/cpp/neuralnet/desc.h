@@ -399,7 +399,7 @@ struct TrunkDesc {
 
   TrunkDesc();
   ~TrunkDesc();
-  TrunkDesc(std::istream& in, int modelVersion, bool binaryFloats, int metaEncoderVersion, bool hasGlobalInput = true);
+  TrunkDesc(std::istream& in, int modelVersion, bool binaryFloats, int metaEncoderVersion, bool hasGlobalInput = true, bool isMuZeroPrediction = false);
   TrunkDesc(TrunkDesc&& other);
 
   TrunkDesc(const TrunkDesc&) = delete;

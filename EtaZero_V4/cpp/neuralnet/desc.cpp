@@ -1669,7 +1669,7 @@ TrunkDesc::TrunkDesc()
     trunkNormKind(TRUNK_NORM_KIND_STANDARD)
 {}
 
-TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats, int metaEncVersion, bool hasGlobalInput) {
+TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats, int metaEncVersion, bool hasGlobalInput, bool isMuZeroPrediction) {
   in >> name;
   modelVersion = vrsn;
   in >> numBlocks;
@@ -1704,12 +1704,14 @@ TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats, int metaEncVersio
 
   if(in.fail())
     throw StringError(name + ": trunk failed to parse num blocks or various channel parameters");
-  if(numBlocks < 1)
-    throw StringError(name + ": trunk num blocks must be positive");
+  if(numBlocks < 0 || (numBlocks == 0 && !isMuZeroPrediction))
+    throw StringError(name + ": zero trunk blocks are only supported for MuZero heads-only prediction");
   if(
     trunkNumChannels <= 0 || midNumChannels <= 0 || regularNumChannels <= 0 ||
     gpoolNumChannels <= 0)
     throw StringError(name + ": all numbers of channels must be positive");
+
+  if(numBlocks == 0) return;
 
   initialConv = ConvLayerDesc(in,binaryFloats);
   if(initialConv.outChannels != trunkNumChannels)
@@ -1813,7 +1815,7 @@ TrunkDesc& TrunkDesc::operator=(TrunkDesc&& other) {
 }
 
 void TrunkDesc::iterConvLayers(const std::function<void(const ConvLayerDesc& desc)>& f) const {
-  f(initialConv);
+  if(numBlocks > 0) f(initialConv);
   for(int i = 0; i < blocks.size(); i++) {
     if(blocks[i].first == ORDINARY_BLOCK_KIND) {
       ResidualBlockDesc* desc = (ResidualBlockDesc*)blocks[i].second.get();
@@ -1841,7 +1843,7 @@ void TrunkDesc::iterConvLayers(const std::function<void(const ConvLayerDesc& des
 
 double TrunkDesc::getSpatialConvDepth() const {
   double depth = 0;
-  depth += initialConv.getSpatialConvDepth();
+  if(numBlocks > 0) depth += initialConv.getSpatialConvDepth();
 
   for(int i = 0; i < blocks.size(); i++) {
     if(blocks[i].first == ORDINARY_BLOCK_KIND) {
@@ -1912,6 +1914,7 @@ int64_t TrunkDesc::getNumParameters() const {
 }
 
 void TrunkDesc::transformToReduceActivations() {
+  if(numBlocks == 0) return;
   // Top-level per-channel scaling: extract factors from trunk tip BN and push into
   // adjacent layers. This requires a standard BatchNorm trunk tip and no immediate-child
   // transformer blocks (RMSNorm is not invariant to per-channel scaling).
@@ -2561,7 +2564,7 @@ ModelDesc::ModelDesc(istream& in, const string& sha256_, bool binaryFloats) : Mo
           (int64_t)numInputChannels != (int64_t)numLatentChannels + (muZeroComponent == 2 ? (modelVersion == 19 ? 3 : 2) : 1)))
     throw StringError(name + ": latent component input dimensions differ");
 
-  trunk = TrunkDesc(in, modelVersion, binaryFloats, metaEncoderVersion, numInputGlobalChannels > 0);
+  trunk = TrunkDesc(in, modelVersion, binaryFloats, metaEncoderVersion, numInputGlobalChannels > 0, muZeroComponent == 3);
   if(isMuZeroBody()) {
     latentProjection = ConvLayerDesc(in,binaryFloats);
     if(latentProjection.inChannels != trunk.trunkNumChannels || latentProjection.outChannels != numLatentChannels ||
@@ -2583,7 +2586,9 @@ ModelDesc::ModelDesc(istream& in, const string& sha256_, bool binaryFloats) : Mo
   if(in.peek() != std::char_traits<char>::eof())
     throw StringError(name + ": unexpected trailing model data; ownership heads are not supported");
 
-  if(numInputChannels != trunk.initialConv.inChannels)
+  if(trunk.numBlocks == 0 && trunk.trunkNumChannels != numLatentChannels)
+    throw StringError(name + ": heads-only prediction width must equal latent channels");
+  if(trunk.numBlocks > 0 && numInputChannels != trunk.initialConv.inChannels)
     throw StringError(
       name + Global::strprintf(
                ": numInputChannels (%d) != trunk.initialConv.inChannels (%d)",
@@ -2737,6 +2742,7 @@ bool ModelDesc::hasAnyTransformerBlocks() const {
 }
 
 bool ModelDesc::applyScale8ToReduceActivations() {
+  if(trunk.numBlocks == 0) return false;
   // Scale8 scales the entire net's activations by 1/8 and compensates with MISH_SCALE8.
   // This is unsafe when:
   // - Non-standard trunk norm (RMSNorm is scale-invariant, so it would undo the 1/8 scaling)
