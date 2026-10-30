@@ -1,94 +1,110 @@
 # 配置目录与启动入口
 
-配置组织和启动脚本属于 EtaZero 外层。引擎继续使用 KataGo 的 `ConfigParser`，训练与 shuffle 继续使用来源程序的命令行解析器；外层不维护搜索参数别名、数值转换或另一份默认值表。
+V4 按环境、网络、搜索、自对弈、训练和运行调度拆分配置。外围转换层位于 `python/etazero/translation.py`；它连接既有 KataGo 引擎和 learner，不改核心解析器，不提供另一套搜索公式。
 
-## 单臂目录
+## 文件职责
 
-一个配置目录包含以下文件，也可在 `run.cfg` 中引用共享文件：
-
-| 文件 | 内容与消费者 |
+| 文件 | 内容 |
 |---|---|
-| `run.cfg` 的 `[run]` | 棋类、算法选择、产样额度、发布、绘图、预算和输出路径，由外层读取。 |
-| `selfplay.cfg` | 原生 `key = value` 与 `@include`，完整交给原生 selfplay。 |
-| `train.cfg` 的 `[train]` | `train.py` 的原生选项名，省略开头的 `-`。 |
-| `shuffle.cfg` 的 `[shuffle]` | `shuffle.py` 的原生选项名，省略开头的 `-`。 |
-| 可选 `gtp.cfg` | Web／GTP 的独立原生推理配置，不继承或改写 selfplay 搜索参数。 |
-| 可选 MuZero JSON | 来源 `MuZeroConfig`，由 `train.cfg` 的 `muzero-config` 引用。 |
+| `env.cfg` / `[environment]` | `game`、`canvas`，以及原生棋盘尺寸、尺寸权重、棋规和贴目字段。 |
+| `net.cfg` / `[network]`、`[muzero]` | 普通网络预设；MuZero representation、dynamics、prediction 预设、latent 宽度、展开长度。 |
+| `selfplay.cfg` | 算法、搜索预算与参数、自对弈采样、fork、写盘、并行和 NN 服务参数，按职责分组。 |
+| `train.cfg` / `[train]` | 原生 learner 选项名，省略命令行开头的 `-`。 |
+| `shuffle.cfg` / `[shuffle]` | 原生 shuffler 选项名，省略命令行开头的 `-`。 |
+| `run.cfg` / `[run]` | 产样／训练额度、模型发布、绘图、总预算和输出路径。 |
 
-`run.cfg` 例如：
+`configs/baseline/` 是公共参数入口，完整列出采用的参数。环境差异集中在 `configs/games/`，算法差异集中在 `configs/algorithms/`。各运行目录显式 include 所需公共文件，再写自己的覆盖项。目录后缀 `g`、`h`、`go`、`xiangqi` 分别选择 Renju、Hex、围棋和中国象棋；修改棋类以 `env.cfg` 为准，目录名不参与算法判断。
+
+baseline 自对弈采用 KataGo selfplay1 的参数起点，排除已移除的围棋专用机制。训练和 shuffle 数值取自固定来源的单机同步示例。网络不是 KataGo 统一指定的默认值，应按实验选择。`configs/checks/` 保留独立的小规模原生接口检查，普通算法目录不代表快速检查预算。
+
+## 文件内分组
+
+参数按 V3.4 的阅读习惯分组，键名仍使用 KataGo 原生拼写：
+
+- `selfplay.cfg`：`[logging]`、`[writer]`、`[game_forks]`、`[policy_init]`、`[side_positions]`、`[reduce_visits]`、`[pda]`、`[surprise_weighting]`、`[parallelism]`、`[handicap]`、`[result_utility]`、`[inference]`。
+- `selfplay.cfg` 的搜索分组：`[agent]`、`[search]`、`[puct]`、`[fpu]`、`[temperature]`、`[dirichlet_noise]`、`[forced_playouts]`、`[policy_target]`、`[lcb]`、`[symmetry]`、`[utility]`、`[value_weighting]`、`[subtree_value_bias]`、`[graph_search]`、`[gumbel]`。
+- `train.cfg`：`[training]`、`[optimizer]`、`[learning_rate]`、`[weight_decay]`、`[lookahead]`、`[swa]`、`[precision]`、`[loss]`、`[validation]`、`[checkpoints]`、`[data]`、`[brenorm]`、`[attention]`。
+- `shuffle.cfg`：`[replay]`、`[workers]`、`[output]`、`[filtering]`。
+
+`[search]` 集中放置 `maxVisits`、`cheapSearchVisits`、`cheapSearchProb`、`cheapSearchTargetWeight` 和 `numSearchThreads`，完整搜索与低预算搜索可以在同一处修改。
+
+这些分组只组织阅读，仍分别合并到该文件的原生参数集合，原来的 `[selfplay]`、`[search]`、`[train]`、`[shuffle]` 也可以用于覆盖。include 和 `.local` 的覆盖顺序不变，同一文件跨分组重复定义同一个原生键也会报错。`[agent]` 和仅在 Gumbel 算法生效的 `[gumbel]` 保留各自的语义，不参与普通分组合并。
+
+## 配置环境和算法
+
+例如五子棋环境：
 
 ```ini
-[run]
-game = go
-algorithm = alphazero
-games_per_round = 8
-iterations = 2
-selfplay_config = selfplay.cfg
-train_config = train.cfg
-shuffle_config = shuffle.cfg
+[environment]
+game = renju
+canvas = 15
+bSizes = 15,13,11
+bSizeRelProbs = 10,3,1
+allowRectangleProb = 0
+komiMean = 0
 ```
 
-最后三个路径字段省略时使用上述文件名。外层路径字段相对声明它的配置文件解析，包含空格时用引号包围。`run_dir` 可指定相对本目录的输出路径；省略时，位于本版本 `configs/` 下的配置自动对应到 `data/` 下的同一相对路径。外部配置目录需要显式输出路径，避免不同项目写入同一目录。
-
-`[run]` 还接受现有外层控制器的 `publish_weights`、`replay_ratio`、`bootstrap_min_rows`、`gatekeeper_config`、`gatekeeper_required_win_prop`、`auto_plot`，含义见 [调度与恢复](controller.md)。布尔值使用 `true`/`false`。`iterations` 和 `max_hours` 是累计预算，至少指定一项；CLI 中对应参数优先于文件值，恢复时可以增加预算。
-
-`train.cfg` 使用来源选项拼写，例如：
+`game` 接受 `go`、`freestyle`、`standard`、`renju`、`hex`、`xiangqi`。目前一臂固定一种棋类／五子棋规则，不能把 V3.4 的混合 `rules/rule_weights` 原样搬来。尺寸分布保留原生 `bSizes/bSizeRelProbs`，没有新增别名。象棋使用 `canvas=10`、`bSizesXY=9-10`，不带 `bSizes` 或 `allowRectangleProb`。
 
 ```ini
-[train]
-model-kind = b2c16-fson-mish
-pos-len = 7
-batch-size = 8
-samples-per-epoch = 32
-max-epochs-this-instance = 1
-lookahead-k = 6
-no-compile
+[agent]
+algorithm = muzero
+root_search_algo = gumbel
+nonroot_search_algo = gumbel
+
+[search]
+maxVisits = 600
+numSearchThreads = 1
+
+[gumbel]
+gumbelMaxConsideredActions = 4
 ```
 
-象棋使用 `[run] game=xiangqi`，原生 `selfplay.cfg` 使用 `bSizesXY=9-10`，不能同时保留 `bSizes` 或 `allowRectangleProb`；`train.cfg` 的 `pos-len` 至少为 10。learner 的输入族由棋类选择，不另设字段别名。当前可用算法与组合边界见 [象棋](xiangqi.md#selfplay-命令与逐轮调度)。
+算法族是 `alphazero` 或 `muzero`，根和非根是 `puct` 或 `gumbel`；Gumbel 非根要求 Gumbel 根。转换层组合成引擎／控制器已有的四种算法。根为 PUCT 时 `[gumbel]` 不参与原生配置。
 
-带值项转换为原生 `-名称 值`；无值项是原生 flag，例如 `no-compile` 转发为 `-no-compile`，不写成 `no-compile = false`。值按命令行引号规则拆分，不执行 shell 展开或命令替换。网络结构继续来自来源 `modelconfigs.py`，不在外层重新定义 backbone 或初始化。MuZero 用 `muzero-config` 替代 `model-kind`，指向实际三组件 JSON；`shuffle.cfg` 用 `muzero-unroll-steps` 指定展开长度。
+```ini
+[network]
+architecture = b2c16-fson-mish
 
-外层只读取阶段编排必需的 `pos-len`、`batch-size`、`samples-per-epoch`、`max-epochs-this-instance`、模型选择，以及 shuffle 的 `num-processes`、`approx-rows-per-out-file`、`keep-target-rows` 和 MuZero 展开长度。内部继续由 `RunConfig` 连接已有控制器。其他原生参数直接转发，类型、缺省值和算法限制由来源消费者检查。原生输出路径、模型发布目录和单设备边界由控制器管理，不能通过参数文件覆盖；shuffle 使用训练配置中的同一个批大小。
+[muzero]
+representation = b2c16-fson-mish
+dynamics = b2c16-fson-mish
+prediction = b2c16-fson-mish
+prediction_blocks = 0
+latent_channels = 6
+unroll_steps = 3
+```
 
-外层 INI 文件允许同名 `.local` 文件覆盖对应键，未知外层字段和重复键会报错；不存在隐式旧版本配置或 baseline 继承。共享外层参数文件使用显式路径。引擎文件的 include、覆盖和注释规则仍由 KataGo 自己处理，外层不会把 `maxVisits`、`cpuctExploration`、`nnMaxBatchSize` 等字段改名。
+组件可以选择不同的 `modelconfigs.py` 预设。其中 `b5c128nbt` 是 V4 按 V3.4 的宽度比例增加的 NBT 预设，使用 KataGo 原有块和 heads；其余名称沿用来源。普通算法只使用 `[network]`，MuZero 使用三个组件。转换层从环境推导棋类、输入族、Go／落子棋／象棋组件版本，并启用当前 MuZero 的 Q 输出。无需手写或复制每种棋类的三组件 JSON；实际 bundle 配置仍保存到运行目录的 `muzero_network.json`。
 
-原生文件中的 `@include` 相对包含它的文件解析；其他原生资源路径保持来源进程的工作目录语义。逐轮 selfplay、shuffle、learner 在本版本 `python/` 下执行，因此额外资源建议填写绝对路径；外层不扫描或重写原生字段中的路径。独立 match 的工作目录规则见 [评估](evaluation.md)。
+`prediction_blocks` 默认 0：hidden 的特征通道直接进入 policy/value heads，mask 仅用于掩码和池化；不创建输入卷积、残差块或 trunk 末端归一化。此时 heads 的输入宽度由 `latent_channels` 决定，head 内部宽度仍来自 `prediction` 预设。设为正整数后，保留该预设的输入卷积和末端归一化，并按预设块序列循环取出指定数量的块；可使用不同于 latent 的主干宽度。representation 和 dynamics 的深度、宽度由各自预设决定。所有组件仍保留当前 KataGo 的适用 heads 和 loss。
+
+## 转换和原生边界
+
+`game` 和 `canvas` 只在 `env.cfg` 填写；模型和 unroll 只在 `net.cfg` 填写；算法只在 `selfplay.cfg` 填写。新配置目录不能再在 run/train/shuffle 中重复设置这些内容，避免两个配置源互相覆盖。
+
+转换后普通网络使用原生 `-model-kind`，MuZero 使用 `-muzero-config`；训练画布转为 `-pos-len`，展开长度转为 shuffler 的 `-muzero-unroll-steps`。搜索、自对弈和环境中的原生字段生成运行目录内的 `selfplay.resolved.cfg`，可直接查看实际引擎输入；解析后的全部调度设置保存在 `config.json`，`--dry-run` 也能查看。
+
+必要的算法适配由转换层统一处理：MuZero 关闭真实棋盘 graph、SVB 和局部重复模式；Gumbel 关闭 graph 和训练根对称剪枝；非围棋不使用贴目或让子；逐轮运行固定输入模型。修改这些能力应修改对应实现，不能靠冲突配置重新启用。原生字段的数值范围由实际消费者检查。
+
+`selfplay.cfg` 中搜索与采样参数共享原生键空间，按 include 和 `.local` 顺序覆盖；`env.cfg` 最后决定环境。其他原生参数可直接写入对应节，不需要在转换层注册别名。额外 SGF、hint 等原生资源路径仍遵循引擎工作目录语义（逐轮执行位于本版本 `python/`）；建议使用绝对路径。
+
+独立 match、GTP、Web 等仍接收原生引擎配置，不直接读取带节的训练 `selfplay.cfg`。`configs/checks/` 使用原生配置和原生命令行参数文件，可独立检查底层接口；没有 `env.cfg/net.cfg` 的此类入口继续通过原有加载路径执行。
+
+## Include、覆盖和启动
+
+配置文件支持 `@include path` 或 `@include = path`，路径相对包含它的文件，按出现顺序展开。后出现的值覆盖之前的值，同一文件重复写同一节的键会报错。被包含文件独立声明自己的节。所有带节文件支持同名 `.local`，在该文件及其 include 后加载；不会隐式继承父目录。
+
+原生 CLI 参数文件中的裸键启用 flag，空赋值不传该选项，例如 `no-compile` 禁用编译，`no-compile =` 恢复原生编译默认。网络／checkpoint 推导的可选项可以留空。原生引擎字段保持原生拼写，不转换成另一套 snake_case 参数。
 
 ```bash
-bash scripts/run.sh check-config --config-dir /absolute/path/to/profile
-CONFIG_DIR=/absolute/path/to/profile bash scripts/run.sh \
-  --run-dir /absolute/path/to/run --iterations 2 --dry-run
-CONFIG_DIR=/absolute/path/to/profile bash scripts/run.sh \
-  --run-dir /absolute/path/to/run --iterations 2
+CONFIG_DIR=configs/az_g bash scripts/run.sh --iterations 2 --dry-run
+CONFIG_DIR=configs/mz_h bash scripts/run.sh --iterations 2 --run-dir /absolute/path/to/new-run
+CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 ```
 
-省略命令时 `run.sh` 默认执行 `run`；也保留 `native`、`plot`、`match` 等显式子命令。`--config-dir` 与 `--config` 选择同一个配置入口，CLI 路径优先于 `CONFIG_DIR`。`--dry-run` 只输出解析后的计划，不创建运行目录、不启动训练；它不替代原生参数和模型加载检查。`check-config` 同样只检查外层及阶段边界。
+总预算使用累计 `iterations` 或 `max_hours`，至少指定一项；CLI 优先于文件。配置位于本版本 `configs/` 时，默认输出映射到 `data/` 下相同相对路径；外部目录需显式指定输出路径。
 
-## 实验目录
+V4 保留外围 replay 调度：复用比例通过 `replay_ratio` 设置，单轮训练由完整 epoch 上限控制，冷启动先收集 `bootstrap_min_rows`。它动态规划后续局数、按实际消费结转额度，并允许原生 reader 重复文件；与原生同步脚本的固定局数、learner train bucket 和 `no-repeat-files` 不同。当前 baseline 使用 SWA 发布，总预算由调用方指定，详见 [调度与恢复](controller.md)。
 
-实验根目录放置 `exp.cfg`，每个直接子目录中的 `run.cfg` 对应一个实验臂。`[experiment]` 指定每臂累计预算、GPU 槽位及是否共享初始权重：
-
-```ini
-[experiment]
-iterations = 2
-gpus = 0
-shared_init = true
-```
-
-`gpus` 为逗号分隔的设备索引或 UUID；省略时继承当前设备可见性并串行执行。预算与输出由实验调度器统一管理，各臂 `run.cfg` 中的单独启动预算和 `run_dir` 不改变实验计划。需要只选择部分臂或引用共享目录时，用可选 `[arms]` 显式指定 `臂名 = 配置目录或运行 JSON 路径`，此时不再自动发现。
-
-```bash
-CONFIG_DIR=/absolute/path/to/experiment bash scripts/autoexp.sh \
-  --work-dir /absolute/path/to/output --dry-run
-CONFIG_DIR=/absolute/path/to/experiment bash scripts/autoexp.sh \
-  --work-dir /absolute/path/to/output
-```
-
-省略 `--work-dir` 时同样按 `configs/` 到 `data/` 的相对路径映射。训练结果存于 `work-dir/runs/臂名`。可选 `[evaluation]` 中的 `config` 指向独立原生 match 配置，其他字段直接使用 `autoelo` 的选择、拟合和驻留选项名（下划线形式）；所有臂完成后自动评估。具体缓存与评分口径见 [比赛与 Elo](evaluation.md)。
-
-运行内的 `config.json` 与实验的已解析 JSON 保存的是调度证据和子进程输入；程序化调用仍可直接提供这些 JSON。用户配置目录不会改写原生日志。算法与性能绘图读取来源日志，等时间横轴使用明确标注的 EtaZero 调度计时，见 [训练观测](observations.md)。
-
-## Web 与推理配置
-
-Web 使用同版本独立 `gtp.cfg`，内容仍是原生字段和 include。按运行路径映射到 `configs/`，或使用保存的 `selfplay_config` 同目录；可以通过 `web/webui.sh --config`／`--config-dir` 明确覆盖。缺失时显示未配置，不套用其他算法配置。模型发现、独立模型入口、Gumbel／MuZero 的字段与启动命令见 [Web 与原生会话](web.md#启动与原生配置)。
+多臂 `exp.cfg` 使用 `[experiment]` 管预算、`gpus` 和共享初始化，`[arms]` 将臂名映射到配置目录；`[evaluation]` 可指定原生 match 配置和 autoelo 设置。`configs/autoexp_example/` 展示连接方法；独立 `scripts/autoelo.sh` 转发既有 autoelo 命令。评估缓存和评分口径见 [比赛与 Elo](evaluation.md)。
