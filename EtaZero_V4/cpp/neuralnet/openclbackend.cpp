@@ -3090,6 +3090,7 @@ struct Trunk {
     checkBufferSize(maxBatchSize,nnXLen,nnYLen,regularNumChannels);
     checkBufferSize(maxBatchSize,nnXLen,nnYLen,gpoolNumChannels);
 
+    if(desc->numBlocks == 0) return;
     initialConv = std::make_unique<ConvLayer>(handle,&desc->initialConv,nnXLen,nnYLen,useFP16);
     if(desc->initialMatMul.inChannels > 0)
       initialMatMul = std::make_unique<MatMulLayer>(handle,&desc->initialMatMul);
@@ -3109,6 +3110,7 @@ struct Trunk {
   }
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    if(!initialConv) return ConvWorkspaceEltsNeeded();
     ConvWorkspaceEltsNeeded maxElts = ConvWorkspaceEltsNeeded::getMax(
       initialConv->requiredConvWorkspaceElts(handle,maxBatchSize),
       blocks.requiredConvWorkspaceElts(handle,maxBatchSize)
@@ -3131,6 +3133,16 @@ struct Trunk {
     cl_mem convWorkspace,
     cl_mem convWorkspace2
   ) const {
+
+    if(!initialConv) {
+      // Input is padded NCHW, with the mask in channel zero.
+      size_t channelBytes = paddedNNXYLen * (handle->usingFP16Storage ? sizeof(half_t) : sizeof(float));
+      size_t srcOrigin[3] = {channelBytes,0,0}, dstOrigin[3] = {0,0,0};
+      size_t region[3] = {trunkNumChannels*channelBytes,(size_t)batchSize,1};
+      CHECK_ERR(clEnqueueCopyBufferRect(handle->commandQueue,input,trunk,srcOrigin,dstOrigin,region,
+        (trunkNumChannels+1)*channelBytes,0,trunkNumChannels*channelBytes,0,0,nullptr,nullptr));
+      return;
+    }
 
     SizedBuf<cl_mem> trunkScratch(scratch->allocator, scratch->getBufSizeXY(trunkNumChannels));
 
