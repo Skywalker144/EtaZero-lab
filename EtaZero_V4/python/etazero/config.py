@@ -12,6 +12,7 @@ class RunConfig:
     batch_size: int
     games_per_round: int
     samples_per_epoch: int
+    native_selfplay: str | None = None
     model_kind: str | None = None
     epochs_per_round: int = 1
     shuffle_processes: int = 1
@@ -63,10 +64,14 @@ class RunConfig:
             raise ValueError('The current source writer/learner supports canvas in [3,19]')
         if self.game == 'xiangqi' and self.canvas < 10:
             raise ValueError('Xiangqi requires canvas >= 10 for its 9x10 board')
-        if self.samples_per_epoch % self.batch_size:
-            raise ValueError('samples_per_epoch must be a multiple of batch_size')
-        if self.shuffle_rows_per_file < self.batch_size or self.shuffle_keep_rows < self.samples_per_epoch:
-            raise ValueError('Shuffle must provide at least one batch per file and one epoch in total')
+        # Source train.py rounds the target batch count and selects whole files;
+        # synchronous_loop.sh itself uses 100000 samples with batch size 128.
+        if self.samples_per_epoch < self.batch_size:
+            raise ValueError('samples_per_epoch must provide at least one batch')
+        # The source reader can repeat files within an epoch. Its shuffle target
+        # need not be as large as samples_per_epoch; require only usable batches.
+        if self.shuffle_rows_per_file < self.batch_size or self.shuffle_keep_rows < self.batch_size:
+            raise ValueError('Shuffle targets must provide at least one batch')
         if self.is_muzero:
             if self.model_kind is not None:
                 raise ValueError('MuZero uses muzero_network, not model_kind')
