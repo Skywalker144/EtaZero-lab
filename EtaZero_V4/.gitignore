@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 *.cfg.local
 /cpp/tests/scratch/
+/cpp/tests/results/bookhtml/
 /cpp/program/gitinfo.h
 CMakeCache.txt
 CMakeFiles/
