@@ -849,8 +849,8 @@ void Search::beginSearch(bool pondering) {
       throw StringError("Gumbel root weightful HumanSL conflicts with sequential-halving quotas; use root weightless exploration");
     clearSearch();
   }
-  if(searchParams.drawEquivalentWinsForWhite != 0.5 || searchParams.noResultUtilityForWhite != 0)
-    throw StringError("EtaZero result utility is W-L, with zero utility for draw and no-result");
+  if(searchParams.drawEquivalentWinsForWhite != 0.5)
+    throw StringError("EtaZero draw utility is fixed at zero");
   if(rootBoard.x_size > nnXLen || rootBoard.y_size > nnYLen)
     throw StringError("Search got from NNEval nnXLen = " + Global::intToString(nnXLen) +
                       " nnYLen = " + Global::intToString(nnYLen) + " but was asked to search board with larger x or y size");
