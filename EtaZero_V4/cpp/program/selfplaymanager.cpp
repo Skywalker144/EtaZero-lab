@@ -413,6 +413,9 @@ void SelfplayManager::runDataWriteLoopImpl(ModelData* modelData) {
   if(logger != NULL)
     logger->write("Data write loop starting for neural net: " + modelData->modelName);
 
+  // Owned by this writer thread. Count games, including zero-row games, never
+  // sampled roots or side positions. A turn limit is not a rule outcome.
+  int64_t blackWins = 0, whiteWins = 0, draws = 0, noResults = 0, truncated = 0;
   Rand rand;
   while(true) {
     size_t size = modelData->finishedGameQueue.size();
@@ -427,6 +430,19 @@ void SelfplayManager::runDataWriteLoopImpl(ModelData* modelData) {
     testAssert(gameData != NULL);
 
     modelData->tdataWriter->writeGame(*gameData);
+
+    if(gameData->hitTurnLimit)
+      truncated++;
+    else if(gameData->endHist.isNoResult)
+      noResults++;
+    else if(gameData->endHist.winner == P_BLACK)
+      blackWins++;
+    else if(gameData->endHist.winner == P_WHITE)
+      whiteWins++;
+    else {
+      testAssert(gameData->endHist.isGameFinished);
+      draws++;
+    }
 
     modelData->gamesFinishedCount.fetch_add(1, std::memory_order_relaxed);
     // Moves actually played by search this game (excludes any pre-placed opening/start-position moves).
@@ -472,6 +488,11 @@ void SelfplayManager::runDataWriteLoopImpl(ModelData* modelData) {
   if(logger != NULL) {
     logger->write("Final cleanup of net: " + modelData->nnEval->getModelFileName());
     logger->write("Final games finished: " + Global::int64ToString(modelData->gamesFinishedCount.load(std::memory_order_relaxed)));
+    logger->write("Final black wins: " + Global::int64ToString(blackWins));
+    logger->write("Final white wins: " + Global::int64ToString(whiteWins));
+    logger->write("Final draws: " + Global::int64ToString(draws));
+    logger->write("Final no results: " + Global::int64ToString(noResults));
+    logger->write("Final truncated games: " + Global::int64ToString(truncated));
     logger->write("Final moves played: " + Global::int64ToString(modelData->movesPlayedCount.load(std::memory_order_relaxed)));
     logger->write("Final data rows: " + Global::int64ToString(modelData->tdataWriter->numRowsWritten()));
     logger->write("Final NN rows: " + Global::int64ToString(modelData->nnEval->numRowsProcessed()));
