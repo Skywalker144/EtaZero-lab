@@ -16,7 +16,7 @@ V4 在 KataGo 上扩展算法和棋类，再由 EtaZero 调度与工具层调用
 
 ## 当前执行链
 
-`scripts/run.sh` 设置本版本 Python 路径并进入 `python/etazero/`，`scripts/autoexp.sh` 进入同一外层的实验调度器。配置目录组织、自适应局数与训练额度编排、实验臂与 GPU 槽位在外层处理，见 [配置与启动](configuration.md)。搜索与推理 `.cfg` 原样交给 KataGo；训练与 shuffle 参数保留来源命名。控制器通过参数列表启动同版本原生 selfplay、`python/shuffle.py`、`python/train.py` 以及普通或 MuZero 的来源模型导出入口。子进程逐个完成后才进入下一阶段，learner 保留来源整文件 epoch/subepoch，外层实际样本预算可暂停并恢复其游标；优化器、LR、Lookahead 与 SWA 跨 iteration 连续推进，候选在外层训练结束后发布。
+`scripts/run.sh` 设置本版本 Python 路径并进入 `python/etazero/`，`scripts/autoexp.sh` 进入同一外层的实验调度器。配置目录组织、自适应局数与训练额度编排、实验臂与 GPU 槽位在外层处理，见 [配置与启动](configuration.md)。搜索与推理 `.cfg` 原样交给 KataGo；训练与 shuffle 参数保留来源命名。控制器通过参数列表启动同版本原生 selfplay、`python/shuffle.py`、`python/train.py`，普通与 MuZero 模型导出则在控制器进程内调用来源入口以复用模块初始化。各阶段完成后才进入下一阶段，learner 保留来源整文件 epoch/subepoch，外层实际样本预算可暂停并恢复其游标；优化器、LR、Lookahead 与 SWA 跨 iteration 连续推进，候选在外层训练结束后发布。
 
 原生程序来自原 CMake 源文件列表。构建适配选择当前 CUDA 架构、定位 Conda/Python 环境中的 CUDA 库以及注册 CTest。搜索统计、数据写入、loss 和推理在来源对应位置扩展四结果通道；共有数学、权重、执行位置与更新频率继续使用来源实现。`native` 命令保留来源参数解析与协议入口。
 
@@ -42,7 +42,7 @@ SGF 的 `GM` 与 `RU` 必须一致：Go 为 1，五子棋族为 4，Hex 为 11�
 
 落子棋历史初始化识别摆子局面的成五、Hex 连通、满盘和相互矛盾的胜方。Renju 的双三/双四判负需要实际落子历史，不能从任意摆子静态反推；记录中的禁手转移按规则判负。自对弈排除已终局起点，终局没有合法策略时 GTP raw-NN 明确拒绝。hint fork 沿来源流程创建，并保留非围棋起点的原始手数和训练权重。
 
-价值 head 与三组 TD head 输出 W/D/L/NR，搜索始终保存白方视角的 W−L、D、NR，报告时由三者还原 W、L。D 和 NR 不随行动方翻转；writer 只交换 W/L，保留来源的 TD 混合系数、量化与归约。NPZ 中的 D 使用原空闲通道，位置定义在 `cpp/dataio/trainingwrite.h`，不挪动已占用的裁定模式字段。基础结果效用为 W−L，Q 的胜负分量仍监督标量 W−L。
+价值 head 与三组 TD head 输出 W/D/L/NR，搜索始终保存白方视角的 W−L、D、NR，报告时由三者还原 W、L。D 和 NR 不随行动方翻转；writer 只交换 W/L，保留来源的 TD 混合系数、量化与归约。NPZ 中的 D 使用原空闲通道，位置定义在 `cpp/dataio/trainingwrite.h`，不挪动已占用的裁定模式字段。搜索结果效用为 `winLossUtilityFactor × (W−L) + noResultUtilityForWhite × NR`；D 固定中性。Q 的胜负分量仍监督标量 W−L。selfplay 的 `noResultStdev` 按 KataGo 在每局初始化时采样三倍标准差截断高斯，并重采样超出 [-1,1] 的 NR 效用；两方共享同一个白方视角系数，黑方取负。非围棋 NR 概率被屏蔽，因此该系数不改变其和棋效用。四结果标签及 learner loss 不随随机系数改写。
 
 搜索中的 score utility、动态分数中心、根收官分数奖励和 anti-mirror 已移除，包括配置、统计修正、策略干预及自对弈的分数中心预搜索。uncertainty 使用胜负误差，LCB/FPU/虚拟损失使用结果效用范围；保留来源其余公式和执行位置。预测分数的 heads、训练目标、推理缓冲区及报告字段也已删除。围棋规则计分与终局判定继续由 `BoardHistory` 负责。
 
@@ -75,6 +75,8 @@ Gumbel 根接入 `cpp/search/searchgumbel.cpp`，复用来源节点；非根可�
 控制器的 run 目录锁由阶段子进程继承，防止控制器退出后仍在运行的 writer 被并发接管。轮次恢复使用已发布 shard、learner 的 epoch／batch 暂停 checkpoint 和原子目录发布；已提交更新不重复，未提交工作重做。具体边界见 [调度与恢复](controller.md)。`source.tar.gz` 在创建 run 时记录代码，包括尚未提交的新文件；不将源码哈希作为读取和恢复的运行门槛。
 
 原生 NPZ writer 和 shuffle 的中间／最终文件采用 DEFLATE level 1 无损压缩。NPY 数组、类型、顺序和目标数值保持原样，以较大的文件换取较短的同步写出时间；原有 writer 队列、逐局处理和原子发布边界保持不变。
+
+shuffle 拼接后及时释放原始数组片段；随机排列、保留行数和分桶随机数仍按来源顺序生成，写出时逐字段按同一排列取行，避免保留整组重排副本。复用已经读出的字段，避免为检查形状或构造缺省目标而重复解压；连续数值数组的标准 NPY 头和数据缓冲直接写入 ZIP，非连续或其他类型仍使用 NumPy writer。训练文件的字段、dtype、NPY 内容和压缩级别不变。
 
 ## 代码归属
 
