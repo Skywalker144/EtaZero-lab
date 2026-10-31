@@ -138,6 +138,8 @@ if __name__ == "__main__":
     optional_args.add_argument('-export-prob', help='Export model with this probablity', type=float, required=False)
     optional_args.add_argument('-max-epochs-this-instance', help='Terminate training after this many more epochs', type=int, required=False)
     optional_args.add_argument('-max-training-samples', help='Terminate training after about this many training steps in samples', type=int, required=False)
+    optional_args.add_argument('-stop-at-samples', type=int,
+                               help='Single-device exact cumulative sample boundary; save the unfinished epoch, reader and Lookahead state')
     optional_args.add_argument('-sleep-seconds-per-epoch', help='Sleep this long between epochs', type=int, required=False)
     optional_args.add_argument('-max-train-bucket-per-new-data', help='When data added, add this many train rows per data row to bucket', type=float, required=False)
     optional_args.add_argument('-max-train-bucket-size', help='Approx total number of train rows allowed if data stops', type=float, required=False)
@@ -450,6 +452,12 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
     initial_train_bucket_level = args["initial_train_bucket_level"]
     max_train_steps_since_last_reload = args["max_train_steps_since_last_reload"]
     stop_when_train_bucket_limited = args["stop_when_train_bucket_limited"]
+    stop_at_samples = args["stop_at_samples"]
+    if stop_at_samples is not None:
+        if world_size != 1 or stop_at_samples < 0 or stop_at_samples % batch_size:
+            raise ValueError('-stop-at-samples requires one device and a nonnegative whole-batch sample target')
+        if max_train_bucket_per_new_data is not None or args['no_repeat_files']:
+            raise ValueError('-stop-at-samples uses outer replay credit and repeatable source file epochs')
     max_val_samples = args["max_val_samples"]
     randomize_val = args["randomize_val"]
     data_prefetch_depth = args["data_prefetch_depth"]
@@ -699,6 +707,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             state_dict["config"] = muzero_learner.checkpoint_config(raw_model)
             if world_size == 1 and not skip_optimizer:
                 state_dict["learner_runtime"] = checkpoint_runtime.capture_runtime(train_rng, val_rng, scaler, device)
+                state_dict["lookahead"] = dict(counter=lookahead_counter,
+                    slow={name: lookahead_cache[param] for name, param in raw_model.named_parameters() if param in lookahead_cache})
 
             if swa_model is not None:
                 state_dict["swa_model"] = swa_model.state_dict()
@@ -941,8 +951,9 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             raise ValueError("Attention penalty requested but MuZero components have no attention layers")
 
     resume_runtime = None
+    resume_lookahead = None
     def load():
-        nonlocal resume_runtime
+        nonlocal resume_runtime, resume_lookahead
         loading_initial_checkpoint = False
         if not os.path.exists(get_checkpoint_path()) or always_initial_checkpoint:
             if not always_initial_checkpoint:
@@ -1034,6 +1045,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             return (model_config, ddp_model, raw_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
         else:
             state_dict = load_model.load_checkpoint(path_to_load_from, map_location=device)
+            resume_lookahead = state_dict.get("lookahead")
 
             config_to_create = state_dict["config"] if "config" in state_dict else modelconfigs.config_of_name[model_kind]
             if requested_muzero_config is not None and config_to_create != {"algorithm": "muzero", "network": requested_muzero_config}:
@@ -1275,12 +1287,18 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
     logging.info(f"Optimizer: " + train_state.get("optimizer_name","SGD"))
 
     lookahead_cache = {}
+    lookahead_counter = 0
     if lookahead_k is not None:
         for param_group in optimizer.param_groups:
             for param in param_group["params"]:
                 lookahead_cache[param] = torch.zeros_like(param.data)
                 lookahead_cache[param] = lookahead_cache[param].copy_(param.data)
         logging.info(f"Using lookahead optimizer {lookahead_alpha} {lookahead_k}")
+        if resume_lookahead is not None:
+            lookahead_counter = resume_lookahead['counter']
+            for name, param in raw_model.named_parameters():
+                if param in lookahead_cache:
+                    lookahead_cache[param].copy_(resume_lookahead['slow'][name])
 
     # EPOCHS AND LR ---------------------------------------------------------------------
 
@@ -1393,9 +1411,12 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             if log_if == "always" or (log_if == "changed" and changed):
                 logging.info(f"Param group {param_group['group_name']} lr {param_group['lr']} weight_decay {param_group['weight_decay']}")
 
-        return per_sample_lr * warmup_scale, normal_weight_decay
+        train_state['lr_metrics'] = (per_sample_lr * warmup_scale, normal_weight_decay)
+        return train_state['lr_metrics']
 
-    last_brenorm_update_samples_this_instance = train_state["global_step_samples"]
+    last_brenorm_update_samples_this_instance = train_state.get('brenorm_last_update_samples', train_state["global_step_samples"])
+    if 'brenorm_rmax' in train_state:
+        raw_model.set_brenorm_params(brenorm_avg_momentum, train_state['brenorm_rmax'], train_state['brenorm_dmax'])
     def maybe_update_brenorm_params():
         nonlocal last_brenorm_update_samples_this_instance
 
@@ -1412,6 +1433,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
 
             raw_model.set_brenorm_params(brenorm_avg_momentum, train_state["brenorm_rmax"], train_state["brenorm_dmax"])
             last_brenorm_update_samples_this_instance = train_state["global_step_samples"]
+            train_state['brenorm_last_update_samples'] = last_brenorm_update_samples_this_instance
 
     is_muzero = isinstance(raw_model, MuZeroModel)
     if is_muzero:
@@ -1437,7 +1459,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             unroll_steps=snapshot["muzero_unroll_steps"], mean_weight=snapshot["muzero_weight_mean"],
             rng=val_rng if validation else train_rng,
             include_meta=raw_model.get_has_metadata_encoder(), randomize_symmetries=reader_args["randomize_symmetries"],
-            prefetch_depth=reader_args.get("prefetch_depth", 1))
+            prefetch_depth=reader_args.get("prefetch_depth", 1), skip_batches=reader_args.get('skip_batches', 0))
 
     def muzero_batch_metrics(model, batch, metrics_fn, is_training):
         return model(batch, metrics_fn=metrics_fn,
@@ -1452,15 +1474,20 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
     # DATA RELOADING GENERATOR ------------------------------------------------------------
 
     # Some globals
-    # Note: last_curdatadir is a plain local, NOT part of train_state, so it is reset to None on every
-    # process start and is not checkpointed. Consequently the first maybe_reload_training_data() call after
-    # a restart always sees curdatadir != last_curdatadir and re-enters the "new shuffle" block below, even
-    # when resuming on the same data dir, which is what lets a resumed run finish the remainder of an
-    # in-progress epoch before repeating files.
+    # Native invocations reload the directory on process start. Exact-budget
+    # invocations restore the active snapshot first, preserving its pending
+    # subepoch, file queue and RNG until the next normal data selection boundary.
     last_curdatadir = None
     vdatadir = None
     # Owns all "which training files have been used" logic.
     trainingdatagenerator = TrainingDataGenerator(train_state, no_repeat_files)
+    if stop_at_samples is not None and train_state.get('data_snapshot') is not None:
+        last_curdatadir = train_state['data_snapshot']
+        vdatadir = os.path.join(last_curdatadir, 'val')
+        trainingdatagenerator.restore_data_dir(os.path.join(last_curdatadir, 'train'))
+        if is_muzero:
+            with open(os.path.join(last_curdatadir, 'train.json')) as f:
+                muzero_snapshot.update(json.load(f))
 
     def maybe_reload_training_data():
         nonlocal last_curdatadir
@@ -1503,6 +1530,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
 
                 logging.info("Updated training data: " + curdatadir)
                 last_curdatadir = curdatadir
+                train_state['data_snapshot'] = curdatadir
 
                 with open(trainjsonpath) as f:
                     datainfo = json.load(f)
@@ -1671,7 +1699,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         running_metrics["weights"]["nsamp"] = global_step_samples_initial
         logging.info(f"Seeded running_metrics nsamp from train_state global_step_samples: {global_step_samples_initial}")
 
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = not torch.are_deterministic_algorithms_enabled()
     trainloop_helpers.maybe_enable_compiled_autograd()
 
     model_norms_only_at_print = trainloop_helpers.get_model_norms_only_at_print()
@@ -1715,7 +1743,16 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         val_metrics_out.close()
         safe_exit(barrier,0)
 
+    def pause_training():
+        logging.info('Outer sample budget reached; preserving unfinished epoch and Lookahead state')
+        save(ddp_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
+        train_metrics_out.close()
+        val_metrics_out.close()
+        safe_exit(barrier, 0)
+
     while True:
+        if stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples:
+            break
         if max_epochs_this_instance is not None and max_epochs_this_instance >= 0 and num_epochs_this_instance >= max_epochs_this_instance:
             logging.info("Hit max epochs this instance, done")
             break
@@ -1723,7 +1760,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             logging.info("Hit max training samples, done")
             break
 
-        if rank == 0:
+        cursor = train_state.get('epoch_cursor')
+        if rank == 0 and cursor is None:
             maybe_reload_training_data()
 
             if max_train_bucket_per_new_data is not None:
@@ -1767,15 +1805,23 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         if scaler is not None:
             logging.info(f"Current grad scale: {scaler.get_scale()}")
 
-        lr_right_now, normal_weight_decay_right_now = update_and_return_lr_and_wd(log_if="always")
-        maybe_update_brenorm_params()
+        if cursor is None:
+            lr_right_now, normal_weight_decay_right_now = update_and_return_lr_and_wd(log_if="always")
+            maybe_update_brenorm_params()
+            cursor = dict(subepoch=0, epoch_batches=0, files=None, batches=0)
+            train_state['epoch_cursor'] = cursor
+        else:
+            lr_right_now, normal_weight_decay_right_now = train_state['lr_metrics']
 
         # SUB EPOCH LOOP -----------
-        batch_count_this_epoch = 0
+        batch_count_this_epoch = cursor['epoch_batches']
         last_train_stats_time = time.perf_counter()
-        for i in range(sub_epochs):
+        for i in range(cursor['subepoch'], sub_epochs):
 
-            if rank == 0:
+            continuing_subepoch = cursor['files'] is not None
+            if continuing_subepoch:
+                train_files_to_use = cursor['files']
+            elif rank == 0:
                 if i != 0:
                     maybe_reload_training_data()
                 train_files_to_use = get_files_for_subepoch()
@@ -1803,7 +1849,11 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             logging.info("Beginning training subepoch!")
             logging.info("This subepoch, using files: " + str(train_files_to_use))
             logging.info("Currently up to data row " + str(train_state["total_num_data_rows"]))
-            lookahead_counter = 0
+            if not continuing_subepoch:
+                lookahead_counter = 0
+                cursor.update(files=train_files_to_use, batches=0)
+            subepoch_batches = sum(get_npz_num_rows(path, npz_num_rows_index_cache) // (batch_size * world_size)
+                                   for path in train_files_to_use)
             for batch in read_batches(
                 train_files_to_use,
                 batch_size=batch_size,
@@ -1815,6 +1865,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                 include_meta=raw_model.get_has_metadata_encoder(),
                 model_config=model_config,
                 prefetch_depth=data_prefetch_depth,
+                skip_batches=cursor['batches'],
             ):
                 optimizer.zero_grad(set_to_none=True)
                 extra_outputs = None
@@ -2048,7 +2099,16 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         logging.info("Accumulating SWA")
                         swa_model.update_parameters(raw_model)
 
+                cursor.update(batches=cursor['batches'] + 1, epoch_batches=batch_count_this_epoch)
+                if (stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples
+                        and cursor['batches'] < subepoch_batches):
+                    pause_training()
+
             logging.info("Finished training subepoch!")
+            cursor.update(subepoch=i + 1, files=None, batches=0)
+            if (stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples
+                    and i + 1 < sub_epochs):
+                pause_training()
 
         # END SUB EPOCH LOOP ------------
 
@@ -2059,6 +2119,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                 for param in param_group["params"]:
                     slow_param_data = lookahead_cache[param]
                     param.data.copy_(slow_param_data)
+        lookahead_counter = 0
+        del train_state['epoch_cursor']
 
         # Incremented on every rank, not just rank 0, so that the counter stays in sync across DDP
         # processes. Under -lr-cycle-* the counter determines the LR, and all ranks must apply the
