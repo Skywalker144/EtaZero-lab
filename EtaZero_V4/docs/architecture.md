@@ -16,7 +16,7 @@ V4 在 KataGo 上扩展算法和棋类，再由 EtaZero 调度与工具层调用
 
 ## 当前执行链
 
-`scripts/run.sh` 设置本版本 Python 路径并进入 `python/etazero/`，`scripts/autoexp.sh` 进入同一外层的实验调度器。配置目录组织、预算、实验臂与 GPU 槽位只在外层处理，见 [配置与启动](configuration.md)。搜索与推理 `.cfg` 原样交给 KataGo；训练与 shuffle 参数保留来源命名。控制器通过参数列表启动同版本原生 selfplay、`python/shuffle.py`、`python/train.py` 以及普通或 MuZero 的来源模型导出入口。子进程逐个完成后才进入下一阶段，learner 的内部 epoch、优化器、LR、Lookahead、SWA、数据生成器及 checkpoint 继续由来源代码管理。
+`scripts/run.sh` 设置本版本 Python 路径并进入 `python/etazero/`，`scripts/autoexp.sh` 进入同一外层的实验调度器。配置目录组织、自适应局数与训练额度编排、实验臂与 GPU 槽位在外层处理，见 [配置与启动](configuration.md)。搜索与推理 `.cfg` 原样交给 KataGo；训练与 shuffle 参数保留来源命名。控制器通过参数列表启动同版本原生 selfplay、`python/shuffle.py`、`python/train.py` 以及普通或 MuZero 的来源模型导出入口。子进程逐个完成后才进入下一阶段，learner 保留来源整文件 epoch/subepoch，外层实际样本预算可暂停并恢复其游标；优化器、LR、Lookahead 与 SWA 跨 iteration 连续推进，候选在外层训练结束后发布。
 
 原生程序来自原 CMake 源文件列表。构建适配选择当前 CUDA 架构、定位 Conda/Python 环境中的 CUDA 库以及注册 CTest。搜索统计、数据写入、loss 和推理在来源对应位置扩展四结果通道；共有数学、权重、执行位置与更新频率继续使用来源实现。`native` 命令保留来源参数解析与协议入口。
 
@@ -72,7 +72,9 @@ Gumbel 根接入 `cpp/search/searchgumbel.cpp`，复用来源节点；非根可�
 
 每轮的 `input_models/` 只引用上轮已发布模型，原生 manager 的目录轮询无法在本轮发现新模型。AlphaZero 首轮为空，使用来源 random evaluator；MuZero 首轮先由同一个 learner 完成 `-initialize-only`，保存零样本 checkpoint 并导出三组件模型。selfplay 完全退出后才 shuffle 和训练；来源 learner 提交 checkpoint 后才导出，模型目录在普通权重或 SWA 的导出完成后原子发布，MuZero 以包含 manifest 和三个组件的整个目录为发布单位。原始数据和旧模型不覆盖。
 
-控制器的 run 目录锁由阶段子进程继承，防止控制器退出后仍在运行的 writer 被并发接管。轮次恢复使用已发布 shard、来源 epoch checkpoint 和原子目录发布；已提交更新不重复，未提交工作重做。具体边界见 [调度与恢复](controller.md)。`source.tar.gz` 在创建 run 时记录代码，包括尚未提交的新文件；不将源码哈希作为读取和恢复的运行门槛。
+控制器的 run 目录锁由阶段子进程继承，防止控制器退出后仍在运行的 writer 被并发接管。轮次恢复使用已发布 shard、learner 的 epoch／batch 暂停 checkpoint 和原子目录发布；已提交更新不重复，未提交工作重做。具体边界见 [调度与恢复](controller.md)。`source.tar.gz` 在创建 run 时记录代码，包括尚未提交的新文件；不将源码哈希作为读取和恢复的运行门槛。
+
+原生 NPZ writer 和 shuffle 的中间／最终文件采用 DEFLATE level 1 无损压缩。NPY 数组、类型、顺序和目标数值保持原样，以较大的文件换取较短的同步写出时间；原有 writer 队列、逐局处理和原子发布边界保持不变。
 
 ## 代码归属
 
@@ -101,6 +103,6 @@ Web 会话使用原生 GTP 保存棋局，`kata-get-state` 导出规则局面和
 1. **多棋类与动作。** 棋类边界包含合法动作、状态转移、终局、特征、有效对称和图身份。当前五子棋与 Hex 的规则、网络输入/动作、writer、SGF/hint 起点、selfplay 与逐轮训练已贯通。Go 内部继续使用 `Loc`，公共策略域不能继续假定 `canvas²+pass`；象棋要贯通动作索引、writer、网络、缓存和协议。象棋规则与原生 BoardHistory 完整历史、动作／特征、Python 联合策略 head、来源 loss、原生导出、CUDA 联合策略读出、evaluator、PUCT/Gumbel 搜索、GameRunner、SGF/hint、原生 writer、来源 shuffle/reader 与 learner 的当前边界见 [象棋](xiangqi.md)；命令级 selfplay 与四种算法的逐轮训练已贯通，普通／MuZero 混合比赛、来源 Elo 与 gatekeeper 已接入；局部模式与 SVB 已接入，普通 PUCT／Gumbel Search 支持无 Go metadata 的次级 HumanSL，原生普通／MuZero JSON analysis 和 GTP 已接入；普通／MuZero 次级网络已接入搜索及 JSON／GTP 入口。
 2. **Gumbel。** 根配额、sequential halving、completed Q、改进策略及可选 PUCT/Gumbel 非根已贯通；来源 weightless root focus、普通／MuZero 次级 HumanSL、非根 visit-cap 快照及根对称剪枝已接入，保留严格根配额。HumanSL 根 weightful 探索和根 visit-cap 快照与配额冲突，明确拒绝。跨手及同根续搜按约定使用 fresh tree；直接继承旧访问与固定 Mctx 的阶段、预算及 Q 计数不兼容，具体原因与影响见 [Gumbel 搜索](gumbel.md#树复用边界)。Gumbel 树复用不再作为未完成项，普通 PUCT 复用保持来源行为。
 3. **MuZero。** 三组件使用来源 `Model` 与适用 heads/loss；latent 搜索在来源 `Search` 内保留选点和回传，只替换真实状态转移及其不适用的机制。模型、轨迹、learner 与同步逐轮发布已有闭环，具体边界见 [MuZero](muzero.md)。象棋已接入三组件网络、联合动作编码、导出、原生 CUDA／Eigen／OpenCL 推理、局面适配及 PUCT/Gumbel latent 搜索，轨迹 writer/shuffle/reader、正式 learner、GameRunner/selfplay 与逐轮调度已接通，普通／SWA 发布及 gatekeeper 恢复共用现有流程。原生 JSON analysis 与 GTP 已接入全部棋类；MuZero 次级 HumanSL 已接入搜索及 JSON／GTP；其余原生工具仍需按职责适配。
-4. **完整调度。** 累计时间预算已接入完整轮次边界，扣除实际 learner 编译耗时，计时缺失时明确失效并按已观测墙钟预算；来源 gatekeeper 通过完整模型副本比赛接入，拒绝候选只保留原 accepted，不回滚 learner。replay-ratio 按完整来源 epoch 分配额度、实际消费扣款，阶段恢复按实际提交点继续。绘图已消费本版本的提交与来源统计，独立比赛已复用来源配对器和 Elo，支持混合模型与逐局恢复，见 [比赛与 Elo](evaluation.md)；历史模型发现和独立 arena 使用提交记录选择实测训练时间点；多实验臂 GPU 槽位调度与来源 learner 共享初始化已接入，训练后自动 Elo、固定参考与原生逐对结果复用已接入；独立 match／arena 与 autoelo 跨配对评估已支持模型驻留窗口，Web 的原生会话、页面与 SGF 已接入，平衡开局与按需网络诊断已通过原生命令接入，象棋逐手动画仍待接入；保留来源 learner 时钟，不用每轮重新初始化代替恢复。
+4. **完整调度。** 累计时间预算已接入完整轮次边界，扣除实际 learner 编译耗时，计时缺失时明确失效并按已观测墙钟预算；来源 gatekeeper 通过完整模型副本比赛接入，拒绝候选只保留原 accepted，不回滚 learner。replay-ratio 按 batch 分配额度、实际消费扣款，文件游标与 Lookahead/SWA 跨轮保存，阶段恢复按实际提交点继续。绘图已消费本版本的提交与来源统计，独立比赛已复用来源配对器和 Elo，支持混合模型与逐局恢复，见 [比赛与 Elo](evaluation.md)；历史模型发现和独立 arena 使用提交记录选择实测训练时间点；多实验臂 GPU 槽位调度与来源 learner 共享初始化已接入，训练后自动 Elo、固定参考与原生逐对结果复用已接入；独立 match／arena 与 autoelo 跨配对评估已支持模型驻留窗口，Web 的原生会话、页面与 SGF 已接入，平衡开局与按需网络诊断已通过原生命令接入，象棋逐手动画仍待接入；保留来源 learner 时钟，不用每轮重新初始化代替恢复。
 
 验收沿完整调用链进行：来源对照、手算边界、多线程/真实 GPU、采样到更新到加载的闭环，以及独立性能测量分别提供证据。直接继承来源源码可以减少重写偏差；新增适配仍需验证。
