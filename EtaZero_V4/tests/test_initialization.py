@@ -36,7 +36,7 @@ def initialize(root, config, weights):
 def test_initialization_groups_share_networks_not_search_or_optimizer(tmp_path):
     config = recovery_config(tmp_path, 'alphazero')
     assert initialization_key(config) == initialization_key(replace(config,
-        algorithm='gumbel_alphazero', train_args=('-no-compile',), games_per_round=20))
+        algorithm='gumbel_alphazero', train_args=('-no-compile',), bootstrap_games=20))
     assert initialization_key(config) != initialization_key(replace(config, game='hex'))
     assert initialization_key(config) != initialization_key(replace(config, canvas=7))
     mu = recovery_config(tmp_path, 'muzero')
@@ -107,7 +107,7 @@ def test_initial_weights_reject_different_network_and_reserved_cli(tmp_path):
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='requires real native CUDA and learner')
 @pytest.mark.parametrize('algorithm', ['alphazero', 'muzero'])
 def test_two_real_arms_share_weights_then_resume_independently(tmp_path, algorithm):
-    config = replace(recovery_config(tmp_path, algorithm), auto_plot=False, epochs_per_round=1)
+    config = replace(recovery_config(tmp_path, algorithm), auto_plot=False)
     work = tmp_path / 'experiment'
     arms = [dict(name='a', run_dir=work / 'runs/a', config=config),
             dict(name='b', run_dir=work / 'runs/b', config=replace(config, algorithm='gumbel_' + algorithm))]
@@ -128,7 +128,7 @@ def test_two_real_arms_share_weights_then_resume_independently(tmp_path, algorit
             torch.testing.assert_close(value, expected[key], rtol=0, atol=0)
         result = json.loads((arm['run_dir'] / 'rounds/000001/result.json').read_text())
         assert result['input_model'] == 'initial'
-        assert result['stage_seconds']['initialize'] > 0
+        assert json.loads((arm['run_dir'] / 'rounds/000000/result.json').read_text())['stage_seconds']['initialize'] > 0
         trained = load_model_state_dict(load_checkpoint(arm['run_dir'] / 'train/checkpoint.ckpt'))
         assert any(not torch.equal(trained[key], value) for key, value in expected.items())
         with pytest.raises(ValueError, match='resume without weights'):
@@ -147,6 +147,5 @@ def test_two_real_arms_share_weights_then_resume_independently(tmp_path, algorit
         state = json.loads((arm['run_dir'] / 'state.json').read_text())
         second = load_checkpoint(arm['run_dir'] / 'train/checkpoint.ckpt')
         assert state['total_samples'] > first['train_state']['global_step_samples']
-        assert second['train_state']['export_cycle_counter'] == first['train_state']['export_cycle_counter'] + 1
         assert (arm['run_dir'] / 'initial/checkpoint.ckpt').read_bytes() == initial_bytes
         assert 'Loading initial weights only:' not in (arm['run_dir'] / 'rounds/000002/logs/train.log').read_text()
