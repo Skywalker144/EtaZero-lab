@@ -83,8 +83,9 @@ def assert_same_state(left, right, path='state'):
 
 
 @gpu
-@pytest.mark.parametrize('algorithm,subepochs', [('alphazero', 1), ('gumbel_muzero', 1), ('alphazero', 2)])
-def test_cuda_pause_restores_fast_slow_rng_scaler_and_file_cursor(tmp_path, algorithm, subepochs, monkeypatch):
+@pytest.mark.parametrize('algorithm,subepochs,interrupt', [
+    ('alphazero', 1, True), ('gumbel_muzero', 1, True), ('alphazero', 2, False)])
+def test_cuda_pause_restores_fast_slow_rng_scaler_and_file_cursor(tmp_path, algorithm, subepochs, interrupt, monkeypatch):
     monkeypatch.setenv('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
     config = replace(recovery_config(tmp_path, algorithm), bootstrap_games=64, train_steps=12,
                      shuffle_rows_per_file=32, auto_plot=False)
@@ -128,15 +129,24 @@ def test_cuda_pause_restores_fast_slow_rng_scaler_and_file_cursor(tmp_path, algo
             shutil.copyfile(root / 'muzero_network.json', branch / 'muzero_network.json')
         branches.append(branch)
     continuous, split = branches
-    def train(branch, stop, log):
+    def train(branch, stop, log, interrupt_after=None):
         command = learner_command(branch, config, stop_samples=stop)
         # Fix kernel choice as well as RNG so this tests exact continuation,
         # independently of cuDNN's default per-process benchmark selection.
-        wrapper = ('import torch,sys,runpy; torch.use_deterministic_algorithms(True); '
-                   'sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")')
+        wrapper = 'import torch,sys,runpy,os,signal\ntorch.use_deterministic_algorithms(True)\n'
+        if interrupt_after is not None:
+            wrapper += ('original=torch.amp.GradScaler.update\ncount=0\n'
+                        'def update(self,*args,**kwargs):\n global count\n'
+                        ' result=original(self,*args,**kwargs)\n count+=1\n'
+                        f' if count=={interrupt_after}: os.kill(os.getpid(),signal.SIGTERM)\n'
+                        ' return result\n'
+                        'torch.amp.GradScaler.update=update\n')
+        wrapper += 'sys.argv=sys.argv[1:]\nrunpy.run_path(sys.argv[0],run_name="__main__")'
         controller.execute([sys.executable, '-c', wrapper, *command[1:]], branch / log)
     train(continuous, 76, 'train.log')
-    train(split, 20, 'first.log')
+    train(split, 76 if interrupt else 20, 'first.log', interrupt_after=5 if interrupt else None)
+    if interrupt:
+        assert 'Stop requested' in (split / 'first.log').read_text()
     first = load_checkpoint(split / 'train/checkpoint.ckpt')
     assert first['lookahead']['counter'] == 5
     assert first['train_state']['epoch_cursor']['batches'] == 5
