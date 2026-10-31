@@ -12,7 +12,7 @@ from test_config_profiles import shell
 
 def profile(path, family='alphazero', root='puct', game='renju'):
     path.mkdir(exist_ok=True)
-    (path/'run.cfg').write_text('[run]\ngames_per_round = 4\niterations = 2\nauto_plot = false\n')
+    (path/'run.cfg').write_text('[run]\nbootstrap_games = 4\ntrain_steps = 3\niterations = 2\nauto_plot = false\n')
     (path/'env.cfg').write_text(f'[environment]\ngame = {game}\ncanvas = 5\nbSizes = 3\nbSizeRelProbs = 1\nallowRectangleProb = 0\nkomiMean = 0\n')
     (path/'net.cfg').write_text('[network]\narchitecture = b2c16-fson-mish\n[muzero]\nrepresentation = b2c16-fson-mish\ndynamics = b2c16-fson-mish\nprediction = b2c16-fson-mish\nlatent_channels = 6\nunroll_steps = 3\n')
     search_text = (f'[agent]\nalgorithm = {family}\nroot_search_algo = {root}\nnonroot_search_algo = {root}\n[search]\nmaxVisits = 8\nnumSearchThreads = 1\nuseGraphSearch = false\nsubtreeValueBiasFactor = 0\n[gumbel]\ngumbelMaxConsideredActions = 4\n')
@@ -30,7 +30,7 @@ def profile(path, family='alphazero', root='puct', game='renju'):
     for key in ('maxVisits', 'numSearchThreads', 'useGraphSearch', 'subtreeValueBiasFactor', 'gumbelMaxConsideredActions'):
         values.pop(key, None)
     (path/'selfplay.cfg').write_text(search_text + '\n[selfplay]\n'+''.join(f'{k} = {v}\n' for k,v in values.items()))
-    (path/'train.cfg').write_text('[train]\nbatch-size = 4\nsamples-per-epoch = 9\nmax-epochs-this-instance = 1\nno-compile\nno-longterm-checkpoints\n')
+    (path/'train.cfg').write_text('[train]\nbatch-size = 4\nno-compile\nno-longterm-checkpoints\n')
     (path/'shuffle.cfg').write_text('[shuffle]\nnum-processes = 1\napprox-rows-per-out-file = 64\nkeep-target-rows = 512\nmin-rows = 1\n')
     return load_config(path)
 
@@ -57,6 +57,14 @@ def test_local_override_and_duplicate_ownership(tmp_path):
     assert load_config(tmp_path).algorithm=='gumbel_alphazero'
     with (tmp_path/'train.cfg').open('a') as out:out.write('pos-len = 19\n')
     with pytest.raises(ValueError,match='belongs in env.cfg'):load_config(tmp_path)
+
+
+def test_replay_budget_profile_override(tmp_path):
+    profile(tmp_path)
+    (tmp_path / 'run.cfg.local').write_text('[run]\nreplay_ratio = 2\ntrain_steps = 17\n')
+    config = load_config(tmp_path)
+    assert config.replay_ratio == 2
+    assert config.train_steps == 17
 
 
 @pytest.mark.skipif(os.environ.get('ETAZERO_EIGEN_TESTS')!='1',reason='requires Eigen')
