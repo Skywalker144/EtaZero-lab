@@ -5,6 +5,7 @@ directory publication. Uncommitted work is recomputed without replaying committe
 The source learner owns checkpoint state, file selection, and optimizer clocks.
 """
 import fcntl
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import uuid
 from . import ROOT, __version__
 from .timing import RoundClock, compiler_seconds, committed_timing
 from .replay import count_rows, plan_sampling, plan_training, commit_replay
+from .stopping import StopRequest, StopRequested
 
 
 def save_json(path, value):
@@ -31,16 +33,32 @@ def save_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def execute(argv, log, *, lock_fd=None):
-    """List arguments avoid shell expansion; source programs run at their source cwd."""
+def execute(argv, log, *, lock_fd=None, stopping=None):
+    """Run source stages; CPU exporters reuse this process's imports."""
+    if stopping is not None:
+        stopping.check(started=False)
     print('Running:', ' '.join(map(str, argv)), flush=True)
-    with Path(log).open('w') as stream:
-        try:
-            subprocess.run(list(map(str, argv)), cwd=ROOT / 'python', stdout=stream,
-                           stderr=subprocess.STDOUT, check=True,
-                           pass_fds=() if lock_fd is None else ((lock_fd,) if isinstance(lock_fd, int) else lock_fd))
-        except subprocess.CalledProcessError as error:
-            raise RuntimeError(f'Source stage exited with {error.returncode}; see {log}') from error
+    with (StopRequest() if stopping is None else nullcontext(stopping)) as stop, Path(log).open('w') as stream:
+        stop.check(started=False)
+        if len(argv) > 1 and Path(argv[1]) in {
+                ROOT / 'python/export_model_pytorch.py', ROOT / 'python/export_muzero.py'}:
+            from .exporting import execute_export
+            execute_export(argv, stream)
+            stop.check()
+            return
+        with subprocess.Popen(list(map(str, argv)), cwd=ROOT / 'python', stdout=stream,
+                              stderr=subprocess.STDOUT, start_new_session=True,
+                              pass_fds=() if lock_fd is None else ((lock_fd,) if isinstance(lock_fd, int) else lock_fd)) as child:
+            stop.child = child
+            try:
+                if stop.requested:
+                    stop.notify_child()
+                code = child.wait()
+            finally:
+                stop.child = None
+        stop.check()
+        if code:
+            raise RuntimeError(f'Source stage exited with {code}; see {log}')
 
 
 def checkpoint_progress(path):
@@ -92,7 +110,7 @@ def snapshot_source(destination):
             archive.add(ROOT / name, arcname=name, filter=include)
 
 
-def run_round(root, config, state, binary, lock_fd=None):
+def run_round(root, config, state, binary, lock_fd=None, stopping=None):
     number = state['completed_rounds'] + 1
     commit_path = root / 'rounds' / f'{number:06d}' / 'commit.json'
     if commit_path.is_file():
@@ -127,14 +145,14 @@ def run_round(root, config, state, binary, lock_fd=None):
     progress['clock_running'] = True
     try:
         persist()
-        _run_round(root, config, state, binary, lock_fd, progress, persist)
+        _run_round(root, config, state, binary, lock_fd, progress, persist, stopping)
     finally:
         if state['active_round'] is not None:
             progress['clock_running'] = False
             persist()
 
 
-def _run_round(root, config, state, binary, lock_fd, progress, persist):
+def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping=None):
     number = state['completed_rounds'] + 1
     directory = root / 'rounds' / f'{number:06d}'
     directory.mkdir(parents=True, exist_ok=True)
@@ -150,6 +168,8 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist):
             persist()
 
     def stage(name, command):
+        if stopping is not None:
+            stopping.check()
         attempt = progress['attempts'].get(name, 0) + 1
         progress['attempts'][name] = attempt
         progress['running'] = name
@@ -163,16 +183,24 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist):
         persist()
         log = logs / (f'{name}.log' if attempt == 1 else f'{name}.{attempt}.log')
         started = time.monotonic()
+        launched = True
         try:
-            execute(command, log, lock_fd=lock_fd)
+            execute(command, log, lock_fd=lock_fd, stopping=stopping)
         except BaseException as error:
-            if not isinstance(error, RuntimeError):
+            if isinstance(error, StopRequested) and not error.started:
+                launched = False
+                if attempt == 1:
+                    del progress['attempts'][name]
+                else:
+                    progress['attempts'][name] = attempt - 1
+                log.unlink(missing_ok=True)  # At most an empty capture, no source process ran.
+            if not isinstance(error, (RuntimeError, StopRequested)):
                 progress['timing_valid'] = False
             raise
         finally:
             wall = time.monotonic() - started
             progress['stage_seconds'][name] = progress['stage_seconds'].get(name, 0.0) + wall
-            if receipt is not None:
+            if receipt is not None and launched:
                 compiled = compiler_seconds(receipt, wall)
                 old = progress['stage_compile_seconds'].get(name, 0.0)
                 progress['stage_compile_seconds'][name] = None if compiled is None or old is None else old + compiled
@@ -341,6 +369,7 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist):
             retain_partial(scratch)
             pending.mkdir(parents=True)
             stage('shuffle', [sys.executable, ROOT / 'python/shuffle.py', root / 'selfplay',
+                '-input-files-stable',
                 '-out-dir', pending / 'train', '-out-tmp-dir', scratch,
                 '-num-processes', config.shuffle_processes,
                 '-approx-rows-per-out-file', config.shuffle_rows_per_file,
@@ -468,7 +497,7 @@ def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights
         raise ValueError(f'Build the native engine first: {binary}')
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    with (root / '.lock').open('a') as lock:
+    with (root / '.lock').open('a') as lock, StopRequest() as stopping:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -508,11 +537,12 @@ def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights
                   file=sys.stderr, flush=True)
         plotted = False
         while state['active_round'] is not None or iterations is None or state['completed_rounds'] < iterations:
+            stopping.check()
             if state['active_round'] is None and max_seconds is not None and state['elapsed_seconds'] >= max_seconds:
                 print(f'Time budget reached after round {state["completed_rounds"]}: '
                       f'{state["elapsed_seconds"]:.3f}s >= {max_seconds:.3f}s', flush=True)
                 break
-            run_round(root, config, state, binary, (lock.fileno(), *inherited_fds))
+            run_round(root, config, state, binary, (lock.fileno(), *inherited_fds), stopping=stopping)
             refresh_plots(root, config)
             plotted = True
         if not plotted and state['completed_rounds'] >= 0:
