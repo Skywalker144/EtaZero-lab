@@ -226,7 +226,7 @@ Current fields are:
       * `drawValue` - The predicted probability of an ordinary draw.
       * `noResultValue` - The predicted probability that the game ends in a no-result (e.g. triple ko/long cycle), as a float in [0,1]. Only present if `includeNoResultValue` was true. Relevant for rulesets like Japanese rules without superko.
       * `humanPrior` - The human policy for the move, as a float in [0,1], if available.
-      * `utility` - The utility of the move, using result utility W−L (D and NR have zero utility), as a float in [-C,C] where C is the maximum possible utility. The utility scale is set by `winLossUtilityFactor` in the config.
+      * `utility` - The utility of the move, using result utility `winLossUtilityFactor * (W−L) + noResultUtilityForWhite * NR` (D has zero utility), as a float in [-C,C] where C is the maximum possible utility. The W/L utility scale is set by `winLossUtilityFactor`; `noResultUtilityForWhite` separately sets NR utility in the config.
       * `lcb` - The [LCB](https://github.com/leela-zero/leela-zero/issues/2282) of the move's winrate. Has the same units as winrate, but might lie outside of [0,1] since the current implementation doesn't strictly account for the 0-1 bounds.
       * `utilityLcb` - The LCB of the move's utility.
       * `weight` - The total weight of the visits that the child node received. The average weight of visits may be lower when less certain, and larger when more certain.
