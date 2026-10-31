@@ -86,7 +86,7 @@ def test_future_horizons_mask_only_unobserved_targets():
 def test_placement_model_consumed_in_second_round(tmp_path, game):
     cfg = selfplay_config(tmp_path / 'selfplay.cfg', game, 100)
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game=game,
-                       canvas=5, batch_size=8, games_per_round=4, samples_per_epoch=16,
+                       canvas=5, batch_size=8, bootstrap_games=4, train_steps=2,
                        shuffle_rows_per_file=128, shuffle_keep_rows=1024, shuffle_args=('-min-rows','1'),
                        train_args=(('-no-compile',) if game == 'renju' else ('-use-fp16',)) +
                                   ('-lookahead-k','6','-no-longterm-checkpoints')).validate()
@@ -100,8 +100,8 @@ def test_placement_model_consumed_in_second_round(tmp_path, game):
     assert weights['conv_spatial.weight'].shape[1] == 5
     assert not any('linear_pass' in name for name in weights)
     report = json.loads((directory / 'rounds/000002/result.json').read_text())
-    assert report['input_model'] == 'round-000001'
-    assert list((directory / 'selfplay/000002/round-000001/tdata').glob('*.npz'))
+    assert report['input_model'].startswith('round-000001-s')
+    assert list((directory / 'selfplay/000002' / report['input_model'] / 'tdata').glob('*.npz'))
     assert run(directory, config, 2) == second
 
 
@@ -110,7 +110,7 @@ def test_source_policy_init_side_and_reanalysis_on_placement(tmp_path, game):
     cfg = selfplay_config(tmp_path / 'selfplay.cfg', game, 100)
     with cfg.open('a') as stream:
         stream.write('numGameThreads = 1\nmaxVisits = 24\n'
-                     'initGamesWithPolicy = true\npolicyInitAreaProp = 0.15\n'
+                     'initGamesWithPolicy = true\npolicyInitAvgMoveNum = 6\npolicyInitAreaProp = 0.15\n'
                      'sidePositionProb = 1\ncheapSearchProb = 1\ncheapSearchVisits = 8\n'
                      'cheapSearchTargetWeight = 1\nuseReanalyze = true\nreanalyzeProp = 1\n'
                      'reanalyzePolicySurpriseWeight = 1\nreanalyzeValueSurpriseWeight = 1\n'
@@ -196,15 +196,15 @@ def test_placement_imported_start_selfplay(tmp_path, game, kind):
 def test_imported_start_training_and_next_model(tmp_path, game, kind):
     cfg = imported_start_config(tmp_path, game, kind)
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game=game,
-                       canvas=5, batch_size=8, games_per_round=4, samples_per_epoch=16,
+                       canvas=5, batch_size=8, bootstrap_games=4, train_steps=2,
                        shuffle_rows_per_file=128, shuffle_keep_rows=1024, shuffle_args=('-min-rows','1'),
                        train_args=('-no-compile','-use-fp16','-no-longterm-checkpoints')).validate()
     directory = tmp_path / 'run'
     state = run(directory, config, 2)
     assert state['completed_rounds'] == 2 and state['total_samples'] >= 32
     report = json.loads((directory / 'rounds/000002/result.json').read_text())
-    assert report['input_model'] == 'round-000001'
-    files = list((directory / 'selfplay/000002/round-000001/tdata').glob('*.npz'))
+    assert report['input_model'].startswith('round-000001-s')
+    files = list((directory / 'selfplay/000002' / report['input_model'] / 'tdata').glob('*.npz'))
     assert files
     for file in files:
         with np.load(file) as shard:
@@ -225,7 +225,7 @@ def assert_terminal_sgf_gtp(tmp_path, directory, game):
                           'cudaUseFP16 = true\nlogSearchInfo = false\nlogToStderr = false\n'
                           'logAllGTPCommunication = false\nponderingEnabled = false\n')
     result = subprocess.run([str(ROOT / 'build/katago'), 'gtp', '-config', str(gtp_config),
-                             '-model', str(directory / 'models/round-000002/model.bin')],
+                             '-model', str(directory / json.loads((directory / 'state.json').read_text())['accepted_model'] / 'model.bin')],
                             input=f'10 loadsgf {terminal}\n11 final_score\n12 kata-raw-nn 0\nquit\n',
                             text=True, capture_output=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
