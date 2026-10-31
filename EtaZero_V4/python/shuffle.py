@@ -18,6 +18,7 @@ import datetime
 import gc
 
 import multiprocessing
+import zipfile
 
 import numpy as np
 from typing import Sequence
@@ -153,10 +154,12 @@ def save_output_npz(
     for key, arr in zip(extra_keys, arrs[7:]):
         save_dict[key] = arr[start:stop]
 
-    np.savez_compressed(
-        filename,
-        **save_dict
-    )
+    # Match the native writer's fast lossless compression. Each synchronous
+    # round compresses both intermediate shards and final training files.
+    with zipfile.ZipFile(filename, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        for key, array in save_dict.items():
+            with archive.open(key + '.npy', 'w', force_zip64=True) as stream:
+                np.lib.format.write_array(stream, array, allow_pickle=False)
 
 def pad_global_targets_nc(globalTargetsNC: np.ndarray) -> np.ndarray:
     """Zero-pad older-format globalTargetsNC rows up to the current channel count."""
