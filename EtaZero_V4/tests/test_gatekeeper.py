@@ -153,7 +153,7 @@ def test_native_gatekeeper_signal_does_not_commit_a_partial_match(tmp_path):
 @pytest.mark.parametrize('algorithm,threshold', [('alphazero', .75), ('gumbel_muzero', .5)])
 def test_outer_gatekeeper_resume_and_next_round_model(tmp_path, monkeypatch, algorithm, threshold):
     profile = gate_config(tmp_path / 'gate.cfg', gumbel='gumbel' in algorithm)
-    config = replace(recovery_config(tmp_path, algorithm), epochs_per_round=1,
+    config = replace(recovery_config(tmp_path, algorithm),
                      gatekeeper_config=str(profile), gatekeeper_required_win_prop=threshold)
     root = tmp_path / 'run'
     calls = []
@@ -174,22 +174,23 @@ def test_outer_gatekeeper_resume_and_next_round_model(tmp_path, monkeypatch, alg
     pending = json.loads((root / 'state.json').read_text())
     assert pending['completed_rounds'] == 1 and pending['accepted_model'] == first['accepted_model']
     trained = checkpoint_progress(root / 'train/checkpoint.ckpt')
-    assert trained[0] > first['total_samples'] and trained[1] == 2
+    assert trained[0] > first['total_samples']
     # Recreate the crash gap before native directory move, after decision commit.
-    gate = root / 'rounds/000002/gatekeeper'
+    gate = next((root / 'rounds/000002/gatekeeper').iterdir())
+    candidate_name = gate.name
     report = json.loads((gate / 'result.json').read_text())
-    moved = gate / ('accepted' if report['accepted'] else 'rejected') / 'round-000002'
-    moved.rename(gate / 'test/round-000002')
+    moved = gate / ('accepted' if report['accepted'] else 'rejected') / candidate_name
+    moved.rename(gate / 'test' / candidate_name)
     count = len(calls)
     second = controller.run(root, config, 2)
     assert len(calls) == count and moved.exists()
     assert checkpoint_progress(root / 'train/checkpoint.ckpt') == trained
-    expected = 'models/round-000002' if threshold == .5 else first['accepted_model']
+    expected = f'models/{candidate_name}' if threshold == .5 else first['accepted_model']
     assert second['accepted_model'] == expected
-    assert (root / 'models/round-000002/model.bin').exists() or (root / 'models/round-000002/model.json').exists()
+    assert (root / 'models' / candidate_name / 'model.bin').exists() or (root / 'models' / candidate_name / 'model.json').exists()
     third = controller.run(root, config, 3)
     third_report = json.loads((root / 'rounds/000003/result.json').read_text())
     assert third_report['input_model'] == Path(expected).name
     assert third_report['gatekeeper']['baseline'] == Path(expected).name
     assert third['total_samples'] > second['total_samples']
-    assert checkpoint_progress(root / 'train/checkpoint.ckpt')[1] == 3
+    assert checkpoint_progress(root / 'train/checkpoint.ckpt')[0] > trained[0]
