@@ -103,7 +103,7 @@ def run_history(root):
     state = json.loads((root / 'state.json').read_text())
     train = learner_log(root / 'train/metrics_train.json') if (root / 'train/metrics_train.json').exists() or state.get('total_samples', 1) else []
     validation = learner_log(root / 'train/metrics_val.json') if (root / 'train/metrics_val.json').exists() or state.get('total_samples', 1) else []
-    history, total_rows, previous_samples = [], 0, 0
+    history, previous_samples = [], 0
     first = 0 if (root / 'rounds/000000').exists() else 1
     for number in range(first, state['completed_rounds'] + 1):
         directory = root / 'rounds' / f'{number:06d}'
@@ -136,8 +136,7 @@ def run_history(root):
                 observed['gatekeeper'] = gatekeeper_metrics(gatekeeper)
             except (OSError, ValueError) as error:
                 warnings.warn(f'Round {number} native gatekeeper logs unavailable: {error}', RuntimeWarning)
-        rows = observed.get('rows')
-        total_rows = None if total_rows is None or rows is None else total_rows + rows
+        total_rows = current['replay']['rows']
         history.append({**observed, 'round': number, 'total_rows': total_rows,
                         'total_samples': current['total_samples'],
                         'new_samples': current['total_samples'] - previous_samples,
@@ -293,7 +292,7 @@ def loss_figure(history):
                     logarithmic=True, legend=False)
             axis.set_xlim(0, max(1, max(x, default=0) * 1.025))
             axis.xaxis.set_major_formatter(FuncFormatter(_compact_number))
-        figure.supxlabel('Train and validation: native metrics JSON logs; retries may repeat sample counts.\n'
+        figure.supxlabel('Train and validation: native metrics JSON logs, excluding updates abandoned on recovery.\n'
                             'Components retain source scaling and need not sum to total loss; no additional smoothing.',
                             fontsize=10, color=GREY)
     return figure
