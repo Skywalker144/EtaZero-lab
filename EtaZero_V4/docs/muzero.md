@@ -60,15 +60,15 @@ PCR/cheap、reduce visits、surprise、主线 reanalysis、side 搜索、fork/hi
 
 首次运行先调用正式 `train.py -initialize-only`。该模式要求新的单设备训练目录，复用来源模型初始化、参数组、optimizer、Lookahead 初值、SWA 初值与完整保存函数，在读取训练数据和执行 forward 之前保存零样本 checkpoint；epoch、样本和 SWA 累积计数均未推进。后续 learner 从这个完整 checkpoint 继续，保留初始化范数基准与 RNG。初始化模式拒绝覆盖已有 checkpoint，不用于恢复训练。外层保留不可覆盖的 `initial/checkpoint.ckpt`，并从其普通权重导出 `models/initial/` 给首轮使用。
 
-每轮只向独立的 `input_models/` 链接本轮完整输入模型，原生轮询不会读到本轮结束后才发布的模型。selfplay 的完整轨迹进入来源 shuffle，由 `muzero_unroll_steps` 生成展开数据；learner 使用跨轮保留的训练目录，仍按来源整文件和 epoch/subepoch 逻辑消费数据，实际样本量可能超过目标。完成训练后从正式 checkpoint 导出新目录，所有组件完成后才原子发布。
+每轮只向独立的 `input_models/` 链接本轮完整输入模型，原生轮询不会读到本轮结束后才发布的模型。selfplay 的完整轨迹进入来源 shuffle，由 `muzero_unroll_steps` 生成展开数据；learner 使用跨轮保留的训练目录，按来源规则选择整文件并组织 epoch/subepoch，由外层实际样本额度控制每轮训练量，预算用尽时保存未完成 epoch 的游标。按本轮最终 checkpoint 导出新目录，所有组件完成后才原子发布。
 
-`publish_weights=ordinary` 或 `swa` 明确选择下一轮 selfplay 的权重；SWA 的累积、参数和计数遵循来源 learner。learner 本身继续使用完整 checkpoint 的训练权重和 optimizer。继续运行不会重复初始化或重复已完成轮；未完成轮复用已提交的阶段产物，learner 只补足尚未提交的 epoch。轮次状态提交后再写观测报告，报告写入失败会警告，已提交模型与完成轮数继续有效。
+`publish_weights=ordinary` 或 `swa` 明确选择下一轮 selfplay 的权重；SWA 的累积、参数和计数遵循来源 learner。learner 本身继续使用完整 checkpoint 的训练权重和 optimizer。继续运行不会重复初始化或重复已完成轮；未完成轮复用已提交的阶段产物，learner 恢复完整 checkpoint 中的训练权重、fast/slow 状态、随机流和数据游标。轮次状态提交后再写观测报告，报告写入失败会警告，已提交模型与完成轮数继续有效。
 
 ## 正式 learner
 
 `python/train.py -muzero-config /path/to/network.json` 创建三组件模型；JSON 是 `MuZeroConfig` 的字段，包括棋类、latent 通道数和三个来源网络配置。继续同一训练目录时直接从 checkpoint 推断网络，不必重复提供该参数。数据目录仍使用来源的 `train/`、`val/` 和相邻 snapshot JSON；训练与验证分别读取自己的 K 和权重均值。普通 AlphaZero 与 MuZero snapshot 不能互换。
 
-`muzero_learner.py` 只连接模型、展开 loss 和批次接口。参数角色、SGD/AdamW/Muon、学习率、warmup、参数衰减、Lookahead、SWA 和文件消费继续在来源训练循环中执行。每个根 batch 只推进一次优化器与根样本计数，K 个未来步不增加训练时钟。Lookahead 保留来源的 subepoch 计数与 epoch 末回到 slow 参数的行为，SWA 仍只在同步点按根样本周期累积。
+`muzero_learner.py` 只连接模型、展开 loss 和批次接口。参数角色、SGD/AdamW/Muon、学习率、warmup、参数衰减、Lookahead、SWA 和文件消费继续在来源训练循环中执行。每个根 batch 只推进一次优化器与根样本计数，K 个未来步不增加训练时钟。Lookahead 保留来源的 subepoch 计数与 epoch 末回到 slow 参数的行为，SWA 仍只在同步点按根样本周期累积。外层预算用尽可在 epoch 中途退出；SWA 参数、采样计数与累积余量以及 Lookahead fast/slow 与计数随完整 checkpoint 恢复。
 
 三组件可分别配置归一化，因此自适应 weight decay 使用各组件的初始范数与观测范数，梯度裁剪按各组件的来源阈值独立执行；不把 prediction 的 norm 设置或范数比例用于 representation/dynamics。全局 gnorm 上界仅用于报告，没有第二次整体裁剪。来源共有公式与调用频率保留；拆分范数和裁剪域是三网络扩展。既有 `wdnormal` 指标对应 prediction，其他组件的真实衰减保存在 optimizer 参数组中。组件梯度范数及 excess 统计沿用来源 `detensorify_metrics` 的有效性判断，在一次设备传输后处理标量；失效批次不计入对应统计的平均，不补零。
 
