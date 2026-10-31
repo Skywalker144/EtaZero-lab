@@ -44,10 +44,11 @@ namespace PlayUtils {
     Search* botB, Search* botW, const Board& board, const BoardHistory& hist, Player pla, NNResultBuf& buf,
     Rand& gameRand, double temperature
   );
+  int samplePolicyInitMoveCount(const BoardHistory&, Rand&, double mean, double gammaShape);
   void initializeGameUsingPolicy(
     Search* botB, Search* botW, Board& board, BoardHistory& hist, Player& pla,
     Rand& gameRand, bool doEndGameIfAllPassAlive,
-    double proportionOfBoardArea, double policyInitGammaShape, double temperature
+    double mean, double policyInitGammaShape, double temperature
   );
 
 

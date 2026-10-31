@@ -174,25 +174,30 @@ Loc PlayUtils::getGameInitializationMove(
 
 //Try playing a bunch of pure policy moves instead of playing from the start to initialize the board
 //and add entropy
+int PlayUtils::samplePolicyInitMoveCount(
+  const BoardHistory& hist, Rand& gameRand, double mean, double gammaShape
+) {
+  if(hist.rules.isPlacement() && hist.rules.game != Rules::Game::HEX) {
+    // KataGomo's board.movenum counts played moves, not setup stones. Imported
+    // positions retain earlier played turns in initialTurnNumber.
+    const double played = (double)hist.initialTurnNumber + hist.moveHistory.size();
+    return std::max(0,(int)floor(gameRand.nextExponential() * mean - 2.0 * played));
+  }
+  return gammaShape != 1.0 ? (int)floor(gameRand.nextGamma(gammaShape) * (mean/gammaShape)) :
+    (int)floor(gameRand.nextExponential() * mean);
+}
+
 void PlayUtils::initializeGameUsingPolicy(
   Search* botB, Search* botW, Board& board, BoardHistory& hist, Player& pla,
   Rand& gameRand, bool doEndGameIfAllPassAlive,
-  double proportionOfBoardArea, double policyInitGammaShape, double temperature
+  double mean, double policyInitGammaShape, double temperature
 ) {
   NNResultBuf buf;
 
   if(hist.isGameFinished)
     return;
 
-  double mean = board.x_size * board.y_size * proportionOfBoardArea;
-  int numInitialMovesToPlay;
-
-  if(policyInitGammaShape != 1.0) {
-    numInitialMovesToPlay = (int)floor(gameRand.nextGamma(policyInitGammaShape) * (mean/policyInitGammaShape));
-  }
-  else {
-    numInitialMovesToPlay = (int)floor(gameRand.nextExponential() * mean);
-  }
+  int numInitialMovesToPlay = samplePolicyInitMoveCount(hist,gameRand,mean,policyInitGammaShape);
 
   testAssert(numInitialMovesToPlay >= 0);
   for(int i = 0; i<numInitialMovesToPlay; i++) {

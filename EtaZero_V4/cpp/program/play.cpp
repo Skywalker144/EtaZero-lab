@@ -1613,9 +1613,10 @@ FinishedGameData* Play::runGame(
     }
   };
 
+  const bool gomokuOpening = hist.rules.isPlacement() && hist.rules.game != Rules::Game::HEX;
   if(playSettings.balancedOpening.probability > 0.0 &&
-     !otherGameProps.isSgfPos && !otherGameProps.isHintPos &&
-     !otherGameProps.isFork && !otherGameProps.isHintFork) {
+     (gomokuOpening || (!otherGameProps.isSgfPos && !otherGameProps.isHintPos &&
+                       !otherGameProps.isFork && !otherGameProps.isHintFork))) {
     const auto result = BalancedOpening::initialize(botB,botW,board,hist,pla,gameRand,playSettings.balancedOpening,shouldStop);
     if(result == BalancedOpening::Result::INTERRUPTED) {
       // GameRunner discards interrupted games before writing data or forking.
@@ -1631,12 +1632,14 @@ FinishedGameData* Play::runGame(
   }
 
   if(playSettings.initGamesWithPolicy && otherGameProps.allowPolicyInit && !hist.isGameFinished) {
-    double proportionOfBoardArea = otherGameProps.isSgfPos ? playSettings.startPosesPolicyInitAreaProp : playSettings.policyInitAreaProp;
-    if(proportionOfBoardArea > 0) {
+    const double mean = gomokuOpening ?
+      (otherGameProps.isSgfPos ? playSettings.startPosesPolicyInitAvgMoveNum : playSettings.policyInitAvgMoveNum) :
+      board.x_size * board.y_size * (otherGameProps.isSgfPos ? playSettings.startPosesPolicyInitAreaProp : playSettings.policyInitAreaProp);
+    if(mean > 0) {
       double policyInitGammaShape = playSettings.policyInitGammaShape;
       double temperature = playSettings.policyInitAreaTemperature;
       testAssert(temperature > 0.0 && temperature < 10.0);
-      PlayUtils::initializeGameUsingPolicy(botB, botW, board, hist, pla, gameRand, doEndGameIfAllPassAlive, proportionOfBoardArea, policyInitGammaShape, temperature);
+      PlayUtils::initializeGameUsingPolicy(botB, botW, board, hist, pla, gameRand, doEndGameIfAllPassAlive, mean, policyInitGammaShape, temperature);
     }
   }
 
@@ -1653,7 +1656,7 @@ FinishedGameData* Play::runGame(
     double proportionOfBoardArea = 0.25;
     double policyInitGammaShape = 1.0 * 0.8 + playSettings.policyInitGammaShape * 0.2;
     double temperature = 2.0/3.0;
-    PlayUtils::initializeGameUsingPolicy(botB, botW, board, hist, pla, gameRand, doEndGameIfAllPassAlive, proportionOfBoardArea, policyInitGammaShape, temperature);
+    PlayUtils::initializeGameUsingPolicy(botB, botW, board, hist, pla, gameRand, doEndGameIfAllPassAlive, board.x_size * board.y_size * proportionOfBoardArea, policyInitGammaShape, temperature);
 
     if(!hist.isGameFinished) {
       //Randomly set to one of the encore phases

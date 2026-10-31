@@ -4,7 +4,7 @@
 
 PlaySettings::PlaySettings()
   :balancedOpening(),initGamesWithPolicy(false),policyInitAreaProp(0.0),startPosesPolicyInitAreaProp(0.0),
-   policyInitGammaShape(1.0),sidePositionProb(0.0),
+   policyInitGammaShape(1.0),policyInitAvgMoveNum(0.0),startPosesPolicyInitAvgMoveNum(0.0),sidePositionProb(0.0),
    policyInitAreaTemperature(1.0),handicapTemperature(1.0),
    earlyForkGameProb(0.0),earlyForkGameExpectedMoveProp(0.0),forkGameProb(0.0),forkGameMinChoices(1),earlyForkGameMaxChoices(1),forkGameMaxChoices(1),
    cheapSearchProb(0),cheapSearchVisits(0),cheapSearchTargetWeight(0.0f),
@@ -35,6 +35,27 @@ static void rejectKomiCompensation(ConfigParser& cfg) {
   }
 }
 
+static void loadPolicyInit(PlaySettings& settings, ConfigParser& cfg, bool selfplay) {
+  const auto game = cfg.contains("game") ? Rules::parseGame(cfg.getString("game")) : Rules::Game::GO;
+  const bool gomoku = Rules::forGame(game).isPlacement() && game != Rules::Game::HEX;
+  if(gomoku) {
+    settings.policyInitAvgMoveNum = selfplay && !cfg.contains("policyInitAvgMoveNum") ? 12.0 :
+      cfg.getDouble("policyInitAvgMoveNum",0.0,100.0);
+    settings.startPosesPolicyInitAvgMoveNum = cfg.contains("startPosesPolicyInitAvgMoveNum") ?
+      cfg.getDouble("startPosesPolicyInitAvgMoveNum",0.0,100.0) : 0.0;
+  }
+  else {
+    settings.policyInitAreaProp = selfplay && !cfg.contains("policyInitAreaProp") ? 0.04 :
+      cfg.getDouble("policyInitAreaProp",0.0,1.0);
+    settings.startPosesPolicyInitAreaProp = cfg.contains("startPosesPolicyInitAreaProp") ?
+      cfg.getDouble("startPosesPolicyInitAreaProp",0.0,1.0) : 0.0;
+    settings.policyInitGammaShape = cfg.contains("policyInitGammaShape") ?
+      cfg.getDouble("policyInitGammaShape",0.5,selfplay ? 10.0 : 100.0) : 1.0;
+  }
+  settings.policyInitAreaTemperature = cfg.contains("policyInitAreaTemperature") ?
+    cfg.getDouble("policyInitAreaTemperature",0.1,5.0) : 1.0;
+}
+
 PlaySettings PlaySettings::loadForMatch(ConfigParser& cfg) {
   rejectKomiCompensation(cfg);
   if(cfg.contains("sekiForkHackProb"))
@@ -46,10 +67,7 @@ PlaySettings PlaySettings::loadForMatch(ConfigParser& cfg) {
   playSettings.resignConsecTurns = cfg.getInt("resignConsecTurns",1,100);
   playSettings.initGamesWithPolicy =  cfg.contains("initGamesWithPolicy") ? cfg.getBool("initGamesWithPolicy") : false;
   if(playSettings.initGamesWithPolicy) {
-    playSettings.policyInitAreaProp = cfg.getDouble("policyInitAreaProp",0.0,1.0);
-    playSettings.startPosesPolicyInitAreaProp = cfg.contains("startPosesPolicyInitAreaProp") ? cfg.getDouble("startPosesPolicyInitAreaProp",0.0,1.0) : 0.0;
-    playSettings.policyInitGammaShape = cfg.contains("policyInitGammaShape") ? cfg.getDouble("policyInitGammaShape",0.5,100.0) : 1.0;
-    playSettings.policyInitAreaTemperature = cfg.contains("policyInitAreaTemperature") ? cfg.getDouble("policyInitAreaTemperature",0.1,5.0) : 1.0;
+    loadPolicyInit(playSettings,cfg,false);
   }
 
   playSettings.recordTimePerMove = true;
@@ -77,15 +95,12 @@ PlaySettings PlaySettings::loadForSelfplay(ConfigParser& cfg, bool /*isDistribut
   PlaySettings playSettings;
   playSettings.balancedOpening = BalancedOpening::Settings::load(cfg,true);
   playSettings.initGamesWithPolicy = cfg.getBool("initGamesWithPolicy");
-  playSettings.policyInitAreaProp = cfg.contains("policyInitAreaProp") ? cfg.getDouble("policyInitAreaProp",0.0,1.0) : 0.04;
-  playSettings.startPosesPolicyInitAreaProp = cfg.contains("startPosesPolicyInitAreaProp") ? cfg.getDouble("startPosesPolicyInitAreaProp",0.0,1.0) : 0.0;
-  playSettings.policyInitGammaShape = cfg.contains("policyInitGammaShape") ? cfg.getDouble("policyInitGammaShape",0.5,10.0) : 1.0;
+  loadPolicyInit(playSettings,cfg,true);
   playSettings.sidePositionProb =
     //forkSidePositionProb is the legacy name, included for backward compatibility
     (cfg.contains("forkSidePositionProb") && !cfg.contains("sidePositionProb")) ?
     cfg.getDouble("forkSidePositionProb",0.0,1.0) : cfg.getDouble("sidePositionProb",0.0,1.0);
 
-  playSettings.policyInitAreaTemperature = cfg.contains("policyInitAreaTemperature") ? cfg.getDouble("policyInitAreaTemperature",0.1,5.0) : 1.0;
   playSettings.handicapTemperature = cfg.contains("handicapTemperature") ? cfg.getDouble("handicapTemperature",0.1,5.0) : 1.0;
 
 

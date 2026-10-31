@@ -12,6 +12,8 @@ struct PlaySettings {
   double policyInitAreaProp; //Avg number of moves is this * board area
   double startPosesPolicyInitAreaProp; //Avg number of moves when using a starting position from sgf
   double policyInitGammaShape; //Controls the shape of policy init
+  double policyInitAvgMoveNum; //KataGomo mean before subtracting twice the existing move count
+  double startPosesPolicyInitAvgMoveNum;
   //Occasionally try some alternative moves and search the responses to them.
   double sidePositionProb;
 
