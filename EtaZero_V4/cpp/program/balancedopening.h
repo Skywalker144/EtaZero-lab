@@ -23,8 +23,8 @@ struct Value { double whiteWin, whiteLoss; };
 using Evaluate = std::function<Value(const Board&,const BoardHistory&,Player,int reference)>;
 enum class Result { SKIPPED, APPLIED, INTERRUPTED };
 
-// Only empty, ongoing placement positions with Black to move are eligible.
-// The caller excludes explicit SGF/hint/fork starts. Rejected and interrupted
+// Only empty, ongoing placement positions are eligible; Hex also requires Black.
+// Nonempty SGF/hint/fork starts are ineligible. Rejected and interrupted
 // attempts never modify the caller's board or history.
 Result initialize(Board&,BoardHistory&,Player&,Rand&,const Settings&,
                   const Evaluate&,const std::function<bool()>& shouldStop);
