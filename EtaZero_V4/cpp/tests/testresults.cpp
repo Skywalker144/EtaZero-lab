@@ -125,6 +125,54 @@ void fixedKomiGames(NNEvaluator* nn, Logger& logger) {
   testAssert(sawPolicyInit);
 }
 
+void randomizedNoResultUtility(Logger& logger) {
+  auto cfg = fixedKomiConfig();
+  cfg.overrideKey("numSearchThreads","1");
+  cfg.overrideKey("noResultUtilityForWhite","0.2");
+  near(Setup::loadSingleParams(cfg,Setup::SETUP_FOR_OTHER).noResultUtilityForWhite,0.2);
+  cfg.overrideKey("noResultStdev","0.2");
+  GameInitializer init(cfg,logger,"nr-utility-init");
+  GameInitializer duplicate(cfg,logger,"nr-utility-init");
+  PlaySettings settings;
+  Board board;
+  BoardHistory hist;
+  Player pla;
+  int handicap;
+  OtherGameProperties props;
+  double sum = 0;
+  bool positive = false, negative = false;
+  for(int i = 0; i < 256; i++) {
+    SearchParams params, repeated;
+    init.createGame(board,pla,hist,handicap,params,NULL,settings,props,NULL,BoardHistoryModes(false,false));
+    duplicate.createGame(board,pla,hist,handicap,repeated,NULL,settings,props,NULL,BoardHistoryModes(false,false));
+    const double u = params.noResultUtilityForWhite;
+    near(u,repeated.noResultUtilityForWhite);
+    near(params.drawEquivalentWinsForWhite,0.5);
+    testAssert(u >= -0.6 && u <= 0.6); // Three-sigma truncated Gaussian, without clipping atoms.
+    positive |= u > 0.1;
+    negative |= u < -0.1;
+    sum += u;
+  }
+  testAssert(positive && negative && std::fabs(sum/256) < 0.05);
+  // Reject samples outside [-1,1], including when the configured mean is near an endpoint.
+  for(double mean : {-0.95,0.95}) for(int i = 0; i < 32; i++) {
+    SearchParams params;
+    params.noResultUtilityForWhite = mean;
+    init.createGame(board,pla,hist,handicap,params,NULL,settings,props,NULL,BoardHistoryModes(false,false));
+    testAssert(params.noResultUtilityForWhite >= -1 && params.noResultUtilityForWhite <= 1);
+  }
+  bool rejected = false;
+  try { init.createGame(board,pla,hist,handicap,NULL,settings,props,NULL,BoardHistoryModes(false,false)); }
+  catch(const StringError&) { rejected = true; }
+  testAssert(rejected); // Non-selfplay entry cannot silently discard randomized search parameters.
+  cfg.overrideKey("noResultStdev","0");
+  GameInitializer fixed(cfg,logger,"nr-utility-fixed");
+  SearchParams params;
+  params.noResultUtilityForWhite = -0.3;
+  fixed.createGame(board,pla,hist,handicap,params,NULL,settings,props,NULL,BoardHistoryModes(false,false));
+  near(params.noResultUtilityForWhite,-0.3);
+}
+
 void excludedSearchOptions() {
   for(const std::string key : {"staticScoreUtilityFactor", "dynamicScoreUtilityFactor", "dynamicScoreCenterZeroWeight",
                                "dynamicScoreCenterScale", "rootEndingBonusPoints", "antiMirror", "genmoveAntiMirror",
@@ -293,10 +341,13 @@ void searchResults() {
   auto nn = std::unique_ptr<NNEvaluator>(TestSearchCommon::startNNEval("/dev/null",logger,"four-results",7,7,0,true,false,false,true,false));
   passingRulesAndSearch(nn.get(),logger);
   fixedKomiGames(nn.get(),logger);
+  randomizedNoResultUtility(logger);
   SearchParams params;
   params.maxVisits = 64;
-  for(int threads : {1,3}) {
+  for(int threads : {1,3}) for(bool graph : {false,true}) for(double nrUtility : {-0.6,0.0,0.6}) {
     params.numThreads = threads;
+    params.useGraphSearch = graph;
+    params.noResultUtilityForWhite = nrUtility;
     Search search(params,nn.get(),&logger,"results-search");
     // A placement draw is a terminal root with D=1, not half a win and half a loss.
     Board board(3,3);
@@ -338,7 +389,21 @@ void searchResults() {
     auto* child = children[0].getIfAllocated();
     testAssert(search.getNodeValues(child,values));
     near(values.winValue,0); near(values.drawValue,0); near(values.lossValue,0);
-    near(values.noResultValue,1); near(values.utility,0);
+    near(values.noResultValue,1); near(values.utility,nrUtility);
+    near(child->stats.utilitySqAvg.load(),nrUtility*nrUtility);
+    // A single root evaluation must retain the NN's mixed outcome distribution in its utility.
+    SearchParams singleParams = params;
+    singleParams.maxVisits = 1;
+    singleParams.numThreads = 1;
+    Search single(singleParams,nn.get(),&logger,"nr-mixed-value");
+    Board empty(7,7);
+    BoardHistory emptyHist(empty,P_BLACK,Rules::getTrompTaylorish(),0,BoardHistoryModes(false,false));
+    single.setPosition(P_BLACK,empty,emptyHist);
+    single.runWholeSearch(P_BLACK);
+    ReportedSearchValues mixedValues;
+    testAssert(single.getRootValues(mixedValues));
+    const NNOutput* mixedNN = single.rootNode->getNNOutput();
+    near(mixedValues.utility,mixedNN->whiteWinProb-mixedNN->whiteLossProb+nrUtility*mixedNN->whiteNoResultProb);
 
     // Cache and node copies must carry D independently from NR.
     NodeStats stats(child->stats);
