@@ -1,5 +1,7 @@
 #include "tests.h"
 #include "../program/balancedopening.h"
+#include "../program/playsettings.h"
+#include "../program/playutils.h"
 #include "../core/test.h"
 #include <limits>
 
@@ -12,6 +14,12 @@ BoardHistory history(const Board& b, G game) {
 void configuration() {
   ConfigParser empty;
   testAssert(Settings::load(empty,true).probability == 0);
+  for(bool self : {false,true}) for(G game : {G::FREESTYLE,G::STANDARD,G::RENJU}) {
+    ConfigParser cfg(std::map<std::string,std::string>{{"game",Rules::gameName(game)}});
+    testAssert(Settings::load(cfg,self).probability == (self ? 0.99 : 1.0));
+    cfg.overrideKey("balanceOpeningProb","0");
+    testAssert(Settings::load(cfg,self).probability == 0);
+  }
   for(bool self : {false,true}) for(G game : {G::RENJU,G::HEX}) {
     ConfigParser cfg(std::map<std::string,std::string>{{"game",Rules::gameName(game)},{"balanceOpeningProb","1"}});
     auto s = Settings::load(cfg,self);
@@ -31,6 +39,57 @@ void configuration() {
     testAssert(rejected);
   }
 }
+void policyLength() {
+  // A draw representing 10.75 requested policy moves leaves 10,8,2,0,0
+  // moves after existing played prefixes 0,1,4,6,20. Board area and gamma
+  // have no role in KataGomo; imported and locally played turns both count.
+  for(G game : {G::FREESTYLE,G::STANDARD,G::RENJU}) for(int size : {9,15}) {
+    for(auto example : {std::pair<int,int>{0,10},{1,8},{4,2},{6,0},{20,0}}) {
+      Board board(size,size); auto hist = history(board,game);
+      if(example.first > 0) hist.makeBoardMoveAssumeLegal(board,Location::getLoc(0,0,size),P_BLACK,nullptr);
+      hist.setInitialTurnNumber(example.first > 0 ? example.first-1 : 0);
+      Rand rand("KataGomo policy draw"), reference("KataGomo policy draw");
+      double mean = 10.75 / reference.nextExponential();
+      testAssert(PlayUtils::samplePolicyInitMoveCount(hist,rand,mean,7) == example.second);
+      testAssert(rand.nextUInt64() == reference.nextUInt64());
+    }
+  }
+  for(G game : {G::GO,G::HEX}) for(double gamma : {1.0,3.0}) {
+    Board board(9,9); auto hist = history(board,game);
+    hist.setInitialTurnNumber(20);
+    Rand rand("other policy draw"), reference("other policy draw");
+    int expected = (int)std::floor(gamma == 1 ? reference.nextExponential()*6 : reference.nextGamma(gamma)*2);
+    testAssert(PlayUtils::samplePolicyInitMoveCount(hist,rand,6,gamma) == expected);
+    testAssert(rand.nextUInt64() == reference.nextUInt64());
+  }
+}
+void policyConfiguration() {
+  ConfigParser cfg(std::map<std::string,std::string>{
+    {"game","renju"},{"initGamesWithPolicy","true"},{"sidePositionProb","0"},
+    {"earlyForkGameProb","0"},{"earlyForkGameExpectedMoveProp","0"},{"forkGameProb","0"},
+    {"forkGameMinChoices","1"},{"earlyForkGameMaxChoices","1"},{"forkGameMaxChoices","1"},
+    {"cheapSearchProb","0"},{"cheapSearchVisits","1"},{"cheapSearchTargetWeight","1"},
+    {"reduceVisits","false"},{"reduceVisitsThreshold","0.9"},{"reduceVisitsThresholdLookback","1"},
+    {"reducedVisitsMin","1"},{"reducedVisitsWeight","1"},
+    {"policySurpriseDataWeight","0"},{"valueSurpriseDataWeight","0"},
+    {"handicapAsymmetricPlayoutProb","0"},{"normalAsymmetricPlayoutProb","0"},{"maxAsymmetricRatio","2"},
+    {"allowResignation","false"},{"resignThreshold","-0.9"},{"resignConsecTurns","1"}});
+  auto self = PlaySettings::loadForSelfplay(cfg,false);
+  testAssert(self.policyInitAvgMoveNum == 12 && self.startPosesPolicyInitAvgMoveNum == 0);
+  testAssert(self.policyInitAreaTemperature == 1 && self.balancedOpening.probability == 0.99);
+  bool missingMean = false;
+  try { PlaySettings::loadForMatch(cfg); } catch(const StringError&) { missingMean = true; }
+  testAssert(missingMean); // KataGomo match requires a mean when policy init is enabled.
+  cfg.overrideKey("policyInitAvgMoveNum","6");
+  cfg.overrideKey("startPosesPolicyInitAvgMoveNum","3");
+  cfg.overrideKey("policyInitAreaTemperature","1.6");
+  for(auto settings : {PlaySettings::loadForSelfplay(cfg,false),PlaySettings::loadForMatch(cfg)}) {
+    testAssert(settings.policyInitAvgMoveNum == 6 && settings.startPosesPolicyInitAvgMoveNum == 3);
+    testAssert(settings.policyInitAreaTemperature == 1.6);
+  }
+  auto gate = PlaySettings::loadForGatekeeper(cfg);
+  testAssert(gate.balancedOpening.probability == 1 && !gate.initGamesWithPolicy);
+}
 void disabledAndInterrupted() {
   Board board(7,7); auto hist = history(board,G::RENJU); Player pla = P_BLACK;
   Rand rand("opening no side effects"), untouched("opening no side effects");
@@ -49,8 +108,17 @@ void disabledAndInterrupted() {
   testAssert(rejected && board.numStonesOnBoard() == 0 && hist.moveHistory.empty());
   Loc loc = Location::getLoc(3,3,7);
   hist.makeBoardMoveAssumeLegal(board,loc,P_BLACK,nullptr); pla = P_WHITE;
-  testAssert(initialize(board,hist,pla,rand,settings,unavailable,{}) == Result::SKIPPED);
+  Rand gated("nonempty KataGomo gate"), source("nonempty KataGomo gate");
+  source.nextBool(settings.probability);
+  testAssert(initialize(board,hist,pla,gated,settings,unavailable,{}) == Result::SKIPPED);
   testAssert(hist.moveHistory.size() == 1 && board.numStonesOnBoard() == 1);
+  testAssert(gated.nextUInt64() == source.nextUInt64());
+  board = Board(7,7);
+  hist = BoardHistory(board,P_WHITE,Rules::forGame(G::RENJU),0,BoardHistoryModes(false,false));
+  pla = P_WHITE;
+  Evaluate even = [](const Board&,const BoardHistory&,Player,int) { return Value{0.5,0.5}; };
+  testAssert(initialize(board,hist,pla,rand,settings,even,{}) == Result::APPLIED);
+  testAssert(hist.moveHistory.front().pla == P_WHITE);
 }
 void hexAcceptance() {
   Rand rand("Hex white probability reference");
@@ -89,7 +157,10 @@ void gomokuCandidates() {
           reference = ref; rootHash = b.pos_hash; rootPla = p; baseMoves = h.moveHistory.size(); rootBoard = b;
         }
         testAssert(reference == ref);
-        if(calls == 1) testAssert(b.pos_hash == rootHash && p == getOpp(rootPla));
+        if(calls == 1) {
+          testAssert(b.pos_hash == rootHash && p == getOpp(rootPla));
+          testAssert(h.moveHistory.size() == baseMoves);
+        }
         if(calls >= 2) {
           testAssert((int)h.moveHistory.size() == baseMoves+1 && p == getOpp(rootPla));
           if(i % 2 && baseMoves > 0) {
@@ -138,6 +209,6 @@ void gomokuCandidates() {
 }
 
 void Tests::runBalancedOpeningTests() {
-  configuration(); disabledAndInterrupted(); hexAcceptance(); gomokuCandidates();
+  configuration(); policyLength(); policyConfiguration(); disabledAndInterrupted(); hexAcceptance(); gomokuCandidates();
   std::cout << "Balanced opening tests passed" << std::endl;
 }
