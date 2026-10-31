@@ -184,6 +184,10 @@ class TrainingDataGenerator:
     def has_any_files(self) -> bool:
         return len(self._all_files) > 0
 
+    def restore_data_dir(self, tdatadir: str) -> None:
+        """Attach an immutable saved snapshot without changing its queue or RNG."""
+        self._all_files = [os.path.join(tdatadir, fname) for fname in os.listdir(tdatadir) if fname.endswith('.npz')]
+
     def has_any_remaining_data(self) -> bool:
         """Whether peek()/pop() can still yield at least one file, given the current directory and mode."""
         if not self.has_any_files():
