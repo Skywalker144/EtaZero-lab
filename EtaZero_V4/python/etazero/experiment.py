@@ -130,26 +130,12 @@ class Scheduler:
         print(f'Started {arm["name"]} in GPU slot {gpu}', flush=True)
 
     def cleanup(self):
-        # Signal the entire arm group, including source children whose controller
-        # may already have exited. Inherited leases prevent premature takeover.
+        # Controllers forward the request to their owned stage groups and wait
+        # for checkpoints, writer drains and compiler receipts before exiting.
         for item in self.running:
             signal_group(item['process'], signal.SIGINT)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            alive = False
-            for item in self.running:
-                item['process'].poll()
-                try:
-                    os.killpg(item['process'].pid, 0)
-                    alive = True
-                except ProcessLookupError:
-                    pass
-            if not alive:
-                break
-            time.sleep(.1)
         for item in self.running:
             process = item['process']
-            signal_group(process, signal.SIGKILL)
             process.wait()
             item['output'].close()
             state = self.states[item['arm']['name']]
