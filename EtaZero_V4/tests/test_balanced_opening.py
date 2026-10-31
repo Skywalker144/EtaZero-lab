@@ -24,7 +24,8 @@ def configure(path, game, **settings):
                     f'game = {game}\nkomiMean = 0\nbSizes = 5\ndataBoardLen = 5\nmaxMovesPerGame = 4\n')
     values = dict(balanceOpeningProb=1, maxVisits=8, numSearchThreads=2,
                   useGraphSearch='false', cudaUseFP16='true',
-                  nnRandSeed='balanced-opening', initGamesWithPolicy='false', **settings)
+                  nnRandSeed='balanced-opening', initGamesWithPolicy='false')
+    values.update(settings)
     if game == 'hex':
         values['makeOpeningFairRate'] = 1
     with path.open('a') as stream:
@@ -42,14 +43,27 @@ def selfplay(tmp_path, cfg, models, games=4):
 
 
 @pytest.mark.parametrize('game', ['renju', 'hex'])
-def test_random_cold_start_skips_model_balancing(tmp_path, game):
+def test_random_cold_start_uses_katagomo_balancing_only_for_gomoku(tmp_path, game):
     cfg = configure(tmp_path / 'selfplay.cfg', game)
     files = selfplay(tmp_path, cfg, tmp_path / 'models')
     assert files
     for file in files:
         with np.load(file) as data:
+            prefix = data['globalTargetsNC'][:, 53]
+            assert ((prefix >= 1) if game == 'renju' else (prefix == 0)).all()
+    assert ('Balanced opening:' in (tmp_path / 'native.log').read_text()) == (game == 'renju')
+
+
+@pytest.mark.parametrize('game', ['freestyle', 'standard', 'renju'])
+def test_gomoku_policy_uses_move_mean_instead_of_go_area_settings(tmp_path, game):
+    cfg = configure(tmp_path / 'selfplay.cfg', game, balanceOpeningProb=0,
+                    initGamesWithPolicy='true', policyInitAvgMoveNum=0,
+                    policyInitAreaProp=1, policyInitGammaShape=10)
+    files = selfplay(tmp_path, cfg, tmp_path / 'models')
+    assert files
+    for file in files:
+        with np.load(file) as data:
             assert (data['globalTargetsNC'][:, 53] == 0).all()
-    assert 'Balanced opening:' not in (tmp_path / 'native.log').read_text()
 
 
 @gpu
@@ -65,7 +79,8 @@ def test_balanced_prefix_through_native_selfplay_and_training(tmp_path, game, mu
         shutil.copyfile(ordinary, models / 'published/model.bin')
     cfg = configure(tmp_path / 'selfplay.cfg', game, useMuZero=str(muzero).lower(),
                     rootSearchAlgorithm='gumbel' if gumbel else 'puct', gumbelMaxConsideredActions=4,
-                    subtreeValueBiasFactor=0, avoidRepeatedPatternUtility=0)
+                    subtreeValueBiasFactor=0, avoidRepeatedPatternUtility=0,
+                    initGamesWithPolicy=str(game != 'hex').lower(), policyInitAvgMoveNum=6)
     files = selfplay(tmp_path, cfg, models)
     assert files and 'Balanced opening:' in (tmp_path / 'native.log').read_text()
     for file in files:
