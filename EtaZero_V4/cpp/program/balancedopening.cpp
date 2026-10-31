@@ -11,7 +11,9 @@ Settings Settings::load(ConfigParser& cfg, bool forSelfPlay) {
   Settings s;
   const auto game = cfg.contains("game") ? Rules::parseGame(cfg.getString("game")) : Rules::Game::GO;
   const bool hex = game == Rules::Game::HEX;
-  s.probability = cfg.contains("balanceOpeningProb") ? cfg.getDouble("balanceOpeningProb",0.0,1.0) : 0.0;
+  const bool gomoku = Rules::forGame(game).isPlacement() && !hex;
+  s.probability = cfg.contains("balanceOpeningProb") ? cfg.getDouble("balanceOpeningProb",0.0,1.0) :
+    (gomoku ? (forSelfPlay ? 0.99 : 1.0) : 0.0);
   if(s.probability > 0.0 && !Rules::forGame(game).isPlacement())
     throw StringError("balanceOpeningProb is supported only for Gomoku and Hex");
   s.dropPow = cfg.contains("balanceOpeningDropPow") ?
@@ -79,11 +81,16 @@ Result initialize(Board& board, BoardHistory& hist, Player& pla, Rand& rand,
                   const Settings& settings, const Evaluate& evaluate, const std::function<bool()>& shouldStop) {
   if(settings.probability == 0.0) return Result::SKIPPED;
   if(!hist.rules.isPlacement()) throw StringError("Balanced openings require Gomoku or Hex");
-  if(hist.isGameFinished || pla != P_BLACK || !hist.moveHistory.empty() || board.numStonesOnBoard() != 0)
+  const bool hex = hist.rules.game == Rules::Game::HEX;
+  // KataGomo consumes the per-game gate before checking an imported board,
+  // and can balance an empty board whose requested next player is White.
+  if(!hex && !rand.nextBool(settings.probability)) return Result::SKIPPED;
+  if(hist.isGameFinished || board.numStonesOnBoard() != 0 ||
+     (hex && (pla != P_BLACK || !hist.moveHistory.empty())))
     return Result::SKIPPED;
   if(board.x_size < 2 || board.y_size < 2)
     throw StringError("Balanced openings require both board dimensions to be at least 2");
-  if(!rand.nextBool(settings.probability)) return Result::SKIPPED;
+  if(hex && !rand.nextBool(settings.probability)) return Result::SKIPPED;
   const auto stop = [&]() { if(shouldStop && shouldStop()) throw Interrupted(); };
   const auto value = [&](const Board& b,const BoardHistory& h,Player p,int reference) {
     stop();
@@ -92,7 +99,7 @@ Result initialize(Board& board, BoardHistory& hist, Player& pla, Rand& rand,
     Value v;
     if(h.presumedNextMovePla != p) {
       BoardHistory input = h;
-      input.clear(b,p,h.rules,h.encorePhase);
+      input.presumedNextMovePla = p;
       v = evaluate(b,input,p,reference);
     }
     else v = evaluate(b,h,p,reference);
@@ -181,9 +188,11 @@ Result initialize(Board& board, BoardHistory& hist, Player& pla, Rand& rand,
 
 Result initialize(Search* black, Search* white, Board& board, BoardHistory& hist, Player& pla, Rand& rand,
                   const Settings& settings, const std::function<bool()>& shouldStop) {
-  // Source AlphaZero cold start has no model with which to balance positions.
-  if((!black->muZeroEvaluator && !black->nnEvaluator->isNeuralNetEnabled()) ||
-     (!white->muZeroEvaluator && !white->nnEvaluator->isNeuralNetEnabled())) return Result::SKIPPED;
+  // KataGomo also runs this path with the source random evaluator. Preserve
+  // Hex's existing model-only cold-start behavior.
+  if(hist.rules.game == Rules::Game::HEX &&
+     ((!black->muZeroEvaluator && !black->nnEvaluator->isNeuralNetEnabled()) ||
+      (!white->muZeroEvaluator && !white->nnEvaluator->isNeuralNetEnabled()))) return Result::SKIPPED;
   NNResultBuf buffer;
   Evaluate evaluate = [&](const Board& b,const BoardHistory& h,Player p,int reference) {
     Search* bot = reference == 0 ? black : white;
