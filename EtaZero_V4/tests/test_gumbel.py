@@ -68,18 +68,18 @@ def test_gumbel_two_round_cuda_training(tmp_path):
     budget = 12
     cfg = gumbel_config(tmp_path / 'selfplay.cfg', 'renju', 3, 'gumbel', budget)
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game='renju',
-                       algorithm='gumbel_alphazero', canvas=5, batch_size=8, games_per_round=4,
-                       samples_per_epoch=16, shuffle_rows_per_file=128, shuffle_keep_rows=1024,
+                       algorithm='gumbel_alphazero', canvas=5, batch_size=8, bootstrap_games=4,
+                       train_steps=2, shuffle_rows_per_file=128, shuffle_keep_rows=1024,
                        shuffle_args=('-min-rows','1'),
                        train_args=('-no-compile','-use-fp16','-no-longterm-checkpoints')).validate()
     directory = tmp_path / 'run'
     state = run(directory, config, 2)
     assert state['completed_rounds'] == 2 and state['total_samples'] >= 32
     report = json.loads((directory / 'rounds/000002/result.json').read_text())
-    assert report['input_model'] == 'round-000001'
+    assert report['input_model'].startswith('round-000001-s')
     checkpoint = torch.load(directory / 'train/checkpoint.ckpt', map_location='cpu', weights_only=False)
     assert checkpoint['config']['version'] == 18
-    paths = list((directory / 'selfplay/000002/round-000001/tdata').glob('*.npz'))
+    paths = list((directory / 'selfplay/000002' / report['input_model'] / 'tdata').glob('*.npz'))
     assert paths
     for path in paths:
         with np.load(path) as shard:
