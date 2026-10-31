@@ -74,7 +74,7 @@ def test_no_limits_runs_until_interrupted(tmp_path, monkeypatch, resume):
     root = tmp_path / 'run'
     completed = []
 
-    def run_round(root, config, state, binary, lock_fd):
+    def run_round(root, config, state, binary, lock_fd, stopping=None):
         if state['completed_rounds'] == 4:
             raise KeyboardInterrupt
         state['completed_rounds'] += 1
