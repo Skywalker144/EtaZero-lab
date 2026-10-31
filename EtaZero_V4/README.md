@@ -92,7 +92,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
 
 `run.cfg` 使用 `bootstrap_games`、`train_steps` 和 `replay_ratio` 规划采样与实际训练预算，首轮数据门槛来自 shuffle 的 `min-rows`。`train.cfg` 保留优化器、SWA 和 Lookahead 参数；内部 epoch 的名义大小由基准步数与 batch size 决定，外层预算暂停时保留未完成的训练状态。具体调度、SWA 与恢复口径见 [调度与恢复](docs/controller.md)。
 
-配置目录按职责拆分：`env.cfg` 管棋类和画布，`net.cfg` 管普通／MuZero 网络，`selfplay.cfg` 按组管理算法、原生搜索参数、采样与执行，`train.cfg`、`shuffle.cfg` 使用原生命令行参数名，`run.cfg` 管外围调度。`configs/baseline/` 保存完整公共参数，`games/` 和 `algorithms/` 分别保存环境和算法差异，各运行目录显式 include。外围转换层生成原生 `selfplay.resolved.cfg`、learner 参数和 MuZero 三组件配置；引擎与 learner 核心保持原有接口。`run.sh`、`autoexp.sh`、`autoelo.sh` 提供单臂、多臂和评估入口，支持 `CONFIG_DIR`、`.local` 与 `--dry-run`。用法、字段归属及与原生同步循环的差异见 [配置与启动](docs/configuration.md)。
+配置目录按职责拆分：`env.cfg` 管棋类和画布，`net.cfg` 管普通／MuZero 网络，`selfplay.cfg` 按组管理算法、原生搜索参数、采样与执行，`train.cfg`、`shuffle.cfg` 使用原生命令行参数名，`run.cfg` 管外围调度。`configs/baseline_az/` 保存完整公共参数，`baseline_gaz/`、`baseline_mz/`、`baseline_gmz/` 定义对应算法差异；每种算法均有 `go`、`gomoku`、`hex`、`xiangqi` 四个棋类入口，显式 include 对应 baseline 与共享游戏配置。外围转换层生成原生 `selfplay.resolved.cfg`、learner 参数和 MuZero 三组件配置；引擎与 learner 核心保持原有接口。`run.sh`、`autoexp.sh`、`autoelo.sh` 提供单臂、多臂和评估入口，支持 `CONFIG_DIR`、`.local` 与 `--dry-run`。用法、字段归属及与原生同步循环的差异见 [配置与启动](docs/configuration.md)。
 
 原生 learner 的验证流程保留；当前逐轮控制器只生成训练快照，正常运行不产生验证 loss。来源验证数据划分方式和当前接入边界见 [验证数据](docs/controller.md#验证数据)。
 
