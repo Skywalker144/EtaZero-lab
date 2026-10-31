@@ -95,23 +95,17 @@ def assert_list_lengths_match(arrlists: Sequence[list[np.ndarray] | None]):
         if arrlist is not None:
             assert len(arrlist) == len(arrlists[0])
 
-def joint_shuffle_take_first_n(n: int, arrs: Sequence[np.ndarray | None]) -> list[np.ndarray | None]:
-    assert_batch_dim_matches(arrs)
-    perm = np.random.permutation(len(arrs[0]))
-    perm = perm[:n]
-    shuffled_arrs: list[np.ndarray | None] = []
-    for arr in arrs:
-        if arr is not None:
-            shuffled_arrs.append(arr[perm])
-        else:
-            shuffled_arrs.append(None)
-    return shuffled_arrs
-
 def joint_concatenate(arrlists: Sequence[list[np.ndarray] | None]) -> list[np.ndarray | None]:
+    """Concatenate fields and release the consumed input fragments immediately."""
     assert_list_lengths_match(arrlists)
-    if len(arrlists[0]) == 1:
-        return [(arrlist[0] if arrlist is not None else None) for arrlist in arrlists]
-    return [(np.concatenate(arrlist, axis=0) if arrlist is not None else None) for arrlist in arrlists]
+    result = []
+    for arrlist in arrlists:
+        if arrlist is None:
+            result.append(None)
+        else:
+            result.append(arrlist[0] if len(arrlist) == 1 else np.concatenate(arrlist, axis=0))
+            arrlist.clear()
+    return result
 
 def memusage_mb():
     return psutil.Process(os.getpid()).memory_info().rss // 1048576
@@ -125,6 +119,7 @@ def save_output_npz(
     start: int,
     stop: int,
     muzero_unroll_steps: int = 0,
+    row_indices: np.ndarray | None = None,
 ):
     extra_keys = muzero_keys(muzero_unroll_steps, include_qvalues)
     assert len(arrs) == 7 + len(extra_keys)
@@ -140,26 +135,39 @@ def save_output_npz(
     assert (qValueTargetsNCMove is not None) == include_qvalues
 
     save_dict = {
-        "binaryInputNCHWPacked": binaryInputNCHWPacked[start:stop],
-        "globalInputNC": globalInputNC[start:stop],
-        "policyTargetsNCMove": policyTargetsNCMove[start:stop],
-        "globalTargetsNC": globalTargetsNC[start:stop],
-        "valueTargetsNCHW": valueTargetsNCHW[start:stop],
+        "binaryInputNCHWPacked": binaryInputNCHWPacked,
+        "globalInputNC": globalInputNC,
+        "policyTargetsNCMove": policyTargetsNCMove,
+        "globalTargetsNC": globalTargetsNC,
+        "valueTargetsNCHW": valueTargetsNCHW,
     }
     if metadataInputNC is not None:
-        save_dict["metadataInputNC"] = metadataInputNC[start:stop]
+        save_dict["metadataInputNC"] = metadataInputNC
     if qValueTargetsNCMove is not None:
-        save_dict["qValueTargetsNCMove"] = qValueTargetsNCMove[start:stop]
+        save_dict["qValueTargetsNCMove"] = qValueTargetsNCMove
 
     for key, arr in zip(extra_keys, arrs[7:]):
-        save_dict[key] = arr[start:stop]
+        save_dict[key] = arr
 
     # Match the native writer's fast lossless compression. Each synchronous
     # round compresses both intermediate shards and final training files.
     with zipfile.ZipFile(filename, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
         for key, array in save_dict.items():
+            # Gather just this output field, not a second copy of the entire
+            # group/bucket. The source permutation and file slices are unchanged.
+            array = array[start:stop] if row_indices is None else array[row_indices[start:stop]]
             with archive.open(key + '.npy', 'w', force_zip64=True) as stream:
-                np.lib.format.write_array(stream, array, allow_pickle=False)
+                if array.flags.c_contiguous and array.dtype.kind in 'biufc':
+                    # Standard NPY header/payload, but pass buffers straight to
+                    # ZIP instead of NumPy's temporary chunk.tobytes() copies.
+                    np.lib.format.write_array_header_1_0(
+                        stream, np.lib.format.header_data_from_array_1_0(array))
+                    if array.nbytes:
+                        data = memoryview(array).cast('B')
+                        for offset in range(0, len(data), 16 * 1024 * 1024):
+                            stream.write(data[offset:offset + 16 * 1024 * 1024])
+                else:
+                    np.lib.format.write_array(stream, array, allow_pickle=False)
 
 def pad_global_targets_nc(globalTargetsNC: np.ndarray) -> np.ndarray:
     """Zero-pad older-format globalTargetsNC rows up to the current channel count."""
@@ -209,11 +217,12 @@ def load_and_accumulate_input_contents(
         if qValueTargetsNCMoveList is not None:
             if fill_in_qvalues:
                 if "qValueTargetsNCMove" in npz:
-                    assert npz["qValueTargetsNCMove"].shape[1] == EXPECTED_Q_VALUE_TARGETS_NCMOVE_CHANNELS
-                    qValueTargetsNCMoveList.append(npz["qValueTargetsNCMove"])
+                    qvalues = npz["qValueTargetsNCMove"]
+                    assert qvalues.shape[1] == EXPECTED_Q_VALUE_TARGETS_NCMOVE_CHANNELS
+                    qValueTargetsNCMoveList.append(qvalues)
                 else:
                     # Create zeros array with shape matching policyTargetsNCMove but with different C dimension
-                    shape = list(npz["policyTargetsNCMove"].shape)
+                    shape = list(policyTargetsNCMoveList[-1].shape)
                     shape[1] = EXPECTED_Q_VALUE_TARGETS_NCMOVE_CHANNELS
                     qValueTargetsNCMoveList.append(np.zeros(shape, dtype=np.int16))
             else:
@@ -274,8 +283,7 @@ def shardify(
     if keep_prob < 1.0:
         num_rows_to_keep = min(num_rows_to_keep,int(round(num_rows_to_keep * keep_prob)))
 
-    concatenated_arrs = joint_shuffle_take_first_n(num_rows_to_keep, concatenated_arrs)
-    assert_batch_dim_matches(concatenated_arrs, num_rows_to_keep)
+    row_indices = np.random.permutation(concatenated_arrs[0].shape[0])[:num_rows_to_keep]
 
     rand_assts = np.random.randint(num_out_files,size=[num_rows_to_keep])
     counts = np.bincount(rand_assts,minlength=num_out_files)
@@ -297,6 +305,7 @@ def shardify(
             start=start,
             stop=stop,
             muzero_unroll_steps=muzero_unroll_steps,
+            row_indices=row_indices,
         )
 
     return num_files_not_found
@@ -309,6 +318,7 @@ def write_one_output_file(
     include_meta: bool,
     include_qvalues: bool,
     muzero_unroll_steps: int = 0,
+    row_indices: np.ndarray | None = None,
 ):
     """Write rows [out_file_start, out_file_stop) of arrs to one output npz + json metadata
     Returns the number of rows written.
@@ -323,6 +333,7 @@ def write_one_output_file(
         start=out_file_start,
         stop=out_file_stop,
         muzero_unroll_steps=muzero_unroll_steps,
+        row_indices=row_indices,
     )
 
     jsonfilename = os.path.splitext(filename)[0] + ".json"
@@ -341,9 +352,9 @@ def merge_bucket(
 ):
     """Merge one shard bucket and split it across its assigned output files.
 
-    Loads all shard files this bucket received (one per sharding group), concatenates and
-    jointly shuffles them, then splits the shuffled rows into len(out_filenames) contiguous
-    output files. Because shardify assigned rows to buckets by an independent uniform draw
+    Loads and concatenates shard files (one per sharding group), then gathers a shared
+    permutation one output field at a time, splitting it into len(out_filenames) contiguous
+    slices. Because shardify assigned rows to buckets by an independent uniform draw
     per row, and the bucket is uniformly permuted before splitting, each output file is a
     uniform random subset of all rows. The overall result is an exact uniform shuffle.
 
@@ -380,13 +391,12 @@ def merge_bucket(
     assert_batch_dim_matches(concatenated_arrs)
     num_rows = concatenated_arrs[0].shape[0]
 
-    concatenated_arrs = joint_shuffle_take_first_n(num_rows, concatenated_arrs)
-    assert_batch_dim_matches(concatenated_arrs, num_rows)
+    row_indices = np.random.permutation(num_rows)
 
     # print("%s: Merge writing... (mem usage %dMB)" % (str(datetime.datetime.now()),memusage_mb()), flush=True)
 
     # Split the shuffled bucket rows into the bucket's output files as evenly as possible.
-    # The rows are already uniformly shuffled, so contiguous slices are uniform random subsets.
+    # Contiguous slices of the shared permutation are uniform random subsets.
     num_out_files_here = len(out_filenames)
     assert num_out_files_here >= 1
     results = []
@@ -398,6 +408,7 @@ def merge_bucket(
             arrs=concatenated_arrs,
             out_file_start=out_file_start,
             out_file_stop=out_file_stop,
+            row_indices=row_indices,
             include_meta=include_meta,
             include_qvalues=include_qvalues,
             muzero_unroll_steps=muzero_unroll_steps,
@@ -813,6 +824,8 @@ if __name__ == '__main__':
     optional_args.add_argument('-taper-window-scale', type=float, required=False, help='The scale at which the power law applies, defaults to -min-rows')
     optional_args.add_argument('-add-to-data-rows', type=float, required=False, help='Compute the window size as if the number of data rows were this much larger/smaller')
     optional_args.add_argument('-summary-file', required=False, help='Summary json file for directory contents')
+    optional_args.add_argument('-input-files-stable', action='store_true',
+                               help='Input writers have stopped and published files are immutable; skip the filesystem-race wait')
     optional_args.add_argument('-out-dir', required=False, help='Dir to output training files (not required in --dry-run-print-resource-cost mode)')
     optional_args.add_argument('-out-tmp-dir', required=False, help='Dir to use as scratch space (not required in --dry-run-print-resource-cost mode)')
     optional_args.add_argument('-approx-rows-per-out-file', type=int, required=False, default=70000, help='Number of rows per output file, default 70k')
@@ -1077,9 +1090,10 @@ if __name__ == '__main__':
     with TimeStuff("Sorting"):
         all_files.sort(key=(lambda x: x[1]), reverse=False)
 
-    # Wait a few seconds just in case to limit the chance of filesystem races, now that we know exactly
-    # the set of filenames we want
-    time.sleep(3)
+    # Retain the source wait for live inputs. The synchronous controller holds
+    # the run lock and waits for the native writer to drain before calling us.
+    if not args.input_files_stable:
+        time.sleep(3)
 
     with TimeStuff("Computing rows for unsummarized files"):
         with multiprocessing.Pool(num_processes) as pool:
