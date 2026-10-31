@@ -4,7 +4,8 @@ This file contains a bunch of configs for models of different sizes.
 See the bottom of this file "base_config_of_name" for a dictionary of all the different
 base model architectures, and which ones are recommended of each different model size.
 
-For each base model, additional configs are also pregenerated with different suffixes.
+For each base model, additional configs are generated with different suffixes when
+config_of_name is first requested.
 
 For example, for b10c384nbt, we also have models like:
 b10c384nbt-mish  (use mish instead of relu)
@@ -1899,149 +1900,165 @@ base_config_of_name = {
 }
 
 
-config_of_name = {}
-for name, base_config in base_config_of_name.items():
-    config = base_config.copy()
-    config_of_name[name] = config
+def _build_model_configs():
+    """Expand source presets only for callers that select a model by name.
+
+    Checkpoint readers already have the complete model config. Importing feature
+    helpers or exporting such a checkpoint must not build every named variant.
+    """
+    config_of_name = {}
+    for name, base_config in base_config_of_name.items():
+        config = base_config.copy()
+        config_of_name[name] = config
 
 
-for name, base_config in list(config_of_name.items()):
-    # Fixup initialization
-    config = base_config.copy()
-    config["norm_kind"] = "fixup"
-    config_of_name[name+""] = config
+    for name, base_config in list(config_of_name.items()):
+        # Fixup initialization
+        config = base_config.copy()
+        config["norm_kind"] = "fixup"
+        config_of_name[name+""] = config
 
-    # Fixed scaling normalization
-    config = base_config.copy()
-    config["norm_kind"] = "fixscale"
-    config_of_name[name+"-fs"] = config
+        # Fixed scaling normalization
+        config = base_config.copy()
+        config["norm_kind"] = "fixscale"
+        config_of_name[name+"-fs"] = config
 
-    # Batchnorm without gamma terms
-    config = base_config.copy()
-    config["norm_kind"] = "bnorm"
-    config_of_name[name+"-bn"] = config
+        # Batchnorm without gamma terms
+        config = base_config.copy()
+        config["norm_kind"] = "bnorm"
+        config_of_name[name+"-bn"] = config
 
-    # Batchrenorm without gamma terms
-    config = base_config.copy()
-    config["norm_kind"] = "brenorm"
-    config_of_name[name+"-brn"] = config
+        # Batchrenorm without gamma terms
+        config = base_config.copy()
+        config["norm_kind"] = "brenorm"
+        config_of_name[name+"-brn"] = config
 
-    # Fixed scaling normalization + Batchrenorm without gamma terms
-    config = base_config.copy()
-    config["norm_kind"] = "fixbrenorm"
-    config_of_name[name+"-fbrn"] = config
+        # Fixed scaling normalization + Batchrenorm without gamma terms
+        config = base_config.copy()
+        config["norm_kind"] = "fixbrenorm"
+        config_of_name[name+"-fbrn"] = config
 
-    # Batchnorm with gamma terms
-    config = base_config.copy()
-    config["norm_kind"] = "bnorm"
-    config["bnorm_use_gamma"] = True
-    config_of_name[name+"-bng"] = config
+        # Batchnorm with gamma terms
+        config = base_config.copy()
+        config["norm_kind"] = "bnorm"
+        config["bnorm_use_gamma"] = True
+        config_of_name[name+"-bng"] = config
 
-    # Batchrenorm with gamma terms
-    config = base_config.copy()
-    config["norm_kind"] = "brenorm"
-    config["bnorm_use_gamma"] = True
-    config_of_name[name+"-brng"] = config
+        # Batchrenorm with gamma terms
+        config = base_config.copy()
+        config["norm_kind"] = "brenorm"
+        config["bnorm_use_gamma"] = True
+        config_of_name[name+"-brng"] = config
 
-    # Fixed scaling normalization + Batchrenorm with gamma terms
-    config = base_config.copy()
-    config["norm_kind"] = "fixbrenorm"
-    config["bnorm_use_gamma"] = True
-    config_of_name[name+"-fbrng"] = config
+        # Fixed scaling normalization + Batchrenorm with gamma terms
+        config = base_config.copy()
+        config["norm_kind"] = "fixbrenorm"
+        config["bnorm_use_gamma"] = True
+        config_of_name[name+"-fbrng"] = config
 
-    # Fixed scaling normalization + ONE batch norm layer in the entire net.
-    config = base_config.copy()
-    config["norm_kind"] = "fixscaleonenorm"
-    config["bnorm_use_gamma"] = True
-    config_of_name[name+"-fson"] = config
+        # Fixed scaling normalization + ONE batch norm layer in the entire net.
+        config = base_config.copy()
+        config["norm_kind"] = "fixscaleonenorm"
+        config["bnorm_use_gamma"] = True
+        config_of_name[name+"-fson"] = config
 
-for name, base_config in list(config_of_name.items()):
-    config = base_config.copy()
-    config["activation"] = "elu"
-    config_of_name[name+"-elu"] = config
+    for name, base_config in list(config_of_name.items()):
+        config = base_config.copy()
+        config["activation"] = "elu"
+        config_of_name[name+"-elu"] = config
 
-    config = base_config.copy()
-    config["activation"] = "gelu"
-    config_of_name[name+"-gelu"] = config
+        config = base_config.copy()
+        config["activation"] = "gelu"
+        config_of_name[name+"-gelu"] = config
 
-    config = base_config.copy()
-    config["activation"] = "mish"
-    config_of_name[name+"-mish"] = config
+        config = base_config.copy()
+        config["activation"] = "mish"
+        config_of_name[name+"-mish"] = config
 
-    config = base_config.copy()
-    config["activation"] = "silu"
-    config_of_name[name+"-silu"] = config
+        config = base_config.copy()
+        config["activation"] = "silu"
+        config_of_name[name+"-silu"] = config
 
-for name, base_config in list(config_of_name.items()):
-    config = base_config.copy()
-    config["use_repvgg_init"] = True
-    config_of_name[name+"-rvgi"] = config
+    for name, base_config in list(config_of_name.items()):
+        config = base_config.copy()
+        config["use_repvgg_init"] = True
+        config_of_name[name+"-rvgi"] = config
 
-    config = base_config.copy()
-    config["use_repvgg_linear"] = True
-    config_of_name[name+"-rvgl"] = config
+        config = base_config.copy()
+        config["use_repvgg_linear"] = True
+        config_of_name[name+"-rvgl"] = config
 
-    config = base_config.copy()
-    config["use_repvgg_init"] = True
-    config["use_repvgg_learning_rate"] = True
-    config_of_name[name+"-rvglr"] = config
+        config = base_config.copy()
+        config["use_repvgg_init"] = True
+        config["use_repvgg_learning_rate"] = True
+        config_of_name[name+"-rvglr"] = config
 
-for name, base_config in list(config_of_name.items()):
-    # Trunk channel gate
-    config = base_config.copy()
-    config["use_trunk_channel_gate"] = True
-    config_of_name[name+"-tcg"] = config
+    for name, base_config in list(config_of_name.items()):
+        # Trunk channel gate
+        config = base_config.copy()
+        config["use_trunk_channel_gate"] = True
+        config_of_name[name+"-tcg"] = config
 
-for name, base_config in list(config_of_name.items()):
-    # Trunk residual backout: parallel backout trunk that later blocks can learn to subtract
-    config = base_config.copy()
-    config["use_trunk_residual_backout"] = True
-    config_of_name[name+"-trb"] = config
+    for name, base_config in list(config_of_name.items()):
+        # Trunk residual backout: parallel backout trunk that later blocks can learn to subtract
+        config = base_config.copy()
+        config["use_trunk_residual_backout"] = True
+        config_of_name[name+"-trb"] = config
 
-    config = base_config.copy()
-    config["use_trunk_residual_backout"] = True
-    config["trunk_residual_backout_noreg"] = True
-    config_of_name[name+"-trbnr"] = config
+        config = base_config.copy()
+        config["use_trunk_residual_backout"] = True
+        config["trunk_residual_backout_noreg"] = True
+        config_of_name[name+"-trbnr"] = config
 
-for name, base_config in list(config_of_name.items()):
-    config = base_config.copy()
-    config["has_intermediate_head"] = True
-    config["intermediate_head_blocks"] = len(config["block_kind"]) // 2
-    config_of_name[name+"-ih"] = config
-
-    # Add parallel heads that uses the final trunk batchnorm.
-    # The original normal heads disables the final trunk batchnorm
-    # This only makes sense for configs that use some form of batchnorm.
-    if "norm" in config["norm_kind"]:
+    for name, base_config in list(config_of_name.items()):
         config = base_config.copy()
         config["has_intermediate_head"] = True
-        config["intermediate_head_blocks"] = len(config["block_kind"])
-        config["trunk_normless"] = True
-        config_of_name[name+"-bnh"] = config
+        config["intermediate_head_blocks"] = len(config["block_kind"]) // 2
+        config_of_name[name+"-ih"] = config
 
-    # RMSNorm before heads. No intermediate head.
-    config = base_config.copy()
-    config["trunk_final_rmsnorm"] = True
-    config_of_name[name+"-rnh"] = config
+        # Add parallel heads that uses the final trunk batchnorm.
+        # The original normal heads disables the final trunk batchnorm
+        # This only makes sense for configs that use some form of batchnorm.
+        if "norm" in config["norm_kind"]:
+            config = base_config.copy()
+            config["has_intermediate_head"] = True
+            config["intermediate_head_blocks"] = len(config["block_kind"])
+            config["trunk_normless"] = True
+            config_of_name[name+"-bnh"] = config
 
-    # RMSNorm spatial before heads. No intermediate head.
-    config = base_config.copy()
-    config["trunk_final_rmsnorm"] = True
-    config["trunk_rmsnorm_spatial"] = True
-    config_of_name[name+"-rsnh"] = config
+        # RMSNorm before heads. No intermediate head.
+        config = base_config.copy()
+        config["trunk_final_rmsnorm"] = True
+        config_of_name[name+"-rnh"] = config
 
-    # RMSNorm spatial before heads. No intermediate head.
-    config = base_config.copy()
-    config["trunk_final_rmsnorm"] = True
-    config["trunk_rmsnorm_spatial"] = True
-    config["rmsnorm_spatial_cgroup_size"] = 16
-    config_of_name[name+"-rgnh"] = config
+        # RMSNorm spatial before heads. No intermediate head.
+        config = base_config.copy()
+        config["trunk_final_rmsnorm"] = True
+        config["trunk_rmsnorm_spatial"] = True
+        config_of_name[name+"-rsnh"] = config
+
+        # RMSNorm spatial before heads. No intermediate head.
+        config = base_config.copy()
+        config["trunk_final_rmsnorm"] = True
+        config["trunk_rmsnorm_spatial"] = True
+        config["rmsnorm_spatial_cgroup_size"] = 16
+        config_of_name[name+"-rgnh"] = config
 
 
-for name, base_config in list(config_of_name.items()):
-    config = base_config.copy()
-    config["metadata_encoder"] = {
-        "meta_encoder_version": 1,
-        "internal_num_channels": config["trunk_num_channels"],
-    }
-    config_of_name[name+"-meta"] = config
+    for name, base_config in list(config_of_name.items()):
+        config = base_config.copy()
+        config["metadata_encoder"] = {
+            "meta_encoder_version": 1,
+            "internal_num_channels": config["trunk_num_channels"],
+        }
+        config_of_name[name+"-meta"] = config
+
+    return config_of_name
+
+
+def __getattr__(name):
+    if name == "config_of_name":
+        configs = _build_model_configs()
+        globals()[name] = configs
+        return configs
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
