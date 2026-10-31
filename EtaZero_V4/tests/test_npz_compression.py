@@ -8,7 +8,8 @@ from shuffle import save_output_npz
 
 
 @pytest.mark.parametrize('optional', [False, True])
-def test_shuffled_arrays_are_lossless_and_readable(optional, tmp_path):
+@pytest.mark.parametrize('indices', [None, [5, 1, 4, 2, 0, 3], []])
+def test_shuffled_arrays_are_lossless_and_readable(optional, indices, tmp_path):
     # Non-contiguous views exercise the streaming NPY writer as well as exact
     # dtypes, negative zero, nonfinite floats and a selected row interval.
     values = np.array([0., -0., np.nan, np.inf, -np.inf, 1.2345], dtype=np.float32)
@@ -20,8 +21,10 @@ def test_shuffled_arrays_are_lossless_and_readable(optional, tmp_path):
     names = ['binaryInputNCHWPacked', 'globalInputNC', 'policyTargetsNCMove', 'globalTargetsNC',
              'valueTargetsNCHW', 'metadataInputNC', 'qValueTargetsNCMove']
     output, reference = tmp_path / 'fast.npz', tmp_path / 'reference.npz'
-    save_output_npz(output, arrays, optional, optional, 1, 5)
-    expected = {name: value[1:5] for name, value in zip(names, arrays) if value is not None}
+    order = None if indices is None else np.array(indices, dtype=np.int64)
+    save_output_npz(output, arrays, optional, optional, 1, 5, row_indices=order)
+    expected = {name: value[1:5] if order is None else value[order[1:5]]
+                for name, value in zip(names, arrays) if value is not None}
     np.savez_compressed(reference, **expected)
     with zipfile.ZipFile(output) as actual, zipfile.ZipFile(reference) as baseline:
         assert actual.namelist() == baseline.namelist()
