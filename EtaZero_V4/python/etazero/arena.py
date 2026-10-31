@@ -48,7 +48,8 @@ def discover_players(root, stride=1, *, arms=None, include_first=True, required_
         # publish more rounds afterwards; those belong to a later evaluation.
         previous, rows, seen_models = 0., [], set()
         last = None
-        for number in range(1, state['completed_rounds'] + 1):
+        first = 0 if (directory / 'rounds/000000').exists() else 1
+        for number in range(first, state['completed_rounds'] + 1):
             path = directory / 'rounds' / f'{number:06d}' / 'commit.json'
             last = json.loads(path.read_text())['state']
             seconds = last['elapsed_seconds']
@@ -156,7 +157,7 @@ def plot_timeline(plan, ratings, output):
             players.sort(key=lambda player: player['iteration'])
             axis.errorbar([p['seconds'] / 3600 for p in players], [indexed[p['id']]['elo'] for p in players],
                           yerr=[indexed[p['id']]['stderr'] for p in players], label=arm,
-                          color=COLORS[index % len(COLORS)], marker='o', markersize=4, capsize=3)
+                          color=COLORS[index % len(COLORS)], marker='None', capsize=3)
         axis.legend()
         figure.supxlabel(f'Anchor: {ratings["anchor"]} · error bars: approximately one standard error\n'
                          'Points use actual commit times; connecting lines do not measure intermediate strength.', fontsize=9)
