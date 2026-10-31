@@ -10,7 +10,7 @@ V4 以固定 KataGo `d91ea855110dae533f0aada947b2b7d78cc8a4e1` 的完整源码�
 
 底层 `Rules`／`BoardHistory` 支持 Freestyle、Standard、Renju 和 Hex，复用来源 PUCT、图搜索和树复用。Renju 禁手是落子判负；Hex 使用六邻接和保持双方目标边的对称。规则、历史、图身份及搜索的边界检查见 `cpp/tests/testplacement.cpp`，搜索检查使用来源随机 evaluator。
 
-四结果贯通终局标签、搜索加权统计与缓存、surprise、主价值及三组 TD 目标、loss、导出和原生推理。D 与 NR 分别监督，基础效用均为零；不再允许随机化这两个结果的效用。网络输出顺序为 W/D/L/NR，旧三结果模型不能加载。CUDA FP32/FP16 和真实两轮训练闭环有专项检查；普通网络的 Eigen CPU FP32、OpenCL FP32/FP16、ONNX Runtime CPU FP32 已通过六种棋类的数值与搜索检查，OpenCL 验证使用 NVIDIA 设备。其余来源后端尚未在对应设备验证。
+四结果贯通终局标签、搜索加权统计与缓存、surprise、主价值及三组 TD 目标、loss、导出和原生推理。D 与 NR 分别监督；D 的效用固定为零，NR 通过 `noResultUtilityForWhite` 加权，并可在 selfplay 中按 `noResultStdev` 逐局随机化。搜索白方效用为 `winLossUtilityFactor × (W−L) + noResultUtilityForWhite × NR`。网络输出顺序为 W/D/L/NR，旧三结果模型不能加载。CUDA FP32/FP16 和真实两轮训练闭环有专项检查；普通网络的 Eigen CPU FP32、OpenCL FP32/FP16、ONNX Runtime CPU FP32 已通过六种棋类的数值与搜索检查，OpenCL 验证使用 NVIDIA 设备。其余来源后端尚未在对应设备验证。
 
 搜索不包含 score utility、根收官分数奖励或 anti-mirror；配置这些旧参数会明确报错。PUCT/FPU、虚拟损失、LCB 与 uncertainty 的效用只使用结果价值，保留来源的共有公式；不再用预测目差或分数误差修正搜索效用及权重。
 
@@ -96,7 +96,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
 
 原生 learner 的验证流程保留；当前逐轮控制器只生成训练快照，正常运行不产生验证 loss。来源验证数据划分方式和当前接入边界见 [验证数据](docs/controller.md#验证数据)。
 
-外层支持**按实际提交点恢复中断轮次**：保留已发布自对弈 shard，补足剩余游戏；复用已发布 shuffle／模型目录；learner 恢复完整 checkpoint 中的 optimizer、Lookahead fast/slow 与同步计数、SWA、文件内游标及 reader/learner RNG、scaler。最后一次保存之后的内存工作需要重做，自对弈在途状态不恢复；恢复边界、锁与计时限制见 [调度与恢复](docs/controller.md)。
+外层支持**按实际提交点恢复中断轮次**：保留已发布自对弈 shard，补足剩余游戏；复用已发布 shuffle／模型目录；learner 恢复完整 checkpoint 中的 optimizer、Lookahead fast/slow 与同步计数、SWA、文件内游标及 reader/learner RNG、scaler。Ctrl+C／SIGTERM 等待自对弈排空或 learner 在安全 batch 边界保存，并结算本次耗时。强杀后最后一次保存之后的内存工作需要重做，原始日志保留但作废更新不进入有效曲线，自对弈在途状态不恢复；恢复边界、锁与计时限制见 [调度与恢复](docs/controller.md)。
 
 训练提交后默认生成 `training.png`、`loss.png` 与 `logs/performance.png`；`auto_plot=false` 可关闭自动渲染。可使用 `bash scripts/run.sh plot --run-dir /absolute/path/to/run` 独立重建。算法与性能图直接读取原生日志，保留其统计口径和输出频率；时间横轴使用明确标注的 EtaZero 调度计时，缺测保留为空；详细定义与 V3.4 的口径区别见 [训练观测与绘图](docs/observations.md)。原生 `selfplaysurprisedump` 支持六种棋类与四种算法的逐手四结果、surprise 和重分析统计，独立诊断用法见该文档。
 
