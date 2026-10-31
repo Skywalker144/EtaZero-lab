@@ -68,6 +68,59 @@ def test_invalid_time_limit_rejected_before_creating_run(tmp_path, budget):
     assert not (tmp_path / 'run').exists()
 
 
+@pytest.mark.parametrize('resume', [False, True])
+def test_no_limits_runs_until_interrupted(tmp_path, monkeypatch, resume):
+    config = recovery_config(tmp_path, 'alphazero')
+    root = tmp_path / 'run'
+    completed = []
+
+    def run_round(root, config, state, binary, lock_fd):
+        if state['completed_rounds'] == 4:
+            raise KeyboardInterrupt
+        state['completed_rounds'] += 1
+        state['elapsed_seconds'] += 3600
+        completed.append(state['completed_rounds'])
+        controller.save_json(root / 'state.json', state)
+
+    monkeypatch.setattr(controller, 'run_round', run_round)
+    monkeypatch.setattr(controller, 'refresh_plots', lambda *args: None)
+    if resume:
+        assert controller.run(root, config, 2, binary='/bin/false')['completed_rounds'] == 2
+    with pytest.raises(KeyboardInterrupt):
+        controller.run(root, config, binary='/bin/false')
+    assert completed == [0, 1, 2, 3, 4]
+    state = json.loads((root / 'state.json').read_text())
+    assert state['completed_rounds'] == 4 and state['elapsed_seconds'] == 18000
+
+
+@pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='requires native CUDA and learner')
+def test_real_unlimited_training_and_resume(tmp_path, monkeypatch):
+    config = replace(recovery_config(tmp_path, 'gumbel_alphazero'),
+                     auto_plot=False)
+    root = tmp_path / 'run'
+    stop_after = [2]
+
+    def interrupt_after_commit(root, config):
+        state = json.loads((root / 'state.json').read_text())
+        if state['completed_rounds'] == stop_after[0]:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(controller, 'refresh_plots', interrupt_after_commit)
+    with pytest.raises(KeyboardInterrupt):
+        controller.run(root, config)
+    first = json.loads((root / 'state.json').read_text())
+    assert first['completed_rounds'] == 2 and first['total_samples'] > 0
+    assert first['accepted_model'] is not None
+    stop_after[0] = 3
+    with pytest.raises(KeyboardInterrupt):
+        controller.run(root, config)
+    resumed = json.loads((root / 'state.json').read_text())
+    assert resumed['completed_rounds'] == 3 and resumed['total_samples'] > first['total_samples']
+    result = json.loads((root / 'rounds/000003/result.json').read_text())
+    assert result['input_model'] == first['accepted_model'].split('/')[-1]
+    assert resumed['active_round'] is None
+
+
 @pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='requires native CUDA and learner')
 @pytest.mark.parametrize('algorithm,compiled,muon', [
     ('alphazero', False, False),
@@ -81,9 +134,12 @@ def test_real_time_budget_and_model_commit(tmp_path, monkeypatch, algorithm, com
         args.remove('-no-compile')
     if muon:
         args[args.index('-use-adamw')] = '-use-muon'
-    config = replace(config, epochs_per_round=1, train_args=tuple(args))
+    config = replace(config, train_args=tuple(args))
     root = tmp_path / 'run'
+    controller.run(root, config, 0)
     actual_save = controller.save_json
+    cold = json.loads((root / 'state.json').read_text())
+    budget = cold['elapsed_seconds'] + 0.000001
 
     def fail_pointer(path, value):
         if path == root / 'state.json' and value.get('completed_rounds') == 1:
@@ -93,7 +149,7 @@ def test_real_time_budget_and_model_commit(tmp_path, monkeypatch, algorithm, com
     if compiled:
         monkeypatch.setattr(controller, 'save_json', fail_pointer)
         with pytest.raises(OSError, match='after model/time commit'):
-            controller.run(root, config, max_seconds=0.000001)
+            controller.run(root, config, max_seconds=budget)
         commit = json.loads((root / 'rounds/000001/commit.json').read_text())
         assert json.loads((root / 'state.json').read_text())['completed_rounds'] == 0
         monkeypatch.setattr(controller, 'save_json', actual_save)
@@ -102,11 +158,11 @@ def test_real_time_budget_and_model_commit(tmp_path, monkeypatch, algorithm, com
             pytest.fail('committed round must be adopted without repeating a source stage')
 
         monkeypatch.setattr(controller, 'execute', no_replay)
-        state = controller.run(root, config, max_seconds=0.000001)
+        state = controller.run(root, config, max_seconds=budget)
         assert state == commit['state']
         assert not (root / 'rounds/000001/result.json').exists()
     else:
-        state = controller.run(root, config, max_seconds=0.000001)
+        state = controller.run(root, config, max_seconds=budget)
         commit = json.loads((root / 'rounds/000001/commit.json').read_text())
         assert state == commit['state']
         report = json.loads((root / 'rounds/000001/result.json').read_text())
@@ -118,7 +174,7 @@ def test_real_time_budget_and_model_commit(tmp_path, monkeypatch, algorithm, com
     assert state['elapsed_seconds'] == pytest.approx(state['wall_seconds'] - state['compile_seconds'])
     receipts = [json.loads(path.read_text()) for path in (root / 'rounds/000001/timing').glob('*.json')]
     assert receipts and all(record['timing_valid'] for record in receipts)
-    assert state['compile_seconds'] == pytest.approx(sum(record['compile_seconds'] for record in receipts))
+    assert state['compile_seconds'] == pytest.approx(cold['compile_seconds'] + sum(record['compile_seconds'] for record in receipts))
     assert (state['compile_seconds'] > 0) == (compiled or muon)
     checkpoint = root / 'train/checkpoint.ckpt'
     modified = checkpoint.stat().st_mtime_ns
