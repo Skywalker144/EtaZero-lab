@@ -139,6 +139,7 @@ class GameInitializer {
 
   float komiMean; // Fixed rule komi for new games and sampled positions; forks retain their rule komi.
   double handicapProb;
+  double noResultStdev;
 
   int numExtraBlackFixed;
 
