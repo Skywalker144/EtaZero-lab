@@ -2,6 +2,7 @@
 from dataclasses import asdict
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -60,8 +61,8 @@ cudaUseFP16 = {str(fp16).lower()}
         network['prediction'].update(block_kind=[], trunk_num_channels=network['latent_channels'])
     config = RunConfig(selfplay_config=str(cfg), game=game, algorithm=algorithm,
         muzero_network=network, muzero_unroll_steps=3,
-        publish_weights=weights, canvas=canvas, batch_size=4, games_per_round=4, samples_per_epoch=8,
-        shuffle_rows_per_file=128, shuffle_keep_rows=512, shuffle_args=('-min-rows', '1'),
+        publish_weights=weights, canvas=canvas, batch_size=4, bootstrap_games=4, train_steps=2,
+        shuffle_rows_per_file=128, shuffle_keep_rows=512, min_rows=1,
         train_args=('-use-adamw', *(('-use-fp16',) if fp16 else ()), '-lookahead-k', '2', '-swa-period-samples', '8',
                     '-no-longterm-checkpoints', *(() if compiled else ('-no-compile',)))).validate()
     root = tmp_path / 'run'
@@ -76,12 +77,12 @@ cudaUseFP16 = {str(fp16).lower()}
     assert first['total_samples'] > 0
     first_report = json.loads((root / 'rounds/000001/result.json').read_text())
     assert first_report['input_model'] == 'initial'
-    first_files = {p.name: p.read_bytes() for p in (root / 'models/round-000001').iterdir()}
+    first_files = {p.name: p.read_bytes() for p in (sorted((root / 'models').glob('round-000001-s*'))[-1]).iterdir()}
     second = run(root, config, 2, binary=binary)
     checkpoint = load_checkpoint(root / 'train/checkpoint.ckpt')
     assert second['total_samples'] > first['total_samples']
     assert second['completed_rounds'] == 2 and second['active_round'] is None
-    assert checkpoint['train_state']['export_cycle_counter'] == 2
+    assert checkpoint['train_state']['global_step_samples'] == second['total_samples']
     assert checkpoint['config'] == {'algorithm': 'muzero', 'network': config.muzero_network}
     assert checkpoint['train_state']['muzero_modelnorm_baselines'] == initial['train_state']['muzero_modelnorm_baselines']
     assert checkpoint['learner_runtime']['train_rng'] != first_checkpoint['learner_runtime']['train_rng']
@@ -89,20 +90,21 @@ cudaUseFP16 = {str(fp16).lower()}
     for name in ('representation.', 'dynamics.', 'prediction.'):
         assert any(not torch.equal(initial['model'][k], v) for k, v in checkpoint['model'].items() if k.startswith(name))
     report = json.loads((root / 'rounds/000002/result.json').read_text())
-    assert report['input_model'] == 'round-000001'
+    assert report['input_model'].startswith('round-000001-s')
     assert report['samples_before'] == first['total_samples']
     assert report['published_weights'] == weights
     assert 'initialize' not in report['stage_seconds']
     assert (root / 'initial/checkpoint.ckpt').read_bytes() == initial_bytes
-    assert {p.name: p.read_bytes() for p in (root / 'models/round-000001').iterdir()} == first_files
-    for number, input_name in ((1, 'initial'), (2, 'round-000001')):
+    assert {p.name: p.read_bytes() for p in (sorted((root / 'models').glob('round-000001-s*'))[-1]).iterdir()} == first_files
+    for number, input_name in ((1, 'initial'), (2, Path(first['accepted_model']).name)):
         frozen = root / 'rounds' / f'{number:06d}' / 'input_models' / input_name
         for file in ('representation.bin', 'dynamics.bin', 'prediction.bin', 'model.json'):
             assert (frozen / file).read_bytes() == (root / 'models' / input_name / file).read_bytes()
-        shards = list((root / 'selfplay' / f'{number:06d}' / input_name / 'tdata').glob('*.npz'))
+        data_round = 0 if number == 1 else number
+        shards = list((root / 'selfplay' / f'{data_round:06d}' / input_name / 'tdata').glob('*.npz'))
         assert shards
         if game == 'xiangqi':
-            verify_native_output(root / 'selfplay' / f'{number:06d}', canvas)
+            verify_native_output(root / 'selfplay' / f'{data_round:06d}', canvas)
         for shard in shards:
             with np.load(shard) as data:
                 assert 'muZeroRootNC' in data and np.isfinite(data['globalTargetsNC']).all()
@@ -115,9 +117,9 @@ cudaUseFP16 = {str(fp16).lower()}
         assert checkpoint['swa_model']['n_averaged'] > 0
         assert any(not torch.equal(v, swa.state_dict()[k]) for k, v in model.state_dict().items())
     export_components(swa if weights == 'swa' else model, tmp_path / 'expected',
-                      f'etazero-v{__version__.replace(".", "_")}-round-000002')
+                      f'etazero-v{__version__.replace(".", "_")}-{Path(second["accepted_model"]).name}')
     for file in ('representation.bin', 'dynamics.bin', 'prediction.bin', 'model.json'):
-        assert (root / 'models/round-000002' / file).read_bytes() == (tmp_path / 'expected' / file).read_bytes()
+        assert (root / second['accepted_model'] / file).read_bytes() == (tmp_path / 'expected' / file).read_bytes()
     modified = (root / 'train/checkpoint.ckpt').stat().st_mtime_ns
     assert run(root, config, 2, binary=binary) == second
     assert (root / 'train/checkpoint.ckpt').stat().st_mtime_ns == modified
