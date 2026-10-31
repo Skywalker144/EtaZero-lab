@@ -11,6 +11,7 @@ import time
 import warnings
 
 from .run import save_json
+from katago.train.stopping import defer_signals
 
 
 def compilation_seconds():
@@ -46,4 +47,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with defer_signals():
+        main()
