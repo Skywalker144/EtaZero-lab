@@ -317,6 +317,12 @@ void ZipFile::writeBuffer(const char* nameWithinZip, void* data, uint64_t numByt
       " within zip file " + fileName + " due to error " + zip_strerror((zip_t*)file)
     );
   }
+  // Training producers are latency-sensitive: default DEFLATE compression can
+  // stall the sole writer and back up all game threads. Level 1 is lossless and
+  // preserves the NPY payload while trading some disk space for faster flushes.
+  if(zip_set_file_compression((zip_t*)file, (zip_uint64_t)idx, ZIP_CM_DEFLATE, 1) < 0)
+    throw StringError("Could not set compression for " + string(nameWithinZip) +
+                      " within " + fileName + " due to error " + zip_strerror((zip_t*)file));
 }
 
 void ZipFile::close() {
