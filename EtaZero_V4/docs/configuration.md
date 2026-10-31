@@ -13,9 +13,28 @@ V4 按环境、网络、搜索、自对弈、训练和运行调度拆分配置�
 | `shuffle.cfg` / `[shuffle]` | 原生 shuffler 选项名，省略命令行开头的 `-`。 |
 | `run.cfg` / `[run]` | 产样／训练额度、模型发布、绘图、总预算和输出路径。 |
 
-`configs/baseline/` 是公共参数入口，完整列出采用的参数。环境差异集中在 `configs/games/`，算法差异集中在 `configs/algorithms/`。各运行目录显式 include 所需公共文件，再写自己的覆盖项。目录后缀 `g`、`h`、`go`、`xiangqi` 分别选择 Renju、Hex、围棋和中国象棋；修改棋类以 `env.cfg` 为准，目录名不参与算法判断。
+`configs/baseline_az/` 完整列出采用的公共参数与 AlphaZero 配方，其余算法 baseline 显式继承公共文件，再定义算法差异。四个 baseline 均使用围棋环境，也可直接运行。各棋类目录继承对应算法 baseline，只覆盖环境与该配方的差异；目录名称不参与算法判断，实际选择来自 `env.cfg` 和 `selfplay.cfg`。
 
-baseline 自对弈采用 KataGo selfplay1 的参数起点，排除已移除的围棋专用机制。训练和 shuffle 数值取自固定来源的单机同步示例。网络不是 KataGo 统一指定的默认值，应按实验选择。`configs/checks/` 保留独立的小规模原生接口检查，普通算法目录不代表快速检查预算。
+| 算法 | 公共入口 | 围棋 | 五子棋 | Hex | 中国象棋 |
+|---|---|---|---|---|---|
+| AlphaZero | `baseline_az` | `az_go` | `az_gomoku` | `az_hex` | `az_xiangqi` |
+| Gumbel AlphaZero | `baseline_gaz` | `gaz_go` | `gaz_gomoku` | `gaz_hex` | `gaz_xiangqi` |
+| MuZero | `baseline_mz` | `mz_go` | `mz_gomoku` | `mz_hex` | `mz_xiangqi` |
+| Gumbel MuZero | `baseline_gmz` | `gmz_go` | `gmz_gomoku` | `gmz_hex` | `gmz_xiangqi` |
+
+`baseline_gaz` 继承 `baseline_az` 并引入共享的 [Gumbel 搜索配置](../configs/algorithms/gumbel.cfg)。`baseline_mz` 继承公共参数，独立定义 MuZero 网络、搜索和展开数据文件大小；`baseline_gmz` 继承 `baseline_mz`，再引入同一份 Gumbel 搜索配置。这样不会用普通网络或普通样本文件大小覆盖 MuZero。普通 baseline 不保留未启用的 MuZero 网络或 Gumbel 模板。
+
+四个 `*_go` 完全继承各自 baseline。四个 `*_gomoku` 共用 [Freestyle 环境](../configs/games/gomoku/env.cfg)：15 路画布，11–15 路棋盘分布；`az_gomoku` 另保留已经确认的五子棋搜索、开局和回放参数。四个 `*_hex` 共用方盘环境；Hex 和象棋的 `replay_ratio` 均为 2。象棋的搜索预算、初始化、fork、side positions、写盘、并行、训练 batch 和 bootstrap 均继承对应算法 baseline；独立的小规模检查只使用 `configs/checks/`。
+
+Hex 的 `chosenMoveTemperatureHalflife=15`，象棋为 40；实际半衰期为该值乘以 `sqrt(棋盘面积)/19`，象棋约为 20 个单方着手。该参数也控制根 policy 温度的衰减。普通 AZ/MuZero 自对弈启用根 Dirichlet 噪声，总浓度 10.83、混合权重 0.25；总浓度是各有效动作 α 的和，不是逐动作 α。继承的 KataGo 机制会在零训练权重的 cheap search 中临时关闭根噪声，保留完整训练搜索的噪声。当前 Gumbel 直接按自身规则出手，且两端 chosen 温度均为 0，继承的 half-life 不影响其出手。
+
+所有算法的根多对称采样上限统一继承 `rootNumSymmetriesToSample=4`；实际数量是 `min(4, 该棋类支持的对称数)`。围棋／五子棋取 4，Hex／象棋取 2。MuZero 平均多对称的根预测输出，后续 latent 搜索保留其中一个采样朝向，不对 latent 张量直接求平均。
+
+Gumbel 共用 `maxVisits=33`，即一次根初始化加名义上的 32 次动作访问；cheap search、reduce visits、LCB 和 forced playouts 关闭。`rootNoiseEnabled=true` 在这里启用 Gumbel 噪声，不添加 Dirichlet 噪声。非对称搜索预算仍可能缩放某一方的实际访问数，33 并不承诺每步严格执行 32 次动作访问。算法组合边界见 [Gumbel 搜索](gumbel.md)。
+
+MuZero 两种算法保留 shuffle 输出文件约 8192 行、桶约 65536 行。MuZero 需要连续未来位置，shuffle 会从轨迹构造展开训练样本；增大文件行数会同时增加物化和读取展开字段的内存，不能直接照搬普通 AlphaZero 的文件大小。数据语义见 [MuZero 网络与展开训练](muzero.md)。
+
+`baseline_az` 的目标是按机制语义接近 KataGo，排除 V4 已移除的围棋专用机制，并非与 main18b 完全一致。完整参数对照见 [V4／KataGo／KataGomo 参数表](config-parameter-audit-2026-10-31.md)。网络并非 KataGo 统一指定的默认值；当前配置也不代表棋力或吞吐已调优。`configs/checks/` 保留独立的小规模原生接口检查。
 
 ## 文件内分组
 
@@ -36,7 +55,7 @@ baseline 自对弈采用 KataGo selfplay1 的参数起点，排除已移除的�
 
 ```ini
 [environment]
-game = renju
+game = freestyle
 canvas = 15
 bSizes = 15,13,11
 bSizeRelProbs = 10,3,1
@@ -98,8 +117,8 @@ unroll_steps = 3
 原生 CLI 参数文件中的裸键启用 flag，空赋值不传该选项，例如 `no-compile` 禁用编译，`no-compile =` 恢复原生编译默认。网络／checkpoint 推导的可选项可以留空。原生引擎字段保持原生拼写，不转换成另一套 snake_case 参数。
 
 ```bash
-CONFIG_DIR=configs/az_g bash scripts/run.sh --iterations 2 --dry-run
-CONFIG_DIR=configs/mz_h bash scripts/run.sh --iterations 2 --run-dir /absolute/path/to/new-run
+CONFIG_DIR=configs/az_gomoku bash scripts/run.sh --iterations 2 --dry-run
+CONFIG_DIR=configs/mz_hex bash scripts/run.sh --iterations 2 --run-dir /absolute/path/to/new-run
 CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 ```
 
