@@ -294,7 +294,7 @@ def prepare_batch(data, mean_weight, rng, model_config, device, *, randomize_sym
 
 def read_npz_muzero_data(npz_files, batch_size, pos_len, device, model_config, *,
                          unroll_steps, mean_weight, rng, include_meta=False,
-                         randomize_symmetries=True, prefetch_depth=1):
+                         randomize_symmetries=True, prefetch_depth=1, skip_batches=0):
     """Single-learner file reader with source prefetch and whole-batch consumption.
 
     Input is a source-shuffled snapshot. Its metadata supplies unroll_steps and
@@ -357,6 +357,9 @@ def read_npz_muzero_data(npz_files, batch_size, pos_len, device, model_config, *
         steps = len(data['globalInputNC']) // batch_size
         logging.info(f'Beginning {path} with {steps} usable MuZero batches')
         for index in range(steps):
+            if skip_batches:
+                skip_batches -= 1
+                continue
             batch = {key: value[index*batch_size:(index+1)*batch_size] for key, value in data.items()}
             yield prepare_batch(batch, mean_weight, rng, model_config, device,
                                 randomize_symmetries=randomize_symmetries, history_matrices=history)
