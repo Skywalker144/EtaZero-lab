@@ -60,10 +60,13 @@
     "repository": "https://github.com/hzyhhzy/KataGomo",
     "commit": "df152116e3787c75c6a3de099d261ca092b7dfc1",
     "sha256": {
-      "cpp/game/randomopening.cpp": "7e94a55e8bbbf152d1b5f45f63333c54e9bff1c93850e3a40d597239f46756b5"
+      "cpp/game/randomopening.cpp": "7e94a55e8bbbf152d1b5f45f63333c54e9bff1c93850e3a40d597239f46756b5",
+      "cpp/program/play.cpp": "c119b1aa4fc64e32d96f723ce0539b3ecf523a7ca041f4d0d2b79a8c19288f87",
+      "cpp/program/playutils.cpp": "f87f975c8564f84f98da4005e24a1182fe94982d6babced078ce30ebba09b0c6",
+      "cpp/program/playsettings.cpp": "c9f17dc6a2ae031bbfdea624cbf05d8c1014929c909d20f255d8e08b521899b1"
     },
     "license": "licenses/KataGomo.txt",
-    "adaptation": "No-VC random skeleton and candidate rejection sampling in cpp/program/balancedopening.cpp. Native BoardHistory rules, four-result W-L, shared ordinary/MuZero initial inference and cancellation. Strict positive cumulative sampling removes the source negative epsilon that could select a zero-weight point. Opt-in balanceOpeningProb defaults to zero; source policy initialization remains unchanged."
+    "adaptation": "No-VC Gomoku opening pipeline: random skeleton, candidate rejection sampling, source selfplay/match probability defaults, random-evaluator cold start, and exponential policy initialization with existing-move compensation and source mean/SGF/temperature settings. Native BoardHistory rules, four-result W-L, shared ordinary/MuZero initial inference and cancellation. Strict positive cumulative sampling retains the documented numerical fix for source negative epsilon selecting a zero-weight point; VC-specific rules/distributions are not included."
   },
   "KataGomo_Hex_opening": {
     "repository": "https://github.com/hzyhhzy/KataGomo",
