@@ -22,8 +22,8 @@ def experiment_plan(config_path, work_dir=None):
     if not isinstance(settings, dict) or set(settings) - allowed:
         raise ValueError('Experiment accepts arms, iterations, max_hours, gpus, shared_init and evaluation')
     iterations, hours = settings.get('iterations'), settings.get('max_hours')
-    if iterations is not None and (type(iterations) is not int or iterations < 1):
-        raise ValueError('iterations must be a positive cumulative round limit')
+    if iterations is not None and (type(iterations) is not int or iterations < 0):
+        raise ValueError('iterations must be a nonnegative final iteration (0 is bootstrap)')
     if hours is not None and (type(hours) not in (int, float) or not math.isfinite(hours * 3600) or hours <= 0):
         raise ValueError('max_hours must be finite and positive')
     if iterations is None and hours is None:

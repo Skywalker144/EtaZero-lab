@@ -10,11 +10,10 @@ class RunConfig:
     selfplay_config: str
     canvas: int
     batch_size: int
-    games_per_round: int
-    samples_per_epoch: int
+    bootstrap_games: int
+    train_steps: int
     native_selfplay: str | None = None
     model_kind: str | None = None
-    epochs_per_round: int = 1
     shuffle_processes: int = 1
     shuffle_rows_per_file: int = 70000
     shuffle_keep_rows: int = 600000
@@ -25,11 +24,16 @@ class RunConfig:
     muzero_network: dict | None = None
     muzero_unroll_steps: int | None = None
     publish_weights: str = 'ordinary'
-    replay_ratio: float | None = None
-    bootstrap_min_rows: int | None = None
+    replay_ratio: float = 4.0
+    min_rows: int = 100000
+    bootstrap_game_multiplier: float = 1.05
     gatekeeper_config: str | None = None
     gatekeeper_required_win_prop: float = 0.5
     auto_plot: bool = True
+
+    @property
+    def samples_per_epoch(self):
+        return self.train_steps * self.batch_size
 
     @property
     def is_muzero(self):
@@ -55,8 +59,8 @@ class RunConfig:
             raise ValueError('gatekeeper_required_win_prop must be finite and in [0,1]')
         if self.gatekeeper_config is None and self.gatekeeper_required_win_prop != 0.5:
             raise ValueError('gatekeeper_required_win_prop requires gatekeeper_config')
-        for key in ('canvas', 'batch_size', 'games_per_round', 'samples_per_epoch',
-                    'epochs_per_round', 'shuffle_processes', 'shuffle_rows_per_file', 'shuffle_keep_rows'):
+        for key in ('canvas', 'batch_size', 'bootstrap_games', 'train_steps', 'min_rows',
+                    'shuffle_processes', 'shuffle_rows_per_file', 'shuffle_keep_rows'):
             value = getattr(self, key)
             if type(value) is not int or value <= 0:
                 raise ValueError(f'{key} must be a positive integer')
@@ -64,12 +68,7 @@ class RunConfig:
             raise ValueError('The current source writer/learner supports canvas in [3,19]')
         if self.game == 'xiangqi' and self.canvas < 10:
             raise ValueError('Xiangqi requires canvas >= 10 for its 9x10 board')
-        # Source train.py rounds the target batch count and selects whole files;
-        # synchronous_loop.sh itself uses 100000 samples with batch size 128.
-        if self.samples_per_epoch < self.batch_size:
-            raise ValueError('samples_per_epoch must provide at least one batch')
-        # The source reader can repeat files within an epoch. Its shuffle target
-        # need not be as large as samples_per_epoch; require only usable batches.
+        # A snapshot must be capable of supplying a complete batch.
         if self.shuffle_rows_per_file < self.batch_size or self.shuffle_keep_rows < self.batch_size:
             raise ValueError('Shuffle targets must provide at least one batch')
         if self.is_muzero:
@@ -94,31 +93,26 @@ class RunConfig:
                 raise ValueError(f'Unknown source model: {self.model_kind}')
         if self.publish_weights not in {'ordinary', 'swa'}:
             raise ValueError('publish_weights must be ordinary or swa')
-        if self.replay_ratio is not None:
-            if type(self.replay_ratio) not in (int, float) or not math.isfinite(self.replay_ratio) or self.replay_ratio <= 0:
-                raise ValueError('replay_ratio must be finite and positive')
-        if self.bootstrap_min_rows is not None:
-            if self.replay_ratio is None:
-                raise ValueError('bootstrap_min_rows requires replay_ratio')
-            if type(self.bootstrap_min_rows) is not int or self.bootstrap_min_rows < self.batch_size:
-                raise ValueError('bootstrap_min_rows must be an integer of at least one batch')
+        for key in ('replay_ratio', 'bootstrap_game_multiplier'):
+            value = getattr(self, key)
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f'{key} must be finite and positive')
         # These settings determine stage ownership or the promised single-learner boundary.
         reserved = {
             'train_args': {'-traindir', '-datadir', '-latestdatadir', '-exportdir', '-exportprefix',
                            '-pos-len', '-batch-size', '-model-kind', '-input-features', '-max-epochs-this-instance',
-                           '-max-training-samples', '-samples-per-epoch', '-multi-gpus',
+                           '-max-training-samples', '-max-batches-this-instance', '-stop-at-samples', '-samples-per-epoch', '-multi-gpus',
                            '-no-export', '-gnorm-stats-debug', '-initial-checkpoint', '-initial-weights', '-always-initial-checkpoint',
-                           '-export-prob', '-initialize-only', '-muzero-config',
+                           '-initialize-only', '-muzero-config',
+                           '-max-train-bucket-per-new-data', '-max-train-bucket-size', '-initial-train-bucket-level',
+                           '-epochs-per-export', '-export-prob',
+                           '-stop-when-train-bucket-limited', '-quit-if-no-data', '-no-repeat-files',
                            '-required-initial-checkpoint-train-steps'},
             'shuffle_args': {'-out-dir', '-out-tmp-dir', '-batch-size', '-num-processes',
                              '-approx-rows-per-out-file', '-keep-target-rows', '-dry-run-print-resource-cost',
-                             '-muzero-unroll-steps'},
+                             '-muzero-unroll-steps', '-min-rows'},
         }
         for key, forbidden in reserved.items():
-            if key == 'train_args' and self.replay_ratio is not None:
-                forbidden = forbidden | {'-max-train-bucket-per-new-data', '-max-train-bucket-size',
-                                         '-initial-train-bucket-level', '-stop-when-train-bucket-limited',
-                                         '-max-train-steps-since-last-reload'}
             args = getattr(self, key)
             if not isinstance(args, (list, tuple)) or not all(isinstance(a, str) for a in args):
                 raise ValueError(f'{key} must be a list of command-line strings')

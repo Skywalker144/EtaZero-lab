@@ -143,8 +143,9 @@ def load_run_profile(path):
     sections = read_sections(path, ['run'], origins=origins)
     def resolve(key, value):
         return str((origins.get(('run', key), path).parent / value).resolve())
-    converters = dict(game=str, algorithm=str, games_per_round=int, publish_weights=str,
-                      replay_ratio=float, bootstrap_min_rows=int, gatekeeper_config=str,
+    converters = dict(game=str, algorithm=str, bootstrap_games=int, train_steps=int,
+                      replay_ratio=float, bootstrap_game_multiplier=float, publish_weights=str,
+                      gatekeeper_config=str,
                       gatekeeper_required_win_prop=float, auto_plot=boolean,
                       selfplay_config=str, train_config=str, shuffle_config=str,
                       iterations=int, max_hours=float, run_dir=str)
@@ -164,8 +165,6 @@ def load_run_profile(path):
     train = BoundaryParser(add_help=False, allow_abbrev=False)
     train.add_argument('-pos-len', dest='canvas', type=int, required=not structured)
     train.add_argument('-batch-size', dest='batch_size', type=int, required=True)
-    train.add_argument('-samples-per-epoch', dest='samples_per_epoch', type=int, required=True)
-    train.add_argument('-max-epochs-this-instance', dest='epochs_per_round', type=int, default=1)
     train.add_argument('-model-kind', dest='model_kind')
     train.add_argument('-muzero-config', dest='muzero_network')
     owned, extra = train.parse_known_args(native_arguments(train_path, 'train', path_options=('muzero-config',)))
@@ -176,6 +175,7 @@ def load_run_profile(path):
     shuffle.add_argument('-num-processes', dest='shuffle_processes', type=int, default=1)
     shuffle.add_argument('-approx-rows-per-out-file', dest='shuffle_rows_per_file', type=int, default=70000)
     shuffle.add_argument('-keep-target-rows', dest='shuffle_keep_rows', type=int, default=600000)
+    shuffle.add_argument('-min-rows', dest='min_rows', type=int, default=100000)
     shuffle.add_argument('-muzero-unroll-steps', dest='muzero_unroll_steps', type=int)
     owned, extra = shuffle.parse_known_args(native_arguments(shuffle_path, 'shuffle'))
     values.update(vars(owned), shuffle_args=extra)
@@ -185,8 +185,9 @@ def load_run_profile(path):
             if values.get(key) is not None:
                 raise ValueError(f'{path}: {key} belongs in env.cfg, net.cfg or selfplay.cfg')
         values.update(translate_profile(path.parent, Path(values['selfplay_config'])))
-    if 'games_per_round' not in values:
-        raise ValueError(f'{path}: run.games_per_round is required')
+    for key in ('bootstrap_games', 'train_steps'):
+        if key not in values:
+            raise ValueError(f'{path}: run.{key} is required')
     return RunConfig(**values).validate(), launch
 
 
