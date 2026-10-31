@@ -62,6 +62,7 @@ def read_npz_training_data(
     model_config: modelconfigs.ModelConfig,
     prefetch_depth: int = 1,
     rng=None,
+    skip_batches: int = 0,
 ):
     rand = np.random.default_rng(seed=list(os.urandom(12))) if rng is None else rng
     num_bin_features = modelconfigs.get_num_bin_input_features(model_config)
@@ -146,6 +147,9 @@ def read_npz_training_data(
         logging.info(f"Beginning {npz_file} with {num_whole_steps * world_size} usable batches, my rank is {rank}")
 
         for n in range(num_whole_steps):
+            if skip_batches:
+                skip_batches -= 1
+                continue
             start = n * batch_size
             end = start + batch_size
 
