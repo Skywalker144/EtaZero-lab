@@ -35,7 +35,7 @@ def export_components(model, directory, model_name, **export_options):
         pos_len=model.pos_len), indent=2) + '\n')
 
 
-def main():
+def main(argv=None):
     import argparse
     from katago.train.load_model import load_model
     from katago.train.muzero_model import MuZeroModel
@@ -50,7 +50,7 @@ def main():
     parser.add_argument('-prune-ffn-scratch-factor', type=float, default=2.0)
     parser.add_argument('-attn-logit-bound-limit', type=float, default=2.5e4)
     parser.add_argument('-ignore-attn-logit-bound', action='store_true')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     model, swa, _ = load_model(args.checkpoint, args.use_swa, 'cpu', pos_len=args.pos_len)
     if not isinstance(model, MuZeroModel):
         raise ValueError('Expected a MuZero checkpoint; use export_model_pytorch.py for AlphaZero')
