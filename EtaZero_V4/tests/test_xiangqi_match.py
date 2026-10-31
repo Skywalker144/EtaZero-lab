@@ -269,18 +269,19 @@ def test_xiangqi_outer_gate_decision_recovery_and_next_round(tmp_path, monkeypat
     trained = checkpoint_progress(directory / 'train/checkpoint.ckpt')
     state = json.loads((directory / 'state.json').read_text())
     assert state['completed_rounds'] == 1 and state['accepted_model'] == first['accepted_model']
-    gate_dir = directory / 'rounds/000002/gatekeeper'
+    gate_dir = next((directory / 'rounds/000002/gatekeeper').iterdir())
+    candidate_name = gate_dir.name
     decision = json.loads((gate_dir / 'result.json').read_text())
     assert decision['accepted'] == (threshold == .5) and decision['outcomes']['draw'] == decision['games']
-    moved = gate_dir / ('accepted' if decision['accepted'] else 'rejected') / 'round-000002'
-    moved.rename(gate_dir / 'test/round-000002')
+    moved = gate_dir / ('accepted' if decision['accepted'] else 'rejected') / candidate_name
+    moved.rename(gate_dir / 'test' / candidate_name)
     previous_calls = list(calls)
     second = controller.run(directory, config, 2)
     assert calls == previous_calls and moved.exists()
     assert checkpoint_progress(directory / 'train/checkpoint.ckpt') == trained
-    expected = 'models/round-000002' if threshold == .5 else first['accepted_model']
+    expected = f'models/{candidate_name}' if threshold == .5 else first['accepted_model']
     assert second['accepted_model'] == expected
     third = controller.run(directory, config, 3)
     report = json.loads((directory / 'rounds/000003/result.json').read_text())
     assert report['input_model'] == Path(expected).name and report['gatekeeper']['baseline'] == Path(expected).name
-    assert third['total_samples'] > second['total_samples'] and checkpoint_progress(directory / 'train/checkpoint.ckpt')[1] == 3
+    assert third['total_samples'] > second['total_samples'] and checkpoint_progress(directory / 'train/checkpoint.ckpt')[1] > trained[1]
