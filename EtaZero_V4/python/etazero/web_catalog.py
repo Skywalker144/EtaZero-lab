@@ -28,7 +28,7 @@ def run_catalog(directory, *, config=None):
     saved = read_json(directory / 'config.json')
     state = read_json(directory / 'state.json')
     count = state['completed_rounds']
-    if type(count) is not int or count < 0:
+    if type(count) is not int or count < -1:
         raise ValueError(f'Invalid completed-round count: {directory}')
     try:
         label = str(directory.relative_to((ROOT / 'data').resolve()))
@@ -40,13 +40,14 @@ def run_catalog(directory, *, config=None):
                   completed_rounds=count, current_model=None, models=[])
     models = {}
     previous = None
-    for number in range(1, count + 1):
+    first = 0 if (directory / 'rounds/000000').exists() else 1
+    for number in range(first, count + 1):
         receipt = read_json(directory / 'rounds' / f'{number:06d}' / 'commit.json')
         committed = receipt['state']
         if committed['completed_rounds'] != number:
             raise ValueError(f'Publication round does not match its commit: {directory}, {number}')
         accepted = committed['accepted_model']
-        for relative in dict.fromkeys([receipt.get('candidate_model'), accepted]):
+        for relative in dict.fromkeys([*receipt.get('candidate_models', []), receipt.get('candidate_model'), accepted]):
             if relative is None:
                 continue
             bundle = (directory / relative).resolve()
@@ -69,11 +70,11 @@ def run_catalog(directory, *, config=None):
                      type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0)
             models[key] = dict(id=key, path=key, run=str(directory), iteration=number,
                                game=saved['game'], algorithm=saved['algorithm'], canvas=saved['canvas'],
-                               weights=saved['publish_weights'], accepted=relative == accepted,
+                               weights='ordinary' if bundle.name == 'initial' else saved['publish_weights'], accepted=relative == accepted,
                                training_seconds=seconds if timed else None,
                                timing_source='EtaZero controller: committed wall time excluding compilation' if timed else None)
         previous = accepted
-    if count and previous != state['accepted_model']:
+    if count >= 0 and previous != state['accepted_model']:
         raise ValueError(f'Published model pointer does not match the committed rounds: {directory}')
     if previous is not None:
         path = (directory / previous).resolve()
