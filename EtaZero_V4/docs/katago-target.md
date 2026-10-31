@@ -13,7 +13,7 @@ V4 的定位是基于 KataGo 合理接入多棋类、Gumbel 和 MuZero 的“Kat
 ## 允许的差异
 
 - 保留围棋，增加 Freestyle/Standard/Renju 五子棋、Hex、中国象棋，按棋类适配状态、动作、历史、对称和必要的平衡开局。
-- 使用 W/D/L/NR。普通和棋与 no-result 分开监督，非围棋屏蔽 NR；基础效用 W−L，D 和 NR 的贡献均为 0。
+- 使用 W/D/L/NR。普通和棋与 no-result 分开监督，非围棋屏蔽 NR；基础效用 W−L，D 固定中性；NR 保留来源的可配置白方效用及 selfplay 截断高斯随机化。
 - 排除 score utility、score/ownership/seki 监督、随机贴目、让子补偿及完整 passing/dame/anti-mirror 增强。围棋规则必需的贴目、计分、pass、超级劫、合法性和终局保留。
 - 增加 Gumbel 根搜索、completed Q、sequential halving、改进策略目标及可选 Gumbel 非根。使用 tree、关闭 graph 属于允许差异；严格根配额与冲突的 PUCT 根机制需要明确处理。Gumbel 使用 fresh tree，不要求同根续搜或跨手树复用；避免将旧访问直接混入本次 SH 阶段、预算与 completed Q。普通 PUCT 的来源树复用继续保留。
 - 增加 MuZero 三组件网络、latent 搜索和展开训练。真实规则负责环境与根合法性；latent 节点不使用真实后继棋盘、真实棋盘 graph、重复模式或 SVB，不跨真实落子复用旧树。
