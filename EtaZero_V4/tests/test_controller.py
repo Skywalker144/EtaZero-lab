@@ -16,9 +16,9 @@ from etazero.run import run
 def config():
     return RunConfig(selfplay_config=str(ROOT / 'configs/checks/source_go.cfg'),
                      model_kind='b2c16-fson-mish', canvas=7, batch_size=8,
-                     games_per_round=8, samples_per_epoch=32,
+                     bootstrap_games=8, train_steps=4,
                      shuffle_rows_per_file=128, shuffle_keep_rows=1024,
-                     shuffle_args=('-min-rows', '1'),
+                     min_rows=1,
                      train_args=('-no-compile', '-lookahead-k', '6', '-no-longterm-checkpoints')).validate()
 
 
@@ -57,35 +57,35 @@ def test_muzero_settings_are_owned_by_the_selected_algorithm(config):
             replace(mu, **changed).validate()
 
 
-def test_shuffle_window_may_be_smaller_than_epoch_when_source_repeats_files(config):
+def test_shuffle_window_can_exhaust_before_the_epoch_target(config):
     assert replace(config, shuffle_keep_rows=config.batch_size,
-                   samples_per_epoch=config.batch_size * 10).validate()
+                   train_steps=10).validate()
     with pytest.raises(ValueError, match='at least one batch'):
         replace(config, shuffle_keep_rows=config.batch_size - 1).validate()
 
 
-def test_epoch_target_need_not_be_divisible_by_batch_size(config):
-    assert replace(config, samples_per_epoch=config.batch_size * 3 + 1).validate()
-    with pytest.raises(ValueError, match='at least one batch'):
-        replace(config, samples_per_epoch=config.batch_size - 1).validate()
+def test_epoch_target_is_a_positive_sample_count(config):
+    assert replace(config, train_steps=3).validate().samples_per_epoch == config.batch_size * 3
+    with pytest.raises(ValueError, match='train_steps'):
+        replace(config, train_steps=0).validate()
 
 
 def test_failed_stage_preserves_artifacts_and_retries_same_round(tmp_path, config):
     root = tmp_path / 'run'
     with pytest.raises(RuntimeError, match='see .*selfplay.log'):
         run(root, config, 1, binary='/bin/false')
-    marker = root / 'selfplay/000001/preserved.txt'
+    marker = root / 'selfplay/000000/preserved.txt'
     marker.write_text('partial data')
     state = json.loads((root / 'state.json').read_text())
-    assert state['completed_rounds'] == 0 and state['accepted_model'] is None
-    assert state['active_round'] == 1 and state['phase'] == 'selfplay'
+    assert state['completed_rounds'] == -1 and state['accepted_model'] is None
+    assert state['active_round'] == 0 and state['phase'] == 'selfplay'
     with pytest.raises(RuntimeError, match=r'see .*selfplay\.2\.log'):
         run(root, config, 1, binary='/bin/false')
     assert marker.read_text() == 'partial data'
     assert len(list((root / 'rounds').iterdir())) == 1
     state = json.loads((root / 'state.json').read_text())
     assert state['round_progress']['attempts'] == {'selfplay': 2}
-    assert (root / 'rounds/000001/logs/selfplay.log').is_file()
+    assert (root / 'rounds/000000/logs/selfplay.log').is_file()
 
 
 def test_concurrent_controller_cannot_write_the_same_run(tmp_path, config):
@@ -152,22 +152,26 @@ def test_source_model_is_consumed_after_completed_round_restart(tmp_path, config
         'handicapProb = 0.5\nnumExtraBlackFixed = 2\nearlyForkGameProb = 0.5\n'
         'normalAsymmetricPlayoutProb = 0.25\nmaxAsymmetricRatio = 4\nmaxVisits = 24\n'
     )
-    config = replace(config, selfplay_config=str(selfplay_config), publish_weights=weights)
+    config = replace(config, selfplay_config=str(selfplay_config), publish_weights=weights, train_steps=8)
     run_dir = tmp_path / 'run'
     first = run(run_dir, config, 1)
     assert first['total_samples'] > 0
     second = run(run_dir, config, 2)
     assert second['completed_rounds'] == 2 and second['total_samples'] > first['total_samples']
     result = json.loads((run_dir / 'rounds/000002/result.json').read_text())
-    assert result['input_model'] == 'round-000001'
+    assert result['input_model'].startswith('round-000001-s')
     assert result['samples_before'] == first['total_samples']
     assert result['published_weights'] == weights
-    assert list((run_dir / 'selfplay/000002/round-000001/tdata').glob('*.npz'))
+    assert list((run_dir / 'selfplay/000002' / result['input_model'] / 'tdata').glob('*.npz'))
     assert not (run_dir / 'selfplay/000002/random').exists()
     for round_dir in (run_dir / 'selfplay').iterdir():
         komis = [float(k) for sgf in round_dir.glob('*/sgfs/*.sgfs')
                  for k in re.findall(r'KM\[([^]]+)\]', sgf.read_text())]
-        assert komis and set(komis) == {-2.5}
+        if not komis:
+            commit = json.loads((run_dir / 'rounds' / round_dir.name / 'commit.json').read_text())
+            assert commit['sampling']['games'] == 0
+        else:
+            assert set(komis) == {-2.5}
     checkpoint = run_dir / 'train/checkpoint.ckpt'
     modified = checkpoint.stat().st_mtime_ns
     assert run(run_dir, config, 2) == second
