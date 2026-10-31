@@ -7,7 +7,7 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run
 bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/path/to/figures
 ```
 
-**训练图的算法与性能指标严格从原生日志读取。** 原生 learner 的文本日志、metrics JSON、selfplay 和 gatekeeper 日志保留原样。外层只解析、汇总和绘制，不读取 SGF、checkpoint、NPZ 或调度结果文件为图补充统计，不为绘图向引擎新增计数或汇总日志，不修改来源日志的打印频率。时间横轴允许使用 EtaZero 调度计时，图上明确标为 `EtaZero controller ... time`；不能把它称为 KataGo 原生计时。
+**训练图的算法与性能指标严格从原生日志读取。** 原生 learner 的文本日志、metrics JSON、selfplay 和 gatekeeper 日志保留原样。外层只解析、汇总和绘制，不读取 SGF、checkpoint、NPZ 或调度结果文件为图补充统计，不修改来源日志的打印频率。selfplay 完整游戏结果由原生 writer 线程逐局汇总，随排空后的 `Final ...` 日志输出；这些统计不进入搜索热路径或训练目标。时间横轴允许使用 EtaZero 调度计时，图上明确标为 `EtaZero controller ... time`；不能把它称为 KataGo 原生计时。
 
 实现入口为 [plotting.py](../python/etazero/plotting.py) 与 [observations.py](../python/etazero/observations.py)。绘图仅原子替换派生图片，不改写原始日志。旧运行的外层 `metrics.json` 不作为图表数据源。
 
@@ -16,8 +16,10 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/
 | 展示内容 | 数据来源 |
 |---|---|
 | 训练 loss、梯度和 MuZero 展开分量 | 来源 learner 的 `train/metrics_train.json`，每行一条原生 JSON 记录 |
+| 概览图的 loss 系数、监督头权重与训练 batch size | `rounds/轮次/logs/train*.log` 中实际生效的 learner 启动参数、模型配置和 loss scale 记录 |
 | 验证 loss | 来源 learner 的 `train/metrics_val.json` |
 | 自对弈游戏数、实际搜索手数、推理与缓存计数 | 原生 selfplay 的 `selfplay/轮次/log*.log` 中的 `Final ...` 记录 |
+| 自对弈黑胜、白胜、和棋、NR、截断 | 同一日志的 `Final black wins`／`white wins`／`draws`／`no results`／`truncated games` |
 | 写出根行数、原生 selfplay 运行时间 | 同一原生日志中的 `Final data rows`、`Total selfplay runtime (seconds)` |
 | gatekeeper 候选得分 | `rounds/轮次/gatekeeper/matches/尝试/log*.log` 中的 `Candidate won/lost match, score ...` |
 | 独立 Elo | 原生 match 的逐局比赛记录，调用来源 Elo 拟合，见 [比赛与 Elo](evaluation.md) |
@@ -27,13 +29,19 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/
 
 ## 统计与横轴
 
-loss 和梯度点直接使用原生日志中的数值，保留来源 `metrics_logging.py` 的移动权重、日志窗口、归约和 Lookahead 观测语义，不二次平滑。loss 的 `_sum` 后缀如何变为日志字段、`_batch` 的窗口如何衰减，均由原生 logger 决定。展示层不重新计算 sums/weights，也不通过读取模型结构改写记录。
+loss 和梯度点来自原生日志，保留来源 `metrics_logging.py` 的移动权重、日志窗口和 Lookahead 观测语义，不二次平滑。loss 的 `_sum` 后缀如何变为日志字段、`_batch` 的窗口如何衰减，均由原生 logger 决定。展示层不重新计算 sums/weights，不改写原始记录。
+
+`training.png` 的 policy/value 分量展示进入总 loss 的加权贡献：保留分量已有的内部样本／目标权重，再乘 learner 的外层系数；存在中间监督头时，按主头和中间头各自的实际系数合并同名分量。策略的版本相关系数按日志中的模型版本选择，其余系数读取 learner 实际打印的值，不用当前配置或默认值推断历史设置。MuZero 的这两组面板只展示根贡献，展开各步面板继续使用原生日志的加权总 loss，不再次加权。概览不包含所有辅助项，因此不能把两组面板的和当成完整总 loss；loss 数值占比也不是梯度贡献占比。
+
+`training.png` 的梯度范数展示裁剪前的 batch-mean 尺度，即原始 `gnorm_batch` 除以训练 batch size；DDP 对应全局 batch size。它不是逐样本梯度范数的平均值，也不消除不同 batch size 的梯度噪声差异。只换算展示值，不改变反向传播、裁剪阈值或优化器。所需启动日志缺失或同轮完整重试记录的设置冲突时，概览的换算曲线警告并留空；`loss.png` 仍可展示原始 loss。
 
 训练点横轴使用每条记录的 `nsamp`，验证点使用 `nsamp_train`。不会把稀疏记录对齐到轮末样本数。只展示已完成轮次覆盖的样本范围；原始日志可能包含失败后重做的更新，同一计数可以有重复观测。计数重复或回退时断开曲线，保留记录，不声称它们都是 checkpoint 的统计。日志不足、非有限值或损坏记录会警告或留空，不补零。某轮没有新记录时不沿用上一轮的值。
 
-来源 loss 分量保留各自的系数位置，分量之和不保证等于总 loss。梯度范数是来源裁剪前的 batch-sum loss 梯度，不能解释为平均 loss 的梯度。MuZero 的普通分量是根统计，`mu_recurrent_*` 和 `mu_step_k_loss` 使用原生适配后 learner 实际输出的定义；没有这些字段时不生成替代曲线。验证值来自来源实际执行的验证过程，不代表 SWA 模型的棋力。
+`loss.png` 的来源 loss 分量保留各自的系数位置，适合观察分量自身变化，分量之和不保证等于总 loss。原始日志的梯度范数仍为裁剪前的 batch-sum loss 梯度。MuZero 的普通分量是根统计，`mu_recurrent_*` 和 `mu_step_k_loss` 使用原生适配后 learner 实际输出的定义；没有这些字段时不生成替代曲线。验证值来自来源实际执行的验证过程，不代表 SWA 模型的棋力。
 
-自对弈汇总读取原生日志中队列排空后的 `Final games finished`、`Final moves played` 等记录。一个指标没有覆盖全部尝试时，该指标留空，不能把其余尝试的子集冒充整轮。`Final moves played` 只计实际由搜索走出的手数，排除预置开局和导入起点；图中均值以此除以完成游戏数，不称为包含开局的完整局长。原有日志没有完整的 W／L／D／NR／截断汇总，胜负分布图留空并注明缺失，不读取 SGF 补齐。
+自对弈汇总读取原生日志中队列排空后的 `Final games finished`、`Final moves played` 等记录。一个指标没有覆盖全部尝试时，该指标留空，不能把其余尝试的子集冒充整轮。`Final moves played` 只计实际由搜索走出的手数，排除预置开局和导入起点；图中均值以此除以完成游戏数，不称为包含开局的完整局长。
+
+结果按已完成游戏计数，包含零训练行游戏，不按重复行、surprise 或 side 样本加权。黑胜、白胜、和棋、NR、截断互斥，合计等于完成游戏数；先判断原生 `hitTurnLimit`，即使 Go 在截断后生成计分标签，仍计入截断，不把网络 bootstrap 当成裁定。象棋的 black/white 沿用引擎先手红方／后手黑方映射。每轮五类计数除以同轮完成游戏数，展示每轮占比。任一尝试缺少任一结果类别、或计数总和不符时，整组占比留空。没有这些字段的历史日志仍显示缺失，不读取 SGF 补齐。
 
 有效根行数读取 native writer 的 `Final data rows`，含实际重复采样与 side 根；MuZero 的展开位置不重复计为根样本。日志缺失时，后续累计根行数也未知，不能从数据文件补齐该图。gatekeeper 只显示唯一一条最终比赛总结的原生得分；日志缺失或有多个不明确的结果时留空，不读取控制器续跑所需的 `result.json` 补值。
 
