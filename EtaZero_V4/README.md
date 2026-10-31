@@ -28,7 +28,7 @@ GTP `final_score` 只返回已完成且非认输对局的规则结果，未终�
 
 原生 selfplay 按 `game` 创建规则，五子棋/Hex 不使用围棋让子或数目收尾。非围棋真实终局产生规则结果；手数截断时以末状态 NN 价值衔接 TD，关闭主终局标签和结果辅助监督，并分别屏蔽不可用的 8/32 手未来局面目标。SGF 输出使用实际棋类和胜负结果。
 
-五子棋／Hex 的 [平衡开局](docs/openings.md) 已作为棋类适配接入原生 GameRunner，供 selfplay、match、gatekeeper 共用，普通网络与 MuZero 使用同一推理入口。它显式启用，保留固定 KataGomo 的候选分布与接受公式；后续 KataGo policy init 和训练采样边界不变。Web/GTP 通过可取消的原生开局建议命令接入，生成失败或取消时保留原棋局。原生 `sampleinitializations` 可检查六种棋类、四种算法初始化后的局面与四结果搜索值，`genposesfromselfplayinit` 使用来源 writer 导出包含棋类有效对称及象棋完整历史的初始化局面；`evalrandominits` 单独检查均匀长度的随机 policy 前缀及后续搜索，用法见该文档。
+五子棋／Hex 的 [平衡开局](docs/openings.md) 已作为棋类适配接入原生 GameRunner，供 selfplay、match、gatekeeper 共用，普通网络与 MuZero 使用同一推理入口。五子棋采用固定 KataGomo 的随机骨架、候选接受、默认启用概率及带既有手数补偿的 policy init，随机 evaluator 冷启动同样执行；Hex 仍显式启用。开局前缀不生成搜索训练目标。Web/GTP 通过可取消的原生开局建议命令接入，生成失败或取消时保留原棋局。原生 `sampleinitializations` 可检查六种棋类、四种算法初始化后的局面与四结果搜索值，`genposesfromselfplayinit` 使用来源 writer 导出包含棋类有效对称及象棋完整历史的初始化局面；`evalrandominits` 单独检查均匀长度的随机 policy 前缀及后续搜索，用法见该文档。
 
 五子棋/Hex 的 SGF 和 hint 起点已接入原生 selfplay。SGF 使用 `GM` 与 `RU` 标识棋类，五子棋须明确 `freestyle`、`standard` 或 `renju`；hint JSON 使用 `game`，省略表示来源 Go 格式。导入保留零气子，Renju/Hex 不自动换色，棋类不匹配会报错或按来源文件加载流程记录并跳过。终局起点不参与自对弈起点采样；来源的 hint fork 保留局面、原始手数和训练权重。`samplesgfs` 的普通采样及 value-fluctuation 加权路径均支持六棋类，后者使用普通／MuZero 原始推理并保留来源权重公式，见 [SGF 波动加权采样](docs/evalsgf.md#sgf-波动加权采样)；`viewstartposes` 与 `trystartposes` 已接入六棋类、普通／MuZero 和 PUCT／Gumbel 搜索，保留各自的筛选、加权抽样与 hint 处理，见 [起点文件诊断](docs/evalsgf.md#查看与搜索起点文件)。其余来源高级工具仍须按实际使用路径核对，不因共享了解析器而视为全部完成多棋类适配。
 
@@ -36,7 +36,7 @@ Gumbel 根在来源搜索树上使用独立配额、sequential halving 和 compl
 
 MuZero 的三组件网络、展开 loss、组件导出、原生描述器、CUDA／Eigen／OpenCL initial/recurrent 执行、跨线程组批、局面适配及原生 PUCT/Gumbel latent 树已接通，直接复用来源 `Model`、`Metrics`、二进制层 writer 和 `Search`，见 [MuZero 网络与展开训练](docs/muzero.md)。根按真实棋规过滤动作，递归只使用静态动作域；预测与 latent 一起发布，保留固定朝向，共用四结果后处理、选点和回传。完整轨迹 writer、来源 shuffle 与展开 reader 也已接入，起点采样仍使用来源逻辑，未来目标保留未入选的主线位置，side 不伪造后续，真实终局与截断分别处理。正式 learner 已连接展开 reader/loss，并保存三组件、optimizer、SWA 和 RNG/scaler 状态；支持 checkpoint 的普通/SWA 三组件导出。原生 `GameRunner` 已接入真实自对弈、重分析、side/fork 与轨迹写入；selfplay 命令已接入三组件 bundle 的发现、加载和生命周期管理；外层控制器已接通零样本初始化、逐轮 selfplay/shuffle/learner、普通/SWA 整包发布和阶段恢复。原生 JSON analysis 与 GTP 已接入全部棋类，GTP 共用三组件模型、raw-NN、棋钟、ponder 和可取消搜索；象棋协议保留完整规则历史并使用联合动作。
 
-外层 `game` 选择棋类，`algorithm` 接受 `alphazero`、`gumbel_alphazero`、`muzero` 和 `gumbel_muzero`，learner 自动选择匹配的输入/动作布局。Renju、Hex 已有真实两轮 CUDA 训练检查，Hex 还覆盖来源 `torch.compile` 与 FP16 AMP。MuZero/Gumbel MuZero 的 Go、Renju、Hex、象棋两轮 CUDA 检查覆盖初始模型、普通/SWA 发布和下一轮消费，其中 Hex 覆盖编译训练。**中国象棋的四种算法已贯通原生 selfplay、SGF/hint 起点、writer、shuffle、learner、普通／SWA 发布与逐轮调度，并通过真实 CUDA FP16 两轮检查；原生普通／MuZero 混合比赛、来源 Elo 与 gatekeeper 已接入；局部模式与 SVB 已接入；普通 PUCT／Gumbel Search 支持无 Go metadata 的次级 HumanSL，原生普通／MuZero JSON analysis 和 GTP 已接入；普通／MuZero 次级网络已接入搜索及 JSON／GTP 入口，当前边界见 [象棋](docs/xiangqi.md)。** Go 与落子棋模型的输入边界会检查棋类，不能混用。外层支持固定游戏数／epoch 数与 replay-ratio 额度调度；replay 模式按实际产样和消费记账，完整 epoch 的超额消费结转为欠额。可选 gatekeeper、累计时间预算和训练绘图已接入；独立混合模型比赛、逐局恢复与来源 Elo 已接入；历史模型发现、训练时间采样和独立 arena 已接入；多实验臂 GPU 槽位调度、共享初始权重和累计预算恢复已接入；训练后自动 Elo 与跨评估对局复用已接入，独立 match／arena 与 autoelo 跨配对评估已支持模型驻留窗口；Web 已通过原生 GTP 接通页面、历史、分析、参数与模型切换；平衡开局和按需网络诊断使用原生命令，象棋逐手动画仍待接入。来源自带的对应工具保留在原位置，不代表已由 EtaZero 控制器集成。
+外层 `game` 选择棋类，`algorithm` 接受 `alphazero`、`gumbel_alphazero`、`muzero` 和 `gumbel_muzero`，learner 自动选择匹配的输入/动作布局。Renju、Hex 已有真实两轮 CUDA 训练检查，Hex 还覆盖来源 `torch.compile` 与 FP16 AMP。MuZero/Gumbel MuZero 的 Go、Renju、Hex、象棋两轮 CUDA 检查覆盖初始模型、普通/SWA 发布和下一轮消费，其中 Hex 覆盖编译训练。**中国象棋的四种算法已贯通原生 selfplay、SGF/hint 起点、writer、shuffle、learner、普通／SWA 发布与逐轮调度，并通过真实 CUDA FP16 两轮检查；原生普通／MuZero 混合比赛、来源 Elo 与 gatekeeper 已接入；局部模式与 SVB 已接入；普通 PUCT／Gumbel Search 支持无 Go metadata 的次级 HumanSL，原生普通／MuZero JSON analysis 和 GTP 已接入；普通／MuZero 次级网络已接入搜索及 JSON／GTP 入口，当前边界见 [象棋](docs/xiangqi.md)。** Go 与落子棋模型的输入边界会检查棋类，不能混用。外层采用 V3.4 的自适应逐轮调度：iteration 0 探测产量，iteration 1 补足训练门槛，后续按近期 rows/game 规划局数、按实际新增样本额度放缩训练步数。内部 epoch、Lookahead 与 SWA 跨 iteration 延续，每轮训练后导出候选并执行可选门控。阶段恢复与计时见 [调度与恢复](docs/controller.md)。
 
 ## 构建与入口
 
@@ -88,15 +88,15 @@ bash scripts/run.sh run --config configs/checks/source_go \
   --run-dir /absolute/path/to/new-run --iterations 2
 ```
 
-`--iterations` 是累计完成轮数；也可使用 `--max-hours` 指定累计时间预算。至少指定一项，两项并用时任一达到即停止开始新轮次。时间预算在完整轮次边界检查，允许最后一轮超出预算；统计扣除实际 learner 编译时间，包含 MuZero 必需的初始化。已完成轮次可以继续增加上限，达到目标后再次运行不重复训练。计时失效和恢复口径见 [调度与恢复](docs/controller.md)。AlphaZero 首轮使用来源 random evaluator；MuZero 首轮由正式 learner 保存零样本的完整初始 checkpoint，再导出三组件模型。之后使用已接受的原生模型。工程检查也可使用 `configs/checks/source_placement`，其 `game` 可选择四种已接入的落子棋；象棋配置入口为 `configs/checks/source_xiangqi`。非围棋原生配置省略 `komiMean` 或设为 0，禁止 Go 让子。以上配置只用于工程检查，不是推荐训练配方。
+`--iterations` 是累计完成轮数；也可使用 `--max-hours` 指定累计时间预算。配置和命令行都未指定这两项时默认无限运行，直到手动中断；两项并用时任一达到即停止开始新轮次。时间预算在完整轮次边界检查，允许最后一轮超出预算；统计扣除实际 learner 编译时间，包含 MuZero 必需的初始化。已完成轮次可以继续增加上限，达到目标后再次运行不重复训练。计时失效和恢复口径见 [调度与恢复](docs/controller.md)。AlphaZero 首轮使用来源 random evaluator；MuZero 首轮由正式 learner 保存零样本的完整初始 checkpoint，再导出三组件模型。之后使用已接受的原生模型。工程检查也可使用 `configs/checks/source_placement`，其 `game` 可选择四种已接入的落子棋；象棋配置入口为 `configs/checks/source_xiangqi`。非围棋原生配置省略 `komiMean` 或设为 0，禁止 Go 让子。以上配置只用于工程检查，不是推荐训练配方。
 
-`samples_per_epoch` 沿用来源的整文件选取语义，是 epoch 的目标量；实际消费可能超过目标。控制器记录 checkpoint 中的实际样本计数，不截断来源内部文件消费来凑固定步数。 配置 `replay_ratio` 后，按近期每局行数规划产样，以完整来源 epoch 分配训练额度；不足额度的轮次只产样，不重新发布模型。冷启动、负额度和统计口径见 [调度与恢复](docs/controller.md)。
+`run.cfg` 使用 `bootstrap_games`、`train_steps` 和 `replay_ratio` 规划采样与实际训练预算，首轮数据门槛来自 shuffle 的 `min-rows`。`train.cfg` 保留优化器、SWA 和 Lookahead 参数；内部 epoch 的名义大小由基准步数与 batch size 决定，外层预算暂停时保留未完成的训练状态。具体调度、SWA 与恢复口径见 [调度与恢复](docs/controller.md)。
 
 配置目录按职责拆分：`env.cfg` 管棋类和画布，`net.cfg` 管普通／MuZero 网络，`selfplay.cfg` 按组管理算法、原生搜索参数、采样与执行，`train.cfg`、`shuffle.cfg` 使用原生命令行参数名，`run.cfg` 管外围调度。`configs/baseline/` 保存完整公共参数，`games/` 和 `algorithms/` 分别保存环境和算法差异，各运行目录显式 include。外围转换层生成原生 `selfplay.resolved.cfg`、learner 参数和 MuZero 三组件配置；引擎与 learner 核心保持原有接口。`run.sh`、`autoexp.sh`、`autoelo.sh` 提供单臂、多臂和评估入口，支持 `CONFIG_DIR`、`.local` 与 `--dry-run`。用法、字段归属及与原生同步循环的差异见 [配置与启动](docs/configuration.md)。
 
 原生 learner 的验证流程保留；当前逐轮控制器只生成训练快照，正常运行不产生验证 loss。来源验证数据划分方式和当前接入边界见 [验证数据](docs/controller.md#验证数据)。
 
-外层支持**按实际提交点恢复中断轮次**：保留已发布自对弈 shard，补足剩余产样；复用已发布 shuffle／模型目录；learner 只补足尚未提交的 epoch。单设备完整 checkpoint 保存 reader 与 learner 的 RNG/scaler。未提交的内存工作需要重做，自对弈在途状态不恢复；恢复边界、锁与计时限制见 [调度与恢复](docs/controller.md)。
+外层支持**按实际提交点恢复中断轮次**：保留已发布自对弈 shard，补足剩余游戏；复用已发布 shuffle／模型目录；learner 恢复完整 checkpoint 中的 optimizer、Lookahead fast/slow 与同步计数、SWA、文件内游标及 reader/learner RNG、scaler。最后一次保存之后的内存工作需要重做，自对弈在途状态不恢复；恢复边界、锁与计时限制见 [调度与恢复](docs/controller.md)。
 
 训练提交后默认生成 `training.png`、`loss.png` 与 `logs/performance.png`；`auto_plot=false` 可关闭自动渲染。可使用 `bash scripts/run.sh plot --run-dir /absolute/path/to/run` 独立重建。算法与性能图直接读取原生日志，保留其统计口径和输出频率；时间横轴使用明确标注的 EtaZero 调度计时，缺测保留为空；详细定义与 V3.4 的口径区别见 [训练观测与绘图](docs/observations.md)。原生 `selfplaysurprisedump` 支持六种棋类与四种算法的逐手四结果、surprise 和重分析统计，独立诊断用法见该文档。
 
