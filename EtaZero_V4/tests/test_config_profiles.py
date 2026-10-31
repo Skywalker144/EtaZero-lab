@@ -19,12 +19,13 @@ def write_profile(path, config=None):
     if config is None:
         (path / 'selfplay.cfg').write_text('maxVisits = 13\n')
         config = RunConfig(selfplay_config=str(path / 'selfplay.cfg'), canvas=5,
-            batch_size=4, games_per_round=4, samples_per_epoch=8, model_kind='b2c16-fson-mish')
+            batch_size=4, bootstrap_games=4, train_steps=2, model_kind='b2c16-fson-mish')
     (path / 'run.cfg').write_text(
         '[run]\n'
         f'selfplay_config = {shlex.quote(config.selfplay_config)}\n'
         f'game = {config.game}\nalgorithm = {config.algorithm}\n'
-        f'games_per_round = {config.games_per_round}\n'
+        f'bootstrap_games = {config.bootstrap_games}\ntrain_steps = {config.train_steps}\n'
+        f'replay_ratio = {config.replay_ratio}\nbootstrap_game_multiplier = {config.bootstrap_game_multiplier}\n'
         f'publish_weights = {config.publish_weights}\nauto_plot = false\niterations = 2\n')
     def extra_args(args):
         lines = []
@@ -40,10 +41,9 @@ def write_profile(path, config=None):
         network = 'muzero-config = network.json'
     (path / 'train.cfg').write_text(
         f'[train]\n{network}\npos-len = {config.canvas}\nbatch-size = {config.batch_size}\n'
-        f'samples-per-epoch = {config.samples_per_epoch}\nmax-epochs-this-instance = {config.epochs_per_round}\n'
         + extra_args(config.train_args) + '\n')
     (path / 'shuffle.cfg').write_text(
-        f'[shuffle]\nnum-processes = {config.shuffle_processes}\n'
+        f'[shuffle]\nnum-processes = {config.shuffle_processes}\nmin-rows = {config.min_rows}\n'
         f'approx-rows-per-out-file = {config.shuffle_rows_per_file}\nkeep-target-rows = {config.shuffle_keep_rows}\n'
         + (f'muzero-unroll-steps = {config.muzero_unroll_steps}\n' if config.is_muzero else '')
         + extra_args(config.shuffle_args) + '\n')
@@ -110,11 +110,24 @@ def test_script_launch_defaults_cli_precedence_and_no_dry_run_writes(tmp_path):
     check = shell('run.sh', 'check-config', '--config-dir', directory)
     assert check.returncode == 0, check.stderr
     assert json.loads(check.stdout)['canvas'] == 5
-    invalid = shell('run.sh', '--config-dir', directory, '--iterations', '0', '--dry-run')
-    assert invalid.returncode != 0 and 'positive cumulative' in invalid.stderr
+    invalid = shell('run.sh', '--config-dir', directory, '--iterations', '-1', '--dry-run')
+    assert invalid.returncode != 0 and 'nonnegative final iteration' in invalid.stderr
     assert default_output(ROOT / 'configs' / 'any-arm' / 'run.cfg', 'run.cfg') == ROOT / 'data' / 'any-arm'
     with pytest.raises(ValueError, match='explicit output'):
         default_output(directory, 'run.cfg')
+
+
+def test_script_launch_without_limits_defaults_to_unlimited(tmp_path):
+    directory = tmp_path / 'profile'; write_profile(directory)
+    profile = directory / 'run.cfg'
+    profile.write_text(profile.read_text().replace('iterations = 2\n', ''))
+    output = tmp_path / 'output'
+    result = shell('run.sh', '--dry-run', '--run-dir', output,
+                   env={'CONFIG_DIR': str(directory)})
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan['iterations'] is None and plan['max_hours'] is None
+    assert not output.exists()
 
 
 def test_autoexp_discovers_arms_and_uses_native_profiles(tmp_path):
@@ -166,7 +179,7 @@ def test_nested_include_paths_belong_to_declaring_files(tmp_path):
     assert actual.serializable() == expected.serializable()
     assert launch['run_dir'] == str(shared / 'output')
     # No explicit resource paths: defaults belong to the selected arm itself.
-    (shared / 'run.cfg').write_text('[run]\ngames_per_round = 4\n')
+    (shared / 'run.cfg').write_text('[run]\nbootstrap_games = 4\ntrain_steps = 2\n')
     (arm / 'run.cfg').write_text('@include ../../shared/run.cfg\n[run]\nalgorithm = muzero\ngame = renju\n')
     (arm / 'shuffle.cfg').write_bytes((shared / 'shuffle.cfg').read_bytes())
     (arm / 'selfplay.cfg').write_text('maxVisits = 3\n')
@@ -207,7 +220,7 @@ def test_included_profile_real_cpu_training_and_resume(tmp_path, algorithm):
     from test_controller_recovery import recovery_config
     shared = tmp_path / 'shared'; shared.mkdir()
     config = recovery_config(shared, algorithm)
-    config = replace(config, epochs_per_round=1, samples_per_epoch=config.samples_per_epoch + 1,
+    config = replace(config, train_steps=3,
                      train_args=tuple(a for a in config.train_args if a != '-use-fp16'))
     with Path(config.selfplay_config).open('a') as out:
         out.write('inputsUseNHWC = true\neigenUseFP16 = false\n')
@@ -224,7 +237,7 @@ def test_included_profile_real_cpu_training_and_resume(tmp_path, algorithm):
     assert result.returncode == 0, result.stdout[-6000:] + result.stderr[-6000:]
     state = json.loads((output / 'state.json').read_text())
     assert state['completed_rounds'] == 2 and state['total_samples'] > 0
-    assert json.loads((output / 'rounds/000002/result.json').read_text())['input_model'] == 'round-000001'
+    assert json.loads((output / 'rounds/000002/result.json').read_text())['input_model'].startswith('round-000001-s')
     committed = (output / 'train/checkpoint.ckpt').read_bytes()
     result = shell('run.sh', *command, env=env)
     assert result.returncode == 0, result.stderr
