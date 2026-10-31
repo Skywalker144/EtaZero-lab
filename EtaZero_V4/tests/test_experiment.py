@@ -155,7 +155,7 @@ def test_scheduler_signal_and_orphaned_stage_lease(tmp_path, termination):
             os.kill(group, signal.SIGKILL)
             with pytest.raises(RuntimeError, match='Another scheduler'):
                 experiment.run_experiment(plan, '/bin/true')
-            os.killpg(group, signal.SIGINT)
+            os.killpg(int(ready.read_text()), signal.SIGINT)
         assert not (work / 'runs/b').exists()
         with (work / '.lock').open('a') as lock:
             def acquire():
@@ -166,6 +166,11 @@ def test_scheduler_signal_and_orphaned_stage_lease(tmp_path, termination):
                     return False
             wait_until(acquire)
     finally:
+        if ready.exists():
+            try:
+                os.killpg(int(ready.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if group is not None:
             try:
                 os.killpg(group, signal.SIGKILL)
