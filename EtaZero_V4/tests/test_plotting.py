@@ -188,7 +188,7 @@ def write_history(root, *, missing=False):
         directory.mkdir(parents=True)
         valid = number < 3
         commit = {'state': {'completed_rounds': number, 'total_samples': number * 20,
-                            'elapsed_seconds': number * 10, 'timing_valid': valid},
+                            'elapsed_seconds': number * 10, 'timing_valid': valid, 'replay': {'rows': number * 10}},
                   'round_timing': {'wall_seconds': 12, 'compile_seconds': 2, 'seconds': 10 if valid else None,
                                    'timing_valid': valid}}
         (directory / 'commit.json').write_text(json.dumps(commit))
@@ -222,7 +222,8 @@ def test_history_uses_only_committed_progress_and_does_not_fill_missing_metrics(
     assert len(history) == 3
     assert history[1]['total_samples'] == 40 and history[1]['new_samples'] == 20
     assert history[1]['train'] == {}
-    assert [row['total_rows'] for row in history] == [10, None, None]
+    assert [row['total_rows'] for row in history] == [10, 20, 30]
+    assert history[1].get('selfplay', {}) == {} and history[2]['selfplay']['rows'] == 10
     assert not history[-1]['timing_valid']
 
 
@@ -232,7 +233,7 @@ def test_bootstrap_rows_and_zero_game_first_training_remain_on_history_axis(tmp_
         directory = tmp_path / 'rounds' / f'{number:06d}'
         (directory / 'logs').mkdir(parents=True)
         state = dict(completed_rounds=number, total_samples=samples, elapsed_seconds=number + 1,
-                     timing_valid=True)
+                     timing_valid=True, replay={'rows': 10})
         sampling = dict(games=2, rows=10) if number == 0 else dict(games=0, rows=0)
         (directory / 'commit.json').write_text(json.dumps(dict(state=state, sampling=sampling, round_timing={})))
     (tmp_path / 'state.json').write_text(json.dumps(state))
