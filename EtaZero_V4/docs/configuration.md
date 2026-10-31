@@ -103,8 +103,8 @@ CONFIG_DIR=configs/mz_h bash scripts/run.sh --iterations 2 --run-dir /absolute/p
 CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 ```
 
-总预算使用累计 `iterations` 或 `max_hours`，至少指定一项；CLI 优先于文件。配置位于本版本 `configs/` 时，默认输出映射到 `data/` 下相同相对路径；外部目录需显式指定输出路径。
+单臂运行可使用最终 iteration 编号 `iterations`（0 为 bootstrap）或累计 `max_hours` 限制总预算；CLI 优先于文件。配置和命令行都未指定这两项时默认无限运行，直到手动中断。配置位于本版本 `configs/` 时，默认输出映射到 `data/` 下相同相对路径；外部目录需显式指定输出路径。
 
-V4 保留外围 replay 调度：复用比例通过 `replay_ratio` 设置，单轮训练由完整 epoch 上限控制，冷启动先收集 `bootstrap_min_rows`。它动态规划后续局数、按实际消费结转额度，并允许原生 reader 重复文件；与原生同步脚本的固定局数、learner train bucket 和 `no-repeat-files` 不同。当前 baseline 使用 SWA 发布，总预算由调用方指定，详见 [调度与恢复](controller.md)。
+V4 使用 V3.4 自适应逐轮调度：`run.cfg` 的 `bootstrap_games` 控制 iteration 0 探测局数，`train_steps` 是训练步数上限，`replay_ratio` 控制新增样本额度；`bootstrap_game_multiplier` 用于 iteration 1 的补满估算。首轮训练门槛由 `shuffle.cfg` 的 `min-rows` 指定。`train.cfg` 保留来源优化器、SWA 与 Lookahead 参数，内部 epoch 样本目标由 `train_steps × batch_size` 推导。逐轮控制器拥有精确暂停与候选发布边界，详见 [调度与恢复](controller.md)。
 
 多臂 `exp.cfg` 使用 `[experiment]` 管预算、`gpus` 和共享初始化，`[arms]` 将臂名映射到配置目录；`[evaluation]` 可指定原生 match 配置和 autoelo 设置。`configs/autoexp_example/` 展示连接方法；独立 `scripts/autoelo.sh` 转发既有 autoelo 命令。评估缓存和评分口径见 [比赛与 Elo](evaluation.md)。
