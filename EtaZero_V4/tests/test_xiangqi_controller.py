@@ -137,8 +137,8 @@ def test_native_imported_full_state_reaches_real_terminal(tmp_path, kind):
 def controller_config(tmp_path, **changes):
     cfg = selfplay_config(tmp_path / 'selfplay.cfg')
     return replace(RunConfig(selfplay_config=str(cfg), game='xiangqi', model_kind='b2c16-fson-mish',
-        canvas=10, batch_size=4, games_per_round=4, samples_per_epoch=8,
-        shuffle_rows_per_file=128, shuffle_keep_rows=1024, shuffle_args=('-min-rows', '1'),
+        canvas=10, batch_size=4, bootstrap_games=4, train_steps=2,
+        shuffle_rows_per_file=128, shuffle_keep_rows=1024, min_rows=1,
         train_args=('-no-compile', '-use-fp16', '-lookahead-k', '2', '-no-longterm-checkpoints'),
         auto_plot=False), **changes)
 
@@ -223,10 +223,10 @@ def check_xiangqi_two_rounds(tmp_path, algorithm, weights, canvas, *, binary=Non
     assert any(key.endswith('.weight') and not torch.equal(value, first_weights[key])
                for key, value in checkpoint['model'].items())
     report = json.loads((directory / 'rounds/000002/result.json').read_text())
-    assert report['input_model'] == 'round-000001' and report['published_weights'] == weights
+    assert report['input_model'].startswith('round-000001-s') and report['published_weights'] == weights
     assert report['samples_before'] == first['total_samples']
     output = directory / 'selfplay/000002'
-    assert (output / 'round-000001').is_dir() and not (output / 'random').exists()
+    assert (output / report['input_model']).is_dir() and not (output / 'random').exists()
     verify_native_output(output, canvas)
     modified = (directory / 'train/checkpoint.ckpt').stat().st_mtime_ns
     assert run(directory, config, 2, binary=binary) == second
