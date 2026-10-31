@@ -80,6 +80,24 @@ def test_empty_and_reused_generations_do_not_invent_metadata(tmp_path):
     assert discover_catalog(tmp_path / 'not-yet-created') == dict(runs=[], errors=[])
 
 
+def test_bootstrap_initial_model_is_visible_before_first_training(tmp_path):
+    root = make_run(tmp_path / 'run')
+    initial = root / 'models/initial'
+    initial.mkdir()
+    (initial / 'model.bin').touch()
+    state = dict(completed_rounds=0, accepted_model='models/initial', elapsed_seconds=1,
+                 timing_valid=True, timing_basis='committed_wall_excluding_compile')
+    write(root / 'rounds/000000/commit.json', dict(state=state, candidate_model=None))
+    write(root / 'state.json', state)
+    result = run_catalog(root)
+    assert len(result['models']) == 1 and result['models'][0]['iteration'] == 0
+    assert result['models'][0]['weights'] == 'ordinary'
+    assert result['current_model'] == str(initial / 'model.bin')
+    from etazero.arena import discover_players
+    write(root / 'state.json', json.loads((root / 'rounds/000001/commit.json').read_text())['state'])
+    assert [p.iteration for p in discover_players(root)] == [0, 1]
+
+
 @pytest.mark.parametrize('seconds,valid', [(float('nan'), True), (20, False)])
 def test_missing_timing_is_not_replaced_by_zero(tmp_path, seconds, valid):
     root = make_run(tmp_path / 'run')
