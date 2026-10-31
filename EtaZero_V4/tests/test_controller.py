@@ -52,6 +52,7 @@ def test_muzero_settings_are_owned_by_the_selected_algorithm(config):
         (dict(algorithm='alphazero'), 'require a MuZero algorithm'),
         (dict(publish_weights='latest'), 'ordinary or swa'),
         (dict(shuffle_args=('-muzero-unroll', '1')), 'outer controller'),
+        (dict(shuffle_args=('-input-files-stable',)), 'outer controller'),
     ]:
         with pytest.raises(ValueError, match=message):
             replace(mu, **changed).validate()
@@ -152,7 +153,10 @@ def test_source_model_is_consumed_after_completed_round_restart(tmp_path, config
         'handicapProb = 0.5\nnumExtraBlackFixed = 2\nearlyForkGameProb = 0.5\n'
         'normalAsymmetricPlayoutProb = 0.25\nmaxAsymmetricRatio = 4\nmaxVisits = 24\n'
     )
-    config = replace(config, selfplay_config=str(selfplay_config), publish_weights=weights, train_steps=8)
+    # Keep enough rows for the first epoch and a Lookahead/SWA update. With a
+    # one-row window, the random final raw shard can have fewer than one batch.
+    config = replace(config, selfplay_config=str(selfplay_config), publish_weights=weights, train_steps=8,
+                     min_rows=2 * 8 * config.batch_size)
     run_dir = tmp_path / 'run'
     first = run(run_dir, config, 1)
     assert first['total_samples'] > 0
