@@ -51,6 +51,9 @@ def generate(config, output, model='/dev/null', **options):
 @pytest.mark.parametrize('game', GAMES)
 def test_source_writer_and_random_evaluator(tmp_path, game):
     config = configure(tmp_path / 'generate.cfg', game)
+    # This writer test asks for an empty start; Gomoku now balances by default.
+    with config.open('a') as out:
+        out.write('\nbalanceOpeningProb = 0\n')
     rows = generate(config, tmp_path / 'poses')
     assert all(row.get('game', 'go') == game and row['hintLoc'] == 'null' and row['weight'] == 1 for row in rows)
     assert all(row['initialTurnNumber'] == 0 and row['moveLocs'] == [] for row in rows)
@@ -66,7 +69,7 @@ def test_model_services_and_policy_prefix(tmp_path, game, muzero, gumbel):
 def check_model_services(tmp_path, game, muzero, gumbel, *, binary=None, fp16=True):
     model = constant_model(tmp_path / 'model', game, muzero)
     config = configure(tmp_path / 'generate.cfg', game, muzero, gumbel, False,
-        cudaUseFP16=str(fp16).lower(), initGamesWithPolicy='true', policyInitAreaProp=.1)
+        cudaUseFP16=str(fp16).lower(), initGamesWithPolicy='true', policyInitAreaProp=.1, policyInitAvgMoveNum=6)
     rows = generate(config, tmp_path / 'poses', model, binary=binary)
     assert all(row.get('game', 'go') == game for row in rows)
     assert re.search(r'NN rows: [1-9][0-9]*', (tmp_path / 'poses/log.log').read_text())
