@@ -357,7 +357,7 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
     maxBoardYSize = std::max(maxBoardYSize, pos.board.y_size);
   }
 
-  if(cfg.contains("noResultStdev")) cfg.getDouble("noResultStdev",0.0,0.0);
+  noResultStdev = cfg.contains("noResultStdev") ? cfg.getDouble("noResultStdev",0.0,1.0) : 0.0;
   numExtraBlackFixed = cfg.contains("numExtraBlackFixed") ? cfg.getInt("numExtraBlackFixed",1,18) : 0;
   if(cfg.contains("drawRandRadius")) cfg.getDouble("drawRandRadius",0.0,0.0);
   if(game != Rules::Game::GO && (handicapProb != 0 || numExtraBlackFixed != 0))
@@ -378,6 +378,8 @@ void GameInitializer::createGame(
 ) {
   //Multiple threads will be calling this, and we have some mutable state such as rand.
   lock_guard<std::mutex> lock(createGameMutex);
+  if(noResultStdev != 0.0)
+    throw StringError("GameInitializer::createGame called in a mode that doesn't support specifying noResultStdev");
   createGameSharedUnsynchronized(board,pla,hist,numExtraBlack,initialPosition,playSettings,otherGameProps,startPosSample,gameHistoryModes);
 }
 
@@ -395,8 +397,14 @@ void GameInitializer::createGame(
   lock_guard<std::mutex> lock(createGameMutex);
   createGameSharedUnsynchronized(board,pla,hist,numExtraBlack,initialPosition,playSettings,otherGameProps,startPosSample,gameHistoryModes);
 
-  if(params.noResultUtilityForWhite != 0 || params.drawEquivalentWinsForWhite != 0.5)
-    throw StringError("EtaZero result utility is W-L, with zero utility for draw and no-result");
+  if(params.drawEquivalentWinsForWhite != 0.5)
+    throw StringError("EtaZero draw utility is fixed at zero");
+  if(noResultStdev > 1e-30) {
+    double mean = params.noResultUtilityForWhite;
+    params.noResultUtilityForWhite = mean + noResultStdev * rand.nextGaussianTruncated(3.0);
+    while(params.noResultUtilityForWhite < -1.0 || params.noResultUtilityForWhite > 1.0)
+      params.noResultUtilityForWhite = mean + noResultStdev * rand.nextGaussianTruncated(3.0);
+  }
 }
 
 
