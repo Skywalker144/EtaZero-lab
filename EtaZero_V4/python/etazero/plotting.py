@@ -15,18 +15,16 @@ THEME = {
     'font.size': 10, 'axes.titlesize': 12, 'axes.titleweight': 'bold', 'grid.linewidth': .7,
 }
 
-def _series(axis, series, logarithmic=False, legend_columns=1, show_markers=None, legend=True):
+def _series(axis, series, logarithmic=False, legend_columns=1, legend=True):
     import numpy as np
     positive = True
-    for index, (label, color, x, y) in enumerate(series):
+    for label, color, x, y in series:
         values = np.asarray(y, dtype=float)
         if not np.isfinite(values).any():
             continue
         positive &= bool((values[np.isfinite(values)] > 0).all())
-        mark = (show_markers is None or show_markers[index]) and (
-            len(values) == 1 or not np.isfinite(values).all())
         axis.plot(x, values, color=color, linewidth=1.7,
-                  marker='o' if mark else None, markersize=3,
+                  marker='None',
                   linestyle='-', label=label)
     if axis.lines:
         if logarithmic and positive:
@@ -99,14 +97,15 @@ COLORS = (BLUE, RED, GREEN, ORANGE, '#c678dd', '#56b6c2', '#e5c07b')
 
 
 def run_history(root):
-    from .observations import learner_log, selfplay_metrics, gatekeeper_metrics
+    from .observations import learner_log, learner_display_scales, selfplay_metrics, gatekeeper_metrics
     root = Path(root)
     muzero = 'muzero' in json.loads((root / 'config.json').read_text())['algorithm']
     state = json.loads((root / 'state.json').read_text())
-    train = learner_log(root / 'train/metrics_train.json')
-    validation = learner_log(root / 'train/metrics_val.json')
+    train = learner_log(root / 'train/metrics_train.json') if (root / 'train/metrics_train.json').exists() or state.get('total_samples', 1) else []
+    validation = learner_log(root / 'train/metrics_val.json') if (root / 'train/metrics_val.json').exists() or state.get('total_samples', 1) else []
     history, total_rows, previous_samples = [], 0, 0
-    for number in range(1, state['completed_rounds'] + 1):
+    first = 0 if (root / 'rounds/000000').exists() else 1
+    for number in range(first, state['completed_rounds'] + 1):
         directory = root / 'rounds' / f'{number:06d}'
         commit = json.loads((directory / 'commit.json').read_text())
         current = commit['state']
@@ -116,13 +115,22 @@ def run_history(root):
                         and previous_samples < row[cursor] <= current['total_samples']]
             observed[section + '_logs'] = selected
             observed[section] = selected[-1] if selected else {}
+        if observed['train_logs']:
+            observed['display_scales'] = learner_display_scales(directory / 'logs')
         try:
             attempts = len(list((directory / 'logs').glob('selfplay*.log')))
-            observed['selfplay'] = selfplay_metrics(root / 'selfplay' / f'{number:06d}', attempts, muzero=muzero)
+            if attempts == 0 and commit.get('sampling') == {'rows': 0, 'games': 0}:
+                observed['selfplay'] = dict(rows=0, games=0)
+            else:
+                observed['selfplay'] = selfplay_metrics(root / 'selfplay' / f'{number:06d}', attempts, muzero=muzero)
             observed['rows'] = observed['selfplay'].get('rows')
         except (OSError, ValueError, KeyError) as error:
             warnings.warn(f'Round {number} native selfplay logs unavailable: {error}', RuntimeWarning)
         gatekeeper = directory / 'gatekeeper'
+        if commit.get('candidate_model'):
+            candidate_logs = gatekeeper / Path(commit['candidate_model']).name
+            if candidate_logs.is_dir():
+                gatekeeper = candidate_logs
         if gatekeeper.exists():
             try:
                 observed['gatekeeper'] = gatekeeper_metrics(gatekeeper)
@@ -158,7 +166,7 @@ def measured_losses(history):
     return ordinary + extra
 
 
-def logged_values(history, key, section='train'):
+def logged_values(history, key, section='train', *, transform=None):
     """Place every observation at its native cursor, retaining retry gaps."""
     x, y, previous = [], [], None
     cursor = 'nsamp' if section == 'train' else 'nsamp_train'
@@ -170,9 +178,29 @@ def logged_values(history, key, section='train'):
             current = record[cursor]
             if previous is not None and current <= previous:
                 x.append(current); y.append(None)
-            x.append(current); y.append(record.get(key))
+            value = record.get(key) if transform is None else transform(row, record, key)
+            x.append(current); y.append(value)
             previous = current
     return x, y
+
+
+def overview_value(row, record, key):
+    """Rescale only the overview, preserving native observations and gaps."""
+    scales = row.get('display_scales', {})
+    if not scales:
+        return None
+    if key == 'gnorm_batch':
+        value = record.get(key)
+        return None if value is None else value / scales['batch_size']
+    total = 0.
+    for prefix, weight in scales['heads'].items():
+        if weight == 0:
+            continue
+        value = record.get(prefix + key)
+        if value is None:
+            return None
+        total += weight * value
+    return total * scales['loss'][key]
 
 
 def _progress_axes(axes, history, key):
@@ -193,9 +221,9 @@ def training_figure(history, algorithm):
               'Root value losses' if muzero else 'Value losses', 'Gradient norm', 'Position NN cache hit rate']
     labels = [('Cumulative effective self-play rows', 'Share of recorded games'),
               ('Cumulative effective self-play rows', 'Moves played by search, excluding opening / initial turn'),
-              ('Cumulative training samples', 'Source component mean'),
-              ('Cumulative training samples', 'Source component mean'),
-              ('Cumulative training samples', 'Source batch-sum L2 norm, pre-clip'),
+              ('Cumulative training samples', 'Weighted loss contribution per root/sample'),
+              ('Cumulative training samples', 'Weighted loss contribution per root/sample'),
+              ('Cumulative training samples', 'Batch-mean gradient L2 norm, pre-clip'),
               ('Cumulative effective self-play rows', 'Cache hits / position requests')]
     if muzero:
         titles.append('Loss by unroll step')
@@ -204,8 +232,17 @@ def training_figure(history, algorithm):
         figure, axes = _figure(titles, labels, f'EtaZero V4 · {algorithm}',
                                figsize=(15, 16.5) if muzero else (15, 12.5))
         x = values(history, 'total_rows')
-        axes[0].text(.5, .5, 'Not recorded in native self-play logs', ha='center', va='center',
-                     color=GREY, transform=axes[0].transAxes)
+        outcomes = (('black_wins', 'Black wins', BLUE), ('white_wins', 'White wins', RED),
+                    ('draws', 'Draws', GREEN), ('no_results', 'No result', '#c678dd'),
+                    ('truncated', 'Truncated', GREY))
+        if any('black_wins' in row.get('selfplay', {}) for row in history):
+            _series(axes[0], [(label, color, x,
+                    [row['selfplay'][key] / row['selfplay']['games']
+                     if key in row.get('selfplay', {}) and row['selfplay'].get('games', 0) else np.nan
+                     for row in history]) for key, label, color in outcomes])
+        else:
+            axes[0].text(.5, .5, 'Not recorded in native self-play logs', ha='center', va='center',
+                         color=GREY, transform=axes[0].transAxes)
         _series(axes[1], [('Mean', ORANGE, x,
                           [row.get('selfplay', {}).get('moves_played', np.nan) / row['selfplay']['games']
                            if row.get('selfplay', {}).get('games', 0) else np.nan for row in history])])
@@ -216,9 +253,9 @@ def training_figure(history, algorithm):
         _progress_axes((axes[0], axes[1], axes[5]), history, 'total_rows')
         x = values(history, 'total_samples')
         for axis, metrics in ((axes[2], POLICY), (axes[3], VALUE)):
-            _series(axis, [(label, COLORS[i % len(COLORS)], *logged_values(history, key))
+            _series(axis, [(label, COLORS[i % len(COLORS)], *logged_values(history, key, transform=overview_value))
                            for i, (key, label) in enumerate(metrics)], logarithmic=True, legend_columns=2)
-        _series(axes[4], [('Network', ORANGE, *logged_values(history, 'gnorm_batch'))], logarithmic=True)
+        _series(axes[4], [('Network', ORANGE, *logged_values(history, 'gnorm_batch', transform=overview_value))], logarithmic=True)
         _progress_axes((axes[2], axes[3], axes[4]), history, 'total_samples')
         if muzero:
             measured = [row for row in history if any(key.startswith('mu_step_') for key in row.get('train', {}))]
@@ -231,7 +268,8 @@ def training_figure(history, algorithm):
                                [int(key.split('_')[2]) for key in keys], [latest['train'][key] for key in keys]))
             _series(axes[6], series, logarithmic=True)
         figure.supxlabel('Loss and gradients: native learner logs at their logged sample counts.\n'
-                            'Components retain source scaling; missing measurements are gaps; invalid times are not labelled.',
+                            'Losses include objective and head weights; MuZero policy/value panels show roots only.\n'
+                            'Gradient norms are divided by training batch size; missing measurements/settings are gaps.',
                             fontsize=10, color=GREY)
     return figure
 
@@ -252,7 +290,7 @@ def loss_figure(history):
         for axis, (key, _) in zip(axes, metrics):
             _series(axis, [('Train', BLUE, *logged_values(history, key)),
                            ('Validation', RED, *logged_values(history, key, 'validation'))],
-                    logarithmic=True, show_markers=(True, False), legend=False)
+                    logarithmic=True, legend=False)
             axis.set_xlim(0, max(1, max(x, default=0) * 1.025))
             axis.xaxis.set_major_formatter(FuncFormatter(_compact_number))
         figure.supxlabel('Train and validation: native metrics JSON logs; retries may repeat sample counts.\n'
