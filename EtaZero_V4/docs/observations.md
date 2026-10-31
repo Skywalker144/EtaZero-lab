@@ -7,7 +7,7 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run
 bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/path/to/figures
 ```
 
-**训练图的算法与性能指标严格从原生日志读取。** 原生 learner 的文本日志、metrics JSON、selfplay 和 gatekeeper 日志保留原样。外层只解析、汇总和绘制，不读取 SGF、checkpoint、NPZ 或调度结果文件为图补充统计，不修改来源日志的打印频率。selfplay 完整游戏结果由原生 writer 线程逐局汇总，随排空后的 `Final ...` 日志输出；这些统计不进入搜索热路径或训练目标。时间横轴允许使用 EtaZero 调度计时，图上明确标为 `EtaZero controller ... time`；不能把它称为 KataGo 原生计时。
+**训练图的算法与性能指标从原生日志读取，累计进度从已提交状态读取。** 原生 learner 的文本日志、metrics JSON、selfplay 和 gatekeeper 日志保留原样。外层只解析、筛选、汇总和绘制，不读取 SGF、checkpoint 或 NPZ 为图补充观测指标，不修改来源日志的打印频率。selfplay 完整游戏结果由原生 writer 线程逐局汇总，随排空后的 `Final ...` 日志输出；这些统计不进入搜索热路径或训练目标。累计根行数采用 `commit.state.replay.rows`，某轮观测缺失不会使后续轮次失去横轴。时间横轴采用 EtaZero 调度计时，图上明确标为 `EtaZero controller ... time`；不能把它称为 KataGo 原生计时。
 
 实现入口为 [plotting.py](../python/etazero/plotting.py) 与 [observations.py](../python/etazero/observations.py)。绘图仅原子替换派生图片，不改写原始日志。旧运行的外层 `metrics.json` 不作为图表数据源。
 
@@ -23,7 +23,8 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/
 | 写出根行数、原生 selfplay 运行时间 | 同一原生日志中的 `Final data rows`、`Total selfplay runtime (seconds)` |
 | gatekeeper 候选得分 | `rounds/轮次/gatekeeper/matches/尝试/log*.log` 中的 `Candidate won/lost match, score ...` |
 | 独立 Elo | 原生 match 的逐局比赛记录，调用来源 Elo 拟合，见 [比赛与 Elo](evaluation.md) |
-| 完成轮次边界、累计训练时间 | EtaZero `state.json` 与 `rounds/轮次/commit.json`，仅用于展示边界和明确标注的外层时间轴 |
+| 完成轮次边界、累计根行数、累计训练时间 | EtaZero `state.json` 与 `rounds/轮次/commit.json`，用于已提交进度和明确标注的外层时间轴 |
+| 恢复时作废的训练／验证日志区间 | learner 根据 checkpoint 保存的日志位置记录的 `train/metrics_recovery.jsonl`，只用于筛选原始记录 |
 
 来源 learner 通常每 100 个 batch 输出训练 metrics；短 epoch 没有触发输出时，图上没有该轮 loss 点。不能从 checkpoint 补一个轮末值，也不能把之前的日志值搬到当前轮末。验证日志同样只使用实际输出的记录，没有验证数据时不补值。原始文本日志和 JSON metrics 均继续由来源程序管理。
 
@@ -35,7 +36,7 @@ loss 和梯度点来自原生日志，保留来源 `metrics_logging.py` 的移�
 
 `training.png` 的梯度范数展示裁剪前的 batch-mean 尺度，即原始 `gnorm_batch` 除以训练 batch size；DDP 对应全局 batch size。它不是逐样本梯度范数的平均值，也不消除不同 batch size 的梯度噪声差异。只换算展示值，不改变反向传播、裁剪阈值或优化器。所需启动日志缺失或同轮完整重试记录的设置冲突时，概览的换算曲线警告并留空；`loss.png` 仍可展示原始 loss。
 
-训练点横轴使用每条记录的 `nsamp`，验证点使用 `nsamp_train`。不会把稀疏记录对齐到轮末样本数。只展示已完成轮次覆盖的样本范围；原始日志可能包含失败后重做的更新，同一计数可以有重复观测。计数重复或回退时断开曲线，保留记录，不声称它们都是 checkpoint 的统计。日志不足、非有限值或损坏记录会警告或留空，不补零。某轮没有新记录时不沿用上一轮的值。
+训练点横轴使用每条记录的 `nsamp`，验证点使用 `nsamp_train`。不会把稀疏记录对齐到轮末样本数。只展示已完成轮次覆盖的样本范围；恢复时，learner 记录 checkpoint 日志位置之后被回退的区间，绘图排除这些旧观测，保留原始文件。缺少字节位置的已有 checkpoint 使用保存样本数筛除超界训练记录，同样本数的旧验证记录保守留空。恢复记录损坏时对应日志留空并警告；没有恢复边界证据的历史重复或回退计数仍断开显示，不推测哪些旧点有效。日志不足、非有限值或损坏记录会警告或留空，不补零。某轮没有新记录时不沿用上一轮的值。
 
 `loss.png` 的来源 loss 分量保留各自的系数位置，适合观察分量自身变化，分量之和不保证等于总 loss。原始日志的梯度范数仍为裁剪前的 batch-sum loss 梯度。MuZero 的普通分量是根统计，`mu_recurrent_*` 和 `mu_step_k_loss` 使用原生适配后 learner 实际输出的定义；没有这些字段时不生成替代曲线。验证值来自来源实际执行的验证过程，不代表 SWA 模型的棋力。
 
@@ -43,7 +44,7 @@ loss 和梯度点来自原生日志，保留来源 `metrics_logging.py` 的移�
 
 结果按已完成游戏计数，包含零训练行游戏，不按重复行、surprise 或 side 样本加权。黑胜、白胜、和棋、NR、截断互斥，合计等于完成游戏数；先判断原生 `hitTurnLimit`，即使 Go 在截断后生成计分标签，仍计入截断，不把网络 bootstrap 当成裁定。象棋的 black/white 沿用引擎先手红方／后手黑方映射。每轮五类计数除以同轮完成游戏数，展示每轮占比。任一尝试缺少任一结果类别、或计数总和不符时，整组占比留空。没有这些字段的历史日志仍显示缺失，不读取 SGF 补齐。
 
-有效根行数读取 native writer 的 `Final data rows`，含实际重复采样与 side 根；MuZero 的展开位置不重复计为根样本。日志缺失时，后续累计根行数也未知，不能从数据文件补齐该图。gatekeeper 只显示唯一一条最终比赛总结的原生得分；日志缺失或有多个不明确的结果时留空，不读取控制器续跑所需的 `result.json` 补值。
+每轮 native writer 写出行数读取 `Final data rows`，含实际重复采样与 side 根；MuZero 的展开位置不重复计为根样本。累计根行数横轴采用调度器已提交的实际回放行数，保留中断前已经发布的 shard。某轮原生汇总缺失时，该轮胜负、搜索手数、推理计数和吞吐留空，后续轮次仍按各自的提交进度显示；不把恢复后的部分尝试冒充整轮统计。gatekeeper 只显示唯一一条最终比赛总结的原生得分；日志缺失或有多个不明确的结果时留空，不读取控制器续跑所需的 `result.json` 补值。
 
 普通网络的局面缓存命中率为原生日志 `Final NN cache hits / (Final NN cache hits + Final NN rows)`。MuZero 的 `Final NN rows` 同时包含 initial 和 recurrent，原有日志没有独立 initial 计数，因此其局面缓存命中率留空。推理平均 batch 为原生网络行数除以 batch 数，MuZero 包含两类请求；来源随机 evaluator 不增加 NN 行数和 batch 计数，不作为网络推理测量。外层只汇总这些原生计数。
 
