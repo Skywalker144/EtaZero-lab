@@ -46,6 +46,7 @@ from katago.train import load_model
 from katago.train import data_processing_pytorch
 from katago.train import trainloop_helpers
 from katago.train import checkpoint_runtime
+from katago.train import metric_history, stopping
 from katago.train import muzero_learner
 from katago.train.muzero_model import MuZeroModel, MuZeroConfig
 from katago.train.muzero_data import read_npz_muzero_data
@@ -705,6 +706,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             state_dict["train_state"] = train_state
             state_dict["last_val_metrics"] = last_val_metrics
             state_dict["config"] = muzero_learner.checkpoint_config(raw_model)
+            state_dict["metrics_log_offsets"] = metric_history.checkpoint_offsets(train_metrics_out, val_metrics_out)
             if world_size == 1 and not skip_optimizer:
                 state_dict["learner_runtime"] = checkpoint_runtime.capture_runtime(train_rng, val_rng, scaler, device)
                 state_dict["lookahead"] = dict(counter=lookahead_counter,
@@ -951,9 +953,10 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             raise ValueError("Attention penalty requested but MuZero components have no attention layers")
 
     resume_runtime = None
+    resume_log_offsets = None
     resume_lookahead = None
     def load():
-        nonlocal resume_runtime, resume_lookahead
+        nonlocal resume_runtime, resume_lookahead, resume_log_offsets
         loading_initial_checkpoint = False
         if not os.path.exists(get_checkpoint_path()) or always_initial_checkpoint:
             if not always_initial_checkpoint:
@@ -1045,6 +1048,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             return (model_config, ddp_model, raw_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
         else:
             state_dict = load_model.load_checkpoint(path_to_load_from, map_location=device)
+            if not loading_initial_checkpoint:
+                resume_log_offsets = state_dict.get('metrics_log_offsets')
             resume_lookahead = state_dict.get("lookahead")
 
             config_to_create = state_dict["config"] if "config" in state_dict else modelconfigs.config_of_name[model_kind]
@@ -1656,6 +1661,10 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         train_metrics_out = open(os.path.join(traindir,f"metrics_train_rank{rank}.json"),"a")
         val_metrics_out = open(os.path.join(traindir,f"metrics_val_rank{rank}.json"),"a")
 
+    if rank == 0:
+        metric_history.record_resume(traindir, resume_log_offsets, train_state['global_step_samples'],
+                                     train_metrics_out, val_metrics_out)
+
     # TRAIN! -----------------------------------------------------------------------------------
 
     last_longterm_checkpoint_save_time = datetime.datetime.now()
@@ -1743,14 +1752,16 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         val_metrics_out.close()
         safe_exit(barrier,0)
 
-    def pause_training():
-        logging.info('Outer sample budget reached; preserving unfinished epoch and Lookahead state')
+    def pause_training(reason='Outer sample budget reached'):
+        logging.info(reason + '; preserving unfinished epoch and Lookahead state')
         save(ddp_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
         train_metrics_out.close()
         val_metrics_out.close()
         safe_exit(barrier, 0)
 
     while True:
+        if world_size == 1 and stopping.requested():
+            pause_training('Stop requested')
         if stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples:
             break
         if max_epochs_this_instance is not None and max_epochs_this_instance >= 0 and num_epochs_this_instance >= max_epochs_this_instance:
@@ -2100,12 +2111,16 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         swa_model.update_parameters(raw_model)
 
                 cursor.update(batches=cursor['batches'] + 1, epoch_batches=batch_count_this_epoch)
+                if world_size == 1 and stopping.requested() and cursor['batches'] < subepoch_batches:
+                    pause_training('Stop requested')
                 if (stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples
                         and cursor['batches'] < subepoch_batches):
                     pause_training()
 
             logging.info("Finished training subepoch!")
             cursor.update(subepoch=i + 1, files=None, batches=0)
+            if world_size == 1 and stopping.requested() and i + 1 < sub_epochs:
+                pause_training('Stop requested')
             if (stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples
                     and i + 1 < sub_epochs):
                 pause_training()
@@ -2334,4 +2349,5 @@ if __name__ == "__main__":
         rank = 0
         world_size = 1
         barrier = None
-        main(rank, world_size, args, multi_gpu_device_ids, readpipes, writepipes, barrier)
+        with stopping.defer_signals():
+            main(rank, world_size, args, multi_gpu_device_ids, readpipes, writepipes, barrier)
