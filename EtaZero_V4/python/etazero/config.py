@@ -110,7 +110,7 @@ class RunConfig:
                            '-required-initial-checkpoint-train-steps'},
             'shuffle_args': {'-out-dir', '-out-tmp-dir', '-batch-size', '-num-processes',
                              '-approx-rows-per-out-file', '-keep-target-rows', '-dry-run-print-resource-cost',
-                             '-muzero-unroll-steps', '-min-rows'},
+                             '-muzero-unroll-steps', '-min-rows', '-input-files-stable'},
         }
         for key, forbidden in reserved.items():
             args = getattr(self, key)
