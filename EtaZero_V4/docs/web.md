@@ -23,7 +23,13 @@ bash web/webui.sh --version EtaZero_V4 --model /absolute/path/to/model.bin.gz \
 
 `--config-dir` 使用该目录的 `gtp.cfg`，与 `--config` 二选一。`--model` 可选择已发现的发布模型，也可指定目录之外的模型；后一种情况必须明确配置，页面不补造其训练代数、算法或累计时间。`--human-model` 原样交给原生 GTP，支持普通次级模型或 MuZero bundle。`--binary` 可显式使用本版本的已构建程序并跳过自动构建；`--help` 不触发构建。默认地址为 `http://127.0.0.1:8766`，关闭服务会关闭当前原生会话。
 
-独立推理配置可以从 [来源 GTP 示例](../cpp/configs/gtp_example.cfg) 复制为自己的 `gtp.cfg`，再按模型设置棋类、尺寸和算法。使用原生 `key = value` 与 `@include`，不读取 V3 的 `analysis.cfg` 或 `ANALYSIS_*` 字段。配置目录缺少 `gtp.cfg` 时，页面显示未配置，创建按钮不可用；不会隐式套用其他实验的参数。
+四种算法 baseline 和各棋类入口均提供独立 `gtp.cfg`。公共参数见 [baseline_az/gtp.cfg](../configs/baseline_az/gtp.cfg)，其他算法继承公共配置并覆盖约束，棋类入口再包含 `games/` 下的原生 GTP 片段。使用原生 `key = value` 与 `@include`，不读取带节的训练配置、V3 的 `analysis.cfg` 或 `ANALYSIS_*` 字段，也不自动读取训练配置的 `.local`。自定义运行目录仍需有对应的 `gtp.cfg`，或用 `--config`／`--config-dir` 明确指定；缺少配置时页面显示未配置，创建按钮不可用。
+
+公共推理参数参考固定 KataGo `d91ea855` 的 GTP 示例和源码默认，显式启用 optimistic policy、uncertainty、noise pruning 和 PUCT 波动调整；根对称采样保留项目约定并由棋类限制有效数量。推理预算独立于 selfplay，根随机噪声与 forced playout 关闭。`analysisWideRootNoise` 是仅供分析的候选拓宽参数，与对弈根噪声分开；Gumbel 片段将两者都关闭，保留 sequential halving，关闭 LCB 选点和访问修剪。MuZero 另外关闭真实棋盘 graph、SVB 和重复棋形奖励。
+
+Gomoku 片段参考固定 KataGomo `df152116` 的 [比赛 GTP 配置](https://github.com/hzyhhzy/KataGomo/blob/df152116e3787c75c6a3de099d261ca092b7dfc1/scripts/gomocup/default_gtp.cfg)，采用其 PUCT log 系数、NN 策略温度、SVB、搜索线程及交互行为设置；普通网络使用其缓存容量，MuZero 仍禁用缓存。棋规使用 V4 已选定的 Freestyle，保留独立 D/NR 语义及 V4 的 optimism／uncertainty，不复制 Renju/VC 专用字段或 NR 偏好。各棋类温度半衰期沿用项目约定；默认 Gumbel SH 选点不使用落子温度。这些是来源适配后的起始配置，未据此宣称棋力或设备吞吐最优。
+
+GTP 是交互推理入口，正式 `match/autoelo` 仍使用独立比赛配置。公共配置保留来源的领先时缩减搜索预算行为；需要固定计算量的比较应在比赛配置中明确关闭这类倍率。日志输出到 stderr，避免在配置目录内生成日志文件；Web 会话由传输层接收 stderr。
 
 - Go 使用对应的 `rules` 和 `defaultBoardSize`，贴目仍由原生配置或创建局面的覆盖指定。
 - 五子棋／Hex 的 `game`、`rules` 使用对应棋类名，`defaultBoardSize` 设置实际方形棋盘；象棋使用 `game=xiangqi`、`rules=xiangqi`，物理尺寸由原生默认的 9×10 决定。
