@@ -84,17 +84,24 @@ def learner_display_scales(directory):
 
 def learner_log(path):
     """Keep the source's logged normalization, cadence, precision and ordering."""
+    from katago.train.metric_history import recovery_ranges, abandoned
     try:
-        lines = path.read_text().splitlines()
-    except OSError as error:
+        lines = path.read_bytes().splitlines(keepends=True)
+        ranges = recovery_ranges(path)
+    except (OSError, ValueError, KeyError, TypeError) as error:
         warnings.warn(f'Native metric log unavailable: {path}: {error}', RuntimeWarning)
         return []
     records = []
+    offset = 0
+    cursor = 'nsamp_train' if path.name == 'metrics_val.json' else 'nsamp'
     for number, line in enumerate(lines, 1):
+        position, offset = offset, offset + len(line)
         try:
             record = json.loads(line)
             if not isinstance(record, dict):
                 raise ValueError('expected a metrics object')
+            if abandoned(position, record, ranges, cursor):
+                continue
             for key, value in record.items():
                 if type(value) in (int, float) and not math.isfinite(value):
                     warnings.warn(f'Nonfinite native metric {key} in {path}:{number}; leaving a gap', RuntimeWarning)
