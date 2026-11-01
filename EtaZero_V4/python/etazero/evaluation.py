@@ -33,6 +33,15 @@ def load_games(directory, limit=None):
     return plan, games
 
 
+def summarize_endings(reasons):
+    total = sum(reasons.values())
+    truncated = reasons['move_limit']
+    # Old archived records have no ending metadata. Do not report missing
+    # observations as zero truncations, or include unplayed games in the rate.
+    return dict(end_reasons=dict(reasons), games_truncated=truncated,
+                truncation_fraction=truncated / total if total and not reasons['unknown'] else None)
+
+
 def summarize_match(directory):
     """Rebuild the observational summary from native records, including a partial match.
 
@@ -42,17 +51,20 @@ def summarize_match(directory):
     directory = Path(directory)
     plan = json.loads((directory / 'plan.json').read_text())
     counts = Counter()
+    reasons = Counter()
     for index, pair in enumerate(plan['matchups']):
         path = directory / f'game-{index}.json'
         if path.is_file():
             game = read_game(path, index, pair)
+            reasons[game.get('end_reason', 'unknown')] += 1
             counts[game['black'], game['white'], game['outcome']] += 1
     pairs = sorted({(black, white) for black, white, _ in counts})
     rows = [dict(black=black, white=white, black_wins=counts[black, white, 'B'],
                  white_wins=counts[black, white, 'W'], draws=counts[black, white, 'D'],
                  no_results=counts[black, white, 'NR']) for black, white in pairs]
     total, completed = len(plan['matchups']), sum(counts.values())
-    result = dict(completed=completed == total, games_requested=total, games_completed=completed, results=rows)
+    result = dict(completed=completed == total, games_requested=total, games_completed=completed,
+                  results=rows, **summarize_endings(reasons))
     save_json(directory / 'summary.json', result)
     return result
 
@@ -127,6 +139,7 @@ def estimate(plan, games, *, prior_games=2., first_player_advantage=False, ancho
                 warnings.warn(f'Source LOS is undefined for {name} versus {other}', RuntimeWarning)
             los[name][other] = value if math.isfinite(value) else None
     result = {'anchor': anchor, 'games': len(games), 'outcomes': outcomes, 'prior_games': prior_games,
+              **summarize_endings(Counter(game.get('end_reason', 'unknown') for game in games)),
               'estimate_first_player_advantage': first_player_advantage, 'players': players, 'los': los,
               'elo_covariance': {p: {q: info.elo_covariance[p, q] for q in info.players} for p in info.players}}
     if first_player_advantage:

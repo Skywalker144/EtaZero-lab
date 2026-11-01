@@ -109,12 +109,14 @@ def test_outer_summary_counts_partial_games_by_color_and_preserves_raw_records(t
     partial = summarize_match(tmp_path)
     assert partial == dict(completed=False, games_requested=4, games_completed=3, results=[
         dict(black=0, white=1, black_wins=1, white_wins=0, draws=1, no_results=0),
-        dict(black=1, white=0, black_wins=0, white_wins=0, draws=0, no_results=1)])
+        dict(black=1, white=0, black_wins=0, white_wins=0, draws=0, no_results=1)],
+        end_reasons={'unknown': 3}, games_truncated=0, truncation_fraction=None)
     (tmp_path / 'game-1.json').write_text(json.dumps(games[1]))
     complete = summarize_match(tmp_path)
     assert complete == dict(completed=True, games_requested=4, games_completed=4, results=[
         dict(black=0, white=1, black_wins=1, white_wins=0, draws=1, no_results=0),
-        dict(black=1, white=0, black_wins=0, white_wins=1, draws=0, no_results=1)])
+        dict(black=1, white=0, black_wins=0, white_wins=1, draws=0, no_results=1)],
+        end_reasons={'unknown': 4}, games_truncated=0, truncation_fraction=None)
     assert json.loads((tmp_path / 'summary.json').read_text()) == complete
     assert all(p.read_bytes() == value for p, value in originals.items())
     (tmp_path / 'game-1.json').write_text(json.dumps(dict(games[1], black=0)))
