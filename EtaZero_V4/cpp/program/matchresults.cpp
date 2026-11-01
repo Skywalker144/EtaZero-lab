@@ -26,8 +26,12 @@ void publish(const std::string& path, const json& data) {
 }
 }
 
+bool MatchResults::scoresGoMoveLimit(ConfigParser& cfg) {
+  return !cfg.contains("game") || Rules::parseGame(cfg.getString("game")) == Rules::Game::GO;
+}
+
 MatchResults::MatchResults(const std::string& dir, const std::string& config, const std::string& extension,
-                           int64_t count, int64_t gamesPerPair)
+                           int64_t count, int64_t gamesPerPair, bool scoreGoMoveLimit)
   :directory(std::filesystem::absolute(dir).string()),lockHandle(-1),plan(),finished(),numGames(count),proposalGames(-1),
    extendPair(!extension.empty()),generate(false) {
   MakeDir::make(directory);
@@ -48,7 +52,7 @@ MatchResults::MatchResults(const std::string& dir, const std::string& config, co
   try {
     applyState(request({{"action","load"},{"resolved_config",config},{"extension_config",extension},
       {"working_directory",std::filesystem::current_path().string()},
-      {"num_games",numGames},{"games_per_pair",gamesPerPair}}));
+      {"num_games",numGames},{"games_per_pair",gamesPerPair},{"go_move_limit_scoring",scoreGoMoveLimit}}));
   }
   catch(...) { closeLock(); throw; }
 }

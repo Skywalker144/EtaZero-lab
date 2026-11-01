@@ -93,8 +93,10 @@ int MainCmds::match(const vector<string>& args) {
   quotaIndependent.overrideKey("numGamesTotal","");
   quotaIndependent.overrideKey("numGamesPerPair","");
   if(printConfig) {
-    cout << json({{"resolved_config",cfg.getAllKeyVals()},
-                  {"extension_config",quotaIndependent.getAllKeyVals()}}).dump() << endl;
+    json identity = {{"resolved_config",cfg.getAllKeyVals()},
+                     {"extension_config",quotaIndependent.getAllKeyVals()}};
+    if(MatchResults::scoresGoMoveLimit(cfg)) identity["go_move_limit_scoring"] = true;
+    cout << identity.dump() << endl;
     return 0;
   }
   if(extendPair && (resultsDir.empty() || cfg.getInt("numBots",1,Setup::MAX_BOT_PARAMS_FROM_CFG) != 2 ||
@@ -104,7 +106,8 @@ int MainCmds::match(const vector<string>& args) {
   if(!resultsDir.empty()) {
     results = make_unique<MatchResults>(resultsDir,cfg.getAllKeyVals(),extendPair ? quotaIndependent.getAllKeyVals() : "",
       cfg.getInt64("numGamesTotal",1,((int64_t)1)<<62),
-      cfg.contains("numGamesPerPair") ? cfg.getInt64("numGamesPerPair",1,((int64_t)1)<<62) : 0);
+      cfg.contains("numGamesPerPair") ? cfg.getInt64("numGamesPerPair",1,((int64_t)1)<<62) : 0,
+      MatchResults::scoresGoMoveLimit(cfg));
     if(results->hasPlan()) {
       size_t requested = extendPair ? (size_t)cfg.getInt64("numGamesTotal",1,((int64_t)1)<<62) : results->getPlan().at("matchups").size();
       bool allComplete = requested <= results->getPlan().at("matchups").size();
@@ -546,8 +549,14 @@ int MainCmds::match(const vector<string>& args) {
 
       bool shouldContinue = gameData != NULL;
       if(gameData != NULL) {
+        auto& hist = gameData->endHist;
+        // GameRunner discards interrupted games before returning here. For Go,
+        // use the same move-limit scoring as the self-play training targets.
+        if(!hist.isGameFinished && hist.rules.isGo() && gameData->hitTurnLimit)
+          hist.endAndScoreGameNow(hist.getRecentBoard(0));
+        const string endReason = gameData->hitTurnLimit ? "move_limit" :
+          hist.isResignation ? "resignation" : hist.isNoResult ? "no_result" : "rule_result";
         if(results || pairBatch) {
-          const auto& hist = gameData->endHist;
           if(!hist.isGameFinished)
             throw StringError("Match game reached its move limit without a rule result; not recording a rated game");
           const string outcome = hist.isNoResult ? "NR" : hist.winner == C_BLACK ? "B" : hist.winner == C_WHITE ? "W" : "D";
@@ -555,7 +564,8 @@ int MainCmds::match(const vector<string>& args) {
           WriteSgf::writeSgf(sgf,gameData->bName,gameData->wName,hist,gameData,false,true);
           hash << gameData->gameHash;
           json record = {{"game_index",gameIndex},{"black",botSpecB.botIdx},{"white",botSpecW.botIdx},
-            {"outcome",outcome},{"moves",hist.getCurrentTurnNumber()},{"game_hash",hash.str()},
+            {"outcome",outcome},{"end_reason",endReason},{"hit_turn_limit",gameData->hitTurnLimit},
+            {"moves",hist.getCurrentTurnNumber()},{"game_hash",hash.str()},
             {"black_time",gameData->bTimeUsed},{"white_time",gameData->wTimeUsed},{"sgf",sgf.str()}};
           if(pairBatch) pairBatch->record((size_t)gameIndex,std::move(record));
           else results->record((size_t)gameIndex,record);

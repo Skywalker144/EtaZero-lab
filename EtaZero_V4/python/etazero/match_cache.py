@@ -29,11 +29,14 @@ class MatchCache:
         self.cwd = request['working_directory']
         self.count = request['num_games']
         self.per_pair = request['games_per_pair']
+        self.go_move_limit_scoring = request.get('go_move_limit_scoring', False)
         self.plan = None
         self.completed = []
         path = self.directory / 'plan.json'
         if path.exists():
             self.plan = json.loads(path.read_text())
+            if self.plan.get('go_move_limit_scoring', False) != self.go_move_limit_scoring:
+                raise ValueError('Go move-limit scoring differs from the saved schedule; use a new results directory')
             key, expected = ('extension_config', self.extension) if self.extension else ('resolved_config', self.config)
             if self.plan.get(key) != expected:
                 raise ValueError('Match configuration differs from the saved schedule; use a new results directory')
@@ -70,6 +73,8 @@ class MatchCache:
             raise ValueError('Match schedule already exists; no new pairing proposal was requested')
         if self.plan is None:
             plan = dict(proposed, resolved_config=self.config, working_directory=self.cwd)
+            if self.go_move_limit_scoring:
+                plan['go_move_limit_scoring'] = True
             if self.extension:
                 plan['extension_config'] = self.extension
             if self.per_pair > 0:

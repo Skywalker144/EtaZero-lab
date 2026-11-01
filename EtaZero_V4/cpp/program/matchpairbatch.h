@@ -61,7 +61,8 @@ class MatchPairBatch {
       extension.overrideKey("numGamesTotal","");
       extension.overrideKey("numGamesPerPair","");
       job.results = std::make_unique<MatchResults>(input[i].at("results_dir").get<std::string>(),
-                          job.config->getAllKeyVals(),extension.getAllKeyVals(),job.count,job.count);
+                          job.config->getAllKeyVals(),extension.getAllKeyVals(),job.count,job.count,
+                          MatchResults::scoresGoMoveLimit(*job.config));
       job.hasWork = true;
       if(job.results->hasPlan()) {
         job.hasWork = (size_t)job.count > job.results->getPlan().at("matchups").size();

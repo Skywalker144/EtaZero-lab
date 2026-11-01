@@ -6,6 +6,7 @@
 
 class MatchPairer;
 class Logger;
+class ConfigParser;
 
 // Native output sink and in-memory view of the outer controller's schedule.
 // The writer keeps its directory lock even if that controller exits mid-game.
@@ -21,8 +22,9 @@ class MatchResults {
   nlohmann::json request(nlohmann::json message) const;
   void applyState(const nlohmann::json& state);
  public:
+  static bool scoresGoMoveLimit(ConfigParser& cfg);
   MatchResults(const std::string& directory, const std::string& resolvedConfig, const std::string& extensionConfig,
-               int64_t numGames, int64_t gamesPerPair);
+               int64_t numGames, int64_t gamesPerPair, bool scoreGoMoveLimit);
   ~MatchResults();
   MatchResults(const MatchResults&) = delete;
   MatchResults& operator=(const MatchResults&) = delete;

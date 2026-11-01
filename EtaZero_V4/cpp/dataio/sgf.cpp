@@ -2251,6 +2251,8 @@ void WriteSgf::writeSgf(
     commentOut << "startTurnIdx=" << startTurnIdx;
     commentOut << ",initTurnNum=" << gameData->startHist.initialTurnNumber;
     commentOut << ",gameHash=" << gameData->gameHash;
+    if(gameData->hitTurnLimit && endHist.rules.isGo() && endHist.isGameFinished && !gameData->hasFullData)
+      commentOut << ",endReason=move_limit,adjudication=training_score";
 
     static_assert(FinishedGameData::NUM_MODES == 8, "");
     if(gameData->mode == FinishedGameData::MODE_NORMAL)
