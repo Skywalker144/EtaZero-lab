@@ -4,7 +4,7 @@
 
 阶段恢复要求运行目录已经提交初始 `state.json`。创建运行记录时、尚未写出初始状态就中断的目录，以及任意其他非空目录，当前不会被自动接管；此时尚未开始自对弈或训练。
 
-每轮固定一个输入模型，依次执行原生 selfplay、来源 shuffle、来源 learner、模型导出和可选 gatekeeper。AlphaZero 首轮使用来源 random evaluator；MuZero 首轮先由正式 learner 保存零样本初始 checkpoint，再导出三组件模型。后续轮次只消费已接受的模型；普通权重／SWA 选择不改变 learner 恢复的训练权重。
+每轮固定一个输入模型，依次执行原生 selfplay、来源 shuffle、来源 learner、模型导出和可选 gatekeeper。未提供初始权重时，AlphaZero 与 MuZero 首轮均使用 random evaluator。MuZero 在 CPU 生成随机策略与价值，根按真实合法动作过滤，递归只使用静态动作域，不加载三组件模型；iteration 0 和首次训练前的补样使用该路径。后续轮次只消费已接受的模型；普通权重／SWA 选择不改变 learner 恢复的训练权重。
 
 同步控制器在持有运行目录锁、selfplay 正常退出且 writer 排空后，以 `-input-files-stable` 调用 shuffle，省去来源工具为并发写入保留的 3 秒文件系统等待。独立 shuffle 默认仍等待；只有输入已停止写入且已发布文件不再修改时才可指定此选项。窗口选择、随机打散、压缩和训练快照发布流程不变。
 
@@ -16,7 +16,7 @@
 
 新运行可使用 `run --weights /absolute/path/to/checkpoint.ckpt`。文件必须来自匹配网络配置的来源 learner；只加载普通模型权重和模型 buffers，不加载其中的 optimizer、SWA、训练计数、运行指标、reader 或 RNG 状态。权重保留为运行内的 `initial/weights.ckpt`，原始路径记录在 `source.json`。来源 learner 的 `-initial-weights` 入口在构造独立 optimizer、SWA 和初始化范数基准之前加载权重。初始化范数基准据此使用本臂实际采用的权重。
 
-显式提供初始权重时，AZ 与 MuZero 都由正式 learner 保存本臂零样本完整 checkpoint，再导出 `models/initial`，首轮 selfplay 使用该模型。初始化与初始导出的耗时计入该臂首轮。省略权重时，AZ 保留来源 random evaluator 冷启动，MuZero 保留必需的三组件初始化。
+显式提供初始权重时，AZ 与 MuZero 都由正式 learner 保存本臂零样本完整 checkpoint，再导出 `models/initial`，首轮 selfplay 使用该模型。初始化与初始导出的耗时计入该臂首轮。省略权重时，AZ 与 MuZero 均使用 random evaluator 冷启动，learner 在攒足数据后首次训练时才初始化网络。
 
 续训不再传 `--weights`，始终恢复本臂的完整 learner checkpoint；原始外部权重文件可以不再存在。初始模型与训练 checkpoint 分开保留，后续训练不会覆盖初始化证据。来源 `-initial-checkpoint` 仍保留它自身载入训练状态的语义，不用于实验臂的仅权重共享。
 
@@ -83,7 +83,7 @@ SWA 周期、平滑尺度与 Lookahead 参数仍由 `train.cfg` 指定；外层�
 
 | 阶段 | 已提交状态 | 再次运行 |
 |---|---|---|
-| MuZero 或显式权重初始化 | 零样本完整 checkpoint 与 `initial/checkpoint.ckpt` | 复用原始初始化，不重新初始化已经开始的训练。 |
+| 显式权重初始化 | 零样本完整 checkpoint 与 `initial/checkpoint.ckpt` | 复用原始初始化，不重新初始化已经开始的训练。 |
 | 自对弈 | 原生 writer 原子发布的 NPZ；正常退出后、全部 writer 排空后的完成回执 | 成功回执确认本次额度；随后由 shuffle 判断是否达到行数门槛。没有成功回执则统计已发布数据中的唯一 game hash，只补足原计划的剩余游戏数。 |
 | shuffle | 完整候选目录原子改名为 `shuffleddata/轮次` | 直接复用已发布快照；未发布目录移到该轮 `discarded/`，从原始数据重新 shuffle。 |
 | learner | 内部 epoch、外层预算或正常停止边界的完整 checkpoint | 恢复 fast/slow、optimizer、SWA 和文件内游标，继续到本轮已记录的绝对样本目标；不重复消费已保存的额度。 |
@@ -107,7 +107,7 @@ checkpoint 同时保存原生训练／验证指标日志的字节位置。恢复
 
 Ctrl+C／SIGTERM 请求停止后，控制器向自己持有的阶段进程组发送停止信号并等待退出。selfplay 排空已完成对局的 writer 队列并写出最终统计；learner 在上述安全边界保存；正在进程内执行的导出先完成调用。控制器结算本次墙钟、读取编译回执后才释放锁，不再开始下一阶段。启动脚本在当前 shell 激活环境后直接执行控制器，使终端中断能等待完整收尾。
 
-计时以控制器实际观测的逐轮单调墙钟为基础，包含 selfplay、shuffle、learner、导出、gatekeeper 及这些阶段间的编排开销。MuZero 必需的零样本初始化和初始导出计入首轮；模型加载、数据等待、来源程序内部等待也计入。运行目录与源码快照的创建、两次调用之间的暂停、轮次计时结算之后的提交文件写入和观测报告不计入。阶段耗时供诊断，不能相加替代完整轮次墙钟。
+计时以控制器实际观测的逐轮单调墙钟为基础，包含 selfplay、shuffle、learner、导出、gatekeeper 及这些阶段间的编排开销。显式初始权重的零样本初始化和初始导出计入首轮；模型加载、数据等待、来源程序内部等待也计入。运行目录与源码快照的创建、两次调用之间的暂停、轮次计时结算之后的提交文件写入和观测报告不计入。阶段耗时供诊断，不能相加替代完整轮次墙钟。
 
 learner 通过 [timed_learner.py](../python/etazero/timed_learner.py) 在原进程执行来源入口，记录 PyTorch 的非重叠外层编译墙钟差值：包含 forward 与 lazy backward 编译、后续重编译和验证图；Muon 自身的编译同样统计，即使网络使用 `-no-compile`。不累加重叠的 backend/Triton 子阶段，不额外预热、更新参数或同步设备。每次 learner／初始化尝试的回执保存在该轮 `timing/`，控制器从轮次墙钟中扣除编译时间，得到有效累计 `elapsed_seconds`。缓存加载仍按 PyTorch 编译计数器报告的时间计入扣除量，不将其解释成纯编译器 CPU 工作量。
 
