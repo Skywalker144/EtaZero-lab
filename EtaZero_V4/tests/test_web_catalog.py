@@ -127,3 +127,17 @@ def test_bad_run_is_visible_and_does_not_hide_other_runs(tmp_path, failure):
     assert [run['id'] for run in catalog['runs']] == [str(good)]
     assert len(catalog['errors']) == 1 and catalog['errors'][0]['run'] == str(bad)
     assert catalog['errors'][0]['error']
+
+
+def test_trained_board_sizes_use_saved_sampling_weights(tmp_path):
+    root = make_run(tmp_path / 'run', game='hex')
+    config = json.loads((root / 'config.json').read_text())
+    config['native_selfplay'] = 'bSizes = 5,3,4,7\nbSizeRelProbs = 2,0,1,1\n'
+    write(root / 'config.json', config)
+    assert run_catalog(root)['trained_board_sizes'] == [4, 5]
+    config['native_selfplay'] = 'bSizesXY = 3-3,5-4,5-5\nbSizeRelProbs = 1,1,0\n'
+    write(root / 'config.json', config)
+    assert run_catalog(root)['trained_board_sizes'] == [3]
+    config['native_selfplay'] = 'bSizes = 3,5\nbSizeRelProbs = 1\n'
+    write(root / 'config.json', config)
+    assert run_catalog(root)['trained_board_sizes'] is None
