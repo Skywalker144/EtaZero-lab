@@ -11,9 +11,8 @@ Settings Settings::load(ConfigParser& cfg, bool forSelfPlay) {
   Settings s;
   const auto game = cfg.contains("game") ? Rules::parseGame(cfg.getString("game")) : Rules::Game::GO;
   const bool hex = game == Rules::Game::HEX;
-  const bool gomoku = Rules::forGame(game).isPlacement() && !hex;
   s.probability = cfg.contains("balanceOpeningProb") ? cfg.getDouble("balanceOpeningProb",0.0,1.0) :
-    (gomoku ? (forSelfPlay ? 0.99 : 1.0) : 0.0);
+    (Rules::forGame(game).isPlacement() ? (forSelfPlay ? 0.99 : 1.0) : 0.0);
   if(s.probability > 0.0 && !Rules::forGame(game).isPlacement())
     throw StringError("balanceOpeningProb is supported only for Gomoku and Hex");
   s.dropPow = cfg.contains("balanceOpeningDropPow") ?
