@@ -12,6 +12,7 @@ V4 按环境、网络、搜索、自对弈、训练和运行调度拆分配置�
 | `train.cfg` / `[train]` | 原生 learner 选项名，省略命令行开头的 `-`。 |
 | `shuffle.cfg` / `[shuffle]` | 原生 shuffler 选项名，省略命令行开头的 `-`。 |
 | `run.cfg` / `[run]` | 产样／训练额度、模型发布、绘图、总预算和输出路径。 |
+| `gtp.cfg` | 每个训练配置目录必备的原生 GTP／Web 推理配置；不带分组标题，独立于训练与比赛参数。 |
 | `configs/match/common.cfg`、棋类 `.cfg` | 原生比赛公共参数与四种棋类的评估条件，不带分组标题；任务另行提供模型、配对及局数。 |
 
 `configs/baseline_az/` 完整列出采用的公共参数与 AlphaZero 配方，其余算法 baseline 显式继承公共文件，再定义算法差异。四个 baseline 均使用围棋环境，也可直接运行。各棋类目录继承对应算法 baseline，只覆盖环境与该配方的差异；目录名称不参与算法判断，实际选择来自 `env.cfg` 和 `selfplay.cfg`。
@@ -130,3 +131,30 @@ CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 V4 使用 V3.4 自适应逐轮调度：`run.cfg` 的 `bootstrap_games` 控制 iteration 0 探测局数，`train_steps` 是训练步数上限，`replay_ratio` 控制新增样本额度；`bootstrap_game_multiplier` 用于 iteration 1 的补满估算。首轮训练门槛由 `shuffle.cfg` 的 `min-rows` 指定。`train.cfg` 保留来源优化器、SWA 与 Lookahead 参数，内部 epoch 样本目标由 `train_steps × batch_size` 推导。逐轮控制器拥有精确暂停与候选发布边界，详见 [调度与恢复](controller.md)。
 
 多臂 `exp.cfg` 使用 `[experiment]` 管预算、`gpus` 和共享初始化，`[arms]` 将臂名映射到配置目录；`[evaluation]` 可指定原生 match 配置和 autoelo 设置。`configs/autoexp_example/` 展示连接方法；独立 `scripts/autoelo.sh` 转发既有 autoelo 命令。评估缓存和评分口径见 [比赛与 Elo](evaluation.md)。
+
+## 新建实验配置目录
+
+每个实验臂都要提供完整的训练入口和 `gtp.cfg`，即使暂时只训练、不使用 Web，也要配齐。推荐按以下结构组织：
+
+```text
+configs/<experiment>/
+├── exp.cfg
+├── match.cfg
+├── <arm_a>/
+│   ├── env.cfg
+│   ├── net.cfg
+│   ├── selfplay.cfg
+│   ├── train.cfg
+│   ├── shuffle.cfg
+│   ├── run.cfg
+│   └── gtp.cfg
+└── <arm_b>/
+    └── ...（同样包含上述七个文件）
+```
+
+1. 选择算法与棋类匹配的现有入口，各文件显式 include 对应文件，再覆盖实验需要改变的参数。例如 `configs/<experiment>/<arm>/env.cfg` 可写 `@include ../../az_gomoku/env.cfg`；网络、搜索、训练、shuffle 和调度文件按同样方式继承。只覆盖实验变量，共有条件保留在公共入口。
+2. 在同一个实验臂目录创建 `gtp.cfg`，例如写 `@include ../../az_gomoku/gtp.cfg`。必须匹配该臂的棋类、规则和普通／MuZero、PUCT／Gumbel 搜索组合；自定义棋规或推理设置在 include 后用原生键覆盖。不要 include 带节的训练配置，也不要把训练访问预算自动复制到推理配置。原生字段与约束见 [Web 与原生会话](web.md#启动与原生配置)。
+3. 在 `exp.cfg` 的 `[arms]` 中将臂名映射到配置目录；`[experiment]` 设置预算、GPU 槽位和共享初始化，需评估时由 `[evaluation]` 引用独立的 `match.cfg`。比赛文件继承相应棋类的 `configs/match/` 配置，再覆盖实验指定的评估条件。实验根目录只做调度，不需要放一个供所有臂共用的 `gtp.cfg`。
+4. 启动前使用 `bash scripts/run.sh check-config --config configs/<experiment>/<arm>` 检查各臂训练配置，再运行 `CONFIG_DIR=configs/<experiment> bash scripts/autoexp.sh --dry-run` 审查调度计划。训练检查不解析 `gtp.cfg`；GTP 配置由原生引擎在加载对应模型时检查。
+
+默认输出位于 `data/<experiment>/<arm>/`，Web 可按相对路径找到该臂的 `gtp.cfg`。单臂实验直接使用包含上述七个文件的目录即可，不需要 `exp.cfg`；多臂也可引用其他已有的完整配置目录。独立原生接口检查及 `games/` 等共享配置片段不属于完整训练入口。
