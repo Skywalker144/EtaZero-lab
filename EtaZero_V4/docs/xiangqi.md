@@ -56,7 +56,7 @@ fork 重放从 `BoardHistory::copyToInitial()` 恢复完整起始快照，保留
 
 ## selfplay 命令与逐轮调度
 
-原生 `selfplay` 使用 `game=xiangqi`、`bSizesXY=9-10`，不能同时配置 `bSizes` 或 `allowRectangleProb`。写入画布 `dataBoardLen` 至少为 10，输入版本缺省为 9，显式选择其他输入族会拒绝。普通模型目录为空时使用来源 random evaluator；真实模型必须为版本 19。`useMuZero=true` 则要求已发布的三组件 bundle，画布须等于 `dataBoardLen`，不使用随机 evaluator 代替 latent 模型。来源模型发现、组批、manager、写入线程和停止流程保持同一调用链。普通模型默认推理缓冲区按实际 9×10 棋盘分配，MuZero 使用组件画布，写入画布均为方形；缓冲区选项沿用原生配置。
+原生 `selfplay` 使用 `game=xiangqi`、`bSizesXY=9-10`，不能同时配置 `bSizes` 或 `allowRectangleProb`。写入画布 `dataBoardLen` 至少为 10，输入版本缺省为 9，显式选择其他输入族会拒绝。普通模型目录为空时使用来源 random evaluator；真实模型必须为版本 19。`useMuZero=true` 且模型目录为空时使用 MuZero 随机 evaluator，保留完整联合动作域和 latent 搜索语义，不执行真实 NN 推理；已有三组件 bundle 时使用真实模型，其画布须等于 `dataBoardLen`。来源模型发现、组批、manager、写入线程和停止流程保持同一调用链。普通模型默认推理缓冲区按实际 9×10 棋盘分配，MuZero 使用组件画布，写入画布均为方形；缓冲区选项沿用原生配置。
 
 外层配置仍使用 [配置目录](configuration.md) 的 `run.cfg`、`selfplay.cfg`、`train.cfg` 和 `shuffle.cfg`。`[run]` 选择 `game=xiangqi` 和四种算法之一，`train.cfg` 的 `pos-len` 至少为 10；控制器以该画布设置原生 writer。普通网络使用 `model-kind`，MuZero 使用 `muzero-config` 和展开步数，零样本初始化与后续训练都由正式 learner 执行。现有 `run.sh`、`autoexp.sh`、共享初始化、普通／SWA 发布和轮次恢复使用同一流程。普通网络支持原生 `subtreeValueBiasFactor`、`avoidRepeatedPatternUtility` 和外部模式表；MuZero 的这些真实棋盘选项需关闭，同时关闭真实棋盘 graph，Gumbel 组合限制见 [Gumbel](gumbel.md)。
 
