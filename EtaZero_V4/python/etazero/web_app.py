@@ -15,6 +15,7 @@ class Conflict(ValueError):
 ACTION_FIELDS = {
     'new': {'model', 'size', 'rules', 'komi', 'fen', 'sgf', 'sgf_turn', 'opening', 'parameters', 'human', 'mode'},
     'configure': {'parameters', 'human', 'mode'},
+    'apply': {'model', 'size', 'rules', 'parameters', 'human', 'mode', 'budget_type', 'budget_value', 'ponder', 'opening'},
     'play': {'move'}, 'branch': {'turn'},
     'diagnose': {'source', 'symmetry', 'optimism'},
     'refresh': set(), 'undo': set(), 'step': set(), 'retry': set(), 'analyze': set(), 'stop': set(),
@@ -37,7 +38,7 @@ class App:
                           busy=False, phase='idle', game=None, history=[], resignation=None,
                           analysis=None, raw_nn=None, opening=None, parameters=None, models=[], config=None, selected_model=None,
                           human='B', mode='play', error=None, analysis_enabled=False, stop_requested=False,
-                          connected=False)
+                          connected=False, ui_setup=None)
 
     def catalog(self):
         from katago.game.xiangqi import MOVES
@@ -85,19 +86,26 @@ class App:
                 raise Conflict('The game has changed; wait for its current state')
             if operation not in ('new', 'refresh') and payload.get('game_id') != self.state['game_id']:
                 raise Conflict('This action belongs to another game')
-            if operation not in ('new', 'refresh') and self.session is not None and not self.state['connected']:
+            if operation not in ('new', 'apply', 'refresh') and self.session is not None and not self.state['connected']:
                 raise Conflict('The native process disconnected; create a new game')
             payload = deepcopy(payload)
             game = self.state['game']
             finished = game and (game['isGameFinished'] or self.state['resignation'] is not None)
-            if operation in ('new', 'configure'):
+            if operation in ('new', 'configure', 'apply'):
                 payload.setdefault('human', self.state['human'])
                 payload.setdefault('mode', self.state['mode'])
                 if payload['human'] not in ('B', 'W') or payload['mode'] not in ('manual', 'play'):
                     raise ValueError('Choose B/W and manual/play mode')
                 if 'parameters' in payload and not isinstance(payload['parameters'], dict):
                     raise ValueError('parameters must be a native parameter object')
-            if operation == 'new':
+            if operation in ('new', 'apply'):
+                if operation == 'apply':
+                    if payload.get('budget_type') not in ('visits', 'total', 'time') or type(payload.get('budget_value')) not in (int, float) or type(payload.get('ponder')) is not bool:
+                        raise ValueError('Invalid workbench budget settings')
+                    if payload.get('size') is not None and (not isinstance(payload['size'], list) or len(payload['size']) != 2 or any(type(n) is not int for n in payload['size'])):
+                        raise ValueError('size must contain two integer board dimensions')
+                    if payload.get('rules') is not None and not isinstance(payload['rules'], str):
+                        raise ValueError('rules must be a native rule name')
                 if 'opening' in payload:
                     if not isinstance(payload['opening'], dict):
                         raise ValueError('opening must be a native opening options object')
@@ -152,7 +160,7 @@ class App:
             if self.state['phase'] == 'analyzing' and self.session is not None:
                 self.session.stop()
             self.cancelled = Event()
-            phase = ('loading' if operation in ('new', 'refresh') else
+            phase = ('loading' if operation in ('new', 'apply', 'refresh') else
                      'thinking' if operation in ('step', 'retry') else
                      'diagnosing' if operation == 'diagnose' else
                      'analyzing' if operation == 'analyze' else 'working')
@@ -193,16 +201,83 @@ class App:
                     self.preparing = None
                     candidate = None
                     self._publish(token=token, **self.session.snapshot(), game_id=uuid4().hex,
-                                  selected_model=payload['_model'], human=payload['human'], mode=payload['mode'])
+                                  selected_model=payload['_model'], human=payload['human'], mode=payload['mode'], ui_setup=None)
                 if previous is not None:
                     previous.close()
+            elif operation == 'apply':
+                previous_setup = self.state['ui_setup']
+                game = self.state['game']
+                size = payload.get('size')
+                rules = payload.get('rules')
+                old_rule = (previous_setup or {}).get('rules')
+                if old_rule is None and game:
+                    old_rule = game['game'] if game['game'] != 'go' else 'go'
+                requested_rule = rules or (game['game'] if game and game['game'] != 'go' else 'go')
+                reset = (game is None or not self.state['connected'] or 'opening' in payload or
+                         (size is not None and size != [game['boardXSize'], game['boardYSize']]) or
+                         (old_rule is not None and requested_rule != old_rule))
+                model_changed = self.state['selected_model'] is None or self.state['selected_model']['id'] != payload['_model']['id']
+                if reset or model_changed:
+                    options = {'parameters': payload.get('parameters', {})}
+                    if not reset:
+                        # Export the native history, not only the board: ko and
+                        # Xiangqi repetition rules depend on the whole record.
+                        options['sgf'] = self.session.engine.command('printsgf').body
+                    else:
+                        if size is not None:
+                            options['size'] = size
+                        if rules is not None:
+                            options['rules'] = rules
+                    candidate = Session(payload['_config'], payload['_model']['path'], binary=self.binary,
+                                        human_model=self.human_model, **options)
+                    if not reset:
+                        old, new = self.session.snapshot(), candidate.snapshot()
+                        def comparable(value):
+                            return {k: v for k, v in value.items() if k != 'analysisPerspective'}
+                        if (comparable(old['game']) != comparable(new['game']) or
+                            [comparable(row) for row in old['history']] != [comparable(row) for row in new['history']]):
+                            raise ValueError('The selected model cannot restore the current game and history')
+                        candidate.opening = old['opening']
+                        candidate.resignation = old['resignation']
+                    if 'opening' in payload:
+                        with self.condition:
+                            if self.closed or token.is_set():
+                                return
+                            self.preparing = candidate
+                            self._publish(token=token, phase='opening')
+                        if not candidate.generate_opening(payload['opening'], cancelled=token):
+                            return
+                    with self.condition:
+                        if self.closed or token.is_set():
+                            return
+                        previous, self.session = self.session, candidate
+                        self.preparing = None
+                        candidate = None
+                    if previous is not None:
+                        previous.close()
+                else:
+                    def same_parameter(key, value):
+                        actual = self.session.parameters.get(key)
+                        return str(actual).lower() == str(value).lower() if type(value) is bool else actual == value
+                    parameters = payload.get('parameters', {})
+                    if any(not same_parameter(key, value) for key, value in parameters.items()):
+                        self.session.configure(parameters)
+                ui_setup = {key: payload.get(key) for key in ('model', 'size', 'rules', 'mode', 'human', 'budget_type', 'budget_value', 'ponder')}
+                self._publish(token=token, **self.session.snapshot(),
+                              game_id=uuid4().hex if reset or model_changed else self.state['game_id'],
+                              selected_model=payload['_model'], human=payload['human'], mode=payload['mode'],
+                              ui_setup=ui_setup)
             elif operation == 'play':
                 self.session.play(payload['move'])
                 self._publish(token=token, **self.session.snapshot())
             elif operation in ('undo', 'branch'):
                 self.session.undo(payload['_count'])
-                self._publish(token=token, **self.session.snapshot(),
-                              **(dict(mode='manual') if operation == 'branch' else {}))
+                extra = {}
+                if operation == 'branch':
+                    extra['mode'] = 'manual'
+                    if self.state['ui_setup'] is not None:
+                        extra['ui_setup'] = dict(self.state['ui_setup'], mode='manual')
+                self._publish(token=token, **self.session.snapshot(), **extra)
             elif operation == 'configure':
                 if 'parameters' in payload:
                     self.session.configure(payload['parameters'])
@@ -220,7 +295,7 @@ class App:
 
             if token.is_set():
                 return
-            if (operation in ('new', 'play', 'retry') and self.state['mode'] == 'play' and
+            if (operation in ('new', 'apply', 'play', 'retry') and self.state['mode'] == 'play' and
                     not self.session.finished and self.session.state['currentPlayer'] != self.state['human']):
                 self._publish(token=token, phase='thinking')
                 self._search(token, play=True)
@@ -229,6 +304,9 @@ class App:
             if self.session is not None and self.state['analysis_enabled'] and not self.session.finished:
                 self._publish(token=token, busy=False, phase='analyzing')
                 self._search(token, continuous=True)
+            elif (self.session is not None and self.state['mode'] == 'play' and
+                  self.session.state['currentPlayer'] == self.state['human'] and not self.session.finished):
+                self.session.start_pondering()
         except Exception as error:
             known = self.session.snapshot() if self.session is not None else {}
             self._publish(token=token, **known, error=str(error), phase='error', analysis_enabled=False)
