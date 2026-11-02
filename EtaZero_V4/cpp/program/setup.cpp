@@ -452,10 +452,10 @@ unique_ptr<SelfplayModel> Setup::initializeMuZeroSelfplayModel(
   const vector<int>* gpuIdxByServerThreadOverride, bool disableFP16
 ) {
   const int canvas = model->posLen();
-  auto options = readEvaluatorOptions(directory,modelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
+  auto options = readEvaluatorOptions(model->isRandom() ? "/dev/null" : directory,modelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
     canvas,canvas,maxBatchSizeRequest,defaultRequireExactNNLen,disableFP16,setupFor);
   if(gpuIdxByServerThreadOverride) options.gpuIdxByServerThread = *gpuIdxByServerThreadOverride;
-  if(options.debugSkipNeuralNet)
+  if(options.debugSkipNeuralNet && !model->isRandom())
     throw StringError("MuZero needs a real three-component model; debugSkipNeuralNet is not supported");
   if(options.nnXLen != canvas || options.nnYLen != canvas)
     throw StringError("MuZero NN buffer dimensions must match the model.json canvas");
@@ -463,6 +463,13 @@ unique_ptr<SelfplayModel> Setup::initializeMuZeroSelfplayModel(
   gameRules.game = Rules::parseGame(model->game());
   if(options.forcedSymmetry >= 0 && !gameRules.allowsSymmetry(options.forcedSymmetry))
     throw StringError("nnForcedSymmetry is invalid for the MuZero model game");
+  if(model->isRandom()) {
+    logger.write("MuZero random evaluator: no neural net inference");
+    auto position = make_unique<MuZero::PositionEvaluator>(std::move(model),options.requireExactNNLen,
+      options.forcedSymmetry >= 0 ? false : options.nnRandomize,options.defaultSymmetry,
+      options.nnCacheSizePowerOfTwo,options.nnMutexPoolSizePowerOfTwo,&logger,options.nnRandSeed);
+    return make_unique<SelfplayModel>(name,directory,nullptr,std::move(position));
+  }
   // homeDataDirOverride is intentionally unused by the source CUDA backend too.
   auto batcher = make_unique<MuZero::Batcher>(std::move(model),options.nnMaxBatchSize,
     options.gpuIdxByServerThread,options.useFP16Mode,cfg,&logger,options.inputsUseNHWC);
