@@ -37,6 +37,36 @@ def _series(axis, series, logarithmic=False, legend_columns=1, legend=True):
                   color='#8a93a3', transform=axis.transAxes)
 
 
+def _value_loss_series(axis, series):
+    import numpy as np
+    from matplotlib.lines import Line2D
+
+    handles = []
+    has_positive = False
+    for label, color, x, y in series:
+        values = np.asarray(y, dtype=float)
+        finite = values[np.isfinite(values)]
+        if not finite.size:
+            continue
+        if (finite < 0).any():
+            warnings.warn(f'{label} contains negative value losses; omitted from log scale', RuntimeWarning)
+        if (finite > 0).any():
+            has_positive = True
+            line, = axis.plot(x, np.where(np.isfinite(values) & (values > 0), values, np.nan), color=color,
+                              linewidth=1.7, marker='None', linestyle='-', label=label)
+            handles.append(line)
+        else:
+            suffix = 'all zero' if (finite == 0).all() else 'no positive values'
+            handles.append(Line2D([], [], color=color, linewidth=1.7, label=f'{label} ({suffix})'))
+    axis.set_yscale('log')
+    if not has_positive:
+        axis.text(.5, .5, 'No positive measurements for log scale', ha='center', va='center',
+                  color='#8a93a3', transform=axis.transAxes)
+    if handles:
+        axis.legend(handles=handles, loc='best', fontsize=8, ncols=2, frameon=True,
+                    facecolor=THEME['axes.facecolor'], edgecolor='none', framealpha=.9)
+
+
 def _figure(titles, labels, title, columns=2, figsize=(15, 13.5), sharex=False):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -251,9 +281,11 @@ def training_figure(history, algorithm):
             axis.yaxis.set_major_formatter(PercentFormatter(1))
         _progress_axes((axes[0], axes[1], axes[5]), history, 'total_rows')
         x = values(history, 'total_samples')
-        for axis, metrics in ((axes[2], POLICY), (axes[3], VALUE)):
-            _series(axis, [(label, COLORS[i % len(COLORS)], *logged_values(history, key, transform=overview_value))
-                           for i, (key, label) in enumerate(metrics)], logarithmic=True, legend_columns=2)
+        _series(axes[2], [(label, COLORS[i % len(COLORS)], *logged_values(history, key, transform=overview_value))
+                          for i, (key, label) in enumerate(POLICY)], logarithmic=True, legend_columns=2)
+        _value_loss_series(axes[3], [(label, COLORS[i % len(COLORS)],
+                                      *logged_values(history, key, transform=overview_value))
+                                     for i, (key, label) in enumerate(VALUE)])
         _series(axes[4], [('Network', ORANGE, *logged_values(history, 'gnorm_batch', transform=overview_value))], logarithmic=True)
         _progress_axes((axes[2], axes[3], axes[4]), history, 'total_samples')
         if muzero:
