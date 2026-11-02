@@ -22,16 +22,16 @@ int SelfplayModel::getNNYLen() const { return board ? board->getNNYLen() : posit
 bool SelfplayModel::getRequireExactNNLen() const {
   return board ? board->getRequireExactNNLen() : position->getRequireExactNNLen();
 }
-int SelfplayModel::getMaxBatchSize() const { return board ? board->getMaxBatchSize() : batcher->getMaxBatchSize(); }
-int SelfplayModel::getNumGpus() const { return board ? board->getNumGpus() : batcher->getNumGpus(); }
+int SelfplayModel::getMaxBatchSize() const { return board ? board->getMaxBatchSize() : batcher ? batcher->getMaxBatchSize() : 1; }
+int SelfplayModel::getNumGpus() const { return board ? board->getNumGpus() : batcher ? batcher->getNumGpus() : 0; }
 std::vector<int> SelfplayModel::getGpuIdxByServerThread() const {
-  return board ? board->getGpuIdxByServerThread() : batcher->getGpuIdxByServerThread();
+  return board ? board->getGpuIdxByServerThread() : batcher ? batcher->getGpuIdxByServerThread() : std::vector<int>{};
 }
 void SelfplayModel::setMaxRowsToSendPerBatch(int rows) {
   if(board) board->setMaxRowsToSendPerBatch(rows);
-  else batcher->setMaxRowsToSendPerBatch(rows);
+  else if(batcher) batcher->setMaxRowsToSendPerBatch(rows);
 }
-enabled_t SelfplayModel::getUsingFP16Mode() const { return board ? board->getUsingFP16Mode() : batcher->getUsingFP16Mode(); }
+enabled_t SelfplayModel::getUsingFP16Mode() const { return board ? board->getUsingFP16Mode() : batcher ? batcher->getUsingFP16Mode() : enabled_t::False; }
 bool SelfplayModel::requiresSGFMetadata() const {
   return board ? board->requiresSGFMetadata() : position->getModel().representationDesc().numInputMetaChannels > 0;
 }
@@ -45,13 +45,14 @@ Rules SelfplayModel::getSupportedRules(const Rules& rules, bool& supported) cons
 }
 
 uint64_t SelfplayModel::numRowsProcessed() const {
-  return board ? board->numRowsProcessed() : batcher->stats().rows;
+  return board ? board->numRowsProcessed() : batcher ? batcher->stats().rows : 0;
 }
 uint64_t SelfplayModel::numBatchesProcessed() const {
-  return board ? board->numBatchesProcessed() : batcher->stats().batches;
+  return board ? board->numBatchesProcessed() : batcher ? batcher->stats().batches : 0;
 }
 double SelfplayModel::averageProcessedBatchSize() const {
   if(board) return board->averageProcessedBatchSize();
+  if(!batcher) return 0.0;
   const auto stats = batcher->stats();
   return (double)stats.rows / (double)stats.batches;
 }
@@ -61,7 +62,7 @@ uint64_t SelfplayModel::numCacheHits() const {
 Logger* SelfplayModel::getLogger() const { return board ? board->getLogger() : position->getLogger(); }
 void SelfplayModel::clearStats() {
   if(board) board->clearStats();
-  else { batcher->clearStats(); position->clearStats(); }
+  else { if(batcher) batcher->clearStats(); position->clearStats(); }
 }
 void SelfplayModel::clearCache() {
   if(board) board->clearCache();
