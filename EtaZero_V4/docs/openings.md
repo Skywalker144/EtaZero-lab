@@ -6,9 +6,9 @@
 
 ## 配置与执行边界
 
-原生 selfplay、match 或 gatekeeper 配置中设置 `balanceOpeningProb`，表示每局启用平衡开局的概率。五子棋缺省采用 KataGomo 的自对弈 0.99、比赛／gatekeeper 1.0；设为 0 可显式关闭。Hex 缺省为 0，需显式启用。`balanceOpeningDropPow` 控制候选权重或接受率的指数。Hex 另外保留来源的 `makeOpeningFairRate` 和严格为正的 `minAcceptRate`。其余参数缺省值按来源的自对弈／比赛用途选择，唯一事实源是 [Settings::load](../cpp/program/balancedopening.cpp)。外围不翻译字段或重算接受率。
+原生 selfplay、match 或 gatekeeper 配置中设置 `balanceOpeningProb`，表示每局启用平衡开局的概率。五子棋与 Hex 缺省采用 KataGomo 的自对弈 0.99、比赛／gatekeeper 1.0；设为 0 可显式关闭。`balanceOpeningDropPow` 控制候选权重或接受率的指数。Hex 另外保留来源的 `makeOpeningFairRate` 和严格为正的 `minAcceptRate`，比赛／gatekeeper 的两层概率门控缺省均为 1。其余参数缺省值按来源的自对弈／比赛用途选择，唯一事实源是 [Settings::load](../cpp/program/balancedopening.cpp)。外围不翻译字段或重算接受率。
 
-`GameRunner` 只初始化未终局的空棋盘；已经落子的起点不会重做平衡开局。五子棋按 KataGomo 以棋盘是否为空判断，空的导入起点也可进入；Hex 另外要求黑先并排除显式 SGF、hint、fork 起点。五子棋先执行每局概率门控，再检查起点是否为空；空盘可由导入起点指定白先。五子棋的 AlphaZero 随机 evaluator 冷启动也执行平衡开局，Hex 的无模型冷启动跳过；MuZero 初始发布模型可直接使用。每次候选推理前后检查停止请求，未接受或被中断的尝试不写回棋盘；`GameRunner` 丢弃中断对局。
+`GameRunner` 只初始化未终局的空棋盘；已经落子的起点不会重做平衡开局。五子棋按 KataGomo 以棋盘是否为空判断，空的导入起点也可进入；Hex 另外要求黑先并排除显式 SGF、hint、fork 起点。五子棋先执行每局概率门控，再检查起点是否为空；空盘可由导入起点指定白先。五子棋的 AlphaZero 随机 evaluator 冷启动也执行平衡开局，Hex 的无模型冷启动跳过；MuZero 的随机 evaluator 与已发布模型均可使用。每次候选推理前后检查停止请求，未接受或被中断的尝试不写回棋盘；`GameRunner` 丢弃中断对局。
 
 平衡完成后按棋类执行 policy init。五子棋使用 KataGomo 的指数长度与既有手数补偿；Go、Hex 和象棋保留 KataGo 的面积均值及 gamma／指数长度。策略温度采样、极小概率的均匀落子和提前终局停止沿用来源。两段前缀都进入原生棋谱和 `startHist`，训练从前缀之后开始；普通 writer 与 MuZero 完整轨迹均不为开局前缀伪造搜索目标。原生训练目标 C53 记录总前缀长度，C51 是当前实际手数；原生日志 `Balanced opening:` 记录平衡阶段的手数。
 
