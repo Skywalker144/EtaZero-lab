@@ -387,3 +387,75 @@ def test_live_model_switch_ordinary_to_muzero(tmp_path, game):
         assert new_game['parameters']['useGumbel'] is True
         assert len(new_game['game']['moves']) == 1 and new_game['analysis']['report']['rootInfo']['visits'] > 0
         assert previous.engine.process.poll() is not None
+
+
+def apply_payload(game, model='model', **changes):
+    data = dict(model=model, size=None if game == 'xiangqi' else [5, 5],
+                rules=None if game == 'go' else game, mode='manual', human='B',
+                budget_type='visits', budget_value=8, ponder=False,
+                parameters={'ponderingEnabled': False})
+    data.update(changes)
+    return data
+
+
+@pytest.mark.parametrize('game', GAMES)
+def test_apply_model_change_keeps_board_and_history(tmp_path, game):
+    config = profile(tmp_path / 'gtp.cfg', game, maxVisits=8)
+    catalog = catalog_for(config, game)
+    catalog['runs'][0]['models'].append(dict(id='second', path='/dev/null', game=game))
+    with App(lambda: deepcopy(catalog)) as app:
+        submit(app, 'apply', **apply_payload(game))
+        idle(app)
+        first = 'b0c2' if game == 'xiangqi' else 'C3'
+        submit(app, 'play', move=first); before = idle(app)
+        previous = app.session
+        submit(app, 'apply', **apply_payload(game, model='second'))
+        switched = idle(app)
+        assert switched['selected_model']['id'] == 'second'
+        assert switched['game'] == before['game'] and switched['history'] == before['history']
+        assert app.session is not previous and previous.engine.process.poll() is not None
+        submit(app, 'undo')
+        assert idle(app)['game']['moves'] == []
+
+
+def test_apply_rejected_model_retains_game_and_latest_setup(tmp_path):
+    config = profile(tmp_path / 'gtp.cfg', 'hex', maxVisits=8)
+    catalog = catalog_for(config, 'hex')
+    catalog['runs'].append(dict(id='bad-run', label='bad', config=str(tmp_path / 'missing.cfg'), game='hex',
+                                models=[dict(id='missing', path='/dev/null', game='hex')]))
+    with App(lambda: deepcopy(catalog)) as app:
+        submit(app, 'apply', **apply_payload('hex')); idle(app)
+        submit(app, 'play', move='C3'); before = idle(app)
+        previous = app.session
+        submit(app, 'apply', **apply_payload('hex', model='missing'))
+        failed = wait_for(app, lambda s: not s['busy'] and s['error'] is not None)
+        assert app.session is previous
+        assert failed['game'] == before['game'] and failed['history'] == before['history']
+        assert failed['ui_setup'] == before['ui_setup']
+
+
+def test_total_visits_includes_reused_root_work(tmp_path):
+    config = profile(tmp_path / 'gtp.cfg', 'hex', numSearchThreads=1)
+    with Session(config, '/dev/null', parameters={'maxVisits': 12, 'maxPlayouts': 1000000,
+                                                  'maxTime': 1e20}) as session:
+        session.search()
+        first = session.snapshot()['analysis']['report']['rootInfo']['visits']
+        session.search()
+        second = session.snapshot()['analysis']['report']['rootInfo']['visits']
+        assert first == 12 and second == first
+
+
+def test_apply_switches_model_during_analysis_and_resumes(tmp_path):
+    config = profile(tmp_path / 'gtp.cfg', 'hex', maxVisits=1000000)
+    catalog = catalog_for(config, 'hex')
+    catalog['runs'][0]['models'].append(dict(id='second', path='/dev/null', game='hex'))
+    with App(lambda: deepcopy(catalog)) as app:
+        submit(app, 'apply', **apply_payload('hex')); idle(app)
+        submit(app, 'play', move='C3'); before = idle(app)
+        submit(app, 'analyze'); analyzed(app)
+        submit(app, 'apply', **apply_payload('hex', model='second'))
+        after = analyzed(app)
+        assert after['selected_model']['id'] == 'second'
+        assert after['game'] == before['game'] and after['history'] == before['history']
+        assert after['analysis']['position']['board'] == before['game']['board']
+        submit(app, 'stop'); idle(app)
