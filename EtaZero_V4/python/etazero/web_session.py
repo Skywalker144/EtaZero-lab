@@ -130,6 +130,11 @@ class Session:
             self.state = self.engine.state()
             self.history.append(position(self.state))
 
+    def start_pondering(self):
+        with self.lock:
+            if not self.finished and self.parameters.get('ponderingEnabled') in (True, 'true'):
+                self.engine.command('kata-start-pondering')
+
     def generate_opening(self, options, *, cancelled=None):
         """Prepare a new session through the native suggestion and play commands.
 
