@@ -23,6 +23,35 @@ def native_config(directory, saved, override):
     return next((path.resolve() for path in candidates if path.is_file()), None)
 
 
+
+def trained_board_sizes(saved):
+    """Square sizes with nonzero sampling weight in the saved resolved config."""
+    raw = saved.get('native_selfplay')
+    if not isinstance(raw, str):
+        return None
+    values = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition('=')
+        if sep:
+            values[key.strip()] = value.split('#', 1)[0].strip()
+    try:
+        weights = [float(x.strip()) for x in values['bSizeRelProbs'].split(',')]
+        if 'bSizes' in values:
+            sizes = [(int(x.strip()),) * 2 for x in values['bSizes'].split(',')]
+        elif 'bSizesXY' in values:
+            sizes = [tuple(int(part.strip()) for part in x.split('-')) for x in values['bSizesXY'].split(',')]
+        else:
+            return None
+        if (len(sizes) != len(weights) or not weights or
+                any(len(pair) != 2 or min(pair) < 2 for pair in sizes) or
+                any(not math.isfinite(w) or w < 0 for w in weights) or not any(weights)):
+            return None
+        return sorted({x for (x, y), w in zip(sizes, weights)
+                       if w > 0 and x == y and x <= saved['canvas']})
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
 def run_catalog(directory, *, config=None):
     directory = Path(directory).resolve()
     saved = read_json(directory / 'config.json')
@@ -36,7 +65,8 @@ def run_catalog(directory, *, config=None):
         label = directory.name
     source = native_config(directory, saved, config)
     result = dict(id=str(directory), label=label, game=saved['game'], algorithm=saved['algorithm'],
-                  canvas=saved['canvas'], config=str(source) if source is not None else None,
+                  canvas=saved['canvas'], trained_board_sizes=trained_board_sizes(saved),
+                  config=str(source) if source is not None else None,
                   completed_rounds=count, current_model=None, models=[])
     models = {}
     previous = None
