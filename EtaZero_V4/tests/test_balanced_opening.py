@@ -123,9 +123,6 @@ def test_balanced_prefix_through_native_selfplay_and_training(tmp_path, game, mu
 def test_mixed_match_uses_native_opening_and_source_elo(tmp_path, game):
     ordinary, bundle = export_models(tmp_path, game)
     cfg = match_config(tmp_path / 'match.cfg', [(ordinary, False), (bundle, True)], game, games=4)
-    with cfg.open('a') as stream:
-        stream.write('balanceOpeningProb = 1\n')
-        if game == 'hex': stream.write('makeOpeningFairRate = 1\n')
     result = run_match(tmp_path / 'match', cfg)
     assert result['games'] == 4
     logs = '\n'.join(p.read_text() for p in (tmp_path / 'match').rglob('*.log'))
