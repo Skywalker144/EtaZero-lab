@@ -34,11 +34,11 @@ GTP 是交互推理入口，正式 `match/autoelo` 仍使用独立比赛配置�
 - Go 使用对应的 `rules` 和 `defaultBoardSize`，贴目仍由原生配置或创建局面的覆盖指定。
 - 五子棋／Hex 的 `game`、`rules` 使用对应棋类名，`defaultBoardSize` 设置实际方形棋盘；象棋使用 `game=xiangqi`、`rules=xiangqi`，物理尺寸由原生默认的 9×10 决定。
 - `rootSearchAlgorithm` 决定 PUCT／Gumbel，`nonrootSearchAlgorithm` 独立指定非根机制；Gumbel 要求 `useGraphSearch=false`，其他组合约束见 [Gumbel](gumbel.md)。不会从训练算法标签推断本次评估搜索。
-- MuZero 使用 `useMuZero=true`、`useGraphSearch=false`、`subtreeValueBiasFactor=0`、`avoidRepeatedPatternUtility=0`，其余约束见 [MuZero GTP](muzero.md#原生-gtp)。模型格式、画布和棋类仍由引擎检查。
+- MuZero 使用 `useMuZero=true`、`useGraphSearch=false`、`subtreeValueBiasFactor=0`、`avoidRepeatedPatternUtility=0`，其余约束见 [MuZero GTP](muzero.md#原生-gtp)。模型格式、画布和棋类仍由引擎检查。GTP 公共配置允许小于 NN 缓冲区的棋盘；显式开启 `requireMaxBoardSize` 时棋盘必须与缓冲区一致，棋盘也不能超过缓冲区。尺寸不匹配会在设置棋盘时拒绝。
 
 ## 页面与数据来源
 
-页面支持六种棋类的棋盘、人机／手动模式、AI 单步、可取消的持续分析、悔棋、历史回看与分支、模型刷新和切换、原生参数修改，以及浅色／深色和窄屏布局。围棋棋盘保留实际提子；Hex 标示黑方上下、白方左右的目标边；象棋使用原生棋子与合法起终点，红方在下。界面支持 SGF 文件上传或粘贴，创建后直接使用原生读取的局面与历史。
+页面支持六种棋类的棋盘、人机／手动模式、AI 单步、可取消的持续分析、悔棋、历史回看与分支、模型刷新和切换、原生参数修改，以及浅色／深色和窄屏布局。围棋棋盘保留实际提子；Hex 标示黑方上下、白方左右的目标边；象棋使用原生棋子与合法起终点，红方在下。左栏按模型、棋盘与棋规、对局模式的顺序设置，选定模型后自动创建棋局，后续更改自动生效。滑动条从运行保存的 `native_selfplay` 快照读取训练时有非零采样权重的方形尺寸；直接模型或缺少该快照时可手动输入，留空使用原生配置。训练过的尺寸不等同于模型全部可推理的尺寸，实际画布和棋规仍由引擎检查。象棋固定为 9×10；五子棋可选 Freestyle、Standard、Renju。
 
 根 W/D/L/NR、得分率、访问数、候选及 PV 均来自原生分析 JSON，页面标明来源报告的 B/W 视角；W−L 由相同根 W 和 L 相减。候选表展示原生 `visits`、`edgeVisits`、先验、LCB、效用和 `playSelectionValue`；它们保留各自尺度，选点值不冒充归一化概率或 Gumbel 改进策略。星号只标记原生搜索返回的建议着法。棋盘候选按原生 `order` 取 Top-K，最低访问过滤以根访问数为分母；对称副本保留原生报告含义，不累加成额外搜索量。
 
@@ -50,13 +50,15 @@ GTP 是交互推理入口，正式 `match/autoelo` 仍使用独立比赛配置�
 
 诊断快照附带其局面、会话手数和实际命令。落子后保留原快照并标明局面差异；可以定位回看，需分支到当前局面后才能对历史位置重新推理。悔棋或原生参数修改清除诊断，创建新会话也不沿用旧模型结果。持续分析中请求诊断时，控制器先停止并读完旧搜索响应，执行有限的原生命令，再恢复持续分析。诊断不清除已有搜索树；原生 raw-NN 的跳过缓存读取和写入缓存行为照常保留，不能把它理解为完全不影响推理缓存的纯内存查询。
 
+人机模式可设置人类先后手、后台 pondering，以及每手新增 visits、总 visits 或思考时间。新增 visits 使用原生 `maxPlayouts`，总 visits 使用 `maxVisits` 并包含复用的根访问，时间使用 `maxTime`；未选用的预算解除限制，来源搜索倍率及并行搜索语义仍然生效。Gumbel 的顺序淘汰配额由访问上限计算；只限制时间时可能在完成淘汰前中止，不等同于已知访问预算的完整顺序淘汰。后台思考在等待人类落子时启动，使用配置中的 pondering 上限。Gumbel 每次搜索使用新树，MuZero 不跨真实落子复用 latent 树，因此 pondering 不保证为下一手保留树访问，详见 [Gumbel](gumbel.md) 和 [MuZero](muzero.md)。
+
 键盘支持 `A` 开关分析、`S` 单步、`U` 悔棋、`Esc` 停止搜索、左右键回看、`Home` 初始局面和 `End` 当前局面。刷新页面保留服务端棋局，多个标签页共享一个会话；主题与手数显示保存在浏览器。
 
 ## 发布模型目录
 
 `discover_catalog` 递归发现同时包含 `config.json` 与 `state.json` 的 V4 运行目录。每次读取一次 `completed_rounds`，只列出这一边界内 `rounds/…/commit.json` 记录的发布模型，不扫描未提交的候选或 `.tmp`。原始配置提供棋类、算法、画布和普通／SWA 权重来源；模型代数来自首次记录它的提交轮次，同一个被复用的 accepted 模型不重复列成新一代。
 
-已提交但被 gatekeeper 拒绝的候选仍可检查，目录明确标记其接受状态；默认当前模型来自提交一致的 `accepted_model` 指针。尚未发布模型的运行保留空目录记录。损坏或缺少文件的运行进入显式 `errors` 列表，不妨碍其他运行被发现；发现过程不修改原始运行或加载 GPU 模型，实际二进制结构和搜索组合由原生命令加载时检查。
+已提交但被 gatekeeper 拒绝的候选仍可检查，目录数据记录其接受状态；默认当前模型来自提交一致的 `accepted_model` 指针。尚未发布模型的运行保留空目录记录。损坏或缺少文件的运行进入显式 `errors` 列表，不妨碍其他运行被发现；发现过程不修改原始运行或加载 GPU 模型，实际二进制结构和搜索组合由原生命令加载时检查。
 
 独立推理配置采用原生 `gtp.cfg`，可传入全局配置路径覆盖；否则先按本版本 `data/` 相对路径映射到 `configs/…/gtp.cfg`，再查找已保存 `selfplay_config` 所在目录的 `gtp.cfg`。找不到时保留为未配置，不静默选择围棋或其他算法的配置，不把训练配置重写成推理配置。配置内容与 include 不在发现阶段解析。
 
@@ -66,13 +68,13 @@ GTP 是交互推理入口，正式 `match/autoelo` 仍使用独立比赛配置�
 
 `web_app.App` 消费上述目录，每个工作台持有一个当前 `web_session.Session`，由单个工作线程顺序执行动作。创建棋局使用目录中的原生模型路径和 `gtp.cfg`；尺寸、规则、贴目、象棋 FEN 及运行参数分别交给原生 `boardsize`、`kata-set-rules`、`komi`、`set_position` 和 `kata-set-params`。参数名、校验与实际取值由原生入口管理，外层返回 `kata-get-params` 和 `kata-get-models` 的原始结果，不按设备猜测精度或将配置重写成旧版字段。
 
-`new`、`play`、`undo`、`branch`、`configure`、`step`、`retry`、`analyze`、`diagnose`、`stop`、`refresh` 覆盖创建、手动落子、悔棋、历史分支、修改参数、AI 单步、重试、持续分析、网络诊断、停止和目录刷新。`diagnose` 接受 `source=main|human`、整数 `symmetry` 及主模型的 `optimism`，省略时为主模型、对称 0、optimism 0；快照保存在 `raw_nn`，没有成功诊断时为 null。人机模式只在创建棋局、用户落子或显式重试后自动执行 AI 回合；修改参数和悔棋不自动出手，历史分支转为手动模式。人机悔棋回到最后一次人类落子之前，手动模式撤回一手。浏览器请求携带状态版本及棋局 ID，旧棋局的动作会被拒绝；分析快照的更新不使同一局面的合法操作失效。
+`new`、`apply`、`play`、`undo`、`branch`、`configure`、`step`、`retry`、`analyze`、`diagnose`、`stop`、`refresh` 覆盖创建、手动落子、悔棋、历史分支、修改参数、AI 单步、重试、持续分析、网络诊断、停止和目录刷新。`diagnose` 接受 `source=main|human`、整数 `symmetry` 及主模型的 `optimism`，省略时为主模型、对称 0、optimism 0；快照保存在 `raw_nn`，没有成功诊断时为 null。人机模式在创建棋局、页面应用设置、用户落子或显式重试后，若轮到 AI 则自动执行 AI 回合；底层 `configure` 和悔棋不自动出手，历史分支转为手动模式。人机悔棋回到最后一次人类落子之前，手动模式撤回一手。浏览器请求携带状态版本及棋局 ID，旧棋局的动作会被拒绝；分析快照的更新不使同一局面的合法操作失效。
 
 有限搜索使用来源可取消的 `kata-search_analyze_cancellable`，完成后才用原生 `play` 落下建议着法。停止与最终落子的提交有明确先后：先接受的停止请求不会落下部分搜索的建议。持续分析期间可提交落子、悔棋、参数修改等操作，控制器先停止并读完旧响应，执行操作，再在当前局面恢复分析。旧任务的报告不能覆盖新棋局；关闭工作台会取消搜索、等待响应结束并回收进程，长轮询也会被唤醒。
 
 每次成功落子保存原生棋盘快照供历史回看，围棋提子与象棋棋子类型不靠前端重放推测。快照不重复保存此前全部着法，空间开销随手数线性增长；实际悔棋仍执行原生 `undo`，不从 FEN 重建完整规则历史。分析保留原始 JSON，并附其所属局面、会话手数与运行／完成／停止状态，落子后的新棋盘不会被误认为旧报告的搜索根。GTP 的 `resign` 单独记录认输方、结果和响应来源，不改写原生 `isGameFinished`；撤回可清除这一记录，未搜索的终局数据不会被补造。
 
-模型切换先在新进程中加载模型并完成局面设置，成功后替换当前会话并关闭旧进程。设置失败保留旧棋局；这个准备阶段会暂时同时驻留新旧模型。目录刷新不重载活动模型，即使其训练目录已移动，现有会话仍可继续。原生断开会保留最后已知局面并显示错误及断开状态，需重新创建会话后继续操作。
+模型切换先用原生 `printsgf` 导出棋局，在新进程中载入后核对局面和逐手历史，成功后替换当前会话并关闭旧进程；认输和开局来源随会话保留。改变尺寸或棋规则创建新局。设置失败保留旧棋局；准备阶段会暂时同时驻留新旧模型。页面合并连续修改，等待正在加载的操作结束后应用最新设置。目录刷新不重载活动模型，即使其训练目录已移动，现有会话仍可继续。原生断开会保留最后已知局面并显示错误及断开状态，需重新创建会话后继续操作。
 
 当前控制器使用原生坐标和参数，不接受旧私有协议字段。平衡开局使用独立的 `opening` 参数对象，未知字段由原生命令拒绝，不被静默忽略或替换为空盘。
 
@@ -80,7 +82,7 @@ HTTP 传输只组织 `/api/state`、`/api/catalog` 与上述动作，不导入�
 
 ## 平衡开局
 
-在页面“平衡开局”中勾选创建时生成，再创建棋局。只支持黑先空盘的 Freestyle／Standard／Renju 和 Hex，要求真实主模型；AlphaZero、Gumbel AlphaZero、MuZero、Gumbel MuZero 调用同一套 [原生算法](openings.md)。开局参数可留空，或填写 `balanceOpeningDropPow` 和 Hex 专用的 `minAcceptRate`。它们先读取 `gtp.cfg`，再应用本次 JSON 覆盖，其余缺省值沿用原生比赛设置。生成不执行训练中的 policy init，不使用次级 HumanSL 作为参考模型。
+在左栏点击“生成平衡开局”，会用当前选择创建一局并生成开局。只支持黑先空盘的 Freestyle／Standard／Renju 和 Hex，要求真实主模型；AlphaZero、Gumbel AlphaZero、MuZero、Gumbel MuZero 调用同一套 [原生算法](openings.md)。页面使用 `gtp.cfg` 或原生缺省的开局参数；HTTP API 可通过 JSON 覆盖 `balanceOpeningDropPow` 和 Hex 专用的 `minAcceptRate`。生成不执行训练中的 policy init，不使用次级 HumanSL 作为参考模型。
 
 HTTP `new` 的 `opening` 是参数对象，`{}` 表示使用缺省设置，省略表示普通创建。它与 SGF、SGF 手数和 FEN 覆盖互斥；尺寸、棋规、贴目及搜索参数仍可设置，实际棋类与合法性由原生检查。原生 GTP 扩展为：
 
@@ -95,7 +97,7 @@ kata-suggest-opening {"balanceOpeningDropPow": 6, "minAcceptRate": 0.005}
 
 Web 在新候选会话中请求建议，并用原生 `play`、`kata-get-state`、`kata-get-history` 执行与读取完整前缀。成功后才替换原会话；失败、停止或关闭工作台会回收候选，原棋局保持原样。生成期间页面显示“停止生成”，首次创建尚无棋局时也可取消。完成后的所有开局着法都可回看、撤回和分支；`opening` 记录创建时的原生建议，撤回后仍作为起点来源保留，不冒充当前棋盘的着法列表。
 
-这条路径只增加需要当前模型和原生棋规的 GTP 入口；Python 和页面不实现候选采样、价值换算或棋规。`tests/test_web_opening.py` 使用真实普通／MuZero 模型验证建议、原生历史、取消与进程回收，并通过浏览器检查创建、历史分支、停止和失败保留旧局。
+这条路径只增加需要当前模型和原生棋规的 GTP 入口；Python 和页面不实现候选采样、价值换算或棋规。`tests/test_web_opening.py` 使用真实普通／MuZero 模型验证建议、原生历史、取消与进程回收，并通过浏览器检查创建及历史分支。
 
 ## SGF 导入与回看
 
@@ -115,6 +117,8 @@ SGF 的所有已载入着法都可以回看、悔棋和继续分支，初始 set
 - `moves`：本 GTP 会话可撤回的着法及执子方。FEN 或 SGF 起点不凭空添加为用户落子；完整规则历史仍保存在引擎内部，不能仅凭当前棋盘或 FEN 重建。
 - `isGameFinished`、`isNoResult`、`isResignation`、`result` 和 `encorePhase`。未终局的 `result` 为 null，不用网络估值判断终局。
 - 象棋另有 `fen` 与 `pieces`，后者按物理 9×10 棋盘排列，正负区分红／黑，绝对值沿用原生 Pikafish 棋子编码。
+
+Web 在读完棋盘后通过 `kata-start-pondering` 重启后台思考；该命令要求已启用 pondering，且不会执行落子。
 
 GTP 的 `genmove`／`kata-search` 返回 `resign` 是引擎的认输建议，来源不会把这条响应写入 `BoardHistory`；外层需要按 GTP 对局语义处理，不能误称它为规则自动终局。已有 `play`、`undo`、`set_position`、`loadsgf`、棋钟及参数命令保持来源行为。
 
@@ -139,6 +143,6 @@ kata-search_analyze_cancellable B 25 json true pvVisits true noResultValue true
 
 `tests/test_web_native.py` 检查六种棋类的原生局面、搜索与查询一致性、真实终局、围棋提子、象棋完整历史、悔棋、持续／有限搜索取消、错误后继续使用和进程清理。真实 CUDA 对照覆盖普通／MuZero、PUCT／Gumbel、FP32／FP16，将 GTP 中的网络证据与原生 JSON analysis 的同局面输出比较。
 
-`tests/test_web_session.py` 通过真实 GTP 进程检查会话动作、人机回合、历史分支、报告视角、版本冲突、配置拒绝、取消与重试、分析中修改局面、进程断开恢复及关闭清理。CUDA 检查覆盖四种算法在围棋、Renju、Hex、象棋上的会话对局与回退，以及原生认输和普通模型到 MuZero 的切换。`tests/test_web_http.py` 用本机临时 HTTP 服务检查六种棋类的动作、长轮询、取消、冲突响应及不支持功能的明确拒绝；浏览器交互另由 `tests/test_web_browser.py` 检查，覆盖六种棋类的 PUCT／Gumbel 页面操作、原始报告一致性、历史、参数、刷新、主题与窄屏，并在真实 CUDA FP16 上覆盖 Go／Renju／Hex／象棋的四种算法。`tests/test_web_sgf.py` 逐前缀对照原生 SGF 读取结果，覆盖六种棋类、提子、象棋前史、失败后继续、浏览器上传与分支，以及四算法的 CUDA 搜索与回退。
+`tests/test_web_session.py` 通过真实 GTP 进程检查会话动作、人机回合、历史分支、报告视角、版本冲突、配置拒绝、取消与重试、分析中修改局面、进程断开恢复及关闭清理。CUDA 检查覆盖四种算法在围棋、Renju、Hex、象棋上的会话对局与回退，以及原生认输和普通模型到 MuZero 的切换。`tests/test_web_http.py` 用本机临时 HTTP 服务检查六种棋类的动作、长轮询、取消、冲突响应及不支持功能的明确拒绝；浏览器交互另由 `tests/test_web_browser.py` 检查，覆盖六种棋类的 PUCT／Gumbel 页面操作、原始报告一致性、历史、参数、刷新、主题与窄屏，并在真实 CUDA FP16 上覆盖 Go／Renju／Hex／象棋的四种算法。`tests/test_web_sgf.py` 逐前缀对照原生 SGF 读取结果，覆盖六种棋类、提子、象棋前史、失败后继续及分支，以及四算法的 CUDA 搜索与回退。
 
 `tests/test_web_raw_nn.py` 对照六棋类原生文本、真实合法动作及现有搜索树，检查 PUCT／Gumbel 诊断、持续分析恢复、历史定位、终局和缺失次级模型。真实 CUDA FP16 检查使用不同的普通／MuZero 主、次级模型（Go 次级含 metadata），分别核对两端 optimism 与 HumanSL 原始响应；浏览器检查热图／象棋动作列表、屏蔽标记、原始文本和窄屏布局。
