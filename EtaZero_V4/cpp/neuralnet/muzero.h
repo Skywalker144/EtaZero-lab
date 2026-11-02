@@ -16,9 +16,13 @@ const void* stateOwner(const State& state);
 class ModelBundle {
   struct Impl;
   std::unique_ptr<Impl> impl;
+  bool randomEvaluation = false;
   friend class Evaluator;
 public:
   explicit ModelBundle(const std::string& directory);
+  // Descriptor-only layout for random cold start; no component files or tensors.
+  ModelBundle(const std::string& game, int canvas);
+  bool isRandom() const { return randomEvaluation; }
   ~ModelBundle();
   const ModelDesc& representationDesc() const;
   const ModelDesc& predictionDesc() const;
