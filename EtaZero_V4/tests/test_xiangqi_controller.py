@@ -81,9 +81,8 @@ def test_native_cold_start_writes_joint_data_and_full_sgf(tmp_path, canvas, gumb
 @pytest.mark.parametrize('options,error', [
     ({'inputsVersion': 8}, 'inputsVersion does not match'),
     ({'dataBoardLen': 9}, 'dataBoardLen >= 10'),
-    ({'useMuZero': 'true'}, 'requires a published three-component bundle'),
 ])
-def test_native_layout_and_missing_bundle_fail_before_model_polling(tmp_path, options, error):
+def test_native_layout_fails_before_model_polling(tmp_path, options, error):
     result = native_selfplay(tmp_path, selfplay_config(tmp_path / 'selfplay.cfg', **options))
     assert result.returncode != 0 and error in result.stdout + result.stderr
     assert not list(tmp_path.rglob('*.npz'))

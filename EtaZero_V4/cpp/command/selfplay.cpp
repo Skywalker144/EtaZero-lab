@@ -161,8 +161,9 @@ int MainCmds::selfplay(const vector<string>& args) {
     time_t modelTime;
     bool foundModel = LoadModel::findLatestModel(modelsDir, logger, modelName, modelFile, modelDir, modelTime, useMuZero);
 
-    if(useMuZero && !foundModel && lastNetName == nullptr)
-      throw StringError("MuZero selfplay requires a published three-component bundle with model.json");
+    // An empty MuZero directory uses stateless random latent predictions until
+    // the first trained bundle is published, just like the ordinary cold start.
+    if(useMuZero && !foundModel && lastNetName == nullptr) foundModel = true;
 
     //No new neural nets yet
     if(!foundModel || (lastNetName != NULL && *lastNetName == modelName))
@@ -182,7 +183,8 @@ int MainCmds::selfplay(const vector<string>& args) {
     Rand rand;
     unique_ptr<SelfplayModel> model;
     if(useMuZero) {
-      auto bundle = make_shared<MuZero::ModelBundle>(modelDir);
+      auto bundle = modelFile == "/dev/null" ? make_shared<MuZero::ModelBundle>(Rules::gameName(gameRunner->getGameInitializer()->getGame()),dataBoardLen) :
+        make_shared<MuZero::ModelBundle>(modelDir);
       if(Rules::parseGame(bundle->game()) != gameRunner->getGameInitializer()->getGame())
         throw StringError("MuZero model game differs from the configured selfplay game");
       if(bundle->posLen() != dataBoardLen || maxBoardXSizeUsed > bundle->posLen() || maxBoardYSizeUsed > bundle->posLen())
