@@ -12,6 +12,7 @@ V4 按环境、网络、搜索、自对弈、训练和运行调度拆分配置�
 | `train.cfg` / `[train]` | 原生 learner 选项名，省略命令行开头的 `-`。 |
 | `shuffle.cfg` / `[shuffle]` | 原生 shuffler 选项名，省略命令行开头的 `-`。 |
 | `run.cfg` / `[run]` | 产样／训练额度、模型发布、绘图、总预算和输出路径。 |
+| `configs/match/common.cfg`、棋类 `.cfg` | 原生比赛公共参数与四种棋类的评估条件，不带分组标题；任务另行提供模型、配对及局数。 |
 
 `configs/baseline_az/` 完整列出采用的公共参数与 AlphaZero 配方，其余算法 baseline 显式继承公共文件，再定义算法差异。四个 baseline 均使用围棋环境，也可直接运行。各棋类目录继承对应算法 baseline，只覆盖环境与该配方的差异；目录名称不参与算法判断，实际选择来自 `env.cfg` 和 `selfplay.cfg`。
 
@@ -24,7 +25,7 @@ V4 按环境、网络、搜索、自对弈、训练和运行调度拆分配置�
 
 `baseline_gaz` 继承 `baseline_az` 并引入共享的 [Gumbel 搜索配置](../configs/algorithms/gumbel.cfg)。`baseline_mz` 继承公共参数，独立定义 MuZero 网络、搜索和展开数据文件大小；`baseline_gmz` 继承 `baseline_mz`，再引入同一份 Gumbel 搜索配置。这样不会用普通网络或普通样本文件大小覆盖 MuZero。普通 baseline 不保留未启用的 MuZero 网络或 Gumbel 模板。
 
-四个 `*_go` 完全继承各自 baseline。四个 `*_gomoku` 共用 [Freestyle 环境](../configs/games/gomoku/env.cfg)：15 路画布，11–15 路棋盘分布；`az_gomoku` 另保留已经确认的五子棋搜索、开局和回放参数。四个 `*_hex` 共用方盘环境；Hex 和象棋的 `replay_ratio` 均为 2。象棋的搜索预算、初始化、fork、side positions、写盘、并行、训练 batch 和 bootstrap 均继承对应算法 baseline；独立的小规模检查只使用 `configs/checks/`。
+四个 `*_go` 完全继承各自 baseline。四个 `*_gomoku` 共用 [Freestyle 环境](../configs/games/gomoku/env.cfg)：15 路画布，11–15 路棋盘分布；`az_gomoku` 另保留已经确认的五子棋搜索、开局和回放参数。四个 `*_hex` 共用方盘环境；Hex 和象棋的 `replay_ratio` 分别集中在 [Hex run.cfg](../configs/games/hex/run.cfg) 与 [象棋 run.cfg](../configs/games/xiangqi/run.cfg)，各算法的 `run.cfg` 先 include 算法 baseline，再 include 对应棋类配置。象棋的搜索预算、初始化、fork、side positions、写盘、并行、训练 batch 和 bootstrap 均继承对应算法 baseline；独立的小规模检查只使用 `configs/checks/`。
 
 Hex 的 `chosenMoveTemperatureHalflife=15`，象棋为 40；实际半衰期为该值乘以 `sqrt(棋盘面积)/19`，象棋约为 20 个单方着手。该参数也控制根 policy 温度的衰减。普通 AZ/MuZero 自对弈启用根 Dirichlet 噪声，总浓度 10.83、混合权重 0.25；总浓度是各有效动作 α 的和，不是逐动作 α。继承的 KataGo 机制会在零训练权重的 cheap search 中临时关闭根噪声，保留完整训练搜索的噪声。当前 Gumbel 直接按自身规则出手，且两端 chosen 温度均为 0，继承的 half-life 不影响其出手。
 
@@ -109,6 +110,8 @@ unroll_steps = 3
 `selfplay.cfg` 中搜索与采样参数共享原生键空间，按 include 和 `.local` 顺序覆盖；`env.cfg` 最后决定环境。其他原生参数可直接写入对应节，不需要在转换层注册别名。额外 SGF、hint 等原生资源路径仍遵循引擎工作目录语义（逐轮执行位于本版本 `python/`）；建议使用绝对路径。
 
 独立 match、GTP、Web 等仍接收原生引擎配置，不直接读取带节的训练 `selfplay.cfg`。各算法 baseline 与棋类入口另有独立 `gtp.cfg`，以原生 include 继承公共推理参数、算法约束和棋类差异；它不参与训练配置解析，也不自动作为 match 配置。推理参数来源与启动方式见 [Web 工作台](web.md)。`configs/checks/` 使用原生配置和原生命令行参数文件，可独立检查底层接口；没有 `env.cfg/net.cfg` 的此类入口继续通过原有加载路径执行。
+
+比赛使用 [configs/match/common.cfg](../configs/match/common.cfg) 维护公共评估参数，[go.cfg](../configs/match/go.cfg)、[gomoku.cfg](../configs/match/gomoku.cfg)、[hex.cfg](../configs/match/hex.cfg) 与 [xiangqi.cfg](../configs/match/xiangqi.cfg) 维护棋类条件。任务通过原生 include 继承一个棋类文件，再指定参赛模型、局数及逐 bot 算法差异；arena／autoelo 可直接使用棋类文件。原生 `match -print-config` 可审查展开结果，用法与 MuZero／Gumbel 覆盖要求见 [比赛配置](evaluation.md#入口与配置)。
 
 ## Include、覆盖和启动
 
