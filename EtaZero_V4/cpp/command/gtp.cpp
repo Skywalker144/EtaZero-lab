@@ -71,6 +71,7 @@ static const vector<string> knownCommands = {
   "kata-get-history", // Read source BoardHistory positions without modifying the engine.
   "kata-suggest-opening", // Cancellable native balancing; returns moves without playing them.
   "kata-get-analysis", // Read the existing search using the source JSON serializer.
+  "kata-start-pondering", // Restart pondering after a client reads the board.
   "fixed_handicap",
   "place_free_handicap",
   "set_free_handicap",
@@ -596,8 +597,26 @@ struct GTPEngine {
       }
     }
 
+    // Resolve the configured buffer before replacing an existing bot. A fixed
+    // maximum buffer can override the requested dimensions, and exact-size
+    // evaluators cannot search a smaller board inside that buffer.
+    const int expectedConcurrentEvals = std::max(genmoveParams.numThreads, analysisParams.numThreads);
+    auto checkEvaluatorSize = [&](const string& path, const char* label) {
+      const auto options = Setup::readEvaluatorOptions(path,0,cfg,logger,seedRand,expectedConcurrentEvals,
+        nnXLen,nnYLen,Setup::MaxBatchSizeRequest::fromConcurrency(),defaultRequireExactNNLen,
+        false,Setup::SETUP_FOR_GTP,true);
+      if(!wasDefault && (boardXSize > options.nnXLen || boardYSize > options.nnYLen ||
+         (options.requireExactNNLen && (boardXSize != options.nnXLen || boardYSize != options.nnYLen))))
+        throw StringError(string(label) + " NN buffer " + Global::intToString(options.nnXLen) + " x " +
+          Global::intToString(options.nnYLen) + (options.requireExactNNLen ? " requires an exact board size" : " is too small for the board"));
+      return options;
+    };
+    const auto primaryOptions = checkEvaluatorSize(nnModelFile,"Primary");
+    if(!humanModelFile.empty()) checkEvaluatorSize(humanModelFile,"Secondary");
+
     //If the neural net is wrongly sized, we need to create or recreate it
-    if(primaryModel == nullptr || !(nnXLen == primaryModel->getNNXLen() && nnYLen == primaryModel->getNNYLen())) {
+    if(primaryModel == nullptr || !(primaryOptions.nnXLen == primaryModel->getNNXLen() &&
+                                   primaryOptions.nnYLen == primaryModel->getNNYLen())) {
 
       if(primaryModel != nullptr) {
         assert(bot != NULL);
@@ -613,7 +632,6 @@ struct GTPEngine {
         logger.write("Cleaned up old neural net and bot");
       }
 
-      const int expectedConcurrentEvals = std::max(genmoveParams.numThreads, analysisParams.numThreads);
       const bool disableFP16 = false;
       const string expectedSha256 = "";
       if(useMuZero) {
@@ -2517,10 +2535,9 @@ int MainCmds::gtp(const vector<string>& args) {
       else {
         try {
           engine->checkBoardSize(newXSize,newYSize);
+          engine->setOrResetBoardSize(cfg,logger,seedRand,newXSize,newYSize,logger.isLoggingToStderr());
         }
         catch(const StringError& e) { responseIsError = true; response = e.what(); }
-        if(!responseIsError)
-          engine->setOrResetBoardSize(cfg,logger,seedRand,newXSize,newYSize,logger.isLoggingToStderr());
       }
     }
 
@@ -3744,8 +3761,14 @@ int MainCmds::gtp(const vector<string>& args) {
                 cerr << out.str() << endl;
             }
             maybeSaveAvoidPatterns(false);
-            engine->setOrResetBoardSize(cfg,logger,seedRand,sgfBoard.x_size,sgfBoard.y_size,logger.isLoggingToStderr());
-            engine->setPositionAndRules(sgfNextPla, sgfBoard, sgfHist, sgfInitialBoard, sgfInitialNextPla, sgfHist.moveHistory);
+            try {
+              engine->setOrResetBoardSize(cfg,logger,seedRand,sgfBoard.x_size,sgfBoard.y_size,logger.isLoggingToStderr());
+              engine->setPositionAndRules(sgfNextPla, sgfBoard, sgfHist, sgfInitialBoard, sgfInitialNextPla, sgfHist.moveHistory);
+            }
+            catch(const StringError& err) {
+              responseIsError = true;
+              response = "Could not load sgf: " + string(err.what());
+            }
           }
         }
       }
@@ -4016,6 +4039,23 @@ int MainCmds::gtp(const vector<string>& args) {
           }
         }
       }
+    }
+
+    else if(command == "kata-start-pondering") {
+      if(!pieces.empty()) {
+        responseIsError = true;
+        response = "kata-start-pondering takes no arguments";
+      }
+      else if(!ponderingEnabled) {
+        responseIsError = true;
+        response = "Pondering is disabled";
+      }
+      else if(engine->bot->getRootHist().isGameFinished) {
+        responseIsError = true;
+        response = "Cannot ponder a finished game";
+      }
+      else
+        maybeStartPondering = true;
     }
 
     else if(command == "stop") {
