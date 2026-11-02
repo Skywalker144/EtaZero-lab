@@ -48,7 +48,7 @@ PCR/cheap、reduce visits、surprise、主线 reanalysis、side 搜索、fork/hi
 
 树内 side 位置沿用来源的访问阈值、最大提取深度、best-path 条件和排除分支。只在搜索完成后的采样阶段重放真实合法路径，遇到真实终局停止提取。latent 节点的 policy 与 Q 仅保留该真实位置的合法根动作，policy 在量化前重设有效最大值的来源编码尺度；surprise 和 entropy 使用同一动作域下重新归一化的目标与 prior。没有合法策略目标质量的候选不产样，仍可继续检查合法后继。W/D/L/NR 和合法动作 Q 仍来自该 latent 节点的搜索统计，raw NN statistics 则重新编码真实观测。以上是把 latent 节点作为真实 side 根监督时的必要适配，不改变树内动作域、选择、访问统计或回传，也不额外搜索或虚构 side 后续轨迹。
 
-原生 `selfplay` 配置 `useMuZero=true` 后，以模型目录中的 `model.json` 发现完整 bundle，三个组件文件不单独参与最新模型选择。必须先导出实际初始化或已训练的三组件模型；空目录不会回退为普通 random evaluator，`debugSkipNeuralNet` 会报错。模型棋类必须与对局一致，模型画布必须等于 `dataBoardLen` 并包含所有配置棋盘。生产者在模型轮询目录外完成导出，再原子发布整个不可变目录；不直接向正在轮询的目录导出。
+原生 `selfplay` 配置 `useMuZero=true` 后，以模型目录中的 `model.json` 发现完整 bundle，三个组件文件不单独参与最新模型选择。空目录使用 MuZero 随机 evaluator 冷启动：CPU 生成标准高斯策略 logits、标准差 0.2 的四结果 logits，经现有后处理归一化；不分配 latent tensor，根方向及静态动作域仍保留，递归不推进真实棋盘。随机路径关闭 policy optimism，剩余时间估计为零，短期价值误差沿用来源零 raw 输出的变换。发布三组件模型后使用真实 NN，真实模型不支持 `debugSkipNeuralNet`。模型棋类必须与对局一致，模型画布必须等于 `dataBoardLen` 并包含所有配置棋盘。生产者在模型轮询目录外完成导出，再原子发布整个不可变目录；不直接向正在轮询的目录导出。
 
 设备与线程选择、批大小、精度、输入布局、缓存、对称和 NN 尺寸选项共用 `Setup` 的来源配置解析与优先级。MuZero 的 NN buffer 尺寸必须等于 bundle 画布；固定的实际棋盘小于画布时默认允许 padding，显式 `requireMaxBoardSize` 仍生效。输入和计算布局的可用组合遵循来源 CUDA/cuDNN 约束，Transformer 仍要求 NHWC 计算。
 
@@ -218,6 +218,8 @@ Go、Freestyle／Standard／Renju、Hex 和象棋使用 `katago gtp -config /pat
 
 `tests/test_muzero_play.py` 使用 Go/Renju/Hex/象棋的真实 CUDA 对局，覆盖来源 PUCT、Gumbel 根与两种非根选择、policy-init/Go 让子、cheap 后重分析、side/fork、树内 side 的真实合法动作与零/单动作熵边界，以及原生轨迹经来源 shuffle 后的正式 FP16 learner 更新。另有原生 selfplay 命令检查覆盖 bundle 发现、配置优先级、实际产样和画布不匹配拒绝；外层检查见下述控制器验证。
 
-`tests/test_muzero_controller.py` 运行 Go/象棋 MuZero、Renju/Hex/象棋 Gumbel MuZero 的实际两轮 CUDA FP16 闭环，覆盖 PUCT/Gumbel 非根、编译训练、零样本初始化、不可变输入 bundle、普通/SWA 发布、展开快照与完整轮次继续运行；发布的三组件逐字比较于独立选择 checkpoint 权重后的导出。工程检查不表示棋力或吞吐已经得到验证。
+`tests/test_muzero_random.py` 在隐藏 GPU 且没有模型文件的条件下，检查六棋类的随机根／递归预测、缓存、静态动作域及 PUCT/Gumbel 轨迹产样。
+
+`tests/test_muzero_controller.py` 运行 Go/象棋 MuZero、Renju/Hex/象棋 Gumbel MuZero 的实际两轮 CUDA FP16 闭环，覆盖 PUCT/Gumbel 非根、编译训练、随机冷启动、显式权重初始化、不可变输入 bundle、普通/SWA 发布、展开快照与完整轮次继续运行；发布的三组件逐字比较于独立选择 checkpoint 权重后的导出。工程检查不表示棋力或吞吐已经得到验证。
 
 象棋 GTP 的完整规则历史、联合策略和 latent 分支由 `tests/test_xiangqi_gtp.py` 检查，包含与 JSON analysis 的同局面数值对照及原生异步控制。
