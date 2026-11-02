@@ -7,11 +7,38 @@
 namespace MuZero {
 PositionEvaluator::PositionEvaluator(Batcher& service, bool exact, bool randomize_, int symmetry,
                                      int cachePower, int mutexPower, Logger* logger_, const std::string& symmetrySeed_)
-  : batcher(service), model(service.model()), requireExactNNLen(exact), symmetrySeed(symmetrySeed_), randomize(randomize_),
-    defaultSymmetry(symmetry), logger(logger_), postprocess(model.predictionDesc().postProcessParams) {
+  : batcher(&service), model(service.model()), requireExactNNLen(exact), symmetrySeed(symmetrySeed_), randomize(randomize_),
+    defaultSymmetry(symmetry), logger(logger_), postprocess(model.predictionDesc().postProcessParams), randomSeed(uint64_t{0}) {
   // The raw MuZero backend already restores scale8 before returning CPU logits.
   postprocess.outputScaleMultiplier = 1.0f;
   if(cachePower >= 0) cache = std::make_unique<NNCacheTable>(cachePower,mutexPower);
+}
+
+PositionEvaluator::PositionEvaluator(std::shared_ptr<const ModelBundle> layout, bool exact, bool randomize_, int symmetry,
+                                     int cachePower, int mutexPower, Logger* logger_, const std::string& seed)
+  : batcher(nullptr), randomModel(std::move(layout)), model(*randomModel), requireExactNNLen(exact),
+    symmetrySeed(seed), randomize(randomize_), defaultSymmetry(symmetry), logger(logger_),
+    postprocess(model.predictionDesc().postProcessParams), randomSeed(seed) {
+  if(cachePower >= 0) cache = std::make_unique<NNCacheTable>(cachePower,mutexPower);
+}
+
+Output PositionEvaluator::randomOutput(PositionBuffer& buffer) const {
+  if(!buffer.evaluationRand) {
+    std::lock_guard<std::mutex> lock(randomSeedMutex);
+    buffer.evaluationRand = std::make_unique<Rand>(randomSeed.nextUInt64());
+  }
+  auto& rand = *buffer.evaluationRand;
+  Output output;
+  const int actions = model.game() == "xiangqi" ? Xiangqi::NUM_ACTIONS : model.posLen()*model.posLen()+(model.game() == "go");
+  output.policy.resize(actions);
+  for(float& p: output.policy) p = (float)rand.nextGaussian();
+  for(float& v: output.value) v = (float)(0.20*rand.nextGaussian());
+  // V3.4 random MuZero has no remaining-time estimate and uses the source
+  // v17 short-term error transform of a zero raw prediction.
+  output.auxiliary = {-1e30f,0.0f};
+  // Random recurrence is stateless. RootOrientation retains the static domain;
+  // no backend latent or real successor board is needed.
+  return output;
 }
 
 std::shared_ptr<Evaluation> PositionEvaluator::finish(Output output, Player nextPlayer,
@@ -21,6 +48,7 @@ std::shared_ptr<Evaluation> PositionEvaluator::finish(Output output, Player next
   const bool xiangqi = model.game() == "xiangqi";
   const int actions = xiangqi ? Xiangqi::NUM_ACTIONS : area+(model.game() == "go");
   MiscNNInputParams params = inputParams;
+  if(model.isRandom()) params.policyOptimism = 0.0;
   if(model.representationDesc().numInputMetaChannels > 0) params.policyOptimism = 0.0;
   auto result = std::make_shared<Evaluation>();
   result->state = std::move(output.state);
@@ -138,7 +166,7 @@ std::shared_ptr<Evaluation> PositionEvaluator::initial(const Board& board, const
   const bool suppressNoResult = !history.rules.isGo() ||
     (history.rules.koRule != Rules::KO_SIMPLE && history.rules.scoringRule != Rules::SCORING_TERRITORY);
   auto orientation = std::make_shared<RootOrientation>(RootOrientation{symmetry,board.x_size,board.y_size,suppressNoResult,nextPlayer});
-  auto result = finish(batcher.initial(buffer.transformed,buffer.global,buffer.metadata),
+  auto result = finish(batcher ? batcher->initial(buffer.transformed,buffer.global,buffer.metadata) : randomOutput(buffer),
                        nextPlayer,std::move(orientation),legal,params,buffer);
   result->nnHash = hash;
   if(cache) cache->set(result); // Like source, skipCache bypasses reads, not writes.
@@ -171,7 +199,7 @@ std::shared_ptr<Evaluation> PositionEvaluator::recurrent(const Evaluation& paren
       transformedAction = NNPos::locToPos(transformed,canvas,canvas,canvas);
     }
   }
-  return finish(batcher.recurrent(parent.state,transformedAction),getOpp(parent.nextPlayer),
+  return finish(batcher ? batcher->recurrent(parent.state,transformedAction) : randomOutput(buffer),getOpp(parent.nextPlayer),
                 parent.orientation,legal,params,buffer);
 }
 

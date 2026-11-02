@@ -24,12 +24,14 @@ struct PositionBuffer {
   std::unique_ptr<bool[]> jointLegal; // Allocated only for Xiangqi, reused across calls.
   bool errorLogLockout = false;
   std::unique_ptr<Rand> symmetryRand;
+  std::unique_ptr<Rand> evaluationRand;
 };
 
 // Batcher must outlive this adapter and all its clients. The root cache uses
 // source NNCacheTable and its hashes; entries retain their latent orientation.
 class PositionEvaluator {
-  Batcher& batcher;
+  Batcher* batcher;
+  std::shared_ptr<const ModelBundle> randomModel;
   const ModelBundle& model;
   const bool requireExactNNLen;
   const std::string symmetrySeed;
@@ -39,6 +41,9 @@ class PositionEvaluator {
   std::atomic<uint64_t> cacheHits{0};
   Logger* logger;
   ModelPostProcessParams postprocess;
+  mutable std::mutex randomSeedMutex;
+  mutable Rand randomSeed;
+  Output randomOutput(PositionBuffer&) const;
 
   std::shared_ptr<Evaluation> finish(Output output, Player nextPlayer,
     std::shared_ptr<const RootOrientation> orientation, const bool* legal,
@@ -46,6 +51,8 @@ class PositionEvaluator {
 public:
   PositionEvaluator(Batcher&, bool requireExactNNLen, bool randomize, int defaultSymmetry,
                     int cacheSizePowerOfTwo, int mutexPoolSizePowerOfTwo, Logger* logger = nullptr, const std::string& symmetrySeed = "");
+  PositionEvaluator(std::shared_ptr<const ModelBundle>, bool requireExactNNLen, bool randomize, int defaultSymmetry,
+                    int cacheSizePowerOfTwo, int mutexPoolSizePowerOfTwo, Logger*, const std::string& seed);
   std::shared_ptr<Evaluation> initial(const Board&, const BoardHistory&, Player,
     const SGFMetadata*, const MiscNNInputParams&, PositionBuffer&, Rand&, bool skipCache);
   // Action is an absolute joint action (Xiangqi) or a policy index in the original
@@ -65,7 +72,7 @@ public:
   void setDefaultSymmetry(int symmetry);
   const ModelBundle& getModel() const { return model; }
   bool getRequireExactNNLen() const { return requireExactNNLen; }
-  void waitForNextNNEvalIfAny() { batcher.waitForNextNNEvalIfAny(); }
+  void waitForNextNNEvalIfAny() { if(batcher) batcher->waitForNextNNEvalIfAny(); }
 };
 }
 #endif
