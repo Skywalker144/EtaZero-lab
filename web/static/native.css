@@ -2,7 +2,7 @@ textarea {box-sizing:border-box;width:100%;padding:10px;border:1px solid var(--l
 .native-policy-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;max-height:300px;overflow:auto}
 .native-policy-list button {font-size:11px;padding:5px}.path {overflow-wrap:anywhere}
 #policy-list>select,#policy-list>.native-policy-list {grid-column:1/-1;width:100%}
-#apply-settings {margin-top:8px}#policy-map {margin:10px 0}#catalog-errors {white-space:pre-wrap;overflow-wrap:anywhere}
+#policy-map {margin:10px 0}#catalog-errors {white-space:pre-wrap;overflow-wrap:anywhere}
 #board .empty-state {position:absolute;inset:0;display:grid;place-content:center;margin:0}
 .board-point .xiangqi-piece {font-size:clamp(13px,3.4cqw,30px)}
 #policy-map .heat-cell {padding:2px;border-radius:2px;min-height:0;font-size:10px;aspect-ratio:1}
@@ -12,3 +12,27 @@ textarea {box-sizing:border-box;width:100%;padding:10px;border:1px solid var(--l
 #nn-list>select,#nn-list>.native-policy-list {grid-column:1/-1;width:100%}
 .nn-entry {padding:5px;font:11px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px}
 #nn-context,#nn-command,#nn-values {overflow-wrap:anywhere}
+
+/* Branding and model controls stay in the setup column at every width. */
+.setup-brand {display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:18px}
+.setup-brand .brand {font-size:19px;gap:8px}
+.setup-brand .brand>span:not(.dot):not(.sr-only) {font:11px ui-monospace,monospace;color:var(--muted);background:var(--subtle);border:1px solid var(--line);border-radius:6px;padding:3px 7px}
+.setup-brand .brand > .dot {padding:0;border:0;border-radius:50%;background:var(--muted);width:6px;height:6px}
+.setup-brand .brand > .dot.online {background:var(--online)}
+.setup-brand select {min-height:32px;font-size:11px;color:var(--muted)}
+.sr-only {position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.setup-section {padding:16px 0 3px;border-top:1px solid var(--line)}
+.setup .field {font-size:12px;font-weight:550;color:var(--text);margin-bottom:13px}
+.setup .field input,.setup .field select {height:40px;background-color:var(--subtle);font-weight:400}
+.setup-label-row {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;font-size:12px;font-weight:550}
+.setup-label-row button {min-height:27px;padding:3px 9px;font-size:11px}
+.setup-hint {font-size:11px;color:var(--muted);line-height:1.5;margin:0 0 14px}
+.ponder-option {margin:2px 0 16px;font-size:12px;line-height:1.4}
+.setup-actions {padding-top:8px}
+.setup-actions button {min-height:42px}
+#opening-hint {margin:4px 2px 0}
+@media(max-width:1150px) {.setup .setup-content {padding-top:12px}.setup #settings {display:block}}
+
+.board-size-field output {margin-left:auto;color:var(--muted);font-weight:400}
+.setup .board-size-field input[type="range"] {height:24px;padding:0;accent-color:var(--accent);box-shadow:none;border:0;background:transparent}
+#board-size-note:empty {display:none}
