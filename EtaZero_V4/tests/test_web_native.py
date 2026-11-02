@@ -5,6 +5,7 @@ from threading import Event
 
 import pytest
 
+from etazero import ROOT
 from etazero.gtp import GtpProcess, GtpError
 from test_gtp import gtp_config
 from test_xiangqi_gtp import config_for_gtp, CHECK_FEN, CHECKS
@@ -66,6 +67,52 @@ def test_native_state_search_reports_and_undo(tmp_path, game, gumbel):
         engine.command('undo')
         assert engine.state() == start
     assert engine.process.poll() == 0
+
+
+@pytest.mark.parametrize('exact', [False, True])
+def test_board_size_obeys_configured_nn_buffer_without_disconnect(tmp_path, exact):
+    config = profile(tmp_path / 'gtp.cfg', 'go', maxBoardSizeForNNBuffer=7,
+                     requireMaxBoardSize=str(exact).lower(), defaultBoardSize=7)
+    with GtpProcess(config, '/dev/null') as engine:
+        engine.command('play B D4')
+        before = engine.state()
+        if exact:
+            with pytest.raises(GtpError, match='requires an exact board size'):
+                engine.command('boardsize 5')
+            assert engine.state() == before
+        else:
+            engine.command('boardsize 5')
+            assert engine.state()['boardXSize'] == 5
+            assert engine.command(report_command(), on_report=lambda _: None).body.startswith('play ')
+        before = engine.state()
+        with pytest.raises(GtpError, match='NN buffer'):
+            engine.command('boardsize 9')
+        assert engine.state() == before
+        sgf = tmp_path / 'oversize.sgf'
+        sgf.write_text('(;GM[1]SZ[9]RU[Tromp-Taylor]KM[0])')
+        with pytest.raises(GtpError, match='NN buffer'):
+            engine.command(f'loadsgf {sgf}')
+        assert engine.state() == before
+        assert engine.command(report_command(before['currentPlayer']), on_report=lambda _: None).body.startswith('play ')
+
+
+@pytest.mark.skipif(os.environ.get('ETAZERO_EIGEN_TESTS') != '1', reason='requires Eigen real-model build')
+@pytest.mark.parametrize('game', ['go', 'renju', 'hex'])
+@pytest.mark.parametrize('muzero', [False, True])
+def test_real_model_search_on_smaller_board(tmp_path, game, muzero):
+    model = model_for(tmp_path / 'model', game, muzero)
+    config = profile(tmp_path / 'gtp.cfg', game, muzero=muzero, random=False,
+                     inputsUseNHWC='true', maxBoardSizeForNNBuffer=5,
+                     requireMaxBoardSize='false', maxVisits=8)
+    with GtpProcess(config, model, binary=ROOT / 'build-eigen/katago') as engine:
+        engine.command('boardsize 3')
+        assert engine.state()['boardXSize'] == 3
+        reply = engine.command(report_command(), on_report=lambda _: None)
+        assert reply.body.startswith('play ')
+        assert reply.analysis['rootInfo']['visits'] > 0
+        with pytest.raises(GtpError, match='NN buffer|model canvas'):
+            engine.command('boardsize 7')
+        assert engine.state()['boardXSize'] == 3
 
 
 @pytest.mark.parametrize('game,moves', [
