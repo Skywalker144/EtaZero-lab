@@ -26,6 +26,48 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
   Board::initHash();
   std::ifstream in(request);
   const json input = json::parse(in);
+  if(input.contains("random_game")) {
+    auto model = std::make_shared<MuZero::ModelBundle>(input.at("random_game").get<std::string>(),input.at("canvas").get<int>());
+    MuZero::PositionEvaluator evaluator(model,false,false,0,4,2,nullptr,"random-position");
+    const bool xiangqi = model->game() == "xiangqi", go = model->game() == "go";
+    const int canvas = model->posLen(), area = canvas*canvas;
+    Rules rules = Rules::forGame(Rules::parseGame(model->game()));
+    if(go) rules.koRule = Rules::KO_SIMPLE;
+    Board board(xiangqi ? 9 : 4,xiangqi ? 10 : 4);
+    const BoardHistoryModes modes(false,false);
+    BoardHistory history = xiangqi ? BoardHistory(Xiangqi::State(),modes) : BoardHistory(board,P_BLACK,rules,0,modes);
+    if(xiangqi) board = history.getRecentBoard(0);
+    const int action = xiangqi ? Xiangqi::parseAction("b0c2") : 0;
+    history.makeBoardMoveAssumeLegal(board,xiangqi ? Xiangqi::actionToLoc(action) : Location::getLoc(0,0,4),P_BLACK,nullptr);
+    MuZero::PositionBuffer buffer;
+    Rand rand("random-position");
+    MiscNNInputParams params;
+    params.policyOptimism = 1.0;
+    auto root = evaluator.initial(board,history,P_WHITE,nullptr,params,buffer,rand,false);
+    testAssert(root->policyProbs[action] == -1 && !root->state);
+    testAssert(evaluator.initial(board,history,P_WHITE,nullptr,params,buffer,rand,false) == root);
+    testAssert(evaluator.numCacheHits() == 1);
+    // Recurrence may start on another search thread with a fresh buffer. Even
+    // repeated occupied actions stay in the latent tree's static vocabulary.
+    MuZero::PositionBuffer otherThread;
+    auto current = root;
+    json outputs = json::array({outputJSON(*root)});
+    for(int depth = 0; depth < 4; depth++) {
+      current = evaluator.recurrent(*current,action,params,otherThread);
+      testAssert(current->orientation == root->orientation && !current->state);
+      testAssert(current->policyProbs[action] >= 0);
+      const int count = xiangqi ? Xiangqi::NUM_ACTIONS : area+1;
+      for(int i = 0; i < count; i++) {
+        const bool allowed = xiangqi || (i == area ? go : i%canvas < 4 && i/canvas < 4);
+        testAssert((current->policyProbs[i] >= 0) == allowed);
+      }
+      outputs.push_back(outputJSON(*current));
+    }
+    reject([&]() { evaluator.recurrent(*root,xiangqi ? Xiangqi::NUM_ACTIONS : 4,params,buffer); });
+    std::ofstream out(response);
+    out << outputs.dump();
+    return;
+  }
   ConfigParser config(input.value("cuda_config",std::map<std::string,std::string>{}));
   auto model = std::make_shared<MuZero::ModelBundle>(directory);
   MuZero::Batcher batcher(model,8,{0,0},input.at("fp16").get<bool>() ? enabled_t::True : enabled_t::False,config,nullptr,input.value("inputs_nhwc",true));
