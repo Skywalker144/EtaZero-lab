@@ -38,7 +38,7 @@ public:
   bool requiresSGFMetadata() const;
   Rules getSupportedRules(const Rules&, bool& supported) const;
   uint64_t numRowsProcessed() const;
-  bool isNeuralNetEnabled() const { return !board || board->isNeuralNetEnabled(); }
+  bool isNeuralNetEnabled() const { return board ? board->isNeuralNetEnabled() : batcher != nullptr; }
   uint64_t numBatchesProcessed() const;
   double averageProcessedBatchSize() const;
   uint64_t numCacheHits() const;
