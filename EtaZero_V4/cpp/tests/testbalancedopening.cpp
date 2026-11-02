@@ -14,9 +14,15 @@ BoardHistory history(const Board& b, G game) {
 void configuration() {
   ConfigParser empty;
   testAssert(Settings::load(empty,true).probability == 0);
-  for(bool self : {false,true}) for(G game : {G::FREESTYLE,G::STANDARD,G::RENJU}) {
+  for(bool self : {false,true}) for(G game : {G::FREESTYLE,G::STANDARD,G::RENJU,G::HEX}) {
     ConfigParser cfg(std::map<std::string,std::string>{{"game",Rules::gameName(game)}});
-    testAssert(Settings::load(cfg,self).probability == (self ? 0.99 : 1.0));
+    auto s = Settings::load(cfg,self);
+    testAssert(s.probability == (self ? 0.99 : 1.0));
+    if(game == G::HEX) {
+      testAssert(s.makeOpeningFairRate == (self ? 0.98 : 1.0));
+      testAssert(s.dropPow == (self ? 6 : 20));
+      testAssert(s.minAcceptRate == (self ? 0.005 : 0.001));
+    }
     cfg.overrideKey("balanceOpeningProb","0");
     testAssert(Settings::load(cfg,self).probability == 0);
   }
