@@ -5,6 +5,7 @@ struct Evaluator::Impl {};
 struct ModelBundle::Impl {};
 [[noreturn]] static void unsupported() { throw StringError("MuZero native inference currently requires the CUDA, Eigen or OpenCL backend"); }
 ModelBundle::ModelBundle(const std::string&) { unsupported(); }
+ModelBundle::ModelBundle(const std::string&,int) { unsupported(); }
 ModelBundle::~ModelBundle() = default;
 const ModelDesc& ModelBundle::representationDesc() const { unsupported(); }
 const ModelDesc& ModelBundle::predictionDesc() const { unsupported(); }
