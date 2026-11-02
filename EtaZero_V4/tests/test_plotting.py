@@ -97,6 +97,29 @@ def test_overview_scales_preserve_retry_and_missing_data_gaps(tmp_path):
         assert observations.learner_display_scales(tmp_path) == {}
 
 
+def test_value_loss_log_scale_keeps_zero_and_missing_distinct(tmp_path):
+    (tmp_path / 'train.log').write_text(learner_header())
+    scales = observations.learner_display_scales(tmp_path)
+    history = [dict(total_samples=30, total_rows=0, display_scales=scales, train_logs=[
+        dict(nsamp=10, vloss=1., qwlloss=0.),
+        dict(nsamp=20, vloss=0., qwlloss=0.),
+        dict(nsamp=30, vloss=.5, qwlloss=0.)])]
+    figure = plotting.training_figure(history, 'alphazero')
+    axis = figure.axes[3]
+    assert axis.get_yscale() == 'log'
+    np.testing.assert_allclose(axis.lines[0].get_ydata(), [.4, np.nan, .2], equal_nan=True)
+    assert [text.get_text() for text in axis.get_legend().get_texts()] == ['Value', 'W-L Q (all zero)']
+    figure.clear()
+
+    history[0]['train_logs'] = [dict(nsamp=10, qwlloss=0.)]
+    figure = plotting.training_figure(history, 'alphazero')
+    axis = figure.axes[3]
+    assert not axis.lines
+    assert [text.get_text() for text in axis.get_legend().get_texts()] == ['W-L Q (all zero)']
+    assert 'No positive measurements for log scale' in [text.get_text() for text in axis.texts]
+    figure.clear()
+
+
 def test_missing_learner_settings_do_not_use_current_config(tmp_path):
     (tmp_path / 'config.json').write_text(json.dumps({'batch_size': 128}))
     with pytest.warns(RuntimeWarning, match='Missing'):
