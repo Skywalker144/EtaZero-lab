@@ -28,7 +28,7 @@ GTP `final_score` 只返回已完成且非认输对局的规则结果，未终�
 
 原生 selfplay 按 `game` 创建规则，五子棋/Hex 不使用围棋让子或数目收尾。非围棋真实终局产生规则结果；手数截断时以末状态 NN 价值衔接 TD，关闭主终局标签和结果辅助监督，并分别屏蔽不可用的 8/32 手未来局面目标。SGF 输出使用实际棋类和胜负结果。
 
-五子棋／Hex 的 [平衡开局](docs/openings.md) 已作为棋类适配接入原生 GameRunner，供 selfplay、match、gatekeeper 共用，普通网络与 MuZero 使用同一推理入口。五子棋采用固定 KataGomo 的随机骨架、候选接受、默认启用概率及带既有手数补偿的 policy init，随机 evaluator 冷启动同样执行；Hex 仍显式启用。开局前缀不生成搜索训练目标。Web/GTP 通过可取消的原生开局建议命令接入，生成失败或取消时保留原棋局。原生 `sampleinitializations` 可检查六种棋类、四种算法初始化后的局面与四结果搜索值，`genposesfromselfplayinit` 使用来源 writer 导出包含棋类有效对称及象棋完整历史的初始化局面；`evalrandominits` 单独检查均匀长度的随机 policy 前缀及后续搜索，用法见该文档。
+五子棋／Hex 的 [平衡开局](docs/openings.md) 已作为棋类适配接入原生 GameRunner，供 selfplay、match、gatekeeper 共用，普通网络与 MuZero 使用同一推理入口。五子棋采用固定 KataGomo 的随机骨架、候选接受、默认启用概率及带既有手数补偿的 policy init，随机 evaluator 冷启动同样执行；Hex 默认启用首手拒绝采样。开局前缀不生成搜索训练目标。Web/GTP 通过可取消的原生开局建议命令接入，生成失败或取消时保留原棋局。原生 `sampleinitializations` 可检查六种棋类、四种算法初始化后的局面与四结果搜索值，`genposesfromselfplayinit` 使用来源 writer 导出包含棋类有效对称及象棋完整历史的初始化局面；`evalrandominits` 单独检查均匀长度的随机 policy 前缀及后续搜索，用法见该文档。
 
 五子棋/Hex 的 SGF 和 hint 起点已接入原生 selfplay。SGF 使用 `GM` 与 `RU` 标识棋类，五子棋须明确 `freestyle`、`standard` 或 `renju`；hint JSON 使用 `game`，省略表示来源 Go 格式。导入保留零气子，Renju/Hex 不自动换色，棋类不匹配会报错或按来源文件加载流程记录并跳过。终局起点不参与自对弈起点采样；来源的 hint fork 保留局面、原始手数和训练权重。`samplesgfs` 的普通采样及 value-fluctuation 加权路径均支持六棋类，后者使用普通／MuZero 原始推理并保留来源权重公式，见 [SGF 波动加权采样](docs/evalsgf.md#sgf-波动加权采样)；`viewstartposes` 与 `trystartposes` 已接入六棋类、普通／MuZero 和 PUCT／Gumbel 搜索，保留各自的筛选、加权抽样与 hint 处理，见 [起点文件诊断](docs/evalsgf.md#查看与搜索起点文件)。其余来源高级工具仍须按实际使用路径核对，不因共享了解析器而视为全部完成多棋类适配。
 
@@ -88,7 +88,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
   --run-dir /absolute/path/to/new-run --iterations 2
 ```
 
-`--iterations` 是累计完成轮数；也可使用 `--max-hours` 指定累计时间预算。配置和命令行都未指定这两项时默认无限运行，直到手动中断；两项并用时任一达到即停止开始新轮次。时间预算在完整轮次边界检查，允许最后一轮超出预算；统计扣除实际 learner 编译时间，包含 MuZero 必需的初始化。已完成轮次可以继续增加上限，达到目标后再次运行不重复训练。计时失效和恢复口径见 [调度与恢复](docs/controller.md)。AlphaZero 首轮使用来源 random evaluator；MuZero 首轮由正式 learner 保存零样本的完整初始 checkpoint，再导出三组件模型。之后使用已接受的原生模型。工程检查也可使用 `configs/checks/source_placement`，其 `game` 可选择四种已接入的落子棋；象棋配置入口为 `configs/checks/source_xiangqi`。非围棋原生配置省略 `komiMean` 或设为 0，禁止 Go 让子。以上配置只用于工程检查，不是推荐训练配方。
+`--iterations` 是累计完成轮数；也可使用 `--max-hours` 指定累计时间预算。配置和命令行都未指定这两项时默认无限运行，直到手动中断；两项并用时任一达到即停止开始新轮次。时间预算在完整轮次边界检查，允许最后一轮超出预算；统计扣除实际 learner 编译时间，包含实际执行的权重初始化与导出。已完成轮次可以继续增加上限，达到目标后再次运行不重复训练。计时失效和恢复口径见 [调度与恢复](docs/controller.md)。AlphaZero 与 MuZero 在未指定初始权重时均使用 random evaluator 冷启动；MuZero 的根与递归节点使用随机预测，不执行 NN 推理。攒足首轮数据并训练后，后续轮次使用已接受的原生模型。工程检查也可使用 `configs/checks/source_placement`，其 `game` 可选择四种已接入的落子棋；象棋配置入口为 `configs/checks/source_xiangqi`。非围棋原生配置省略 `komiMean` 或设为 0，禁止 Go 让子。以上配置只用于工程检查，不是推荐训练配方。
 
 `run.cfg` 使用 `bootstrap_games`、`train_steps` 和 `replay_ratio` 规划采样与实际训练预算，首轮数据门槛来自 shuffle 的 `min-rows`。`train.cfg` 保留优化器、SWA 和 Lookahead 参数；内部 epoch 的名义大小由基准步数与 batch size 决定，外层预算暂停时保留未完成的训练状态。具体调度、SWA 与恢复口径见 [调度与恢复](docs/controller.md)。
 
@@ -102,7 +102,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
 
 多实验臂可使用 `bash scripts/autoexp.sh --config-dir /absolute/path/to/experiment --work-dir /absolute/path/to/output`，按 GPU 槽位排队，共享初始权重但保持各臂独立的 learner 状态；配置和恢复方式见 [多实验臂调度](docs/controller.md#多实验臂调度)。新建单臂也可用 `run --weights` 载入初始权重。
 
-独立比赛可使用 `bash scripts/run.sh match --config /absolute/path/to/match.cfg --output-dir /absolute/path/to/evaluation`；支持普通网络与 MuZero 混合对弈。`arena` 可读取训练提交记录，选择历史模型并绘制训练时间曲线。比赛恢复、配置索引、采样与 Elo 口径见 [独立比赛与 Elo](docs/evaluation.md)。
+独立比赛可使用 `bash scripts/run.sh match --config /absolute/path/to/match.cfg --output-dir /absolute/path/to/evaluation`；支持普通网络与 MuZero 混合对弈。公共比赛条件位于 [configs/match/common.cfg](configs/match/common.cfg)，四种棋类分别使用该目录下的 `go.cfg`、`gomoku.cfg`、`hex.cfg`、`xiangqi.cfg`；任务提供模型、配对、局数和逐 bot 算法差异。`arena` 可读取训练提交记录，选择历史模型并绘制训练时间曲线。比赛恢复、配置索引、采样与 Elo 口径见 [独立比赛与 Elo](docs/evaluation.md)。
 
 原生 `benchmark`／GTP `kata-benchmark` 已接入全部棋类与普通／MuZero 搜索，保留来源抽样、计时及调参流程。`benchmarknn` 使用来源前向计时循环，支持多棋类尺寸及分别测量 MuZero initial／recurrent。多棋类和新算法使用实际吞吐进行线程比较；Go PUCT 的来源经验 Elo 估计与对局 Elo 必须区分，见 [搜索与推理 benchmark](docs/benchmark.md)。
 
@@ -114,7 +114,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
 
 ## 文件与验证
 
-运行目录保存 `config.json`、`source.json` 和包括未提交适配代码的 `source.tar.gz`；`rounds/` 保存逐轮输入模型目录、阶段日志和结果，`selfplay/` 保存原始数据，`shuffleddata/` 保存训练快照，`train/` 保存来源 checkpoint，`models/` 保存不可覆盖的发布模型。MuZero 另有 `initial/checkpoint.ckpt` 保存原始零样本状态，`muzero_network.json` 是交给 learner 的网络配置副本。阶段失败不推进完成轮数或 accepted 指针；已经导出的候选与已提交 learner checkpoint 保留。配置 `gatekeeper_config` 时使用独立原生比赛配置，拒绝候选不回滚训练；规则和恢复范围见 [调度与恢复](docs/controller.md)。
+运行目录保存 `config.json`、`source.json` 和包括未提交适配代码的 `source.tar.gz`；`rounds/` 保存逐轮输入模型目录、阶段日志和结果，`selfplay/` 保存原始数据，`shuffleddata/` 保存训练快照，`train/` 保存来源 checkpoint，`models/` 保存不可覆盖的发布模型。显式提供初始权重时，`initial/checkpoint.ckpt` 保存原始零样本状态；MuZero 的 `muzero_network.json` 是交给 learner 的网络配置副本。阶段失败不推进完成轮数或 accepted 指针；已经导出的候选与已提交 learner checkpoint 保留。配置 `gatekeeper_config` 时使用独立原生比赛配置，拒绝候选不回滚训练；规则和恢复范围见 [调度与恢复](docs/controller.md)。
 
 ```bash
 conda run --no-capture-output -n pytorch ctest --test-dir build --output-on-failure
