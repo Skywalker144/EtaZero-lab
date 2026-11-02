@@ -281,7 +281,7 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
 
     checkpoint = root / 'train/checkpoint.ckpt'
     accepted = root / state['accepted_model'] if state['accepted_model'] else None
-    if number == 0 and (config.is_muzero or (root / 'initial/weights.ckpt').is_file()) and accepted is None:
+    if number == 0 and (root / 'initial/weights.ckpt').is_file() and accepted is None:
         if not done('initialize'):
             if not checkpoint.is_file():
                 stage('initialize', [*learner_command(root, config), '-initialize-only'])
