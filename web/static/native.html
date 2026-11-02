@@ -7,56 +7,51 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-<header class="header"><div class="brand">EtaZero <span id="version"></span><h1>原生工作台</h1></div>
-  <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">连接中</span>
-  <select id="theme" aria-label="配色主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
-</header>
 <div id="error" class="error" role="alert" hidden></div>
 <main class="workspace">
-  <aside class="setup panel" aria-label="模型与会话配置"><details class="setup-details" id="setup-details" open>
+  <aside class="setup panel" aria-label="模型与会话配置">
+    <div class="setup-brand"><div class="brand">EtaZero <span id="version"></span><span id="connection-dot" class="dot" aria-hidden="true"></span><span id="connection" class="sr-only" role="status">连接中</span></div>
+      <select id="theme" aria-label="配色主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
+    <details class="setup-details" id="setup-details" open>
     <summary class="setup-toggle">会话配置<span>展开 / 收起</span></summary><div class="setup-content">
-    <div class="panel-heading"><h2>模型与棋局</h2><button id="refresh-models">刷新模型</button></div>
     <form id="settings">
-      <label class="field">运行目录<select id="run" required></select></label>
-      <label class="field">发布模型<select id="model" required></select></label>
-      <div id="model-summary" class="model-summary"></div><p id="config-path" class="muted path"></p>
-      <details class="inspector"><summary>初始局面 <span>可选覆盖</span></summary>
-        <p class="muted">留空使用原生配置。尺寸、棋规和贴目只在创建棋局时生效。</p>
-        <div class="field-row"><label class="field">宽<input id="size-x" type="number" min="2" placeholder="配置值"></label><label class="field">高<input id="size-y" type="number" min="2" placeholder="配置值"></label></div>
-        <label class="field">原生棋规<input id="rules" placeholder="如 tromp-taylor、renju、hex"></label>
-        <label class="field">贴目<input id="komi" type="number" step="0.5" placeholder="配置值"></label>
-        <label class="field">象棋 FEN<input id="fen" placeholder="留空为标准开局"></label>
-      </details>
-      <details class="inspector" id="sgf-panel"><summary>导入 SGF <span>创建棋局时生效</span></summary>
-        <label class="field">选择棋谱文件<input id="sgf-file" type="file" accept=".sgf,text/plain"></label>
-        <label class="field">或粘贴棋谱<textarea id="sgf" rows="4" spellcheck="false" placeholder="(;GM[1]…)"></textarea></label>
-        <label class="field">载入至第几手后<input id="sgf-turn" type="number" min="0" step="1" placeholder="留空载入全部；0 为初始局面"></label>
-        <p class="muted">棋谱提供尺寸、棋规和起点，请清空上方初始局面覆盖。按原生 SGF 读取器选择主线，支持历史回看与继续分支。请求上限 4 MiB。</p>
-      </details>
-      <details class="inspector" id="opening-panel"><summary>平衡开局 <span>五子棋 / Hex</span></summary>
-        <label class="check"><input id="balanced-opening" type="checkbox">创建时按当前模型生成平衡开局</label>
-        <label class="field">开局参数（JSON，可留空）<textarea id="opening-options" rows="3" spellcheck="false" placeholder="{}"></textarea></label>
-        <p class="muted">支持 balanceOpeningDropPow，Hex 另支持 minAcceptRate。留空使用配置值或原生缺省值。生成时可以停止；不能与 SGF 或 FEN 合用。</p>
-      </details>
-      <label class="field">操作模式<select id="mode"><option value="play">人机对弈</option><option value="manual">局面研究 · 手动双方</option></select></label>
-      <label class="field">人类执子<select id="human"><option value="B">黑方 / 象棋红方</option><option value="W">白方 / 象棋黑方</option></select></label>
-      <label class="field">maxVisits <small>留空沿用原生配置</small><input id="visits" type="number" min="1" step="1" placeholder="原生访问预算"></label>
-      <details class="inspector"><summary>其他搜索参数 <span>原生字段</span></summary><label class="field" for="parameters">要修改的参数（JSON 对象）</label><textarea id="parameters" rows="5" spellcheck="false">{}</textarea><p class="muted">仅提交填入的字段，具体约束由引擎校验。</p></details>
-      <button id="new-game" type="submit" class="primary wide">创建棋局</button>
-      <button id="apply-settings" type="button" class="wide" disabled>应用模式 / 执子 / 参数</button>
+      <div class="setup-section">
+        <div class="setup-label-row"><label for="run">运行目录</label><button id="refresh-models" type="button">刷新</button></div>
+        <label class="field"><select id="run" aria-label="运行目录" required></select></label>
+        <label class="field">模型<select id="model" required></select></label>
+        <p id="model-summary" class="setup-hint"></p>
+      </div>
+      <div class="setup-section">
+        <label class="field board-size-field">棋盘大小 <output id="board-size-value"></output>
+          <input id="board-size-range" type="range" min="0" max="0" step="1" aria-label="棋盘大小" hidden>
+          <input id="board-size" type="number" min="2" step="1" placeholder="使用模型配置的尺寸" aria-label="棋盘大小" hidden>
+        </label>
+        <p id="board-size-note" class="setup-hint"></p>
+        <label class="field">棋规<select id="rules"></select></label>
+      </div>
+      <div class="setup-section">
+        <label class="field">模式<select id="mode"><option value="play">人机对弈</option><option value="manual">手动双方</option></select></label>
+        <div id="play-settings">
+          <label class="field">人类执子<select id="human"><option value="B">先手</option><option value="W">后手</option></select></label>
+          <label class="check ponder-option"><input id="ponder" type="checkbox">对手思考时 AI 后台思考（pondering）</label>
+          <p id="ponder-note" class="setup-hint" hidden>Gumbel 不跨手复用搜索树；MuZero 不跨真实落子复用 latent 树。</p>
+          <label class="field">AI 每手预算<select id="budget-type"><option value="visits">新增 visits</option><option value="total">总 visits</option><option value="time">思考时间（秒）</option></select></label>
+          <label class="field"><span id="budget-label">新增 visits</span><input id="budget" type="number" min="1" step="1" value="500" required></label>
+        </div>
+      </div>
+      <div class="setup-actions"><button id="balanced-opening" type="button" class="primary wide">生成平衡开局</button></div>
+      <p id="opening-hint" class="setup-hint">使用当前设置创建一局，并生成平衡开局。</p>
     </form>
-    <details class="inspector"><summary>发布信息</summary><pre id="model-info"></pre></details>
-    <details class="inspector"><summary>实际参数与模型</summary><pre id="engine-config"></pre></details>
     <p id="catalog-errors" class="muted"></p>
     </div></details>
   </aside>
   <section class="position panel" aria-label="棋盘与历史">
     <div class="panel-heading"><h2>局面 <span id="rule-badge" class="badge"></span></h2><span id="session-mode" class="muted">未创建</span></div>
-    <div class="status-line"><span id="status" role="status">选择模型，创建棋局</span><span id="move-count"></span></div>
+    <div class="status-line"><span id="status" role="status">选择模型后自动开始</span><span id="move-count"></span></div>
     <p id="session-info" class="session-info"></p>
     <p id="opening-info" class="muted" hidden></p>
     <div class="actions"><button id="analyze" class="primary" disabled>开启分析 <kbd>A</kbd></button><button id="step" disabled>AI 单步 <kbd>S</kbd></button><button id="stop" hidden>停止搜索</button><button id="pass" hidden>停一手</button><button id="undo" disabled>撤回 <kbd>U</kbd></button><button id="retry" hidden>重试 AI</button></div>
-    <div class="board-surround"><div id="board" class="board" role="group" aria-label="棋盘"><p class="empty-state">创建棋局后显示原生局面</p></div></div>
+    <div class="board-surround"><div id="board" class="board" role="group" aria-label="棋盘"><p class="empty-state">选择模型后显示棋盘</p></div></div>
     <div class="board-footer"><label class="check"><input id="numbers" type="checkbox" checked>手数</label><label class="overlay-label">叠加<select id="overlay"><option value="candidates">候选得分</option><option value="prior">候选先验</option><option value="visits">候选访问</option><option value="none">无</option></select></label><span id="board-coordinate" class="mono">—</span></div>
     <div class="candidate-controls"><label>Top K <input id="candidate-top" type="number" min="1" value="10"></label><label>最低访问 % <input id="candidate-min" type="number" min="0" max="100" value="1" step="0.1"></label></div>
     <p id="view-note" class="view-note" hidden></p><button id="branch" class="wide" hidden>从此处继续 · 撤回后续落子</button>
@@ -66,7 +61,7 @@
   </section>
   <aside class="analysis panel" aria-label="搜索分析">
     <div class="panel-heading"><h2>搜索分析</h2><span id="analysis-status" class="muted">—</span></div>
-    <div id="analysis-empty" class="empty-state"><strong>查看引擎如何选择</strong><p>创建棋局后按 A 开启持续分析。<br>按 Esc 停止；落子或悔棋后会继续分析。</p></div>
+    <div id="analysis-empty" class="empty-state"><strong>查看引擎如何选择</strong><p>按 A 开启持续分析。<br>按 Esc 停止；落子或悔棋后会继续分析。</p></div>
     <div id="analysis-data" hidden>
       <div class="analysis-context"><span id="analysis-context"></span><button id="show-analysis">定位局面</button></div>
       <div class="metrics"><div><small>根访问</small><strong id="completed"></strong></div><div><small>得分率</small><strong id="winrate"></strong></div><div><small>W−L</small><strong id="value"></strong></div></div>

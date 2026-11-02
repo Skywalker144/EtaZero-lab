@@ -176,11 +176,8 @@ def test_browser_native_opening_history_failure_and_cancel(tmp_path, game, muzer
                 page = browser.new_page(viewport={'width': 1440, 'height': 1100})
                 errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
                 open_game(page, f'http://127.0.0.1:{server.server_port}')
-                page.locator('#opening-panel summary').click()
-                page.check('#balanced-opening')
-                page.fill('#opening-options', '{"balanceOpeningDropPow":2}')
                 old = app.snapshot()['game_id']
-                page.click('#new-game')
+                page.click('#balanced-opening')
                 ready(page, f'state.game_id !== {json.dumps(old)} && !state.busy')
                 current = app.snapshot()
                 assert page.locator('#opening-info').is_visible()
@@ -190,17 +187,6 @@ def test_browser_native_opening_history_failure_and_cancel(tmp_path, game, muzer
                 page.click('#first')
                 assert page.evaluate('displayedGame().board') == current['history'][0]['board']
                 page.click('#branch'); ready(page, 'state.game.moves.length === 0 && !state.busy')
-                if game == 'hex':
-                    page.fill('#opening-options', '{"balanceOpeningDropPow":1e300,"minAcceptRate":1e-300}')
-                    page.click('#new-game'); ready(page, 'state.phase === "opening"')
-                    page.click('#stop'); ready(page)
-                    assert app.snapshot()['game_id'] == current['game_id']
-                    assert page.evaluate('state.game.moves.length') == 0
-                page.fill('#opening-options', '{"unknown":1}')
-                page.click('#new-game')
-                page.wait_for_function('state && !state.busy && state.error')
-                assert page.locator('#error').is_visible()
-                assert app.snapshot()['game_id'] == current['game_id']
                 assert not errors, errors
                 browser.close()
         finally:

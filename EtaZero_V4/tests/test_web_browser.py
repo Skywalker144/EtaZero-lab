@@ -23,11 +23,9 @@ def ready(page, expression='!state.busy && state.phase === "idle"'):
 
 def open_game(page, url):
     page.goto(url)
-    page.locator('#new-game').wait_for()
-    page.wait_for_function('!document.getElementById("new-game").disabled')
+    ready(page, 'state.game && !state.busy && !setupFlight')
     page.select_option('#mode', 'manual')
-    page.click('#new-game')
-    ready(page, 'state.game && !state.busy')
+    ready(page, 'state.mode === "manual" && !state.busy && !setupFlight')
 
 
 @pytest.mark.parametrize('game', GAMES)
@@ -87,9 +85,6 @@ def test_native_browser_board_history_analysis_and_parameters(tmp_path, game, gu
                     assert page.locator('#policy-map .heat-cell').count()==25
                 if not gumbel:
                     page.screenshot(path=f'/tmp/etazero-v4-web-{game}.png',full_page=True)
-                page.fill('#visits','12');page.click('#apply-settings');ready(page)
-                assert int(app.snapshot()['parameters']['maxVisits'])==12
-                assert app.snapshot()['game']['moves']==[]
                 page.reload();ready(page,'state.game && !state.busy')
                 assert page.locator('#mode').input_value()=='manual'
                 page.select_option('#theme','dark')
@@ -198,3 +193,157 @@ def test_cuda_model_browser_move_and_native_analysis(tmp_path,game,muzero,gumbel
                 browser.close()
         finally:
             app.close();server.shutdown();server.server_close();thread.join(timeout=5)
+
+
+@pytest.mark.parametrize('game,rule', [('freestyle', 'standard'), ('hex', 'hex')])
+def test_setup_board_rules_budget_and_ponder(tmp_path, game, rule):
+    config = profile(tmp_path / 'gtp.cfg', game, maxVisits=8)
+    with App(lambda: catalog_for(config, game)) as app:
+        server = make_server(app, '127.0.0.1', 0)
+        thread = Thread(target=server.serve_forever); thread.start()
+        try:
+            with sync_playwright() as api:
+                browser = api.chromium.launch(headless=True)
+                page = browser.new_page()
+                open_game(page, f'http://127.0.0.1:{server.server_port}')
+                page.fill('#board-size', '7'); page.locator('#board-size').dispatch_event('change')
+                page.select_option('#rules', rule)
+                ready(page, 'state.game.boardXSize === 7 && !state.busy && !setupFlight && setupRevision === setupSent')
+                page.select_option('#mode', 'play')
+                page.check('#ponder')
+                page.fill('#budget', '12'); page.locator('#budget').dispatch_event('change')
+                ready(page, 'state.ui_setup?.budget_value === 12 && state.ui_setup?.ponder && !state.busy && !setupFlight')
+                state = app.snapshot()
+                assert (state['game']['boardXSize'], state['game']['game']) == (7, rule)
+                assert state['parameters']['ponderingEnabled'] == 'true'
+                assert state['parameters']['maxPlayouts'] == 12
+                assert state['parameters']['maxVisits'] > 12
+                page.wait_for_timeout(300)
+                assert app.session.engine.analysis()['rootInfo']['visits'] > 0
+                page.click('[data-point="D4"]')
+                ready(page, 'state.game.moves.length === 2 && !state.busy')
+                page.wait_for_timeout(300)
+                assert app.session.engine.analysis()['rootInfo']['visits'] > 0
+                page.select_option('#budget-type', 'total')
+                page.fill('#budget', '16'); page.locator('#budget').dispatch_event('change')
+                ready(page, 'state.ui_setup?.budget_type === "total" && state.ui_setup?.budget_value === 16 && !state.busy && !setupFlight')
+                assert app.snapshot()['parameters']['maxVisits'] == 16
+                assert app.snapshot()['parameters']['maxPlayouts'] > 16
+                page.select_option('#budget-type', 'time')
+                page.fill('#budget', '0.25'); page.locator('#budget').dispatch_event('change')
+                page.uncheck('#ponder')
+                ready(page, 'state.ui_setup?.budget_type === "time" && state.ui_setup?.budget_value === 0.25 && !state.ui_setup?.ponder && !state.busy && !setupFlight')
+                assert app.snapshot()['parameters']['maxTime'] == 0.25
+                assert app.snapshot()['parameters']['maxPlayouts'] > 16
+                assert app.snapshot()['parameters']['ponderingEnabled'] == 'false'
+                browser.close()
+        finally:
+            app.close(); server.shutdown(); server.server_close(); thread.join(timeout=5)
+
+
+def test_automatic_setup_slider_model_switch_and_failure(tmp_path):
+    config = profile(tmp_path / 'gtp.cfg', 'hex', maxVisits=8)
+    catalog = catalog_for(config, 'hex')
+    run = catalog['runs'][0]
+    run.update(canvas=7, trained_board_sizes=[3, 5, 7])
+    run['models'].append(dict(id='second', path='/dev/null', game='hex'))
+    catalog['runs'].append(dict(id='bad', label='bad', config=str(tmp_path / 'missing.cfg'), game='hex',
+                                canvas=7, trained_board_sizes=[3, 5, 7],
+                                models=[dict(id='missing', path='/dev/null', game='hex')]))
+    with App(lambda: catalog) as app:
+        server = make_server(app, '127.0.0.1', 0)
+        thread = Thread(target=server.serve_forever); thread.start()
+        try:
+            with sync_playwright() as api:
+                browser = api.chromium.launch(headless=True)
+                page = browser.new_page()
+                errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
+                open_game(page, f'http://127.0.0.1:{server.server_port}')
+                assert page.locator('#board-size-range').is_visible()
+                assert page.locator('#board-size-value').inner_text() == '7 × 7'
+                page.click('[data-point="D4"]')
+                ready(page, 'state.game.moves.length === 1 && !state.busy')
+                before = app.snapshot()
+                page.select_option('#model', 'second')
+                ready(page, 'state.selected_model?.id === "second" && !state.busy && !setupFlight')
+                after = app.snapshot()
+                assert after['game'] == before['game'] and after['history'] == before['history']
+                page.select_option('#run', 'bad')
+                page.wait_for_function('state && !state.busy && state.error && !setupFlight', timeout=30000)
+                assert page.locator('#run').input_value() == 'run'
+                assert page.locator('#model').input_value() == 'second'
+                assert app.snapshot()['game'] == before['game']
+                # Two immediate edits leave only the latest requested size.
+                page.locator('#board-size-range').evaluate("""el => {
+                  el.value='0'; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));
+                  el.value='1'; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));
+                }""")
+                ready(page, 'state.game.boardXSize === 5 && !state.busy && !setupFlight && setupRevision === setupSent')
+                assert app.snapshot()['game']['moves'] == []
+                assert not errors, errors
+                browser.close()
+        finally:
+            app.close(); server.shutdown(); server.server_close(); thread.join(timeout=5)
+
+
+def test_changes_while_model_loading_keep_latest_request(tmp_path, monkeypatch):
+    from threading import Event
+    import etazero.web_app as module
+    original = module.Session
+    started, release = Event(), Event()
+    def delayed(config, model, **kwargs):
+        if str(model) == '/dev/zero':
+            started.set()
+            assert release.wait(15)
+        return original(config, model, **kwargs)
+    monkeypatch.setattr(module, 'Session', delayed)
+    config = profile(tmp_path / 'gtp.cfg', 'hex', maxVisits=8)
+    catalog = catalog_for(config, 'hex')
+    run = catalog['runs'][0]
+    run.update(canvas=7, trained_board_sizes=[3, 5, 7])
+    run['models'].append(dict(id='slow', path='/dev/zero', game='hex'))
+    with App(lambda: catalog) as app:
+        server = make_server(app, '127.0.0.1', 0)
+        thread = Thread(target=server.serve_forever); thread.start()
+        try:
+            with sync_playwright() as api:
+                browser = api.chromium.launch(headless=True)
+                page = browser.new_page()
+                open_game(page, f'http://127.0.0.1:{server.server_port}')
+                page.select_option('#model', 'slow')
+                assert started.wait(10)
+                page.locator('#board-size-range').evaluate("""el => {
+                  el.value='1'; el.dispatchEvent(new Event('input',{bubbles:true}));
+                  el.dispatchEvent(new Event('change',{bubbles:true}));
+                }""")
+                release.set()
+                ready(page, 'state.selected_model?.id === "slow" && state.game.boardXSize === 5 && !state.busy && !setupFlight && setupRevision === setupSent')
+                assert page.locator('#board-size-value').inner_text() == '5 × 5'
+                browser.close()
+        finally:
+            release.set()
+            app.close(); server.shutdown(); server.server_close(); thread.join(timeout=5)
+
+
+def test_budget_change_interrupts_ai_then_resumes_with_latest_setting(tmp_path):
+    config = profile(tmp_path / 'gtp.cfg', 'hex', maxVisits=8)
+    with App(lambda: catalog_for(config, 'hex')) as app:
+        server = make_server(app, '127.0.0.1', 0)
+        thread = Thread(target=server.serve_forever); thread.start()
+        try:
+            with sync_playwright() as api:
+                browser = api.chromium.launch(headless=True)
+                page = browser.new_page()
+                open_game(page, f'http://127.0.0.1:{server.server_port}')
+                page.select_option('#mode', 'play')
+                ready(page, 'state.mode === "play" && !state.busy && !setupFlight')
+                page.fill('#budget', '100000000'); page.locator('#budget').dispatch_event('change')
+                ready(page, 'state.ui_setup?.budget_value === 100000000 && !state.busy && !setupFlight')
+                page.select_option('#human', 'W')
+                page.wait_for_function('state.phase === "thinking"', timeout=30000)
+                page.fill('#budget', '8'); page.locator('#budget').dispatch_event('change')
+                ready(page, 'state.ui_setup?.budget_value === 8 && state.game.moves.length === 1 && !state.busy && !setupFlight')
+                assert app.snapshot()['parameters']['maxPlayouts'] == 8
+                browser.close()
+        finally:
+            app.close(); server.shutdown(); server.server_close(); thread.join(timeout=5)

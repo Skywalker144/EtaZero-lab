@@ -108,54 +108,6 @@ def test_failed_import_preserves_existing_session(tmp_path, change):
         assert idle(app)['game']['moves'] == []
 
 
-@pytest.mark.parametrize('game', ['go', 'xiangqi'])
-def test_browser_sgf_upload_prefix_history_and_branch(tmp_path, game):
-    config = profile(tmp_path / 'gtp.cfg', game)
-    # Comments may exceed the legacy HTTP request limit; they are read by KataGo.
-    sgf = record(game).replace('(;', '(;C[' + '研究说明。' * 3000 + ']')
-    source = tmp_path / '导入 棋谱.sgf'
-    source.write_text(sgf)
-    with App(lambda: catalog_for(config, game)) as app:
-        server = make_server(app, '127.0.0.1', 0)
-        thread = Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            with sync_playwright() as browser_api:
-                browser = browser_api.chromium.launch(headless=True)
-                page = browser.new_page(viewport={'width': 1440, 'height': 1100})
-                errors = []
-                page.on('pageerror', lambda error: errors.append(str(error)))
-                open_game(page, f'http://127.0.0.1:{server.server_port}')
-                page.locator('#sgf-panel summary').click()
-                page.locator('#sgf-file').set_input_files(source)
-                page.wait_for_function('document.getElementById("sgf").value.startsWith("(;C[")')
-                page.fill('#sgf-turn', '3')
-                page.click('#new-game')
-                ready(page, 'state.game.moves.length === 3 && !state.busy')
-                assert len(app.snapshot()['history']) == 4
-                page.click('#first')
-                assert page.evaluate('displayedGame().board') == app.snapshot()['history'][0]['board']
-                page.click('#branch')
-                ready(page, 'state.game.moves.length === 0 && !state.busy')
-                assert app.snapshot()['game']['turnNumber'] == (97 if game == 'xiangqi' else 0)
-                page.fill('#sgf-turn', '0')
-                old_id = app.snapshot()['game_id']
-                page.click('#new-game')
-                ready(page, f'state.game_id !== {json.dumps(old_id)} && !state.busy')
-                assert app.snapshot()['game']['moves'] == []
-                assert len(app.snapshot()['history']) == 1
-                page.fill('#sgf-turn', '')
-                page.click('#new-game')
-                ready(page, 'state.game.moves.length > 3 && !state.busy')
-                assert not errors, errors
-                browser.close()
-        finally:
-            app.close()
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-
-
 @cuda
 @pytest.mark.parametrize('game', ['go', 'xiangqi'])
 @pytest.mark.parametrize('muzero,gumbel', [(False, False), (False, True), (True, False), (True, True)])

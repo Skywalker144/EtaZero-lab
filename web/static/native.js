@@ -1,11 +1,13 @@
 const $ = id => document.getElementById(id);
 const columns = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
-const gameNames = {go:'围棋',freestyle:'Freestyle',standard:'Standard',renju:'Renju',hex:'Hex',xiangqi:'中国象棋'};
+const gameNames = {go:'围棋',freestyle:'Freestyle',standard:'Standard',renju:'Renju',hex:'Hex',xiangqi:'中国象棋',chinese:'围棋 · 中国规则',japanese:'围棋 · 日本规则',aga:'围棋 · AGA',new_zealand:'围棋 · 新西兰规则', 'tromp-taylor':'围棋 · Tromp–Taylor'};
 const pieces = {1:['','車','仕','炮','兵','馬','相','帥'],'-1':['','車','士','砲','卒','馬','象','將']};
 const phaseNames = {idle:'就绪',loading:'加载中',opening:'生成平衡开局中',working:'更新局面',diagnosing:'读取网络输出',thinking:'AI 思考中',analyzing:'持续分析',stopping:'正在停止',error:'操作失败'};
 let state = null, catalog = null, pending = false, online = false, notice = '';
-let viewTurn = null, selectedFrom = null, highlight = null, formKey = '', catalogRevision = -1;
+let viewTurn = null, selectedFrom = null, highlight = null, catalogRevision = -1;
 let loadingCatalog = false, boardKey = '', historyKey = '';
+let setupInitialized=false, setupRevision=0, setupSent=0, setupFlight=null, openingQueued=false, syncingSetup=false;
+let boardSizes=null, setupSyncKey='';
 const esc = text => String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = (v, digits=3) => Number.isFinite(v) ? v.toFixed(digits) : '—';
 const percent = v => Number.isFinite(v) ? (100*v).toFixed(1) : '—';
@@ -45,19 +47,23 @@ function accept(next) {
     viewTurn=null; selectedFrom=null; highlight=null;
   }
   state=next;
-  const key = `${state.instance}:${state.game_id}:${state.mode}:${state.human}`;
-  if (formKey!==key) {
-    formKey=key; $('mode').value=state.mode; $('human').value=state.human;
+  if (setupFlight?.accepted && !state.busy) {
+    const flight=setupFlight; setupFlight=null;
+    if (state.error && flight.revision===setupRevision && state.ui_setup) hydrateSetup(state.ui_setup);
+    if (state.ui_setup) setupSyncKey=JSON.stringify(state.ui_setup);
   }
   if (catalogRevision!==state.catalog_revision) loadCatalog();
+  if (setupInitialized && !setupFlight && setupRevision===setupSent && state.ui_setup &&
+      setupSyncKey!==JSON.stringify(state.ui_setup)) hydrateSetup(state.ui_setup);
   render();
+  queueMicrotask(drainSetup);
 }
 async function command(operation, payload={}) {
   if (!state || pending || !online || (state.busy && operation!=='stop')) return;
   pending=true; notice=''; render();
   try { accept(await api('/api/'+operation,{version:state.version,game_id:state.game_id,...payload})); }
   catch(error) { notice=error.message; try {accept(await api('/api/state'));} catch {} }
-  finally {pending=false;render();}
+  finally {pending=false;render();queueMicrotask(drainSetup);}
 }
 function selectedRun() {return catalog?.runs.find(run=>run.id===$('run').value);}
 function selectedModel() {return selectedRun()?.models.find(model=>model.id===$('model').value);}
@@ -65,21 +71,22 @@ function populateModels(preferred) {
   const run=selectedRun(); $('model').replaceChildren();
   for (const model of run?.models || []) {
     const label=model.iteration===undefined ? model.path.split('/').at(-1) :
-      `第 ${model.iteration} 轮 · ${model.weights} · ${model.accepted?'已接受':'被拒候选'}`;
+      `Iteration ${model.iteration} · ${model.training_seconds==null?'训练时间未知':`训练 ${(model.training_seconds/3600).toFixed(2)} h`}`;
     $('model').add(new Option(label,model.id));
   }
   if (run?.models.some(m=>m.id===preferred)) $('model').value=preferred;
   else if (run?.current_model) $('model').value=run.current_model;
   if (!run?.models.length) $('model').add(new Option('暂无发布模型',''));
-  render();
+  updateRules();
 }
 async function loadCatalog() {
   if (loadingCatalog) return;
   loadingCatalog=true;
   const revision=state?.catalog_revision ?? 0;
   try {
+    const incoming=await api('/api/catalog');
     const previousRun=$('run').value, previousModel=$('model').value;
-    catalog=await api('/api/catalog'); catalogRevision=revision;
+    catalog=incoming; catalogRevision=revision;
     $('version').textContent=catalog.version; $('run').replaceChildren();
     for (const run of catalog.runs) $('run').add(new Option(run.label,run.id));
     const preferred=previousModel || state?.selected_model?.id || catalog.default_model;
@@ -87,20 +94,147 @@ async function loadCatalog() {
       catalog.runs.find(r=>r.models.length && r.config) || catalog.runs[0];
     if (run) $('run').value=run.id;
     populateModels(preferred);
+    if (!setupInitialized) {
+      setupInitialized=true;
+      if (state?.ui_setup) hydrateSetup(state.ui_setup);
+      else if (state?.game) {
+        $('mode').value=state.mode; $('human').value=state.human;
+        if ([...$('rules').options].some(o=>o.value===state.game.game)) $('rules').value=state.game.game;
+        setBoardSize(state.game.boardXSize);
+        const params=state.parameters || {}, cap=1125899906842624;
+        const kind=params.maxPlayouts<cap?'visits':params.maxVisits<cap?'total':params.maxTime<1e12?'time':'visits';
+        $('budget-type').value=kind; $('budget-type').dataset.previous=kind;
+        $('budget').value=kind==='visits' && params.maxPlayouts<cap?params.maxPlayouts:
+          kind==='total'?params.maxVisits:kind==='time'?params.maxTime:500;
+        $('ponder').checked=params.ponderingEnabled===true || params.ponderingEnabled==='true';
+        updateSetup();
+      } else requestSetup();
+    }
   } catch(error) {notice=error.message;render();}
-  finally {loadingCatalog=false;}
+  finally {loadingCatalog=false;queueMicrotask(drainSetup);}
 }
-function parameters() {
-  const values=JSON.parse($('parameters').value || '{}');
-  if (!values || Array.isArray(values) || typeof values!=='object') throw new Error('参数必须是 JSON 对象');
-  if ($('visits').value!=='') {
-    const visits=Number($('visits').value);
-    if (!Number.isSafeInteger(visits) || visits<1) throw new Error('maxVisits 必须是正整数');
-    values.maxVisits=visits;
+const ruleNames = {default:'使用模型配置',freestyle:'五子棋 · Freestyle',standard:'五子棋 · Standard',renju:'五子棋 · Renju',hex:'Hex',go:'围棋 · 配置棋规',xiangqi:'中国象棋',chinese:'围棋 · 中国规则',japanese:'围棋 · 日本规则',aga:'围棋 · AGA',new_zealand:'围棋 · 新西兰规则', 'tromp-taylor':'围棋 · Tromp–Taylor'};
+function updateRules() {
+  const game=selectedModel()?.game || selectedRun()?.game;
+  const choices=['freestyle','standard','renju'].includes(game) ? ['freestyle','standard','renju'] :
+    game==='go' ? ['go','chinese','japanese','aga','new_zealand','tromp-taylor'] :
+    game && ruleNames[game] ? [game] : ['default','freestyle','standard','renju','hex','go','chinese','japanese','aga','new_zealand','tromp-taylor','xiangqi'];
+  const previous=$('rules').value;
+  $('rules').replaceChildren(...choices.map(value=>new Option(ruleNames[value],value)));
+  $('rules').value=choices.includes(previous)?previous:choices.includes(game)?game:choices[0];
+  updateBoardSizes(); updateSetup();
+}
+function setBoardSize(size) {
+  if (boardSizes?.length) {
+    let index=boardSizes.indexOf(Number(size));
+    if(index<0) index=boardSizes.indexOf(selectedRun()?.canvas);
+    if(index<0) index=boardSizes.length-1;
+    $('board-size-range').value=String(index);
+    $('board-size-value').textContent=`${boardSizes[index]} × ${boardSizes[index]}`;
+  } else $('board-size').value=size==null?'':String(size);
+}
+function updateBoardSizes() {
+  const old=selectedBoardSize();
+  const sizes=selectedRun()?.trained_board_sizes;
+  boardSizes=Array.isArray(sizes) && sizes.length ? sizes : null;
+  $('board-size-range').hidden=!boardSizes;
+  $('board-size').hidden=Boolean(boardSizes);
+  if(boardSizes) {
+    $('board-size-range').min='0'; $('board-size-range').max=String(boardSizes.length-1);
+    setBoardSize(old);
+    $('board-size-note').textContent='可选尺寸来自训练配置。';
+  } else {
+    $('board-size').value=old==null?'':String(old);
+    $('board-size-value').textContent='';
+    $('board-size-note').textContent=Array.isArray(selectedRun()?.trained_board_sizes)?'训练配置没有方形尺寸，可手动输入。':'训练尺寸未知，可手动输入。';
   }
-  return values;
 }
-function settings() {return {mode:$('mode').value,human:$('human').value,parameters:parameters()};}
+function selectedBoardSize() {
+  return boardSizes?.length ? boardSizes[Number($('board-size-range').value)] :
+    $('board-size').value==='' ? null : Number($('board-size').value);
+}
+function updateSetup() {
+  const play=$('mode').value==='play', xi=$('rules').value==='xiangqi', type=$('budget-type').value;
+  $('play-settings').hidden=!play; $('budget').disabled=!play;
+  $('ponder-note').hidden=!$('ponder').checked;
+  $('board-size').hidden=xi || Boolean(boardSizes); $('board-size-range').hidden=xi || !boardSizes;
+  $('board-size').disabled=xi; $('board-size-range').disabled=xi || boardSizes?.length===1;
+  if(xi){$('board-size-value').textContent='9 × 10';$('board-size-note').textContent='中国象棋使用固定棋盘。';}
+  else if(!boardSizes) {$('board-size-value').textContent='';$('board-size-note').textContent=Array.isArray(selectedRun()?.trained_board_sizes)?'训练配置没有方形尺寸，可手动输入。':'训练尺寸未知，可手动输入。';}
+  else if(boardSizes) {$('board-size-value').textContent=`${selectedBoardSize()} × ${selectedBoardSize()}`;$('board-size-note').textContent='可选尺寸来自训练配置。';}
+  $('budget-label').textContent=type==='time'?'思考时间（秒）':type==='total'?'总 visits':'新增 visits';
+  $('budget').min=type==='time'?'0.001':'1';$('budget').step=type==='time'?'any':'1';
+  $('opening-hint').textContent=['freestyle','standard','renju','hex'].includes($('rules').value)
+    ? '按当前设置生成平衡开局。' : '平衡开局支持五子棋和 Hex。';
+  render();
+}
+function settings() {
+  const play=$('mode').value==='play', type=$('budget-type').value, value=Number($('budget').value);
+  if(play && (!$('budget').value || !Number.isFinite(value) || value<=0 || (type!=='time' && !Number.isSafeInteger(value))))
+    throw new Error(type==='time'?'思考时间必须大于 0 秒':'visits 必须是正整数');
+  const cap=1125899906842624;
+  return {mode:$('mode').value,human:$('human').value, budget_type:type,
+    budget_value:Number.isFinite(value)&&value>0?value:500, ponder:$('ponder').checked,
+    parameters:play ? {ponderingEnabled:$('ponder').checked,maxVisits:type==='total'?value:cap,
+      maxPlayouts:type==='visits'?value:cap,maxTime:type==='time'?value:1e20} : {ponderingEnabled:false}};
+}
+function setupPayload(opening=false) {
+  const rule=$('rules').value, size=rule==='xiangqi'?null:selectedBoardSize();
+  if(size!==null && (!Number.isSafeInteger(size)||size<2))throw new Error('棋盘大小必须是大于 1 的整数');
+  const result={model:$('model').value,...settings(),size:size===null?null:[size,size],
+    rules:['go','default'].includes(rule)?null:rule};
+  if(opening)result.opening={};
+  return result;
+}
+function hydrateSetup(setup) {
+  if(!catalog || !setup)return;
+  syncingSetup=true;
+  const run=catalog.runs.find(r=>r.models.some(m=>m.id===setup.model));
+  if(run) {$('run').value=run.id;populateModels(setup.model);}
+  $('mode').value=setup.mode; $('human').value=setup.human;
+  $('budget-type').value=setup.budget_type; $('budget-type').dataset.previous=setup.budget_type; $('budget').value=setup.budget_value;
+  $('ponder').checked=setup.ponder;
+  const rule=setup.rules || (selectedRun()?.game==='go'?'go':'default');
+  if([...$('rules').options].some(option=>option.value===rule))$('rules').value=rule;
+  if(setup.size)setBoardSize(setup.size[0]);
+  setupSyncKey=JSON.stringify(setup); updateSetup();syncingSetup=false;
+}
+function requestSetup(opening=false) {
+  if(syncingSetup)return;
+  if(!opening && !setupFlight && setupRevision===setupSent && state?.ui_setup) {
+    try {
+      const candidate=setupPayload();
+      const keys=['model','size','rules','mode','human','budget_type','budget_value','ponder'];
+      if(keys.every(key=>JSON.stringify(candidate[key])===JSON.stringify(state.ui_setup[key])))return;
+    } catch {}
+  }
+  setupRevision++; if(opening)openingQueued=true;
+  queueMicrotask(drainSetup);
+}
+async function drainSetup() {
+  if(!setupInitialized || !state || !online || !selectedModel() || !selectedRun()?.config || pending || setupRevision===setupSent)return;
+  if(setupFlight) {
+    if(state.busy && ['thinking','opening'].includes(state.phase) && !state.stop_requested)command('stop');
+    return;
+  }
+  if(state.busy) {
+    if(['thinking','opening'].includes(state.phase) && !state.stop_requested)command('stop');
+    return;
+  }
+  let payload;
+  try {payload=setupPayload(openingQueued);}
+  catch(error) {notice=error.message;setupSent=setupRevision;render();return;}
+  const flight={revision:setupRevision,accepted:false};setupFlight=flight;setupSent=setupRevision;openingQueued=false;
+  pending=true;notice='';render();
+  try {
+    const next=await api('/api/apply',{version:state.version,game_id:state.game_id,...payload});
+    flight.accepted=true;accept(next);
+  } catch(error) {
+    setupFlight=null;notice=error.message;
+    try {accept(await api('/api/state'));} catch {}
+    if(flight.revision===setupRevision && state?.ui_setup)hydrateSetup(state.ui_setup);
+  } finally {pending=false;render();queueMicrotask(drainSetup);}
+}
 function view(turn) {
   if (!state?.game) return;
   turn=Math.max(0,Math.min(state.history.length-1,turn));
@@ -321,15 +455,12 @@ function render() {
   $('connection').textContent=online?'工作台已连接':'断线 · 重连中';$('connection-dot').classList.toggle('online',online);
   const error=notice || state?.error || '';$('error').hidden=!error;$('error').textContent=error;
   const run=selectedRun(),model=selectedModel();
-  $('config-path').textContent=run?.config || '需要为所选运行配置原生 gtp.cfg';
-  $('model-info').textContent=JSON.stringify(model||{},null,2);
-  $('model-summary').textContent=model ? [gameNames[model.game],model.algorithm,model.weights,
-    model.training_seconds==null?null:`EtaZero 外层累计 ${(model.training_seconds/3600).toFixed(2)} h`].filter(Boolean).join(' · ') : '暂无可用模型';
+  $('model-summary').textContent=!run?.config ? '所选目录缺少原生 gtp.cfg，无法创建棋局。' : model ? '' : '暂无可用模型';
+  $('model-summary').hidden=!$('model-summary').textContent;
   $('catalog-errors').textContent=(catalog?.errors||[]).map(item=>`${item.run}: ${item.error}`).join('\n');
-  $('new-game').disabled=!interactive() || !model || !run?.config;
   $('refresh-models').disabled=!interactive();
+  $('balanced-opening').disabled=!online || !model || !run?.config || ['opening','stopping'].includes(state?.phase) || !['freestyle','standard','renju','hex'].includes($('rules').value);
   const g=state?.game,available=interactive()&&state?.connected&&g;
-  $('apply-settings').disabled=!available;
   $('analyze').disabled=$('step').disabled=!available || over() || viewTurn!==null;
   $('analyze').textContent=state?.analysis_enabled?'暂停分析 (A)':'开启分析 (A)';
   $('analyze').setAttribute('aria-pressed',Boolean(state?.analysis_enabled));
@@ -339,7 +470,6 @@ function render() {
   $('undo').disabled=!available || !undoable;
   $('pass').hidden=g?.game!=='go';$('pass').disabled=!canPlay()||!g?.legalMoves.includes('pass');
   $('retry').hidden=!available || over() || state.mode!=='play' || g.currentPlayer===state.human;
-  $('engine-config').textContent=JSON.stringify({parameters:state?.parameters,models:state?.models,opening:state?.opening},null,2);
   $('opening-info').hidden=!state?.opening;
   $('opening-info').textContent=state?.opening?`初始平衡开局 · ${state.opening.moves.length} 手 · 来源：原生 KataGomo 开局算法` : '';
   $('state-version').textContent=`单会话 · 状态 ${state?.version??'—'}`;
@@ -347,29 +477,31 @@ function render() {
     $('rule-badge').textContent=gameNames[g.game];$('session-mode').textContent=state.mode==='manual'?'手动双方':'人机对弈';
     $('status').textContent=state.phase==='opening'?'生成平衡开局中 · 成功后替换当前棋局':over()?`对局结束 · ${state.resignation?.result || g.result}`:`${phaseNames[state.phase]} · ${side(g.currentPlayer)}行棋`;
     $('move-count').textContent=`原生第 ${g.turnNumber} 手`;
-    $('session-info').textContent=`${g.boardXSize} × ${g.boardYSize} · ${state.parameters?.useGumbel?'Gumbel':'PUCT'} · maxVisits ${state.parameters?.maxVisits??'—'} · ${state.connected?'引擎已连接':'引擎已断开'}`;
+    $('session-info').textContent=`${g.boardXSize} × ${g.boardYSize} · ${state.parameters?.useGumbel?'Gumbel':'PUCT'} · ${state.connected?'引擎已连接':'引擎已断开'}`;
     $('rule-note').textContent=g.game==='hex'?'黑方连接上下边，白方连接左右边。':g.game==='xiangqi'?'先选择棋子，再选择原生合法落点；红方在下。':g.game==='renju'?'黑方禁手按原生规则落子判负。':g.game==='go'?`原生棋规：${JSON.stringify(g.rules)}`:'合法性与终局由原生棋规裁定。';
-  } else $('status').textContent=state?.busy?phaseNames[state.phase]:'选择模型，创建棋局';
+  } else $('status').textContent=state?.busy?phaseNames[state.phase]:'选择模型后自动开始';
   renderBoard();renderHistory();renderAnalysis();renderRawNN();
 }
-$('settings').onsubmit=event=>{event.preventDefault();try {
-  const payload={model:$('model').value,...settings()},x=$('size-x').value,y=$('size-y').value;
-  if(x || y){if(!x||!y)throw new Error('请同时填写宽和高');payload.size=[Number(x),Number(y)];}
-  for(const key of ['rules','fen'])if($(key).value.trim())payload[key]=$(key).value.trim();
-  if($('komi').value!=='')payload.komi=Number($('komi').value);
-  if($('sgf').value.trim())payload.sgf=$('sgf').value;
-  if($('sgf-turn').value!=='')payload.sgf_turn=Number($('sgf-turn').value);
-  if($('balanced-opening').checked) {
-    payload.opening=JSON.parse($('opening-options').value || '{}');
-    if(!payload.opening || Array.isArray(payload.opening) || typeof payload.opening!=='object')throw new Error('开局参数必须是 JSON 对象');
-  }
-  command('new',payload);
-}catch(error){notice=error.message;render();}};
-$('apply-settings').onclick=()=>{try{command('configure',settings());}catch(error){notice=error.message;render();}};
-$('sgf-file').onchange=async()=>{try{
-  const file=$('sgf-file').files[0];if(file)$('sgf').value=await file.text();
-}catch(error){notice=error.message;render();}};
-$('run').onchange=()=>populateModels();$('model').onchange=render;
+$('settings').onsubmit=event=>event.preventDefault();
+$('balanced-opening').onclick=()=>requestSetup(true);
+$('run').onchange=()=>{populateModels();requestSetup();};
+$('model').onchange=()=>{updateRules();requestSetup();};
+$('rules').onchange=()=>{updateSetup();requestSetup();};
+$('mode').onchange=()=>{updateSetup();requestSetup();};
+$('human').onchange=()=>requestSetup();
+$('ponder').onchange=()=>{updateSetup();requestSetup();};
+$('budget-type').onchange=()=>{
+  const type=$('budget-type').value, previous=$('budget-type').dataset.previous || 'visits';
+  if((type==='time') !== (previous==='time'))$('budget').value=type==='time'?'5':'500';
+  $('budget-type').dataset.previous=type;updateSetup();requestSetup();
+};
+$('budget').onchange=()=>requestSetup();
+$('board-size').onchange=()=>requestSetup();
+for(const id of ['budget','board-size'])$(id).addEventListener('keydown',event=>{
+  if(event.key==='Enter'){event.preventDefault();$(id).blur();requestSetup();}
+});
+$('board-size-range').oninput=()=>updateSetup();
+$('board-size-range').onchange=()=>requestSetup();
 $('refresh-models').onclick=()=>command('refresh');
 $('analyze').onclick=()=>command(state?.analysis_enabled?'stop':'analyze');
 for(const name of ['step','stop','undo','retry'])$(name).onclick=()=>command(name);
