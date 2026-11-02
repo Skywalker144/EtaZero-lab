@@ -17,10 +17,25 @@ bash scripts/run.sh match --output-dir /absolute/path/to/new-evaluation \
   --fit-only --anchor baseline --first-player-advantage
 ```
 
-配置由原生 `ConfigParser` 解析，包括来源的 include、逐 bot 搜索参数、`includeBots`、`secondaryBots`、`extraPairs` 与 `extraPairsAreOneSidedBW`。从 `cpp/configs/match_example.cfg` 复制完整配置并修改所需项；例如以下字段定义两个不同算法族的 bot，不是完整可运行配置：
+配置由原生 `ConfigParser` 解析，包括来源的 include、逐 bot 搜索参数、`includeBots`、`secondaryBots`、`extraPairs` 与 `extraPairsAreOneSidedBW`。比赛条件使用独立于训练和 Web 的公共与棋类配置：
+
+| 配置 | 职责 |
+|---|---|
+| [common.cfg](../configs/match/common.cfg) | 公共搜索预算、温度、认输、执行并行与推理参数；采用普通 PUCT。 |
+| [go.cfg](../configs/match/go.cfg) | 围棋棋规、尺寸分布、固定贴目与初始化。 |
+| [gomoku.cfg](../configs/match/gomoku.cfg) | Freestyle 尺寸分布、平衡开局与初始化；任务可覆盖为 Standard 或 Renju。 |
+| [hex.cfg](../configs/match/hex.cfg) | Hex 方盘分布、首手平衡采样的两层概率、接受率指数与下限。 |
+| [xiangqi.cfg](../configs/match/xiangqi.cfg) | 中国象棋标准棋盘与初始化。 |
+
+四个棋类文件 include `common.cfg`，显式声明平衡开局、policy init 和棋类温度半衰期。公共配置不放参赛模型、配对和局数；直接 match 在任务配置中填写这些字段，arena／autoelo 由生成的 `participants.cfg` 提供。搜索预算和棋盘分布可以在任务中显式覆盖。原有实验比赛配置仍独立使用，不自动切换到这些公共文件。
+
+例如在本版本新建任务配置 `configs/my_match/match.cfg`，include 所选棋类文件，并定义两个不同算法族的 bot。原生 include 须使用相对路径，相对包含它的文件解析；首个命令行 `-config` 可以使用绝对路径。
 
 ```ini
+@include ../match/hex.cfg
+
 numBots = 2
+numGamesTotal = 40
 botName0 = baseline
 nnModelFile0 = /absolute/path/to/ordinary/model.bin.gz
 useMuZero0 = false
@@ -30,12 +45,31 @@ botName1 = candidate
 nnModelFile1 = /absolute/path/to/muzero-model-directory
 useMuZero1 = true
 rootSearchAlgorithm1 = gumbel
+nonrootSearchAlgorithm1 = gumbel
 useGraphSearch1 = false
 subtreeValueBiasFactor1 = 0
+avoidRepeatedPatternUtility1 = 0
 rootSymmetryPruning1 = false
+useLcbForSelection1 = false
+chosenMoveTemperatureEarly1 = 0
+chosenMoveTemperature1 = 0
+chosenMoveSubtract1 = 0
+chosenMovePrune1 = 0
+gumbelMaxConsideredActions1 = 16
+gumbelNoiseScale1 = 0
 ```
 
-普通模型路径指向原生模型文件，MuZero 路径指向含 `model.json` 与三组件的目录。`useMuZeroN` 优先于公共 `useMuZero`，缺省为 false；其余算法组合约束见 [Gumbel](gumbel.md) 和 [MuZero](muzero.md)。同一配置使用同一棋类，模型的输入布局、MuZero 棋类及画布必须与比赛匹配。
+普通模型路径指向原生模型文件，MuZero 路径指向含 `model.json` 与三组件的目录。`useMuZeroN` 优先于公共 `useMuZero`，缺省为 false；其余算法组合约束见 [Gumbel](gumbel.md) 和 [MuZero](muzero.md)。MuZero 须关闭该 bot 的 graph、SVB 和局部重复模式，Gumbel 须关闭 graph 并明确其选点参数。公共配置保留既有普通 PUCT 的 graph／SVB 设置；arena／autoelo 只从模型记录推导 `useMuZeroN`，不会自动改变搜索算法或消除冲突。若整场采用 MuZero 兼容的公共搜索，可在任务配置中统一设置 `useGraphSearch=false`、`subtreeValueBiasFactor=0`；普通模型也将使用这组条件。同一配置使用同一棋类，模型的输入布局、MuZero 棋类及画布必须与比赛匹配。
+
+arena／autoelo 的 `--config` 可直接指定对应的棋类文件；需要修改公共搜索条件时，指定 include 该文件的任务配置。自动实验的 `[evaluation] config` 同样填写所选配置路径。文件路径相对 `exp.cfg` 解析，不会根据训练棋类自动选择比赛文件。
+
+运行前可用原生解析器检查 include 和覆盖后的参数，不加载模型或启动比赛：
+
+```bash
+bash scripts/run.sh native match -config configs/my_match/match.cfg -print-config
+```
+
+输出 JSON 中的 `resolved_config` 是展开后的原生参数文本；它不补齐全部代码默认值，因此关键比赛条件仍在 cfg 中显式维护。实际运行的合并配置与参赛信息保存在 `results/plan.json`。`cpp/configs/match_example.cfg` 继续作为来源完整模板，其他高级参数可参考该文件与原生实现。
 
 普通网络的 `avoidSgf…` 模式表保留来源逐 bot／逐配置组索引。Go、各落子棋和象棋使用各自模式身份，外部 SGF 可共用文件目录；窗口和有效对称见 [架构](architecture.md)。MuZero 仍排除真实棋盘模式与 SVB。
 
