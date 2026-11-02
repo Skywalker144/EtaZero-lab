@@ -70,7 +70,7 @@ GTP `kata-raw-nn` 和 JSON analysis 提供独立 D，JSON 根结果还提供 W�
 
 Gumbel 根接入 `cpp/search/searchgumbel.cpp`，复用来源节点；非根可选择来源 PUCT 或 Gumbel 确定性分配。`gumbel.cpp` 负责 completed Q、改进策略、非根分配及根配额调度；训练目标通过独立接口输出完整动作域，报告仍与已分配子节点对齐。默认 SH 出手、可选访问采样和训练策略的区别，以及 fresh tree 和当前组合限制见 [Gumbel 搜索](gumbel.md)。
 
-每轮的 `input_models/` 只引用上轮已发布模型，原生 manager 的目录轮询无法在本轮发现新模型。AlphaZero 首轮为空，使用来源 random evaluator；MuZero 首轮先由同一个 learner 完成 `-initialize-only`，保存零样本 checkpoint 并导出三组件模型。selfplay 完全退出后才 shuffle 和训练；来源 learner 提交 checkpoint 后才导出，模型目录在普通权重或 SWA 的导出完成后原子发布，MuZero 以包含 manifest 和三个组件的整个目录为发布单位。原始数据和旧模型不覆盖。
+每轮的 `input_models/` 只引用上轮已发布模型，原生 manager 的目录轮询无法在本轮发现新模型。未提供初始权重时，AlphaZero 与 MuZero 首轮模型目录均为空，使用 random evaluator；MuZero 随机路径不执行三组件推理，保留根合法动作过滤与递归静态动作域。显式初始权重则由 learner 完成 `-initialize-only` 并发布初始模型。selfplay 完全退出后才 shuffle 和训练；来源 learner 提交 checkpoint 后才导出，模型目录在普通权重或 SWA 的导出完成后原子发布，MuZero 以包含 manifest 和三个组件的整个目录为发布单位。原始数据和旧模型不覆盖。
 
 控制器的 run 目录锁由阶段子进程继承，防止控制器退出后仍在运行的 writer 被并发接管。轮次恢复使用已发布 shard、learner 的 epoch／batch 暂停 checkpoint 和原子目录发布；已提交更新不重复，未提交工作重做。具体边界见 [调度与恢复](controller.md)。`source.tar.gz` 在创建 run 时记录代码，包括尚未提交的新文件；不将源码哈希作为读取和恢复的运行门槛。
 
