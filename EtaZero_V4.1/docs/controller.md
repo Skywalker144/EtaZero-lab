@@ -49,21 +49,23 @@ V4 逐轮控制器当前仅生成 `train/` 和 `train.json`，没有接入可选
 
 ## 自适应逐轮调度
 
-外层沿用 V3.4 的采样规划和训练额度：原生 selfplay → 来源 shuffle → 按实际额度训练 → 导出候选 → 可选 gatekeeper。`run.cfg` 的 `bootstrap_games`、`train_steps`、`replay_ratio` 分别控制探测局数、每轮基准训练步数上限和新增样本复用倍率；`shuffle.cfg` 的 `min-rows` 是首轮训练的数据门槛。
+同步路径每个有训练更新的 iteration 对应一个完整 epoch：原生 selfplay → 来源 shuffle → 选定完整文件 → 训练完 → epoch 收尾 → 保存并导出候选 → 可选 gatekeeper。`run.cfg` 的 `bootstrap_games`、`train_steps`、`replay_ratio` 分别控制探测局数、基准产样预算和新增样本复用倍率；`train_steps` 不是实际训练步数的硬上限。`shuffle.cfg` 的 `min-rows` 是首轮数据门槛。
 
 - iteration 0：运行 `bootstrap_games` 局，记录实际 rows/game，不 shuffle、不训练。
-- iteration 1：根据 bootstrap 的平均产量估算补足 `min-rows` 所需局数，乘 `bootstrap_game_multiplier` 后向上取整；不足时继续补局。此前已经达到门槛则不再补局。该轮训练不向后续发放 bootstrap 样本额度。
-- iteration ≥ 2：合并前两轮的实际 rows 与 games 计算平均产量，按 `train_steps × batch_size / replay_ratio` 规划新增 rows，再反推局数。运行完整局数后，以实际产量计算训练额度；不在本轮追补计划 rows。
+- iteration 1：根据 bootstrap 的平均产量估算补足 `min-rows` 所需局数，乘 `bootstrap_game_multiplier` 后向上取整；不足时继续补局。首轮一次性获得 `train_steps × batch_size` 的训练额度，不再按 bootstrap 与补样 rows 重复发放额度。
+- iteration ≥ 2：合并前两轮的实际 rows 与 games 估算产量，按 `train_steps × batch_size / replay_ratio` 规划新增 rows 和局数；实际新增 rows 乘 `replay_ratio` 加入上轮余额。不按计划 rows 发放额度，也不在本轮追补计划产量。
 
-第一轮实际训练步数为 `min(train_steps, 快照完整 batch 数)`。后续可用额度为 `上轮剩余额度 + 本轮新增 rows × replay_ratio`，实际步数再受 `floor(可用额度 / batch_size)` 限制，扣除实际训练消费量后把剩余额度带到下一轮。快照 batch 数按各 NPZ 单独取整后求和；MuZero 按展开后的根 batch 计数，未来展开步不重复计入训练时钟。额度结余不改变下一轮的基准产样目标。
+额度以样本数记账。目标为 `max(0, 上轮余额 + 实际新增 rows × replay_ratio)`；首轮使用独立授予的额度。随机排列最新快照中的文件，按每文件 `floor(rows / batch_size)` 累计完整 batch，选择最接近目标的前缀；距离相同时选择较短前缀。文件不重复，快照不足时读完可用文件，尾部不足一批的样本不消费。MuZero 只计算根样本，展开步不重复计入训练时钟。
 
-内部来源 epoch 的名义样本量为 `train_steps × batch_size`，保留整文件选择和 subepoch 行为。外层预算可以在文件或 epoch 中途用完：learner 的 `-stop-at-samples` 接受精确累计样本目标，保存当前文件列表与已消费 batch、epoch/subepoch 游标、训练模型、optimizer、Lookahead fast/slow 与同步计数、SWA 和随机状态后退出。下一轮先读完原来选中的 subepoch，在下一个选择边界采用最新 shuffle。旧快照在这些游标仍可引用时保留。
+轮末余额为本轮可用额度减去实际消费样本数，允许为负。首次训练的取整差额同样结转；只有这一套余额，不额外维护第二份补偿账。正余额可让下一轮训练超过基准步数，负余额减少后续目标；余额不改变基准产样规划。目标较小时可以选零个文件，零训练轮保留现有模型，不推进 epoch 或 SWA 时钟。
 
-SWA 周期、平滑尺度与 Lookahead 参数仍由 `train.cfg` 指定；外层换轮不重置它们，不在发布时强制追加 SWA 采样。只有内部完整 epoch 才执行来源 Lookahead 收尾与验证。每个实际训练步数大于零的 iteration 保存一个候选，无需等待内部 epoch 完成；来源独立命令仍支持原生导出周期，逐轮控制器则拥有自己的发布边界。零步轮次保留现有模型。
+控制器在启动 learner 前持久化所选文件顺序、精确消费量与训练起始计数，传入 `-epoch-files` 和恰好位于整组文件末尾的 `-stop-at-samples`。正常轮次消费完选中文件并收尾，不把未完成文件组带到下一轮；下一轮重新从最新快照选文件。文件/batch 游标只用于本轮中断恢复，恢复时不能重新选文件或重复授予额度。单卡同步路径没有独立 subepoch 调度，也不执行来源为异步数据生产保留的固定等待；独立 learner 仍支持多 subepoch 和来源文件选择。
 
-选择 SWA 发布时，若 `n_averaged` 仍为零则警告并跳过候选，继续后续采样和训练，不回退到普通权重。已有有效 SWA 但本轮未更新时，发布当前已有的平均权重。候选保存在 `torchmodels_toexport/round-N-s样本数-d累计数据行数/`，用于续训的是 `train/checkpoint.ckpt` 中的训练权重与完整状态。
+优化器、SWA、样本计数和学习率状态跨轮延续。Lookahead 保留来源 epoch 收尾：将 fast 权重恢复到 slow 权重并清零同步计数，因此最后不足 k 步的 fast 增量不会进入发布权重。SWA 继续按实际消费样本间隔、在 Lookahead 已同步时更新，不因发布强制追加采样。按 epoch 的周期学习率以新定义的完整 epoch 推进；按样本数的计划继续使用实际累计消费量。每个训练轮只收尾一次、保存并产生一个候选；验证仍按下述既有数据边界执行。
 
-`result.json` 记录采样计划、实际 rows/games、训练步数上限、快照 batch 数、可用及剩余训练额度、实际步数和内部完成 epoch 数。`state.json.completed_rounds` 保存最大已完成 iteration 编号，新运行尚未完成 bootstrap 时为 -1。
+选择 SWA 发布时，若 `n_averaged` 仍为零则警告并跳过候选，继续后续采样和训练，不回退到普通权重。已有有效 SWA 但本轮未更新时，发布已有的平均权重。候选保存在 `torchmodels_toexport/round-N-s样本数-d累计数据行数/`；续训使用 `train/checkpoint.ckpt` 的完整训练状态。
+
+`result.json` 记录采样计划、实际 rows/games、文件列表、快照 batch 数、可用及剩余额度、实际步数和完成 epoch 数（训练轮为 1，零训练轮为 0）。`state.json.completed_rounds` 保存最大已完成 iteration 编号，新运行为 -1。
 
 ## 候选验收
 
@@ -86,7 +88,7 @@ SWA 周期、平滑尺度与 Lookahead 参数仍由 `train.cfg` 指定；外层�
 | 显式权重初始化 | 零样本完整 checkpoint 与 `initial/checkpoint.ckpt` | 复用原始初始化，不重新初始化已经开始的训练。 |
 | 自对弈 | 原生 writer 原子发布的 NPZ；正常退出后、全部 writer 排空后的完成回执 | 成功回执确认本次额度；随后由 shuffle 判断是否达到行数门槛。没有成功回执则统计已发布数据中的唯一 game hash，只补足原计划的剩余游戏数。 |
 | shuffle | 完整候选目录原子改名为 `shuffleddata/轮次` | 直接复用已发布快照；未发布目录移到该轮 `discarded/`，从原始数据重新 shuffle。 |
-| learner | 内部 epoch、外层预算或正常停止边界的完整 checkpoint | 恢复 fast/slow、optimizer、SWA 和文件内游标，继续到本轮已记录的绝对样本目标；不重复消费已保存的额度。 |
+| learner | 完整 epoch 或正常停止边界的 checkpoint | 恢复同一文件计划、fast/slow、optimizer、SWA 和游标；消费完后收尾一次。已完成的 epoch 不重复训练或扣额度。 |
 | 导出 | 包含全部必需模型文件的候选目录原子发布到 `models/` | 复用已发布目录；部分导出移到 `discarded/`，从已提交 checkpoint 重新导出。 |
 | gatekeeper | 原生完整决策原子写入 `gatekeeper/候选名/result.json` | 复用决策并补完副本移动；没有决策则在独立尝试目录重赛，保留旧 accepted。 |
 | 轮次 | 模型路径、消费计数、完成轮数与计时先写入 `rounds/轮次/commit.json`，再更新 `state.json` | 若轮次已提交但根状态指针尚未更新，直接采用该提交；不重跑阶段、不重复累计时间。之后才写观测用 `result.json`，报告失败不会撤销有效提交。 |
@@ -95,7 +97,7 @@ AlphaZero 与 MuZero 共用此流程。MuZero manifest 和三个组件以整个�
 
 恢复不会保存或重建自对弈进程的内存状态：在途对局、尚未写出的行、fork 队列、搜索树及其 RNG 会丢失，重新启动后产生新对局。已发布行来自已经结束的对局，目标不会被改成虚假的部分对局目标；MuZero shard 保留所引用位置的完整轨迹。同一游戏跨多个 shard 时只计一次。被中断尝试中没有留下任何训练行的游戏无法从 NPZ 计数，可能额外补产；正常完成的原生回执则包含零训练行游戏的额度完成情况。故恢复保证已发布数据可继续使用，不承诺精确重演中断前的自对弈过程或恢复全部 buffered rows。
 
-learner 在内部完整 epoch、外层预算暂停和正常停止边界保存，不逐 batch 写 checkpoint。单设备 learner 收到 SIGINT/SIGTERM 后完成当前 batch 的更新、AMP 跳步、Lookahead/SWA 和游标推进再保存；若已到 epoch 末尾则完成该 epoch 的收尾。异常或强杀退出后，最后一次保存以来的内存更新需要重做。完整 checkpoint 保存模型、optimizer、Lookahead slow 权重与同步计数、SWA 及累计余量、LR/brenorm 更新时钟、文件选择与已消费游标，以及训练／验证 reader RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备 RNG 和 AMP scaler。读取游标恢复时跳过已消费 batch，不重复消耗增强随机数。已发布 shuffle 快照继续保留。
+同步 learner 在完整 epoch 和正常停止边界保存，不逐 batch 写 checkpoint。单设备 learner 收到 SIGINT/SIGTERM 后完成当前 batch 的更新、AMP 跳步、Lookahead/SWA 和游标推进再保存；若已到 epoch 末尾则完成该 epoch 的收尾。异常或强杀退出后，最后一次保存以来的内存更新需要重做。完整 checkpoint 保存模型、optimizer、Lookahead slow 权重与同步计数、SWA 及累计余量、LR/brenorm 更新时钟、本轮文件计划与已消费游标，以及训练／验证 reader RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备 RNG 和 AMP scaler。读取游标恢复时跳过已消费 batch，不重复消耗增强随机数。已发布 shuffle 快照继续保留。
 
 checkpoint 同时保存原生训练／验证指标日志的字节位置。恢复时将该位置之后的旧记录区间记入 `train/metrics_recovery.jsonl`，绘图排除这些已回退更新的观测，原始日志保留不变。已有 checkpoint 缺少日志位置时，按其已保存样本数筛除此前日志中的超界更新，同样本数的验证记录保守留空。指标与模型恢复分开处理，不从日志恢复 optimizer，也不因丢弃作废指标而扣除已花掉的时间。
 
