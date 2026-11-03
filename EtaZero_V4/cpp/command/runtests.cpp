@@ -25,6 +25,11 @@
 using namespace std;
 
 int MainCmds::runtests(const vector<string>& args) {
+  if(args.size() == 2 && args[1] == "-balanced-openings") {
+    Board::initHash();
+    Tests::runBalancedOpeningTests();
+    return 0;
+  }
   if(args.size() == 2 && args[1] == "-book") {
     Board::initHash();
     Tests::runBookTests();
