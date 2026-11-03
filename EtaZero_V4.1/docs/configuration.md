@@ -128,7 +128,7 @@ CONFIG_DIR=configs/autoexp_example bash scripts/autoexp.sh --dry-run
 
 单臂运行可使用最终 iteration 编号 `iterations`（0 为 bootstrap）或累计 `max_hours` 限制总预算；CLI 优先于文件。配置和命令行都未指定这两项时默认无限运行，直到手动中断。配置位于本版本 `configs/` 时，默认输出映射到 `data/` 下相同相对路径；外部目录需显式指定输出路径。
 
-V4 使用 V3.4 自适应逐轮调度：`run.cfg` 的 `bootstrap_games` 控制 iteration 0 探测局数，`train_steps` 是训练步数上限，`replay_ratio` 控制新增样本额度；`bootstrap_game_multiplier` 用于 iteration 1 的补满估算。首轮训练门槛由 `shuffle.cfg` 的 `min-rows` 指定。`train.cfg` 保留来源优化器、SWA 与 Lookahead 参数，内部 epoch 样本目标由 `train_steps × batch_size` 推导。逐轮控制器拥有精确暂停与候选发布边界，详见 [调度与恢复](controller.md)。
+同步控制器用 `bootstrap_games` 探测产量，`train_steps × batch_size / replay_ratio` 规划后续新增样本；`train_steps` 是基准预算，不是实际训练步数上限。首轮门槛来自 shuffle 的 `min-rows`，首次训练独立获得一份基准额度。之后按实际新增 rows 发放额度，与上轮有符号余额合并，选最接近目标的完整文件前缀。每个训练轮消费完文件后收尾一个 epoch，再发布候选。`sub-epochs` 与 `epoch-files` 由控制器拥有，用户 `train.cfg` 保留优化器、SWA 与 Lookahead 参数。轮内中断继续原文件计划，详见 [调度与恢复](controller.md)。
 
 多臂 `exp.cfg` 使用 `[experiment]` 管预算、`gpus` 和共享初始化，`[arms]` 将臂名映射到配置目录；`[evaluation]` 可指定原生 match 配置和 autoelo 设置。`configs/autoexp_example/` 展示连接方法；独立 `scripts/autoelo.sh` 转发既有 autoelo 命令。评估缓存和评分口径见 [比赛与 Elo](evaluation.md)。
 
