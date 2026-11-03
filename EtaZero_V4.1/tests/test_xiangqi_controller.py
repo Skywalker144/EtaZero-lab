@@ -137,7 +137,7 @@ def controller_config(tmp_path, **changes):
     cfg = selfplay_config(tmp_path / 'selfplay.cfg')
     return replace(RunConfig(selfplay_config=str(cfg), game='xiangqi', model_kind='b2c16-fson-mish',
         canvas=10, batch_size=4, bootstrap_games=4, train_steps=2,
-        shuffle_rows_per_file=128, shuffle_keep_rows=1024, min_rows=1,
+        shuffle_rows_per_file=8, shuffle_keep_rows=1024, min_rows=1,
         train_args=('-no-compile', '-use-fp16', '-lookahead-k', '2', '-no-longterm-checkpoints'),
         auto_plot=False), **changes)
 
