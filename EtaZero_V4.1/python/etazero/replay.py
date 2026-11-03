@@ -1,5 +1,6 @@
-"""V3.4 sampling plans and sample credit, independent of learner epoch clocks."""
+"""Adaptive sampling and signed sample credit for complete-file epochs."""
 import math
+import random
 
 
 def count_rows(directory):
@@ -29,24 +30,39 @@ def plan_sampling(config, replay, iteration):
                 target_rows=target, rows_per_game=average)
 
 
-def plan_training(config, replay, iteration, new_rows, snapshot):
+def plan_training(config, replay, iteration, new_rows, snapshot, *, rng=None):
     # Per-file truncation matches both ordinary and expanded MuZero readers.
     from train import get_npz_num_rows
     cache = {}
-    batches = sum(get_npz_num_rows(str(p), cache) // config.batch_size
-                  for p in (snapshot / 'train').glob('*.npz'))
+    files = [(str(p.resolve()), get_npz_num_rows(str(p), cache) // config.batch_size)
+             for p in sorted((snapshot / 'train').glob('*.npz'))]
+    files = [(path, count) for path, count in files if count > 0]
+    batches = sum(count for _, count in files)
     if batches == 0:
         raise ValueError('Shuffle snapshot has no complete training batch')
-    credit = 0.0 if iteration == 1 else replay['credit'] + new_rows * config.replay_ratio
+    # Bootstrap receives one baseline grant, not credit for all bootstrap rows.
+    credit = (float(config.samples_per_epoch) if iteration == 1 else
+              replay['credit'] + new_rows * config.replay_ratio)
     if not math.isfinite(credit):
         raise ValueError('Replay training credit is not finite')
-    steps = min(config.train_steps, batches)
-    if iteration >= 2:
-        steps = min(steps, math.floor(credit / config.batch_size))
-    return dict(train_steps=steps, snapshot_batches=batches, available_credit=credit)
+    (rng if rng is not None else random.SystemRandom()).shuffle(files)
+    target = max(0.0, credit) / config.batch_size
+    selected, steps = [], 0
+    for path, count in files:
+        # Nearest prefix in random file order. Ties choose the shorter prefix;
+        # zero files is valid, so small grants cannot force perpetual borrowing.
+        if steps + count >= target:
+            if abs(steps + count - target) < abs(steps - target):
+                selected.append(path)
+                steps += count
+            break
+        selected.append(path)
+        steps += count
+    return dict(train_steps=steps, snapshot_batches=batches, available_credit=credit,
+                target_samples=max(0.0, credit), files=selected)
 
 
 def commit_replay(replay, iteration, sampling, plan, consumed_samples):
     return dict(rows=replay['rows'] + sampling['rows'],
-                credit=plan['available_credit'] - consumed_samples if iteration >= 2 else 0.0,
+                credit=plan['available_credit'] - consumed_samples if iteration >= 1 else 0.0,
                 history=[*replay['history'], sampling][-2:])

@@ -62,7 +62,7 @@ cudaUseFP16 = {str(fp16).lower()}
     config = RunConfig(selfplay_config=str(cfg), game=game, algorithm=algorithm,
         muzero_network=network, muzero_unroll_steps=3,
         publish_weights=weights, canvas=canvas, batch_size=4, bootstrap_games=4, train_steps=2,
-        shuffle_rows_per_file=128, shuffle_keep_rows=512, min_rows=64,
+        shuffle_rows_per_file=8, shuffle_keep_rows=512, min_rows=64,
         train_args=('-use-adamw', *(('-use-fp16',) if fp16 else ()), '-lookahead-k', '2', '-swa-period-samples', '8',
                     '-no-longterm-checkpoints', *(() if compiled else ('-no-compile',)))).validate()
     root = tmp_path / 'run'
@@ -84,6 +84,9 @@ cudaUseFP16 = {str(fp16).lower()}
     assert second['total_samples'] > first['total_samples']
     assert second['completed_rounds'] == 2 and second['active_round'] is None
     assert checkpoint['train_state']['global_step_samples'] == second['total_samples']
+    assert 'epoch_cursor' not in checkpoint['train_state']
+    assert checkpoint['train_state']['export_cycle_counter'] == 2
+    assert Path(checkpoint['train_state']['data_snapshot']).name == '000002'
     assert checkpoint['config'] == {'algorithm': 'muzero', 'network': config.muzero_network}
     assert checkpoint['train_state']['muzero_modelnorm_baselines'] == first_checkpoint['train_state']['muzero_modelnorm_baselines']
     assert checkpoint['learner_runtime']['train_rng'] != first_checkpoint['learner_runtime']['train_rng']

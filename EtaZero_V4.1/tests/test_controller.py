@@ -17,7 +17,7 @@ def config():
     return RunConfig(selfplay_config=str(ROOT / 'configs/checks/source_go.cfg'),
                      model_kind='b2c16-fson-mish', canvas=7, batch_size=8,
                      bootstrap_games=8, train_steps=4,
-                     shuffle_rows_per_file=128, shuffle_keep_rows=1024,
+                     shuffle_rows_per_file=8, shuffle_keep_rows=1024,
                      min_rows=1,
                      train_args=('-no-compile', '-lookahead-k', '6', '-no-longterm-checkpoints')).validate()
 
@@ -30,7 +30,8 @@ def test_unconnected_algorithms_are_rejected(config, algorithm):
 
 @pytest.mark.parametrize('args', [('-multi-gpus', '0,1'), ('-latestdatadir=/tmp/data',),
                                  ('-max-training-samples', '1'), ('-traind=/tmp/data',),
-                                 ('-initialize-only',), ('-muzero-conf=/tmp/network.json',)])
+                                 ('-initialize-only',), ('-muzero-conf=/tmp/network.json',),
+                                 ('-sub-epochs', '2'), ('-epoch-files', '/tmp/plan.json')])
 def test_source_arguments_cannot_override_stage_ownership(config, args):
     with pytest.raises(ValueError, match='outer controller'):
         replace(config, train_args=args).validate()
@@ -165,6 +166,8 @@ def test_source_model_is_consumed_after_completed_round_restart(tmp_path, config
     result = json.loads((run_dir / 'rounds/000002/result.json').read_text())
     assert result['input_model'].startswith('round-000001-s')
     assert result['samples_before'] == first['total_samples']
+    assert result['training_epochs'] == 1
+    assert all(Path(p).parent.parent.name == '000002' for p in result['training_plan']['files'])
     assert result['published_weights'] == weights
     assert list((run_dir / 'selfplay/000002' / result['input_model'] / 'tdata').glob('*.npz'))
     assert not (run_dir / 'selfplay/000002/random').exists()

@@ -84,7 +84,7 @@ def published_games(data):
     return len(games)
 
 
-def learner_command(root, config, *, stop_samples=None):
+def learner_command(root, config, *, stop_samples=None, epoch_files=None):
     network = (['-muzero-config', root / 'muzero_network.json'] if config.is_muzero else
                ['-model-kind', config.model_kind])
     return [sys.executable, ROOT / 'python/train.py',
@@ -94,6 +94,7 @@ def learner_command(root, config, *, stop_samples=None):
         '-samples-per-epoch', config.samples_per_epoch,
         '-no-export', '-quit-if-no-data',
         *(['-stop-at-samples', stop_samples] if stop_samples is not None else []),
+        *(['-epoch-files', epoch_files] if epoch_files is not None else []),
         *config.train_args,
         *(['-initial-weights', root / 'initial/weights.ckpt'] if (root / 'initial/weights.ckpt').is_file() else [])]
 
@@ -399,14 +400,19 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
     target_samples = before + progress['training_plan']['train_steps'] * config.batch_size
     if not done('train'):
         if after < target_samples:
-            stage('train', learner_command(root, config, stop_samples=target_samples))
+            files_path = directory / 'epoch-files.json'
+            save_json(files_path, progress['training_plan']['files'])
+            stage('train', learner_command(root, config, stop_samples=target_samples, epoch_files=files_path))
         finish('train')
     after, epoch = checkpoint_progress(checkpoint) if checkpoint.is_file() else (0, 0)
     if after != target_samples:
         raise RuntimeError(f'Learner consumed {after - before} samples; planned {target_samples - before}')
+    expected_epochs = int(target_samples > before)
+    if epoch - progress['train_start']['epoch'] != expected_epochs:
+        raise RuntimeError('A trained round must complete exactly one learner epoch')
 
-    # An outer iteration publishes its final average even when the source epoch
-    # is still in progress. The learner resumes its full fast/slow checkpoint.
+    # Publish only after the complete file group and source epoch cleanup.
+    # Resume training from the full optimizer/Lookahead/SWA checkpoint.
     if after > before:
         candidate = root / 'torchmodels_toexport' / f'round-{number:06d}-s{after}-d{state["replay"]["rows"] + progress["sampling"]["rows"]}'
         candidate.mkdir(parents=True, exist_ok=True)

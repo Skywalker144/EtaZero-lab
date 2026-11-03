@@ -113,7 +113,7 @@ def test_stop_before_learner_launch_does_not_require_a_compiler_receipt(tmp_path
     state = json.loads((root / 'state.json').read_text())
     state['round_progress'].update(done=['selfplay', 'shuffle'], attempts={},
         sampling=dict(rows=0, games=0), train_start=dict(samples=0, epoch=0),
-        training_plan=dict(train_steps=1))
+        training_plan=dict(train_steps=1, files=[]))
     def not_launched(*args, **kwargs):
         raise StopRequested(started=False)
     monkeypatch.setattr(controller, 'execute', not_launched)
@@ -140,7 +140,7 @@ def test_compiled_controller_stop_keeps_checkpoint_receipt_and_resumes_budget(tm
             '--run-dir', str(root), '--iterations', '1'], start_new_session=True,
             env=dict(os.environ, PYTHONPATH=str(ROOT / 'python')), stdout=output, stderr=subprocess.STDOUT)
         try:
-            wait_until(lambda: log_path.exists() and 'Beginning training subepoch!' in log_path.read_text(), seconds=60)
+            wait_until(lambda: log_path.exists() and 'Beginning synchronous epoch!' in log_path.read_text(), seconds=60)
             process.send_signal(signal.SIGTERM)
             assert process.wait(timeout=180) == 130
         finally:

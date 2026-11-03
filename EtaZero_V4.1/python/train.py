@@ -141,6 +141,7 @@ if __name__ == "__main__":
     optional_args.add_argument('-max-training-samples', help='Terminate training after about this many training steps in samples', type=int, required=False)
     optional_args.add_argument('-stop-at-samples', type=int,
                                help='Single-device exact cumulative sample boundary; save the unfinished epoch, reader and Lookahead state')
+    optional_args.add_argument('-epoch-files', help='JSON list of ordered files constituting one synchronous epoch; requires -stop-at-samples at its end')
     optional_args.add_argument('-sleep-seconds-per-epoch', help='Sleep this long between epochs', type=int, required=False)
     optional_args.add_argument('-max-train-bucket-per-new-data', help='When data added, add this many train rows per data row to bucket', type=float, required=False)
     optional_args.add_argument('-max-train-bucket-size', help='Approx total number of train rows allowed if data stops', type=float, required=False)
@@ -454,6 +455,19 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
     max_train_steps_since_last_reload = args["max_train_steps_since_last_reload"]
     stop_when_train_bucket_limited = args["stop_when_train_bucket_limited"]
     stop_at_samples = args["stop_at_samples"]
+    epoch_files = None
+    if args['epoch_files'] is not None:
+        if world_size != 1 or sub_epochs != 1 or stop_at_samples is None:
+            raise ValueError('-epoch-files requires one device, one epoch without subdivisions, and -stop-at-samples')
+        with open(args['epoch_files']) as f:
+            epoch_files = json.load(f)
+        if (not isinstance(epoch_files, list) or not epoch_files or
+                not all(isinstance(path, str) for path in epoch_files) or
+                len(set(epoch_files)) != len(epoch_files)):
+            raise ValueError('-epoch-files must contain a nonempty list of distinct paths')
+        epoch_files = [os.path.realpath(path) for path in epoch_files]
+        if len({os.path.dirname(path) for path in epoch_files}) != 1:
+            raise ValueError('-epoch-files must belong to a single training snapshot')
     if stop_at_samples is not None:
         if world_size != 1 or stop_at_samples < 0 or stop_at_samples % batch_size:
             raise ValueError('-stop-at-samples requires one device and a nonnegative whole-batch sample target')
@@ -1485,11 +1499,13 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
     last_curdatadir = None
     vdatadir = None
     # Owns all "which training files have been used" logic.
-    trainingdatagenerator = TrainingDataGenerator(train_state, no_repeat_files)
-    if stop_at_samples is not None and train_state.get('data_snapshot') is not None:
+    trainingdatagenerator = TrainingDataGenerator(train_state, no_repeat_files) if epoch_files is None else None
+    if (stop_at_samples is not None and train_state.get('data_snapshot') is not None and
+            (epoch_files is None or train_state.get('epoch_cursor') is not None)):
         last_curdatadir = train_state['data_snapshot']
         vdatadir = os.path.join(last_curdatadir, 'val')
-        trainingdatagenerator.restore_data_dir(os.path.join(last_curdatadir, 'train'))
+        if trainingdatagenerator is not None:
+            trainingdatagenerator.restore_data_dir(os.path.join(last_curdatadir, 'train'))
         if is_muzero:
             with open(os.path.join(last_curdatadir, 'train.json')) as f:
                 muzero_snapshot.update(json.load(f))
@@ -1501,7 +1517,9 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         assert rank == 0, "Helper ddp training processes should not call maybe_reload_training_data"
 
         while True:
-            if datadir:
+            if epoch_files is not None:
+                curdatadir = os.path.dirname(os.path.dirname(epoch_files[0]))
+            elif datadir:
                 curdatadir = os.path.realpath(datadir)
             elif latestdatadir:
                 curdatadir = max(
@@ -1579,7 +1597,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
 
                 # Load training data files. The generator handles all "which files have been used" and no_repeat_files semantics.
                 tdatadir = os.path.join(curdatadir,"train")
-                loaded_any_data = trainingdatagenerator.set_data_dir_if_has_remaining_files(tdatadir)
+                loaded_any_data = (True if epoch_files is not None else
+                                   trainingdatagenerator.set_data_dir_if_has_remaining_files(tdatadir))
                 if not loaded_any_data:
                     if quit_if_no_data:
                         logging.info(f"No new training files found in: {tdatadir}, quitting")
@@ -1759,6 +1778,19 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         val_metrics_out.close()
         safe_exit(barrier, 0)
 
+    if epoch_files is not None:
+        cursor = train_state.get('epoch_cursor')
+        if cursor is not None and cursor['files'] != epoch_files:
+            raise ValueError('Saved epoch cursor differs from the synchronous file plan')
+        remaining = sum(get_npz_num_rows(path, npz_num_rows_index_cache) // batch_size for path in epoch_files)
+        if cursor is not None:
+            remaining -= cursor['batches']
+        current = train_state['global_step_samples']
+        if current != stop_at_samples and current + remaining * batch_size != stop_at_samples:
+            raise ValueError('Synchronous sample target must end exactly at the selected file boundary')
+        if current == stop_at_samples and cursor is not None:
+            raise ValueError('Synchronous epoch reached its sample target without completing epoch cleanup')
+
     while True:
         if world_size == 1 and stopping.requested():
             pause_training('Stop requested')
@@ -1827,11 +1859,15 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         # SUB EPOCH LOOP -----------
         batch_count_this_epoch = cursor['epoch_batches']
         last_train_stats_time = time.perf_counter()
-        for i in range(cursor['subepoch'], sub_epochs):
+        # The synchronous controller supplies a single complete epoch. Only the
+        # independent source learner schedules and reloads subepochs.
+        for i in ((0,) if epoch_files is not None else range(cursor['subepoch'], sub_epochs)):
 
             continuing_subepoch = cursor['files'] is not None
             if continuing_subepoch:
                 train_files_to_use = cursor['files']
+            elif epoch_files is not None:
+                train_files_to_use = epoch_files
             elif rank == 0:
                 if i != 0:
                     maybe_reload_training_data()
@@ -1857,8 +1893,9 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             # DDP need to wait on the main process after reloading data and sending files to train with
             safe_barrier(barrier,rank)
 
-            logging.info("Beginning training subepoch!")
-            logging.info("This subepoch, using files: " + str(train_files_to_use))
+            logging.info("Beginning synchronous epoch!" if epoch_files is not None else "Beginning training subepoch!")
+            logging.info(("This epoch, using files: " if epoch_files is not None else
+                          "This subepoch, using files: ") + str(train_files_to_use))
             logging.info("Currently up to data row " + str(train_state["total_num_data_rows"]))
             if not continuing_subepoch:
                 lookahead_counter = 0
@@ -2117,7 +2154,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         and cursor['batches'] < subepoch_batches):
                     pause_training()
 
-            logging.info("Finished training subepoch!")
+            logging.info("Finished synchronous epoch!" if epoch_files is not None else "Finished training subepoch!")
             cursor.update(subepoch=i + 1, files=None, batches=0)
             if world_size == 1 and stopping.requested() and i + 1 < sub_epochs:
                 pause_training('Stop requested')
@@ -2292,7 +2329,9 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         # Finally save, now after validation and exports are done
         save(ddp_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
 
-        if sleep_seconds_per_epoch is None:
+        if epoch_files is not None:
+            pass  # Complete, published input files; no asynchronous producer to wait for.
+        elif sleep_seconds_per_epoch is None:
             time.sleep(1)
         else:
             time.sleep(sleep_seconds_per_epoch)

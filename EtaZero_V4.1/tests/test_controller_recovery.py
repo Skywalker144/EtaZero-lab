@@ -87,7 +87,7 @@ def recovery_config(tmp_path, algorithm, *, fp16=True):
         network = dict(model_kind='b2c16-fson-mish')
     return RunConfig(selfplay_config=str(cfg), algorithm=algorithm, game='renju',
         canvas=5, batch_size=4, bootstrap_games=4, train_steps=4,
-        publish_weights='swa', shuffle_rows_per_file=128, shuffle_keep_rows=512,
+        publish_weights='swa', shuffle_rows_per_file=8, shuffle_keep_rows=512,
         min_rows=1, train_args=('-use-adamw', *(('-use-fp16',) if fp16 else ()), '-no-compile',
             '-lookahead-k', '2', '-swa-period-samples', '8', '-no-longterm-checkpoints'), **network).validate()
 
@@ -154,7 +154,7 @@ def test_recover_partial_games_epochs_and_atomic_publications(tmp_path, monkeypa
         assert state['active_round'] == (0 if cold else 1)
 
     interrupted('partial_selfplay')
-    input_name = 'initial' if config.is_muzero else 'random'
+    input_name = 'random'
     data = root / 'selfplay/000000' / input_name / 'tdata'
     assert controller.published_games(data) == 1
     initial_shards = {p: p.read_bytes() for p in data.glob('*.npz')}
@@ -170,7 +170,10 @@ def test_recover_partial_games_epochs_and_atomic_publications(tmp_path, monkeypa
     interrupted('partial_train')
     first = load_checkpoint(root / 'train/checkpoint.ckpt')
     assert first['train_state']['global_step_samples'] > 0
-    assert first['train_state']['global_step_samples'] == config.train_steps * config.batch_size
+    plan = json.loads((root / 'state.json').read_text())['round_progress']['training_plan']
+    assert first['train_state']['global_step_samples'] == plan['train_steps'] * config.batch_size
+    assert 'epoch_cursor' not in first['train_state']
+    assert first['train_state']['export_cycle_counter'] == 1
     assert 'lookahead' in first
     assert bool(first['learner_runtime']['scaler']) == (device == 'cuda')
     interrupted('train_receipt')
@@ -195,7 +198,7 @@ def test_recover_partial_games_epochs_and_atomic_publications(tmp_path, monkeypa
     assert all(p.read_bytes() == content for p, content in initial_shards.items())
     assert calls.count('train') == 1 and calls.count('shuffle') == 2 and calls.count('export') == 2
     if config.is_muzero:
-        assert calls.count('initialize') == calls.count('initial_export') == 1
+        assert calls.count('initialize') == calls.count('initial_export') == 0
     discarded = root / 'rounds/000001/discarded'
     assert any(discarded.glob('000001.tmp.*')) and any(discarded.glob('round-000001-s*.tmp.*'))
     report = json.loads((root / 'rounds/000001/result.json').read_text())
