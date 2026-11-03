@@ -72,9 +72,12 @@
     "repository": "https://github.com/hzyhhzy/KataGomo",
     "commit": "4bbf953596e96a78daa2008811187a61381a886f",
     "sha256": {
-      "cpp/game/randomopening.cpp": "efed8b11a4a5fd0ac240ed5479a7f0d476bc9ac36a8723017d83b1c49d0fa177"
+      "cpp/game/randomopening.cpp": "efed8b11a4a5fd0ac240ed5479a7f0d476bc9ac36a8723017d83b1c49d0fa177",
+      "cpp/program/play.cpp": "19901c522324f7fa73ca5dd0b6447fd1427d8e494019f1adef74a3da68ac3460",
+      "cpp/program/playsettings.cpp": "b655043090aac009b374b44d92eaccfc0cf277c3a8b6f9417f9a6562da557f2c",
+      "cpp/program/playutils.cpp": "64dbe67c8da258c5b9ac0ff64d0a9987fe32c36ecb9d077fd57aa5d32325e2d5"
     },
     "license": "licenses/KataGomo.txt",
-    "adaptation": "White-model first-move rejection sampling only, preserving white win probability rather than W-L or expected score. Source fairness/exponent/minimum acceptance defaults apply when enabled. No special templates or random fill. Uses the same native module and evaluator boundary as Gomoku; match games retain independent source GameRunner initialization."
+    "adaptation": "Hex selfplay opening pipeline: source special templates (including size conditions and value filtering), random fill, white-model first-move rejection sampling, random-evaluator cold start, and exponential policy initialization with existing-move compensation inside the scale. Uses native BoardHistory setup stones without captures or fabricated moves, shared ordinary/MuZero initial evaluation, and cancellation. Hex profiles use scripts/hex19x3 opening parameters and board-size weights. Classic Hex rules only, no source maxMoves variant. Imported/fork starts are preserved. Match/gatekeeper retain first-move-only defaults unless setup probabilities are explicitly configured; interactive GTP suggestions remain move-prefix-only."
   }
 }
