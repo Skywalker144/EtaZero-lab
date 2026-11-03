@@ -26,7 +26,7 @@ V4 按环境、网络、搜索、自对弈、训练和运行调度拆分配置�
 
 `baseline_gaz` 继承 `baseline_az` 并引入共享的 [Gumbel 搜索配置](../configs/algorithms/gumbel.cfg)。`baseline_mz` 继承公共参数，独立定义 MuZero 网络、搜索和展开数据文件大小；`baseline_gmz` 继承 `baseline_mz`，再引入同一份 Gumbel 搜索配置。这样不会用普通网络或普通样本文件大小覆盖 MuZero。普通 baseline 不保留未启用的 MuZero 网络或 Gumbel 模板。
 
-四个 `*_go` 完全继承各自 baseline。四个 `*_gomoku` 共用 [Freestyle 环境](../configs/games/gomoku/env.cfg)：15 路画布，11–15 路棋盘分布；`az_gomoku` 另保留已经确认的五子棋搜索、开局和回放参数。四个 `*_hex` 共用方盘环境；Hex 和象棋的 `replay_ratio` 分别集中在 [Hex run.cfg](../configs/games/hex/run.cfg) 与 [象棋 run.cfg](../configs/games/xiangqi/run.cfg)，各算法的 `run.cfg` 先 include 算法 baseline，再 include 对应棋类配置。象棋的搜索预算、初始化、fork、side positions、写盘、并行、训练 batch 和 bootstrap 均继承对应算法 baseline；独立的小规模检查只使用 `configs/checks/`。
+四个 `*_go` 完全继承各自 baseline。四个 `*_gomoku` 共用 [Freestyle 环境](../configs/games/gomoku/env.cfg)：15 路画布，11–15 路棋盘分布；`az_gomoku` 另保留已经确认的五子棋搜索、开局和回放参数。四个 `*_hex` 共用 [Hex 环境](../configs/games/hex/env.cfg) 中显式定义的 9–19 路方盘权重与 19 路画布，以及 [Hex 开局配置](../configs/games/hex/selfplay.cfg)；Hex 和象棋的 `replay_ratio` 分别集中在 [Hex run.cfg](../configs/games/hex/run.cfg) 与 [象棋 run.cfg](../configs/games/xiangqi/run.cfg)，各算法的 `run.cfg` 先 include 算法 baseline，再 include 对应棋类配置。象棋的搜索预算、初始化、fork、side positions、写盘、并行、训练 batch 和 bootstrap 均继承对应算法 baseline；独立的小规模检查只使用 `configs/checks/`。
 
 Hex 的 `chosenMoveTemperatureHalflife=15`，象棋为 40；实际半衰期为该值乘以 `sqrt(棋盘面积)/19`，象棋约为 20 个单方着手。该参数也控制根 policy 温度的衰减。普通 AZ/MuZero 自对弈启用根 Dirichlet 噪声，总浓度 10.83、混合权重 0.25；总浓度是各有效动作 α 的和，不是逐动作 α。继承的 KataGo 机制会在零训练权重的 cheap search 中临时关闭根噪声，保留完整训练搜索的噪声。当前 Gumbel 直接按自身规则出手，且两端 chosen 温度均为 0，继承的 half-life 不影响其出手。
 
