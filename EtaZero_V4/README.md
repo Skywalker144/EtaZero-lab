@@ -28,7 +28,7 @@ GTP `final_score` 只返回已完成且非认输对局的规则结果，未终�
 
 原生 selfplay 按 `game` 创建规则，五子棋/Hex 不使用围棋让子或数目收尾。非围棋真实终局产生规则结果；手数截断时以末状态 NN 价值衔接 TD，关闭主终局标签和结果辅助监督，并分别屏蔽不可用的 8/32 手未来局面目标。SGF 输出使用实际棋类和胜负结果。
 
-五子棋／Hex 的 [平衡开局](docs/openings.md) 已作为棋类适配接入原生 GameRunner，供 selfplay、match、gatekeeper 共用，普通网络与 MuZero 使用同一推理入口。五子棋采用固定 KataGomo 的随机骨架、候选接受、默认启用概率及带既有手数补偿的 policy init，随机 evaluator 冷启动同样执行；Hex 默认启用首手拒绝采样。开局前缀不生成搜索训练目标。Web/GTP 通过可取消的原生开局建议命令接入，生成失败或取消时保留原棋局。原生 `sampleinitializations` 可检查六种棋类、四种算法初始化后的局面与四结果搜索值，`genposesfromselfplayinit` 使用来源 writer 导出包含棋类有效对称及象棋完整历史的初始化局面；`evalrandominits` 单独检查均匀长度的随机 policy 前缀及后续搜索，用法见该文档。
+五子棋／Hex 的 [平衡开局](docs/openings.md) 已作为棋类适配接入原生 GameRunner，供 selfplay、match、gatekeeper 共用，普通网络与 MuZero 使用同一推理入口。五子棋采用固定 KataGomo 的随机骨架、候选接受、默认启用概率及带既有手数补偿的 policy init，随机 evaluator 冷启动同样执行；Hex 自对弈依次选择特殊模板、随机填盘和首手拒绝采样，再执行其专属的带手数补偿的 policy init，随机 evaluator 冷启动也执行；Hex 环境显式采用来源 19 路阶段的尺寸权重。开局前缀不生成搜索训练目标。Web/GTP 通过可取消的原生开局建议命令接入，生成失败或取消时保留原棋局。原生 `sampleinitializations` 可检查六种棋类、四种算法初始化后的局面与四结果搜索值，`genposesfromselfplayinit` 使用来源 writer 导出包含棋类有效对称及象棋完整历史的初始化局面；`evalrandominits` 单独检查均匀长度的随机 policy 前缀及后续搜索，用法见该文档。
 
 五子棋/Hex 的 SGF 和 hint 起点已接入原生 selfplay。SGF 使用 `GM` 与 `RU` 标识棋类，五子棋须明确 `freestyle`、`standard` 或 `renju`；hint JSON 使用 `game`，省略表示来源 Go 格式。导入保留零气子，Renju/Hex 不自动换色，棋类不匹配会报错或按来源文件加载流程记录并跳过。终局起点不参与自对弈起点采样；来源的 hint fork 保留局面、原始手数和训练权重。`samplesgfs` 的普通采样及 value-fluctuation 加权路径均支持六棋类，后者使用普通／MuZero 原始推理并保留来源权重公式，见 [SGF 波动加权采样](docs/evalsgf.md#sgf-波动加权采样)；`viewstartposes` 与 `trystartposes` 已接入六棋类、普通／MuZero 和 PUCT／Gumbel 搜索，保留各自的筛选、加权抽样与 hint 处理，见 [起点文件诊断](docs/evalsgf.md#查看与搜索起点文件)。其余来源高级工具仍须按实际使用路径核对，不因共享了解析器而视为全部完成多棋类适配。
 
