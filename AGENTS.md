@@ -35,6 +35,7 @@
 | EtaZero_V3.3 | 开发中 |
 | EtaZero_V3.4 | 开发中 |
 | EtaZero_V4 | 开发中 |
+| EtaZero_V4.1 | 开发中 |
 
 ## 修改边界
 

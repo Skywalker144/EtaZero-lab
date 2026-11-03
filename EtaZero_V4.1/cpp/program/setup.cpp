@@ -1,0 +1,1315 @@
+#include "../program/setup.h"
+#include "../program/selfplaymanager.h"
+
+#include "../core/datetime.h"
+#include "../core/test.h"
+#include "../core/makedir.h"
+#include "../core/fileutils.h"
+#include "../neuralnet/nninterface.h"
+#include "../search/patternbonustable.h"
+
+using namespace std;
+
+void Setup::initializeSession(ConfigParser& cfg) {
+  (void)cfg;
+  NeuralNet::globalInitialize();
+}
+
+PrintTreeOptions Setup::defaultLogSearchTreeOptions() {
+  return PrintTreeOptions().maxDepth(1).maxChildrenToShow(10);
+}
+
+PrintTreeOptions Setup::loadLogSearchTreeOptions(ConfigParser& cfg) {
+  PrintTreeOptions options = defaultLogSearchTreeOptions();
+  if(cfg.contains("logTreeMaxDepth"))
+    options = options.maxDepth(cfg.getInt("logTreeMaxDepth",1,1000000));
+  if(cfg.contains("logTreeMaxChildrenToShow"))
+    options = options.maxChildrenToShow(cfg.getInt("logTreeMaxChildrenToShow",1,1000000));
+  if(cfg.contains("logTreeMinVisitsToShow"))
+    options = options.minVisitsToShow(cfg.getInt64("logTreeMinVisitsToShow",(int64_t)0,(int64_t)1 << 50));
+  if(cfg.contains("logTreeMinVisitsToExpand"))
+    options = options.minVisitsToExpand(cfg.getInt64("logTreeMinVisitsToExpand",(int64_t)1,(int64_t)1 << 50));
+  if(cfg.contains("logTreeMaxPVDepth"))
+    options = options.maxPVDepth(cfg.getInt("logTreeMaxPVDepth",1,1000));
+  if(cfg.contains("logTreeShowAllRootChildren"))
+    options = options.showAllRootChildren(cfg.getBool("logTreeShowAllRootChildren"));
+  return options;
+}
+
+std::vector<std::string> Setup::getBackendPrefixes() {
+  std::vector<std::string> prefixes;
+  prefixes.push_back("cuda");
+  prefixes.push_back("trt");
+  prefixes.push_back("metal");
+  prefixes.push_back("opencl");
+  prefixes.push_back("rocm");
+  prefixes.push_back("eigen");
+  prefixes.push_back("onnx");
+  prefixes.push_back("dummybackend");
+  return prefixes;
+}
+
+NNEvaluator* Setup::initializeNNEvaluator(
+  const string& nnModelName,
+  const string& nnModelFile,
+  const string& expectedSha256,
+  ConfigParser& cfg,
+  Logger& logger,
+  Rand& seedRand,
+  int expectedConcurrentEvals,
+  int defaultNNXLen,
+  int defaultNNYLen,
+  MaxBatchSizeRequest maxBatchSizeRequest,
+  bool defaultRequireExactNNLen,
+  bool disableFP16,
+  setup_for_t setupFor,
+  int modelIndex
+) {
+  vector<NNEvaluator*> nnEvals =
+    initializeNNEvaluators(
+      {nnModelName},
+      {nnModelFile},
+      {expectedSha256},
+      cfg,
+      logger,
+      seedRand,
+      expectedConcurrentEvals,
+      defaultNNXLen,
+      defaultNNYLen,
+      maxBatchSizeRequest,
+      defaultRequireExactNNLen,
+      disableFP16,
+      setupFor,
+      modelIndex
+    );
+  testAssert(nnEvals.size() == 1);
+  return nnEvals[0];
+}
+
+bool Setup::EvaluatorOptions::operator==(const EvaluatorOptions& other) const {
+  return debugSkipNeuralNet == other.debugSkipNeuralNet &&
+    nnXLen == other.nnXLen &&
+    nnYLen == other.nnYLen &&
+    requireExactNNLen == other.requireExactNNLen &&
+    inputsUseNHWC == other.inputsUseNHWC &&
+    nnRandomize == other.nnRandomize &&
+    nnRandSeed == other.nnRandSeed &&
+    seedWasSpecified == other.seedWasSpecified &&
+    numNNServerThreadsPerModel == other.numNNServerThreadsPerModel &&
+    gpuIdxByServerThread == other.gpuIdxByServerThread &&
+    homeDataDirOverride == other.homeDataDirOverride &&
+    useFP16Mode == other.useFP16Mode &&
+    forcedSymmetry == other.forcedSymmetry &&
+    nnCacheSizePowerOfTwo == other.nnCacheSizePowerOfTwo &&
+    nnMutexPoolSizePowerOfTwo == other.nnMutexPoolSizePowerOfTwo &&
+    nnMaxBatchSize == other.nnMaxBatchSize &&
+    defaultSymmetry == other.defaultSymmetry;
+}
+
+Setup::EvaluatorOptions Setup::readEvaluatorOptions(
+  const string& nnModelFile, size_t index, ConfigParser& cfg, Logger& logger, Rand& seedRand,
+  int expectedConcurrentEvals, int defaultNNXLen, int defaultNNYLen,
+  Setup::MaxBatchSizeRequest maxBatchSizeRequest, bool defaultRequireExactNNLen,
+  bool disableFP16, Setup::setup_for_t setupFor, bool deferSeed
+) {
+  using namespace Setup;
+  EvaluatorOptions options;
+  const string idxStr = Global::uint64ToString(index);
+  #if defined(USE_CUDA_BACKEND)
+  string backendPrefix = "cuda";
+  #elif defined(USE_TENSORRT_BACKEND)
+  string backendPrefix = "trt";
+  #elif defined(USE_METAL_BACKEND)
+  string backendPrefix = "metal";
+  #elif defined(USE_OPENCL_BACKEND)
+  string backendPrefix = "opencl";
+  #elif defined(USE_ROCM_BACKEND)
+  string backendPrefix = "rocm";
+  #elif defined(USE_EIGEN_BACKEND)
+  string backendPrefix = "eigen";
+  #elif defined(USE_ONNX_BACKEND)
+  string backendPrefix = "onnx";
+  #else
+  string backendPrefix = "dummybackend";
+  #endif
+
+  #if defined(USE_ONNX_BACKEND)
+  // Distributed selfplay (contribute) uploads training data, which must never contain
+  // FP16-overflow NaN rows, so always apply the scale8 workaround regardless of onnxSkipScale8.
+  if(setupFor == SETUP_FOR_DISTRIBUTED && cfg.contains("onnxSkipScale8") && cfg.getBool("onnxSkipScale8")) {
+    cfg.overrideKey("onnxSkipScale8", "false");
+    logger.write(
+      "WARNING: onnxSkipScale8 = true is not allowed for contribute (distributed selfplay); "
+      "forcing it to false so FP16-overflow NaNs cannot poison contributed training data.");
+  }
+  #endif
+
+  //Automatically flag keys that are for other backends as used so that we don't warn about unused keys
+  //for those options
+  for(const string& prefix: getBackendPrefixes()) {
+    if(prefix != backendPrefix)
+      cfg.markAllKeysUsedWithPrefix(prefix);
+  }
+
+  bool debugSkipNeuralNetDefault = (nnModelFile == "/dev/null");
+  options.debugSkipNeuralNet =
+    setupFor == SETUP_FOR_DISTRIBUTED ? debugSkipNeuralNetDefault :
+    cfg.contains("debugSkipNeuralNet") ? cfg.getBool("debugSkipNeuralNet") :
+    debugSkipNeuralNetDefault;
+
+  options.nnXLen = std::max(defaultNNXLen,2);
+  options.nnYLen = std::max(defaultNNYLen,2);
+  if(setupFor != SETUP_FOR_DISTRIBUTED) {
+    if(cfg.contains("maxBoardXSizeForNNBuffer" + idxStr))
+      options.nnXLen = cfg.getInt("maxBoardXSizeForNNBuffer" + idxStr, 2, NNPos::MAX_BOARD_LEN);
+    else if(cfg.contains("maxBoardXSizeForNNBuffer"))
+      options.nnXLen = cfg.getInt("maxBoardXSizeForNNBuffer", 2, NNPos::MAX_BOARD_LEN);
+    else if(cfg.contains("maxBoardSizeForNNBuffer" + idxStr))
+      options.nnXLen = cfg.getInt("maxBoardSizeForNNBuffer" + idxStr, 2, NNPos::MAX_BOARD_LEN);
+    else if(cfg.contains("maxBoardSizeForNNBuffer"))
+      options.nnXLen = cfg.getInt("maxBoardSizeForNNBuffer", 2, NNPos::MAX_BOARD_LEN);
+
+    if(cfg.contains("maxBoardYSizeForNNBuffer" + idxStr))
+      options.nnYLen = cfg.getInt("maxBoardYSizeForNNBuffer" + idxStr, 2, NNPos::MAX_BOARD_LEN);
+    else if(cfg.contains("maxBoardYSizeForNNBuffer"))
+      options.nnYLen = cfg.getInt("maxBoardYSizeForNNBuffer", 2, NNPos::MAX_BOARD_LEN);
+    else if(cfg.contains("maxBoardSizeForNNBuffer" + idxStr))
+      options.nnYLen = cfg.getInt("maxBoardSizeForNNBuffer" + idxStr, 2, NNPos::MAX_BOARD_LEN);
+    else if(cfg.contains("maxBoardSizeForNNBuffer"))
+      options.nnYLen = cfg.getInt("maxBoardSizeForNNBuffer", 2, NNPos::MAX_BOARD_LEN);
+  }
+
+  options.requireExactNNLen = defaultRequireExactNNLen;
+  if(setupFor != SETUP_FOR_DISTRIBUTED) {
+    if(cfg.contains("requireMaxBoardSize" + idxStr))
+      options.requireExactNNLen = cfg.getBool("requireMaxBoardSize" + idxStr);
+    else if(cfg.contains("requireMaxBoardSize"))
+      options.requireExactNNLen = cfg.getBool("requireMaxBoardSize");
+  }
+
+  //ROCm defaults to NHWC inputs like CUDA: its compute layout is NHWC in the default FP16 path
+  //(transformers always, convnets on the archs where NHWC is faster), and unlike cuDNN, MIOpen
+  //cannot consume mismatched input/compute layouts for free - it costs a device transpose.
+  options.inputsUseNHWC = backendPrefix == "opencl" || backendPrefix == "trt" || backendPrefix == "metal" || backendPrefix == "onnx" ? false : true;
+  if(cfg.contains(backendPrefix+"InputsUseNHWC"+idxStr))
+    options.inputsUseNHWC = cfg.getBool(backendPrefix+"InputsUseNHWC"+idxStr);
+  else if(cfg.contains("inputsUseNHWC"+idxStr))
+    options.inputsUseNHWC = cfg.getBool("inputsUseNHWC"+idxStr);
+  else if(cfg.contains(backendPrefix+"InputsUseNHWC"))
+    options.inputsUseNHWC = cfg.getBool(backendPrefix+"InputsUseNHWC");
+  else if(cfg.contains("inputsUseNHWC"))
+    options.inputsUseNHWC = cfg.getBool("inputsUseNHWC");
+
+  options.nnRandomize =
+    setupFor == SETUP_FOR_DISTRIBUTED ? true :
+    cfg.contains("nnRandomize") ? cfg.getBool("nnRandomize") :
+    true;
+
+  options.seedWasSpecified = setupFor != SETUP_FOR_DISTRIBUTED &&
+    (cfg.contains("nnRandSeed" + idxStr) || cfg.contains("nnRandSeed"));
+  if(setupFor == SETUP_FOR_DISTRIBUTED)
+    options.nnRandSeed = Global::uint64ToString(seedRand.nextUInt64());
+  else if(cfg.contains("nnRandSeed" + idxStr))
+    options.nnRandSeed = cfg.getString("nnRandSeed" + idxStr);
+  else if(cfg.contains("nnRandSeed"))
+    options.nnRandSeed = cfg.getString("nnRandSeed");
+  else
+    options.nnRandSeed = deferSeed ? "" : Global::uint64ToString(seedRand.nextUInt64());
+  if(!deferSeed) logger.write("nnRandSeed" + idxStr + " = " + options.nnRandSeed);
+
+#ifndef USE_EIGEN_BACKEND
+  cfg.markAllKeysUsedWithPrefix("numEigenThreadsPerModel");
+  options.numNNServerThreadsPerModel =
+    cfg.contains("numNNServerThreadsPerModel") ? cfg.getInt("numNNServerThreadsPerModel",1,1024) : 1;
+#else
+  cfg.markAllKeysUsedWithPrefix("numNNServerThreadsPerModel");
+  options.numNNServerThreadsPerModel =
+    cfg.contains("numEigenThreadsPerModel") ? cfg.getInt("numEigenThreadsPerModel",1,1024) :
+    computeDefaultEigenBackendThreads(expectedConcurrentEvals,logger);
+#endif
+
+  for(int j = 0; j<options.numNNServerThreadsPerModel; j++) {
+    string threadIdxStr = Global::intToString(j);
+    if(cfg.contains(backendPrefix+"DeviceToUseModel"+idxStr+"Thread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"DeviceToUseModel"+idxStr+"Thread"+threadIdxStr,0,1023));
+    else if(cfg.contains(backendPrefix+"GpuToUseModel"+idxStr+"Thread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"GpuToUseModel"+idxStr+"Thread"+threadIdxStr,0,1023));
+    else if(cfg.contains("deviceToUseModel"+idxStr+"Thread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("deviceToUseModel"+idxStr+"Thread"+threadIdxStr,0,1023));
+    else if(cfg.contains("gpuToUseModel"+idxStr+"Thread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("gpuToUseModel"+idxStr+"Thread"+threadIdxStr,0,1023));
+    else if(cfg.contains(backendPrefix+"DeviceToUseModel"+idxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"DeviceToUseModel"+idxStr,0,1023));
+    else if(cfg.contains(backendPrefix+"GpuToUseModel"+idxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"GpuToUseModel"+idxStr,0,1023));
+    else if(cfg.contains("deviceToUseModel"+idxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("deviceToUseModel"+idxStr,0,1023));
+    else if(cfg.contains("gpuToUseModel"+idxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("gpuToUseModel"+idxStr,0,1023));
+    else if(cfg.contains(backendPrefix+"DeviceToUseThread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"DeviceToUseThread"+threadIdxStr,0,1023));
+    else if(cfg.contains(backendPrefix+"GpuToUseThread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"GpuToUseThread"+threadIdxStr,0,1023));
+    else if(cfg.contains("deviceToUseThread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("deviceToUseThread"+threadIdxStr,0,1023));
+    else if(cfg.contains("gpuToUseThread"+threadIdxStr))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("gpuToUseThread"+threadIdxStr,0,1023));
+    else if(cfg.contains(backendPrefix+"DeviceToUse"))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"DeviceToUse",0,1023));
+    else if(cfg.contains(backendPrefix+"GpuToUse"))
+      options.gpuIdxByServerThread.push_back(cfg.getInt(backendPrefix+"GpuToUse",0,1023));
+    else if(cfg.contains("deviceToUse"))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("deviceToUse",0,1023));
+    else if(cfg.contains("gpuToUse"))
+      options.gpuIdxByServerThread.push_back(cfg.getInt("gpuToUse",0,1023));
+    else
+      options.gpuIdxByServerThread.push_back(-1);
+  }
+
+  options.homeDataDirOverride = loadHomeDataDirOverride(cfg);
+
+  // Backend-specific options (e.g. openclTunerFile, cudaDisableGraphSDPA) are read directly by the
+  // relevant compute backend off of cfg (see createComputeContext). Because they follow the backend
+  // prefix convention, the getBackendPrefixes() loop above already marks them used for the backends
+  // that don't read them, so no explicit mark-used is needed here.
+
+  options.useFP16Mode = enabled_t::Auto;
+  if(cfg.contains(backendPrefix+"UseFP16-"+idxStr))
+    options.useFP16Mode = cfg.getEnabled(backendPrefix+"UseFP16-"+idxStr);
+  else if(cfg.contains("useFP16-"+idxStr))
+    options.useFP16Mode = cfg.getEnabled("useFP16-"+idxStr);
+  else if(cfg.contains(backendPrefix+"UseFP16"))
+    options.useFP16Mode = cfg.getEnabled(backendPrefix+"UseFP16");
+  else if(cfg.contains("useFP16"))
+    options.useFP16Mode = cfg.getEnabled("useFP16");
+
+  options.forcedSymmetry = -1;
+  if(setupFor != SETUP_FOR_DISTRIBUTED && cfg.contains("nnForcedSymmetry"))
+    options.forcedSymmetry = cfg.getInt("nnForcedSymmetry",0,SymmetryHelpers::NUM_SYMMETRIES-1);
+
+  if(!deferSeed) logger.write(
+    "After dedups: nnModelFile" + idxStr + " = " + nnModelFile
+    + " useFP16 " + options.useFP16Mode.toString()
+  );
+
+  options.nnCacheSizePowerOfTwo =
+    cfg.contains("nnCacheSizePowerOfTwo") ? cfg.getInt("nnCacheSizePowerOfTwo", -1, 48) :
+    setupFor == SETUP_FOR_GTP ? 20 :
+    setupFor == SETUP_FOR_BENCHMARK ? 20 :
+    setupFor == SETUP_FOR_BENCHMARKNN ? 16 :
+    setupFor == SETUP_FOR_DISTRIBUTED ? 19 :
+    setupFor == SETUP_FOR_MATCH ? 21 :
+    setupFor == SETUP_FOR_ANALYSIS ? 23 :
+    cfg.getInt("nnCacheSizePowerOfTwo", -1, 48);
+
+  options.nnMutexPoolSizePowerOfTwo =
+    cfg.contains("nnMutexPoolSizePowerOfTwo") ? cfg.getInt("nnMutexPoolSizePowerOfTwo", -1, 24) :
+    setupFor == SETUP_FOR_GTP ? 16 :
+    setupFor == SETUP_FOR_BENCHMARK ? 16 :
+    setupFor == SETUP_FOR_BENCHMARKNN ? 12 :
+    setupFor == SETUP_FOR_DISTRIBUTED ? 16 :
+    setupFor == SETUP_FOR_MATCH ? 17 :
+    setupFor == SETUP_FOR_ANALYSIS ? 17 :
+    cfg.getInt("nnMutexPoolSizePowerOfTwo", -1, 24);
+
+  // Turn what the caller knows (maxBatchSizeRequest) into a batch size the way this backend wants
+  // it (NeuralNet::getBatchPolicy), rather than having every call site bake in a formula that is
+  // only right for GPU backends.
+  const NeuralNet::BatchPolicy batchPolicy = NeuralNet::getBatchPolicy(cfg);
+
+  if(maxBatchSizeRequest.kind == MaxBatchSizeRequest::EXPLICIT_SIZE) {
+    // The caller already has an exact batch size in hand (a benchmark or test tool's own number),
+    // so no policy transform applies - not even CpuLocal's fixed size, since these tools exist
+    // precisely to measure or exercise a specific batch size.
+    options.nnMaxBatchSize = maxBatchSizeRequest.size;
+    if(options.nnMaxBatchSize <= 0 || options.nnMaxBatchSize > 65536)
+      throw StringError("Invalid explicit max batch size: " + Global::intToString(options.nnMaxBatchSize));
+  }
+  else if(batchPolicy == NeuralNet::BatchPolicy::CpuLocal) {
+    // Batching doesn't help this backend (see BatchPolicy::CpuLocal), so fix a small size that
+    // saves memory, ignoring both the request and anything the user specified for GPUs.
+    options.nnMaxBatchSize = 2;
+    cfg.markAllKeysUsedWithPrefix("nnMaxBatchSize");
+  }
+  else if(maxBatchSizeRequest.kind == MaxBatchSizeRequest::REQUIRE_FROM_CONFIG) {
+    // No default to fall back on, so the config has to say. Callers using this always pass a
+    // setupFor that does not force the request, so there is nothing to force here.
+    options.nnMaxBatchSize = cfg.getInt("nnMaxBatchSize", 1, 65536);
+  }
+  else {
+    int derived;
+    if(batchPolicy == NeuralNet::BatchPolicy::FixedShape) {
+      // Every batch gets padded up to this size, so overshooting wastes real arithmetic on every
+      // evaluation. Server threads sharing a device share its concurrency, hence dividing by the
+      // number of distinct devices rather than by the thread count.
+      const int numDevices = NeuralNet::getNumEffectiveDevices(cfg, options.gpuIdxByServerThread);
+      derived = computeFixedShapeMaxBatchSize(expectedConcurrentEvals, numDevices);
+    }
+    else if(maxBatchSizeRequest.kind == MaxBatchSizeRequest::FROM_CONCURRENCY_STRICT) {
+      // The caller means exactly the concurrency it gave.
+      derived = std::max(1, expectedConcurrentEvals);
+    }
+    else {
+      // Any batch size is fine here and larger ones amortize per-call overhead, so round up and
+      // keep a floor.
+      derived = std::max(8, ((expectedConcurrentEvals + 3) / 4) * 4);
+    }
+
+    const bool forceRequest =
+      setupFor == SETUP_FOR_BENCHMARK || setupFor == SETUP_FOR_BENCHMARKNN || setupFor == SETUP_FOR_DISTRIBUTED;
+    options.nnMaxBatchSize =
+      (!forceRequest && cfg.contains("nnMaxBatchSize")) ? cfg.getInt("nnMaxBatchSize", 1, 65536) :
+      derived;
+  }
+
+  options.defaultSymmetry = options.forcedSymmetry >= 0 ? options.forcedSymmetry : 0;
+  if(disableFP16)
+    options.useFP16Mode = enabled_t::False;
+  return options;
+}
+
+vector<NNEvaluator*> Setup::initializeNNEvaluators(
+  const vector<string>& nnModelNames,
+  const vector<string>& nnModelFiles,
+  const vector<string>& expectedSha256s,
+  ConfigParser& cfg,
+  Logger& logger,
+  Rand& seedRand,
+  int expectedConcurrentEvals,
+  int defaultNNXLen,
+  int defaultNNYLen,
+  MaxBatchSizeRequest maxBatchSizeRequest,
+  bool defaultRequireExactNNLen,
+  bool disableFP16,
+  setup_for_t setupFor,
+  int firstModelIndex
+) {
+  // GameRunner and the analysis/GTP protocols preserve full Xiangqi histories.
+  // Other commands still need state adapters, including with random evaluators.
+  const bool xiangqi = cfg.contains("game") && Rules::parseGame(cfg.getString("game")) == Rules::Game::XIANGQI;
+  const bool supportsXiangqi = setupFor == SETUP_FOR_SELFPLAY || setupFor == SETUP_FOR_MATCH ||
+    setupFor == SETUP_FOR_GATEKEEPER || setupFor == SETUP_FOR_ANALYSIS || setupFor == SETUP_FOR_GTP ||
+    setupFor == SETUP_FOR_BENCHMARK || setupFor == SETUP_FOR_BENCHMARKNN;
+  if(xiangqi && !supportsXiangqi)
+    throw StringError("Xiangqi is not yet connected to this native game command");
+  vector<NNEvaluator*> nnEvals;
+  testAssert(nnModelNames.size() == nnModelFiles.size());
+  testAssert(expectedSha256s.size() == 0 || expectedSha256s.size() == nnModelFiles.size());
+
+  for(size_t i = 0; i<nnModelFiles.size(); i++) {
+    const string& nnModelName = nnModelNames[i];
+    const string& nnModelFile = nnModelFiles[i];
+    const string& expectedSha256 = expectedSha256s.size() > 0 ? expectedSha256s[i]: "";
+
+    const auto options = readEvaluatorOptions(nnModelFile,i+firstModelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
+      defaultNNXLen,defaultNNYLen,maxBatchSizeRequest,defaultRequireExactNNLen,disableFP16,setupFor);
+
+    NNEvaluator* nnEval = new NNEvaluator(
+      nnModelName,
+      nnModelFile,
+      expectedSha256,
+      &logger,
+      options.nnMaxBatchSize,
+      options.nnXLen,
+      options.nnYLen,
+      options.requireExactNNLen,
+      options.inputsUseNHWC,
+      options.nnCacheSizePowerOfTwo,
+      options.nnMutexPoolSizePowerOfTwo,
+      options.debugSkipNeuralNet,
+      options.homeDataDirOverride,
+      options.useFP16Mode,
+      options.numNNServerThreadsPerModel,
+      options.gpuIdxByServerThread,
+      options.nnRandSeed,
+      (options.forcedSymmetry >= 0 ? false : options.nnRandomize),
+      options.defaultSymmetry,
+      cfg
+    );
+
+    if((nnEval->getModelVersion() == 19 && (!xiangqi || !supportsXiangqi)) ||
+       (xiangqi && !nnEval->isNeuralNetLess() && nnEval->getModelVersion() != 19)) {
+      delete nnEval;
+      for(auto* previous : nnEvals) delete previous;
+      throw StringError("Xiangqi models require game=xiangqi and a supported native command; other model families cannot play Xiangqi");
+    }
+
+    // benchmarkPureForward drives compute handles itself, without server threads.
+    if(setupFor != SETUP_FOR_BENCHMARKNN)
+      nnEval->spawnServerThreads();
+
+    nnEvals.push_back(nnEval);
+  }
+
+  return nnEvals;
+}
+
+unique_ptr<SelfplayModel> Setup::initializeMuZeroSelfplayModel(
+  const string& name, const string& directory, shared_ptr<const MuZero::ModelBundle> model,
+  ConfigParser& cfg, Logger& logger, Rand& seedRand,
+  int expectedConcurrentEvals, bool defaultRequireExactNNLen,
+  int modelIndex, setup_for_t setupFor, MaxBatchSizeRequest maxBatchSizeRequest,
+  const vector<int>* gpuIdxByServerThreadOverride, bool disableFP16
+) {
+  const int canvas = model->posLen();
+  auto options = readEvaluatorOptions(model->isRandom() ? "/dev/null" : directory,modelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
+    canvas,canvas,maxBatchSizeRequest,defaultRequireExactNNLen,disableFP16,setupFor);
+  if(gpuIdxByServerThreadOverride) options.gpuIdxByServerThread = *gpuIdxByServerThreadOverride;
+  if(options.debugSkipNeuralNet && !model->isRandom())
+    throw StringError("MuZero needs a real three-component model; debugSkipNeuralNet is not supported");
+  if(options.nnXLen != canvas || options.nnYLen != canvas)
+    throw StringError("MuZero NN buffer dimensions must match the model.json canvas");
+  Rules gameRules;
+  gameRules.game = Rules::parseGame(model->game());
+  if(options.forcedSymmetry >= 0 && !gameRules.allowsSymmetry(options.forcedSymmetry))
+    throw StringError("nnForcedSymmetry is invalid for the MuZero model game");
+  if(model->isRandom()) {
+    logger.write("MuZero random evaluator: no neural net inference");
+    auto position = make_unique<MuZero::PositionEvaluator>(std::move(model),options.requireExactNNLen,
+      options.forcedSymmetry >= 0 ? false : options.nnRandomize,options.defaultSymmetry,
+      options.nnCacheSizePowerOfTwo,options.nnMutexPoolSizePowerOfTwo,&logger,options.nnRandSeed);
+    return make_unique<SelfplayModel>(name,directory,nullptr,std::move(position));
+  }
+  // homeDataDirOverride is intentionally unused by the source CUDA backend too.
+  auto batcher = make_unique<MuZero::Batcher>(std::move(model),options.nnMaxBatchSize,
+    options.gpuIdxByServerThread,options.useFP16Mode,cfg,&logger,options.inputsUseNHWC);
+  auto position = make_unique<MuZero::PositionEvaluator>(*batcher,options.requireExactNNLen,
+    options.forcedSymmetry >= 0 ? false : options.nnRandomize,options.defaultSymmetry,
+    options.nnCacheSizePowerOfTwo,options.nnMutexPoolSizePowerOfTwo,&logger,options.nnRandSeed);
+  return make_unique<SelfplayModel>(name,directory,std::move(batcher),std::move(position));
+}
+
+int Setup::computeFixedShapeMaxBatchSize(int expectedConcurrentEvals, int numDevices) {
+  numDevices = std::max(1, numDevices);
+  const int perDevice = (expectedConcurrentEvals + numDevices - 1) / numDevices;
+  // Floor of 2 rather than 1: batch size 1 makes OpenVINO's NPU inference produce nonfinite
+  // policy outputs (a provider bug, observed with OpenVINO 2026.2.1), and a 2-row batch costs
+  // low-thread-count configurations only a little on the other providers.
+  return std::max(2, (perDevice + 1) / 2);
+}
+
+int Setup::computeDefaultEigenBackendThreads(int expectedConcurrentEvals, Logger& logger) {
+  auto getNumCores = [&logger]() {
+    int numCores = (int)std::thread::hardware_concurrency();
+    if(numCores <= 0) {
+      logger.write("Could not determine number of cores on this machine, choosing eigen backend threads as if it were 8");
+      numCores = 8;
+    }
+    return numCores;
+  };
+  return std::min(expectedConcurrentEvals,getNumCores());
+}
+
+string Setup::loadHomeDataDirOverride(
+  ConfigParser& cfg
+){
+  string homeDataDirOverride;
+  if(cfg.contains("homeDataDir"))
+    homeDataDirOverride = cfg.getString("homeDataDir");
+  return homeDataDirOverride;
+}
+
+SearchParams Setup::loadSingleParams(
+  ConfigParser& cfg,
+  setup_for_t setupFor
+) {
+  const bool hasHumanModel = false;
+  return loadSingleParams(cfg,setupFor,hasHumanModel);
+}
+SearchParams Setup::loadSingleParams(
+  ConfigParser& cfg,
+  setup_for_t setupFor,
+  bool hasHumanModel
+) {
+  const bool loadSingleConfigOnly = true;
+  vector<SearchParams> paramss = loadParams(cfg, setupFor, hasHumanModel, loadSingleConfigOnly);
+  if(paramss.size() != 1)
+    throw StringError("Config contains parameters for multiple bot configurations, but this KataGo command only supports a single configuration");
+  return paramss[0];
+}
+
+static Player parsePlayer(const char* field, const string& s) {
+  Player pla = C_EMPTY;
+  bool suc = PlayerIO::tryParsePlayer(s,pla);
+  if(!suc)
+    throw StringError("Could not parse player in field " + string(field) + ", should be BLACK or WHITE");
+  return pla;
+}
+
+vector<SearchParams> Setup::loadParams(
+  ConfigParser& cfg,
+  setup_for_t setupFor
+) {
+  const bool hasHumanModel = false;
+  const bool loadSingleConfigOnly = false;
+  return loadParams(cfg,setupFor,hasHumanModel,loadSingleConfigOnly);
+}
+
+vector<SearchParams> Setup::loadParams(
+  ConfigParser& cfg,
+  setup_for_t setupFor,
+  bool hasHumanModel
+) {
+  const bool loadSingleConfigOnly = false;
+  return loadParams(cfg,setupFor,hasHumanModel,loadSingleConfigOnly);
+}
+
+vector<SearchParams> Setup::loadParams(
+  ConfigParser& cfg,
+  setup_for_t setupFor,
+  bool hasHumanModel,
+  bool loadSingleConfigOnly
+) {
+  if(setupFor == SETUP_FOR_SELFPLAY || setupFor == SETUP_FOR_GATEKEEPER)
+    setupFor = SETUP_FOR_OTHER;
+
+  vector<SearchParams> paramss;
+  int numBots = 1;
+  if(cfg.contains("numBots"))
+    numBots = cfg.getInt("numBots",1,MAX_BOT_PARAMS_FROM_CFG);
+
+  if(loadSingleConfigOnly) {
+    if(numBots != 1)
+      throw ConfigParsingError("The config for this command cannot have numBots > 0");
+  }
+
+  for(int i = 0; i<numBots; i++) {
+    SearchParams params;
+
+    string idxStr = loadSingleConfigOnly ? "" : Global::intToString(i);
+
+    if(cfg.contains("maxPlayouts"+idxStr)) params.maxPlayouts = cfg.getInt64("maxPlayouts"+idxStr, (int64_t)1, (int64_t)1 << 50);
+    else if(cfg.contains("maxPlayouts"))   params.maxPlayouts = cfg.getInt64("maxPlayouts",        (int64_t)1, (int64_t)1 << 50);
+    if(cfg.contains("maxVisits"+idxStr)) params.maxVisits = cfg.getInt64("maxVisits"+idxStr, (int64_t)1, (int64_t)1 << 50);
+    else if(cfg.contains("maxVisits"))   params.maxVisits = cfg.getInt64("maxVisits",        (int64_t)1, (int64_t)1 << 50);
+    if(cfg.contains("maxTime"+idxStr)) params.maxTime = cfg.getDouble("maxTime"+idxStr, 0.0, 1.0e20);
+    else if(cfg.contains("maxTime"))   params.maxTime = cfg.getDouble("maxTime",        0.0, 1.0e20);
+
+    if(cfg.contains("maxPlayoutsPondering"+idxStr)) params.maxPlayoutsPondering = cfg.getInt64("maxPlayoutsPondering"+idxStr, (int64_t)1, (int64_t)1 << 50);
+    else if(cfg.contains("maxPlayoutsPondering"))   params.maxPlayoutsPondering = cfg.getInt64("maxPlayoutsPondering",        (int64_t)1, (int64_t)1 << 50);
+    else                                            params.maxPlayoutsPondering = (int64_t)1 << 50;
+    if(cfg.contains("maxVisitsPondering"+idxStr)) params.maxVisitsPondering = cfg.getInt64("maxVisitsPondering"+idxStr, (int64_t)1, (int64_t)1 << 50);
+    else if(cfg.contains("maxVisitsPondering"))   params.maxVisitsPondering = cfg.getInt64("maxVisitsPondering",        (int64_t)1, (int64_t)1 << 50);
+    else                                          params.maxVisitsPondering = (int64_t)1 << 50;
+    if(cfg.contains("maxTimePondering"+idxStr)) params.maxTimePondering = cfg.getDouble("maxTimePondering"+idxStr, 0.0, 1.0e20);
+    else if(cfg.contains("maxTimePondering"))   params.maxTimePondering = cfg.getDouble("maxTimePondering",        0.0, 1.0e20);
+    else                                        params.maxTimePondering = 1.0e20;
+
+    if(cfg.contains("lagBuffer"+idxStr)) params.lagBuffer = cfg.getDouble("lagBuffer"+idxStr, 0.0, 3600.0);
+    else if(cfg.contains("lagBuffer"))   params.lagBuffer = cfg.getDouble("lagBuffer",        0.0, 3600.0);
+    else                                 params.lagBuffer = 0.0;
+
+
+    if(cfg.contains("numSearchThreads"+idxStr)) params.numThreads = cfg.getInt("numSearchThreads"+idxStr, 1, 4096);
+    else                                        params.numThreads = cfg.getInt("numSearchThreads",        1, 4096);
+
+    if(cfg.contains("minPlayoutsPerThread"+idxStr)) params.minPlayoutsPerThread = cfg.getDouble("minPlayoutsPerThread"+idxStr, 0.0, 1.0e20);
+    else if(cfg.contains("minPlayoutsPerThread"))   params.minPlayoutsPerThread = cfg.getDouble("minPlayoutsPerThread",        0.0, 1.0e20);
+    else                                            params.minPlayoutsPerThread = (setupFor == SETUP_FOR_ANALYSIS || setupFor == SETUP_FOR_GTP) ? 8.0 : 0.0;
+
+    for(const string key : {"staticScoreUtilityFactor", "dynamicScoreUtilityFactor",
+                            "dynamicScoreCenterZeroWeight", "dynamicScoreCenterScale", "rootEndingBonusPoints",
+                            "antiMirror", "genmoveAntiMirror", "rootPruneUselessMoves", "conservativePass",
+                            "fillDameBeforePass", "enablePassingHacks", "enableMorePassingHacks",
+                            "avoidMYTDaggerHack", "avoidMYTDaggerHackPla", "friendlyPass", "cleanupBeforePass", "friendlyPassOk",
+                            "searchFactorAfterOnePass", "searchFactorAfterTwoPass"}) {
+      if(cfg.contains(key) || cfg.contains(key+idxStr))
+        throw StringError(key + " is excluded from EtaZero search");
+    }
+
+    if(cfg.contains("winLossUtilityFactor"+idxStr)) params.winLossUtilityFactor = cfg.getDouble("winLossUtilityFactor"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("winLossUtilityFactor"))   params.winLossUtilityFactor = cfg.getDouble("winLossUtilityFactor",        0.0, 1.0);
+    else                                            params.winLossUtilityFactor = 1.0;
+    if(cfg.contains("noResultUtilityForWhite"+idxStr)) params.noResultUtilityForWhite = cfg.getDouble("noResultUtilityForWhite"+idxStr, -1.0, 1.0);
+    else if(cfg.contains("noResultUtilityForWhite"))   params.noResultUtilityForWhite = cfg.getDouble("noResultUtilityForWhite",        -1.0, 1.0);
+    else                                               params.noResultUtilityForWhite = 0.0;
+    if(cfg.contains("drawEquivalentWinsForWhite"+idxStr)) params.drawEquivalentWinsForWhite = cfg.getDouble("drawEquivalentWinsForWhite"+idxStr, 0.5, 0.5);
+    else if(cfg.contains("drawEquivalentWinsForWhite"))   params.drawEquivalentWinsForWhite = cfg.getDouble("drawEquivalentWinsForWhite",        0.5, 0.5);
+    else                                                  params.drawEquivalentWinsForWhite = 0.5;
+
+
+    if(cfg.contains("cpuctExploration"+idxStr)) params.cpuctExploration = cfg.getDouble("cpuctExploration"+idxStr, 0.0, 10.0);
+    else if(cfg.contains("cpuctExploration"))   params.cpuctExploration = cfg.getDouble("cpuctExploration",        0.0, 10.0);
+    else                                        params.cpuctExploration = 1.0;
+    if(cfg.contains("cpuctExplorationLog"+idxStr)) params.cpuctExplorationLog = cfg.getDouble("cpuctExplorationLog"+idxStr, 0.0, 10.0);
+    else if(cfg.contains("cpuctExplorationLog"))   params.cpuctExplorationLog = cfg.getDouble("cpuctExplorationLog",        0.0, 10.0);
+    else                                           params.cpuctExplorationLog = 0.45;
+    if(cfg.contains("cpuctExplorationBase"+idxStr)) params.cpuctExplorationBase = cfg.getDouble("cpuctExplorationBase"+idxStr, 10.0, 100000.0);
+    else if(cfg.contains("cpuctExplorationBase"))   params.cpuctExplorationBase = cfg.getDouble("cpuctExplorationBase",        10.0, 100000.0);
+    else                                            params.cpuctExplorationBase = 500.0;
+
+    if(cfg.contains("cpuctUtilityStdevPrior"+idxStr)) params.cpuctUtilityStdevPrior = cfg.getDouble("cpuctUtilityStdevPrior"+idxStr, 1e-8, 10.0);
+    else if(cfg.contains("cpuctUtilityStdevPrior"))   params.cpuctUtilityStdevPrior = cfg.getDouble("cpuctUtilityStdevPrior",        1e-8, 10.0);
+    else                                              params.cpuctUtilityStdevPrior = 0.40;
+    if(cfg.contains("cpuctUtilityStdevPriorWeight"+idxStr)) params.cpuctUtilityStdevPriorWeight = cfg.getDouble("cpuctUtilityStdevPriorWeight"+idxStr, 0.0, 100.0);
+    else if(cfg.contains("cpuctUtilityStdevPriorWeight"))   params.cpuctUtilityStdevPriorWeight = cfg.getDouble("cpuctUtilityStdevPriorWeight",        0.0, 100.0);
+    else                                                    params.cpuctUtilityStdevPriorWeight = 2.0;
+    if(cfg.contains("cpuctUtilityStdevScale"+idxStr)) params.cpuctUtilityStdevScale = cfg.getDouble("cpuctUtilityStdevScale"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("cpuctUtilityStdevScale"))   params.cpuctUtilityStdevScale = cfg.getDouble("cpuctUtilityStdevScale",        0.0, 1.0);
+    else                                              params.cpuctUtilityStdevScale = ((setupFor != SETUP_FOR_DISTRIBUTED && setupFor != SETUP_FOR_OTHER) ? 0.85 : 0.0);
+
+
+    if(cfg.contains("fpuReductionMax"+idxStr)) params.fpuReductionMax = cfg.getDouble("fpuReductionMax"+idxStr, 0.0, 2.0);
+    else if(cfg.contains("fpuReductionMax"))   params.fpuReductionMax = cfg.getDouble("fpuReductionMax",        0.0, 2.0);
+    else params.fpuReductionMax = 0.2;
+    if(cfg.contains("fpuLossProp"+idxStr)) params.fpuLossProp = cfg.getDouble("fpuLossProp"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("fpuLossProp"))   params.fpuLossProp = cfg.getDouble("fpuLossProp",        0.0, 1.0);
+    else                                   params.fpuLossProp = 0.0;
+    if(cfg.contains("fpuParentWeightByVisitedPolicy"+idxStr)) params.fpuParentWeightByVisitedPolicy = cfg.getBool("fpuParentWeightByVisitedPolicy"+idxStr);
+    else if(cfg.contains("fpuParentWeightByVisitedPolicy"))   params.fpuParentWeightByVisitedPolicy = cfg.getBool("fpuParentWeightByVisitedPolicy");
+    else                                                      params.fpuParentWeightByVisitedPolicy = (setupFor != SETUP_FOR_DISTRIBUTED);
+    if(params.fpuParentWeightByVisitedPolicy) {
+      if(cfg.contains("fpuParentWeightByVisitedPolicyPow"+idxStr)) params.fpuParentWeightByVisitedPolicyPow = cfg.getDouble("fpuParentWeightByVisitedPolicyPow"+idxStr, 0.0, 5.0);
+      else if(cfg.contains("fpuParentWeightByVisitedPolicyPow"))   params.fpuParentWeightByVisitedPolicyPow = cfg.getDouble("fpuParentWeightByVisitedPolicyPow",        0.0, 5.0);
+      else                                                         params.fpuParentWeightByVisitedPolicyPow = 2.0;
+    }
+    else {
+      if(cfg.contains("fpuParentWeight"+idxStr)) params.fpuParentWeight = cfg.getDouble("fpuParentWeight"+idxStr,        0.0, 1.0);
+      else if(cfg.contains("fpuParentWeight"))   params.fpuParentWeight = cfg.getDouble("fpuParentWeight",        0.0, 1.0);
+      else                                       params.fpuParentWeight = 0.0;
+    }
+
+    if(cfg.contains("policyOptimism"+idxStr)) params.policyOptimism = cfg.getDouble("policyOptimism"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("policyOptimism"))   params.policyOptimism = cfg.getDouble("policyOptimism",        0.0, 1.0);
+    else params.policyOptimism = (setupFor != SETUP_FOR_DISTRIBUTED && setupFor != SETUP_FOR_OTHER) ? 1.0 : 0.0;
+
+    if(cfg.contains("valueWeightExponent"+idxStr)) params.valueWeightExponent = cfg.getDouble("valueWeightExponent"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("valueWeightExponent")) params.valueWeightExponent = cfg.getDouble("valueWeightExponent", 0.0, 1.0);
+    else params.valueWeightExponent = 0.25;
+    if(cfg.contains("useNoisePruning"+idxStr)) params.useNoisePruning = cfg.getBool("useNoisePruning"+idxStr);
+    else if(cfg.contains("useNoisePruning"))   params.useNoisePruning = cfg.getBool("useNoisePruning");
+    else                                       params.useNoisePruning = (setupFor != SETUP_FOR_DISTRIBUTED && setupFor != SETUP_FOR_OTHER);
+    if(cfg.contains("noisePruneUtilityScale"+idxStr)) params.noisePruneUtilityScale = cfg.getDouble("noisePruneUtilityScale"+idxStr, 0.001, 10.0);
+    else if(cfg.contains("noisePruneUtilityScale"))   params.noisePruneUtilityScale = cfg.getDouble("noisePruneUtilityScale", 0.001, 10.0);
+    else                                              params.noisePruneUtilityScale = 0.15;
+    if(cfg.contains("noisePruningCap"+idxStr)) params.noisePruningCap = cfg.getDouble("noisePruningCap"+idxStr, 0.0, 1e50);
+    else if(cfg.contains("noisePruningCap"))   params.noisePruningCap = cfg.getDouble("noisePruningCap", 0.0, 1e50);
+    else                                       params.noisePruningCap = 1e50;
+
+
+    if(cfg.contains("useUncertainty"+idxStr)) params.useUncertainty = cfg.getBool("useUncertainty"+idxStr);
+    else if(cfg.contains("useUncertainty"))   params.useUncertainty = cfg.getBool("useUncertainty");
+    else                                      params.useUncertainty = (setupFor != SETUP_FOR_DISTRIBUTED && setupFor != SETUP_FOR_OTHER);
+    if(cfg.contains("uncertaintyCoeff"+idxStr)) params.uncertaintyCoeff = cfg.getDouble("uncertaintyCoeff"+idxStr, 0.0001, 1.0);
+    else if(cfg.contains("uncertaintyCoeff"))   params.uncertaintyCoeff = cfg.getDouble("uncertaintyCoeff", 0.0001, 1.0);
+    else                                        params.uncertaintyCoeff = 0.25;
+    if(cfg.contains("uncertaintyExponent"+idxStr)) params.uncertaintyExponent = cfg.getDouble("uncertaintyExponent"+idxStr, 0.0, 2.0);
+    else if(cfg.contains("uncertaintyExponent"))   params.uncertaintyExponent = cfg.getDouble("uncertaintyExponent", 0.0, 2.0);
+    else                                           params.uncertaintyExponent = 1.0;
+    if(cfg.contains("uncertaintyMaxWeight"+idxStr)) params.uncertaintyMaxWeight = cfg.getDouble("uncertaintyMaxWeight"+idxStr, 1.0, 100.0);
+    else if(cfg.contains("uncertaintyMaxWeight"))   params.uncertaintyMaxWeight = cfg.getDouble("uncertaintyMaxWeight", 1.0, 100.0);
+    else                                            params.uncertaintyMaxWeight = 8.0;
+
+    if(cfg.contains("useGraphSearch"+idxStr)) params.useGraphSearch = cfg.getBool("useGraphSearch"+idxStr);
+    else if(cfg.contains("useGraphSearch"))   params.useGraphSearch = cfg.getBool("useGraphSearch");
+    else                                      params.useGraphSearch = (setupFor != SETUP_FOR_DISTRIBUTED);
+    if(cfg.contains("graphSearchRepBound"+idxStr)) params.graphSearchRepBound = cfg.getInt("graphSearchRepBound"+idxStr, 3, 50);
+    else if(cfg.contains("graphSearchRepBound"))   params.graphSearchRepBound = cfg.getInt("graphSearchRepBound",        3, 50);
+    else                                           params.graphSearchRepBound = 11;
+    if(cfg.contains("graphSearchCatchUpLeakProb"+idxStr)) params.graphSearchCatchUpLeakProb = cfg.getDouble("graphSearchCatchUpLeakProb"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("graphSearchCatchUpLeakProb"))   params.graphSearchCatchUpLeakProb = cfg.getDouble("graphSearchCatchUpLeakProb", 0.0, 1.0);
+    else                                                  params.graphSearchCatchUpLeakProb = 0.0;
+    // if(cfg.contains("graphSearchCatchUpProp"+idxStr)) params.graphSearchCatchUpProp = cfg.getDouble("graphSearchCatchUpProp"+idxStr, 0.0, 1.0);
+    // else if(cfg.contains("graphSearchCatchUpProp"))   params.graphSearchCatchUpProp = cfg.getDouble("graphSearchCatchUpProp", 0.0, 1.0);
+    // else                                              params.graphSearchCatchUpProp = 0.0;
+
+    auto searchOption = [&](const string& key) { return cfg.contains(key+idxStr) ? key+idxStr : key; };
+    string rootAlgorithm = cfg.contains(searchOption("rootSearchAlgorithm")) ? cfg.getString(searchOption("rootSearchAlgorithm")) : "puct";
+    string interiorAlgorithm = cfg.contains(searchOption("nonrootSearchAlgorithm")) ? cfg.getString(searchOption("nonrootSearchAlgorithm")) : "puct";
+    if(rootAlgorithm != "puct" && rootAlgorithm != "gumbel") throw IOError("Unknown rootSearchAlgorithm");
+    if(interiorAlgorithm != "puct" && interiorAlgorithm != "gumbel") throw IOError("Unknown nonrootSearchAlgorithm");
+    params.useGumbel = rootAlgorithm == "gumbel";
+    params.useGumbelNonroot = interiorAlgorithm == "gumbel";
+    if(params.useGumbelNonroot && !params.useGumbel)
+      throw IOError("Gumbel nonroot selection requires rootSearchAlgorithm=gumbel");
+    if(cfg.contains(searchOption("gumbelMaxConsideredActions"))) params.gumbel.max_num_considered_actions = cfg.getInt(searchOption("gumbelMaxConsideredActions"),1,0x3fffffff);
+    if(cfg.contains(searchOption("gumbelCVisit"))) params.gumbel.c_visit = cfg.getDouble(searchOption("gumbelCVisit"),0,1e20);
+    if(cfg.contains(searchOption("gumbelCScale"))) params.gumbel.c_scale = cfg.getDouble(searchOption("gumbelCScale"),1e-20,1e20);
+    if(cfg.contains(searchOption("gumbelNoiseScale"))) params.gumbel.noise_scale = cfg.getDouble(searchOption("gumbelNoiseScale"),0,1e20);
+    if(cfg.contains(searchOption("gumbelRescaleQ"))) params.gumbel.rescale_q_values = cfg.getBool(searchOption("gumbelRescaleQ"));
+    if(cfg.contains(searchOption("gumbelSampleVisits"))) params.gumbel.sample_visits = cfg.getBool(searchOption("gumbelSampleVisits"));
+
+    if(cfg.contains("rootNoiseEnabled"+idxStr)) params.rootNoiseEnabled = cfg.getBool("rootNoiseEnabled"+idxStr);
+    else if(cfg.contains("rootNoiseEnabled"))   params.rootNoiseEnabled = cfg.getBool("rootNoiseEnabled");
+    else                                        params.rootNoiseEnabled = false;
+    if(cfg.contains("rootDirichletNoiseTotalConcentration"+idxStr))
+      params.rootDirichletNoiseTotalConcentration = cfg.getDouble("rootDirichletNoiseTotalConcentration"+idxStr, 0.001, 10000.0);
+    else if(cfg.contains("rootDirichletNoiseTotalConcentration"))
+      params.rootDirichletNoiseTotalConcentration = cfg.getDouble("rootDirichletNoiseTotalConcentration", 0.001, 10000.0);
+    else
+      params.rootDirichletNoiseTotalConcentration = 10.83;
+    if(cfg.contains("rootDirichletNoiseWeight"+idxStr)) params.rootDirichletNoiseWeight = cfg.getDouble("rootDirichletNoiseWeight"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("rootDirichletNoiseWeight"))   params.rootDirichletNoiseWeight = cfg.getDouble("rootDirichletNoiseWeight",        0.0, 1.0);
+    else                                                params.rootDirichletNoiseWeight = 0.25;
+
+    if(cfg.contains("rootPolicyTemperature"+idxStr)) params.rootPolicyTemperature = cfg.getDouble("rootPolicyTemperature"+idxStr, 0.01, 100.0);
+    else if(cfg.contains("rootPolicyTemperature"))   params.rootPolicyTemperature = cfg.getDouble("rootPolicyTemperature",        0.01, 100.0);
+    else                                             params.rootPolicyTemperature = 1.0;
+    if(cfg.contains("rootPolicyTemperatureEarly"+idxStr)) params.rootPolicyTemperatureEarly = cfg.getDouble("rootPolicyTemperatureEarly"+idxStr, 0.01, 100.0);
+    else if(cfg.contains("rootPolicyTemperatureEarly"))   params.rootPolicyTemperatureEarly = cfg.getDouble("rootPolicyTemperatureEarly",        0.01, 100.0);
+    else                                                  params.rootPolicyTemperatureEarly = params.rootPolicyTemperature;
+    if(cfg.contains("rootFpuReductionMax"+idxStr)) params.rootFpuReductionMax = cfg.getDouble("rootFpuReductionMax"+idxStr, 0.0, 2.0);
+    else if(cfg.contains("rootFpuReductionMax"))   params.rootFpuReductionMax = cfg.getDouble("rootFpuReductionMax",        0.0, 2.0);
+    else                                           params.rootFpuReductionMax = params.rootNoiseEnabled ? 0.0 : 0.1;
+    if(cfg.contains("rootFpuLossProp"+idxStr)) params.rootFpuLossProp = cfg.getDouble("rootFpuLossProp"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("rootFpuLossProp"))   params.rootFpuLossProp = cfg.getDouble("rootFpuLossProp",        0.0, 1.0);
+    else                                       params.rootFpuLossProp = params.fpuLossProp;
+    if(cfg.contains("rootNumSymmetriesToSample"+idxStr)) params.rootNumSymmetriesToSample = cfg.getInt("rootNumSymmetriesToSample"+idxStr, 1, SymmetryHelpers::NUM_SYMMETRIES);
+    else if(cfg.contains("rootNumSymmetriesToSample"))   params.rootNumSymmetriesToSample = cfg.getInt("rootNumSymmetriesToSample",        1, SymmetryHelpers::NUM_SYMMETRIES);
+    else                                                 params.rootNumSymmetriesToSample = 1;
+    if(cfg.contains("rootSymmetryPruning"+idxStr)) params.rootSymmetryPruning = cfg.getBool("rootSymmetryPruning"+idxStr);
+    else if(cfg.contains("rootSymmetryPruning"))   params.rootSymmetryPruning = cfg.getBool("rootSymmetryPruning");
+    else                                           params.rootSymmetryPruning = (setupFor == SETUP_FOR_ANALYSIS || setupFor == SETUP_FOR_GTP);
+
+    if(cfg.contains("rootDesiredPerChildVisitsCoeff"+idxStr)) params.rootDesiredPerChildVisitsCoeff = cfg.getDouble("rootDesiredPerChildVisitsCoeff"+idxStr, 0.0, 100.0);
+    else if(cfg.contains("rootDesiredPerChildVisitsCoeff"))   params.rootDesiredPerChildVisitsCoeff = cfg.getDouble("rootDesiredPerChildVisitsCoeff",        0.0, 100.0);
+    else                                                      params.rootDesiredPerChildVisitsCoeff = 0.0;
+
+    if(cfg.contains("rootPolicyOptimism"+idxStr)) params.rootPolicyOptimism = cfg.getDouble("rootPolicyOptimism"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("rootPolicyOptimism"))   params.rootPolicyOptimism = cfg.getDouble("rootPolicyOptimism",        0.0, 1.0);
+    else params.rootPolicyOptimism = (setupFor != SETUP_FOR_DISTRIBUTED && setupFor != SETUP_FOR_OTHER) ? std::min(params.policyOptimism, 0.2) : 0.0;
+
+    if(cfg.contains("chosenMoveTemperature"+idxStr)) params.chosenMoveTemperature = cfg.getDouble("chosenMoveTemperature"+idxStr, 0.0, 5.0);
+    else if(cfg.contains("chosenMoveTemperature"))   params.chosenMoveTemperature = cfg.getDouble("chosenMoveTemperature",        0.0, 5.0);
+    else                                             params.chosenMoveTemperature = 0.1;
+    if(cfg.contains("chosenMoveTemperatureEarly"+idxStr))
+      params.chosenMoveTemperatureEarly = cfg.getDouble("chosenMoveTemperatureEarly"+idxStr, 0.0, 5.0);
+    else if(cfg.contains("chosenMoveTemperatureEarly"))
+      params.chosenMoveTemperatureEarly = cfg.getDouble("chosenMoveTemperatureEarly",        0.0, 5.0);
+    else
+      params.chosenMoveTemperatureEarly = 0.5;
+    if(cfg.contains("chosenMoveTemperatureHalflife"+idxStr))
+      params.chosenMoveTemperatureHalflife = cfg.getDouble("chosenMoveTemperatureHalflife"+idxStr, 0.1, 100000.0);
+    else if(cfg.contains("chosenMoveTemperatureHalflife"))
+      params.chosenMoveTemperatureHalflife = cfg.getDouble("chosenMoveTemperatureHalflife",        0.1, 100000.0);
+    else
+      params.chosenMoveTemperatureHalflife = 19;
+    if(cfg.contains("chosenMoveTemperatureOnlyBelowProb"+idxStr)) params.chosenMoveTemperatureOnlyBelowProb = cfg.getDouble("chosenMoveTemperatureOnlyBelowProb"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("chosenMoveTemperatureOnlyBelowProb"))   params.chosenMoveTemperatureOnlyBelowProb = cfg.getDouble("chosenMoveTemperatureOnlyBelowProb",        0.0, 1.0);
+    else                                                          params.chosenMoveTemperatureOnlyBelowProb = 1.0;
+    if(cfg.contains("chosenMoveSubtract"+idxStr)) params.chosenMoveSubtract = cfg.getDouble("chosenMoveSubtract"+idxStr, 0.0, 1.0e10);
+    else if(cfg.contains("chosenMoveSubtract"))   params.chosenMoveSubtract = cfg.getDouble("chosenMoveSubtract",        0.0, 1.0e10);
+    else                                          params.chosenMoveSubtract = 0.0;
+    if(cfg.contains("chosenMovePrune"+idxStr)) params.chosenMovePrune = cfg.getDouble("chosenMovePrune"+idxStr, 0.0, 1.0e10);
+    else if(cfg.contains("chosenMovePrune"))   params.chosenMovePrune = cfg.getDouble("chosenMovePrune",        0.0, 1.0e10);
+    else                                       params.chosenMovePrune = 1.0;
+
+    if(cfg.contains("useLcbForSelection"+idxStr)) params.useLcbForSelection = cfg.getBool("useLcbForSelection"+idxStr);
+    else if(cfg.contains("useLcbForSelection"))   params.useLcbForSelection = cfg.getBool("useLcbForSelection");
+    else                                          params.useLcbForSelection = true;
+    if(cfg.contains("lcbStdevs"+idxStr)) params.lcbStdevs = cfg.getDouble("lcbStdevs"+idxStr, 1.0, 12.0);
+    else if(cfg.contains("lcbStdevs"))   params.lcbStdevs = cfg.getDouble("lcbStdevs",        1.0, 12.0);
+    else                                 params.lcbStdevs = 5.0;
+    if(cfg.contains("minVisitPropForLCB"+idxStr)) params.minVisitPropForLCB = cfg.getDouble("minVisitPropForLCB"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("minVisitPropForLCB"))   params.minVisitPropForLCB = cfg.getDouble("minVisitPropForLCB",        0.0, 1.0);
+    else                                          params.minVisitPropForLCB = 0.15;
+    //For distributed and selfplay, we default to buggy LCB for the moment since it has effects on the policy training target.
+    if(cfg.contains("useNonBuggyLcb"+idxStr)) params.useNonBuggyLcb = cfg.getBool("useNonBuggyLcb"+idxStr);
+    else if(cfg.contains("useNonBuggyLcb"))   params.useNonBuggyLcb = cfg.getBool("useNonBuggyLcb");
+    else                                      params.useNonBuggyLcb = (setupFor != SETUP_FOR_DISTRIBUTED && setupFor != SETUP_FOR_OTHER);
+
+
+    if(cfg.contains("alwaysComputePassAliveUnderSuicideRules"+idxStr)) params.alwaysComputePassAliveUnderSuicideRules = cfg.getEnabled("alwaysComputePassAliveUnderSuicideRules"+idxStr);
+    else if(cfg.contains("alwaysComputePassAliveUnderSuicideRules"))   params.alwaysComputePassAliveUnderSuicideRules = cfg.getEnabled("alwaysComputePassAliveUnderSuicideRules");
+    else                                                               params.alwaysComputePassAliveUnderSuicideRules = enabled_t::Auto;
+    if(cfg.contains("excludeTerritoryAdjacentToAtari"+idxStr)) params.excludeTerritoryAdjacentToAtari = cfg.getEnabled("excludeTerritoryAdjacentToAtari"+idxStr);
+    else if(cfg.contains("excludeTerritoryAdjacentToAtari"))   params.excludeTerritoryAdjacentToAtari = cfg.getEnabled("excludeTerritoryAdjacentToAtari");
+    else                                                       params.excludeTerritoryAdjacentToAtari = enabled_t::Auto;
+    if(cfg.contains("wideRootNoise"+idxStr)) params.wideRootNoise = cfg.getDouble("wideRootNoise"+idxStr, 0.0, 5.0);
+    else if(cfg.contains("wideRootNoise"))   params.wideRootNoise = cfg.getDouble("wideRootNoise", 0.0, 5.0);
+    else                                     params.wideRootNoise = (setupFor == SETUP_FOR_ANALYSIS ? Setup::DEFAULT_ANALYSIS_WIDE_ROOT_NOISE : 0.00);
+
+
+
+    if(cfg.contains("playoutDoublingAdvantage"+idxStr)) params.playoutDoublingAdvantage = cfg.getDouble("playoutDoublingAdvantage"+idxStr,-3.0,3.0);
+    else if(cfg.contains("playoutDoublingAdvantage"))   params.playoutDoublingAdvantage = cfg.getDouble("playoutDoublingAdvantage",-3.0,3.0);
+    else                                                params.playoutDoublingAdvantage = 0.0;
+    if(cfg.contains("playoutDoublingAdvantagePla"+idxStr)) params.playoutDoublingAdvantagePla = parsePlayer("playoutDoublingAdvantagePla",cfg.getString("playoutDoublingAdvantagePla"+idxStr));
+    else if(cfg.contains("playoutDoublingAdvantagePla"))   params.playoutDoublingAdvantagePla = parsePlayer("playoutDoublingAdvantagePla",cfg.getString("playoutDoublingAdvantagePla"));
+    else                                                   params.playoutDoublingAdvantagePla = C_EMPTY;
+
+    {
+      const string key = cfg.contains("visitCapContempt"+idxStr) ? "visitCapContempt"+idxStr : "visitCapContempt";
+      if(cfg.contains(key)) params.visitCapContempt = cfg.getInt64(key, (int64_t)0, (int64_t)1 << 50);
+      else                  params.visitCapContempt = 0;
+      if(params.visitCapContempt == 1)
+        throw StringError(key + " must be 0 or at least 2");
+    }
+    if(cfg.contains("visitCapContemptPla"+idxStr)) params.visitCapContemptPla = parsePlayer("visitCapContemptPla",cfg.getString("visitCapContemptPla"+idxStr));
+    else if(cfg.contains("visitCapContemptPla"))   params.visitCapContemptPla = parsePlayer("visitCapContemptPla",cfg.getString("visitCapContemptPla"));
+    else                                           params.visitCapContemptPla = C_EMPTY;
+
+    if(cfg.contains("avoidRepeatedPatternUtility"+idxStr)) params.avoidRepeatedPatternUtility = cfg.getDouble("avoidRepeatedPatternUtility"+idxStr, -3.0, 3.0);
+    else if(cfg.contains("avoidRepeatedPatternUtility"))   params.avoidRepeatedPatternUtility = cfg.getDouble("avoidRepeatedPatternUtility", -3.0, 3.0);
+    else                                                   params.avoidRepeatedPatternUtility = 0.0;
+
+    if(cfg.contains("nnPolicyTemperature"+idxStr))
+      params.nnPolicyTemperature = cfg.getFloat("nnPolicyTemperature"+idxStr,0.01f,5.0f);
+    else if(cfg.contains("nnPolicyTemperature"))
+      params.nnPolicyTemperature = cfg.getFloat("nnPolicyTemperature",0.01f,5.0f);
+    else
+      params.nnPolicyTemperature = 1.0f;
+
+
+    if(cfg.contains("ignorePreRootHistory"+idxStr)) params.ignorePreRootHistory = cfg.getBool("ignorePreRootHistory"+idxStr);
+    else if(cfg.contains("ignorePreRootHistory"))   params.ignorePreRootHistory = cfg.getBool("ignorePreRootHistory");
+    else                                            params.ignorePreRootHistory = (setupFor == SETUP_FOR_ANALYSIS ? Setup::DEFAULT_ANALYSIS_IGNORE_PRE_ROOT_HISTORY : false);
+    if(cfg.contains("ignoreAllHistory"+idxStr)) params.ignoreAllHistory = cfg.getBool("ignoreAllHistory"+idxStr);
+    else if(cfg.contains("ignoreAllHistory"))   params.ignoreAllHistory = cfg.getBool("ignoreAllHistory");
+    else                                        params.ignoreAllHistory = false;
+
+    if(cfg.contains("subtreeValueBiasFactor"+idxStr)) params.subtreeValueBiasFactor = cfg.getDouble("subtreeValueBiasFactor"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("subtreeValueBiasFactor")) params.subtreeValueBiasFactor = cfg.getDouble("subtreeValueBiasFactor", 0.0, 1.0);
+    else params.subtreeValueBiasFactor = 0.45;
+    if(cfg.contains("subtreeValueBiasFreeProp"+idxStr)) params.subtreeValueBiasFreeProp = cfg.getDouble("subtreeValueBiasFreeProp"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("subtreeValueBiasFreeProp")) params.subtreeValueBiasFreeProp = cfg.getDouble("subtreeValueBiasFreeProp", 0.0, 1.0);
+    else params.subtreeValueBiasFreeProp = 0.8;
+    if(cfg.contains("subtreeValueBiasWeightExponent"+idxStr)) params.subtreeValueBiasWeightExponent = cfg.getDouble("subtreeValueBiasWeightExponent"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("subtreeValueBiasWeightExponent")) params.subtreeValueBiasWeightExponent = cfg.getDouble("subtreeValueBiasWeightExponent", 0.0, 1.0);
+    else params.subtreeValueBiasWeightExponent = 0.85;
+
+    if(cfg.contains("useEvalCache"+idxStr)) params.useEvalCache = cfg.getBool("useEvalCache"+idxStr);
+    else if(cfg.contains("useEvalCache"))   params.useEvalCache = cfg.getBool("useEvalCache");
+    else                                    params.useEvalCache = false;
+
+    if(cfg.contains("evalCacheMinVisits"+idxStr)) params.evalCacheMinVisits = cfg.getInt64("evalCacheMinVisits"+idxStr, (int64_t)1, (int64_t)1 << 50);
+    else if(cfg.contains("evalCacheMinVisits"))   params.evalCacheMinVisits = cfg.getInt64("evalCacheMinVisits",        (int64_t)1, (int64_t)1 << 50);
+    else                                          params.evalCacheMinVisits = 100;
+
+    if(cfg.contains("nodeTableShardsPowerOfTwo"+idxStr)) params.nodeTableShardsPowerOfTwo = cfg.getInt("nodeTableShardsPowerOfTwo"+idxStr, 8, 24);
+    else if(cfg.contains("nodeTableShardsPowerOfTwo"))   params.nodeTableShardsPowerOfTwo = cfg.getInt("nodeTableShardsPowerOfTwo",        8, 24);
+    else                                                 params.nodeTableShardsPowerOfTwo = 16;
+    if(cfg.contains("numVirtualLossesPerThread"+idxStr)) params.numVirtualLossesPerThread = cfg.getDouble("numVirtualLossesPerThread"+idxStr, 0.01, 1000.0);
+    else if(cfg.contains("numVirtualLossesPerThread"))   params.numVirtualLossesPerThread = cfg.getDouble("numVirtualLossesPerThread",        0.01, 1000.0);
+    else                                                 params.numVirtualLossesPerThread = 1.0;
+
+    if(cfg.contains("treeReuseCarryOverTimeFactor"+idxStr)) params.treeReuseCarryOverTimeFactor = cfg.getDouble("treeReuseCarryOverTimeFactor"+idxStr,0.0,1.0);
+    else if(cfg.contains("treeReuseCarryOverTimeFactor"))   params.treeReuseCarryOverTimeFactor = cfg.getDouble("treeReuseCarryOverTimeFactor",0.0,1.0);
+    else                                                    params.treeReuseCarryOverTimeFactor = 0.0;
+    if(cfg.contains("overallocateTimeFactor"+idxStr)) params.overallocateTimeFactor = cfg.getDouble("overallocateTimeFactor"+idxStr,0.01,100.0);
+    else if(cfg.contains("overallocateTimeFactor"))   params.overallocateTimeFactor = cfg.getDouble("overallocateTimeFactor",0.01,100.0);
+    else                                              params.overallocateTimeFactor = 1.0;
+    if(cfg.contains("midgameTimeFactor"+idxStr)) params.midgameTimeFactor = cfg.getDouble("midgameTimeFactor"+idxStr,0.01,100.0);
+    else if(cfg.contains("midgameTimeFactor"))   params.midgameTimeFactor = cfg.getDouble("midgameTimeFactor",0.01,100.0);
+    else                                         params.midgameTimeFactor = 1.0;
+    if(cfg.contains("midgameTurnPeakTime"+idxStr)) params.midgameTurnPeakTime = cfg.getDouble("midgameTurnPeakTime"+idxStr,0.0,1000.0);
+    else if(cfg.contains("midgameTurnPeakTime"))   params.midgameTurnPeakTime = cfg.getDouble("midgameTurnPeakTime",0.0,1000.0);
+    else                                           params.midgameTurnPeakTime = 130.0;
+    if(cfg.contains("endgameTurnTimeDecay"+idxStr)) params.endgameTurnTimeDecay = cfg.getDouble("endgameTurnTimeDecay"+idxStr,0.0,1000.0);
+    else if(cfg.contains("endgameTurnTimeDecay"))   params.endgameTurnTimeDecay = cfg.getDouble("endgameTurnTimeDecay",0.0,1000.0);
+    else                                            params.endgameTurnTimeDecay = 100.0;
+    if(cfg.contains("obviousMovesTimeFactor"+idxStr)) params.obviousMovesTimeFactor = cfg.getDouble("obviousMovesTimeFactor"+idxStr,0.01,1.0);
+    else if(cfg.contains("obviousMovesTimeFactor"))   params.obviousMovesTimeFactor = cfg.getDouble("obviousMovesTimeFactor",0.01,1.0);
+    else                                              params.obviousMovesTimeFactor = 1.0;
+    if(cfg.contains("obviousMovesPolicyEntropyTolerance"+idxStr)) params.obviousMovesPolicyEntropyTolerance = cfg.getDouble("obviousMovesPolicyEntropyTolerance"+idxStr,0.001,2.0);
+    else if(cfg.contains("obviousMovesPolicyEntropyTolerance"))   params.obviousMovesPolicyEntropyTolerance = cfg.getDouble("obviousMovesPolicyEntropyTolerance",0.001,2.0);
+    else                                                          params.obviousMovesPolicyEntropyTolerance = 0.30;
+    if(cfg.contains("obviousMovesPolicySurpriseTolerance"+idxStr)) params.obviousMovesPolicySurpriseTolerance = cfg.getDouble("obviousMovesPolicySurpriseTolerance"+idxStr,0.001,2.0);
+    else if(cfg.contains("obviousMovesPolicySurpriseTolerance"))   params.obviousMovesPolicySurpriseTolerance = cfg.getDouble("obviousMovesPolicySurpriseTolerance",0.001,2.0);
+    else                                                           params.obviousMovesPolicySurpriseTolerance = 0.15;
+    if(cfg.contains("futileVisitsThreshold"+idxStr)) params.futileVisitsThreshold = cfg.getDouble("futileVisitsThreshold"+idxStr,0.01,1.0);
+    else if(cfg.contains("futileVisitsThreshold"))   params.futileVisitsThreshold = cfg.getDouble("futileVisitsThreshold",0.01,1.0);
+    else                                             params.futileVisitsThreshold = 0.0;
+
+    // This does NOT report an error under throwHumanParsingError like the parameters below that expect a second model
+    // because the user might be providing the human model as the MAIN model. In which case humanSLProfile is still a
+    // valid param but the others are not.
+    if(setupFor != SETUP_FOR_DISTRIBUTED) {
+      string humanSLProfileName;
+      if(cfg.contains("humanSLProfile"+idxStr)) humanSLProfileName = cfg.getString("humanSLProfile"+idxStr);
+      else if(cfg.contains("humanSLProfile"))   humanSLProfileName = cfg.getString("humanSLProfile");
+      params.humanSLProfile = SGFMetadata::getProfile(humanSLProfileName);
+    }
+
+    auto throwHumanParsingError = [](const string& param) {
+      throw ConfigParsingError(
+        string("Provided parameter ") + param + string(" but no human model was specified (e.g -human-model b18c384nbt-humanv0.bin.gz)")
+      );
+    };
+
+    if(!hasHumanModel && cfg.contains("humanSLCpuctExploration"+idxStr)) throwHumanParsingError("humanSLCpuctExploration"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLCpuctExploration")) throwHumanParsingError("humanSLCpuctExploration");
+    else if(cfg.contains("humanSLCpuctExploration"+idxStr)) params.humanSLCpuctExploration = cfg.getDouble("humanSLCpuctExploration"+idxStr, 0.0, 1000.0);
+    else if(cfg.contains("humanSLCpuctExploration"))   params.humanSLCpuctExploration = cfg.getDouble("humanSLCpuctExploration",        0.0, 1000.0);
+    else                                               params.humanSLCpuctExploration = 1.0;
+    if(!hasHumanModel && cfg.contains("humanSLCpuctPermanent"+idxStr)) throwHumanParsingError("humanSLCpuctPermanent"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLCpuctPermanent")) throwHumanParsingError("humanSLCpuctPermanent");
+    else if(cfg.contains("humanSLCpuctPermanent"+idxStr)) params.humanSLCpuctPermanent = cfg.getDouble("humanSLCpuctPermanent"+idxStr, 0.0, 1000.0);
+    else if(cfg.contains("humanSLCpuctPermanent"))   params.humanSLCpuctPermanent = cfg.getDouble("humanSLCpuctPermanent",        0.0, 1000.0);
+    else                                             params.humanSLCpuctPermanent = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLRootExploreProbWeightless"+idxStr)) throwHumanParsingError("humanSLRootExploreProbWeightless"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLRootExploreProbWeightless")) throwHumanParsingError("humanSLRootExploreProbWeightless");
+    else if(cfg.contains("humanSLRootExploreProbWeightless"+idxStr)) params.humanSLRootExploreProbWeightless = cfg.getDouble("humanSLRootExploreProbWeightless"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLRootExploreProbWeightless"))   params.humanSLRootExploreProbWeightless = cfg.getDouble("humanSLRootExploreProbWeightless",        0.0, 1.0);
+    else                                                        params.humanSLRootExploreProbWeightless = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLRootExploreProbWeightful"+idxStr)) throwHumanParsingError("humanSLRootExploreProbWeightful"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLRootExploreProbWeightful")) throwHumanParsingError("humanSLRootExploreProbWeightful");
+    else if(cfg.contains("humanSLRootExploreProbWeightful"+idxStr)) params.humanSLRootExploreProbWeightful = cfg.getDouble("humanSLRootExploreProbWeightful"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLRootExploreProbWeightful"))   params.humanSLRootExploreProbWeightful = cfg.getDouble("humanSLRootExploreProbWeightful",        0.0, 1.0);
+    else                                                       params.humanSLRootExploreProbWeightful = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLPlaExploreProbWeightless"+idxStr)) throwHumanParsingError("humanSLPlaExploreProbWeightless"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLPlaExploreProbWeightless")) throwHumanParsingError("humanSLPlaExploreProbWeightless");
+    else if(cfg.contains("humanSLPlaExploreProbWeightless"+idxStr)) params.humanSLPlaExploreProbWeightless = cfg.getDouble("humanSLPlaExploreProbWeightless"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLPlaExploreProbWeightless"))   params.humanSLPlaExploreProbWeightless = cfg.getDouble("humanSLPlaExploreProbWeightless",        0.0, 1.0);
+    else                                                       params.humanSLPlaExploreProbWeightless = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLPlaExploreProbWeightful"+idxStr)) throwHumanParsingError("humanSLPlaExploreProbWeightful"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLPlaExploreProbWeightful")) throwHumanParsingError("humanSLPlaExploreProbWeightful");
+    else if(cfg.contains("humanSLPlaExploreProbWeightful"+idxStr)) params.humanSLPlaExploreProbWeightful = cfg.getDouble("humanSLPlaExploreProbWeightful"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLPlaExploreProbWeightful"))   params.humanSLPlaExploreProbWeightful = cfg.getDouble("humanSLPlaExploreProbWeightful",        0.0, 1.0);
+    else                                                      params.humanSLPlaExploreProbWeightful = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLOppExploreProbWeightless"+idxStr)) throwHumanParsingError("humanSLOppExploreProbWeightless"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLOppExploreProbWeightless")) throwHumanParsingError("humanSLOppExploreProbWeightless");
+    else if(cfg.contains("humanSLOppExploreProbWeightless"+idxStr)) params.humanSLOppExploreProbWeightless = cfg.getDouble("humanSLOppExploreProbWeightless"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLOppExploreProbWeightless"))   params.humanSLOppExploreProbWeightless = cfg.getDouble("humanSLOppExploreProbWeightless",        0.0, 1.0);
+    else                                                       params.humanSLOppExploreProbWeightless = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLOppExploreProbWeightful"+idxStr)) throwHumanParsingError("humanSLOppExploreProbWeightful"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLOppExploreProbWeightful")) throwHumanParsingError("humanSLOppExploreProbWeightful");
+    else if(cfg.contains("humanSLOppExploreProbWeightful"+idxStr)) params.humanSLOppExploreProbWeightful = cfg.getDouble("humanSLOppExploreProbWeightful"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLOppExploreProbWeightful"))   params.humanSLOppExploreProbWeightful = cfg.getDouble("humanSLOppExploreProbWeightful",        0.0, 1.0);
+    else                                                      params.humanSLOppExploreProbWeightful = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLChosenMoveProp"+idxStr)) throwHumanParsingError("humanSLChosenMoveProp"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLChosenMoveProp")) throwHumanParsingError("humanSLChosenMoveProp");
+    else if(cfg.contains("humanSLChosenMoveProp"+idxStr)) params.humanSLChosenMoveProp = cfg.getDouble("humanSLChosenMoveProp"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("humanSLChosenMoveProp"))   params.humanSLChosenMoveProp = cfg.getDouble("humanSLChosenMoveProp",        0.0, 1.0);
+    else                                             params.humanSLChosenMoveProp = 0.0;
+    if(!hasHumanModel && cfg.contains("humanSLChosenMoveIgnorePass"+idxStr)) throwHumanParsingError("humanSLChosenMoveIgnorePass"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLChosenMoveIgnorePass")) throwHumanParsingError("humanSLChosenMoveIgnorePass");
+    else if(cfg.contains("humanSLChosenMoveIgnorePass"+idxStr)) params.humanSLChosenMoveIgnorePass = cfg.getBool("humanSLChosenMoveIgnorePass"+idxStr);
+    else if(cfg.contains("humanSLChosenMoveIgnorePass"))   params.humanSLChosenMoveIgnorePass = cfg.getBool("humanSLChosenMoveIgnorePass");
+    else                                                   params.humanSLChosenMoveIgnorePass = false;
+    if(!hasHumanModel && cfg.contains("humanSLChosenMovePiklLambda"+idxStr)) throwHumanParsingError("humanSLChosenMovePiklLambda"+idxStr);
+    else if(!hasHumanModel && cfg.contains("humanSLChosenMovePiklLambda")) throwHumanParsingError("humanSLChosenMovePiklLambda");
+    else if(cfg.contains("humanSLChosenMovePiklLambda"+idxStr)) params.humanSLChosenMovePiklLambda = cfg.getDouble("humanSLChosenMovePiklLambda"+idxStr, 0.0, 1000000000.0);
+    else if(cfg.contains("humanSLChosenMovePiklLambda"))   params.humanSLChosenMovePiklLambda = cfg.getDouble("humanSLChosenMovePiklLambda",        0.0, 1000000000.0);
+    else                                                   params.humanSLChosenMovePiklLambda = 1000000000.0;
+
+    //On distributed, tolerate reading mutexPoolSize since older version configs use it.
+    if(setupFor == SETUP_FOR_DISTRIBUTED)
+      cfg.markAllKeysUsedWithPrefix("mutexPoolSize");
+
+    paramss.push_back(params);
+  }
+
+  return paramss;
+}
+
+
+bool Setup::maybeWarnHumanSLParams(
+  const SearchParams& params,
+  const NNEvaluator* nnEval,
+  const NNEvaluator* humanEval,
+  std::ostream& out,
+  Logger* logger,
+  const MuZero::PositionEvaluator* muZeroEval,
+  const MuZero::PositionEvaluator* humanMuZeroEval
+) {
+  if(params.humanSLProfile.initialized) {
+    bool hasAnySGFMetaUse =
+      (nnEval != NULL && nnEval->requiresSGFMetadata()) ||
+      (humanEval != NULL && humanEval->requiresSGFMetadata()) ||
+      (muZeroEval != nullptr && muZeroEval->getModel().representationDesc().numInputMetaChannels > 0) ||
+      (humanMuZeroEval != nullptr && humanMuZeroEval->getModel().representationDesc().numInputMetaChannels > 0);
+    if(!hasAnySGFMetaUse) {
+      string modelNames;
+      if(nnEval != NULL)
+        modelNames += nnEval->getModelName();
+      if(muZeroEval != nullptr)
+        modelNames += muZeroEval->getModel().predictionDesc().name;
+      if(humanEval != NULL) {
+        if(modelNames.size() > 0)
+          modelNames += " and ";
+        modelNames += humanEval->getModelName();
+      }
+      if(humanMuZeroEval != nullptr) {
+        if(modelNames.size() > 0) modelNames += " and ";
+        modelNames += humanMuZeroEval->getModel().predictionDesc().name;
+      }
+      if(logger != NULL)
+        logger->write("WARNING: humanSLProfile is specified as config param but model(s) don't use it: " + modelNames);
+      out << "WARNING: humanSLProfile is specified as config param but model(s) don't use it: " << modelNames << endl;
+      return true;
+    }
+  }
+  return false;
+}
+
+
+Player Setup::parseReportAnalysisWinrates(
+  ConfigParser& cfg, Player defaultPerspective
+) {
+  if(!cfg.contains("reportAnalysisWinratesAs"))
+    return defaultPerspective;
+
+  string sOrig = cfg.getString("reportAnalysisWinratesAs");
+  string s = Global::toLower(sOrig);
+  if(s == "b" || s == "black")
+    return P_BLACK;
+  else if(s == "w" || s == "white")
+    return P_WHITE;
+  else if(s == "sidetomove")
+    return C_EMPTY;
+
+  throw StringError("Could not parse config value for reportAnalysisWinratesAs: " + sOrig);
+}
+
+Rules Setup::loadSingleRules(
+  ConfigParser& cfg,
+  bool loadKomi
+) {
+  if(cfg.contains("friendlyPassOk"))
+    throw StringError("friendlyPassOk is excluded from EtaZero");
+  Rules rules;
+
+  if(cfg.contains("rules")) {
+    if(cfg.contains("koRule")) throw StringError("Cannot both specify 'rules' and individual rules like koRule");
+    if(cfg.contains("scoringRule")) throw StringError("Cannot both specify 'rules' and individual rules like scoringRule");
+    if(cfg.contains("multiStoneSuicideLegal")) throw StringError("Cannot both specify 'rules' and individual rules like multiStoneSuicideLegal");
+    if(cfg.contains("hasButton")) throw StringError("Cannot both specify 'rules' and individual rules like hasButton");
+    if(cfg.contains("taxRule")) throw StringError("Cannot both specify 'rules' and individual rules like taxRule");
+    if(cfg.contains("whiteHandicapBonus")) throw StringError("Cannot both specify 'rules' and individual rules like whiteHandicapBonus");
+    if(cfg.contains("whiteBonusPerHandicapStone")) throw StringError("Cannot both specify 'rules' and individual rules like whiteBonusPerHandicapStone");
+
+    rules = Rules::parseRules(cfg.getString("rules"));
+  }
+  else {
+    string koRule = cfg.getString("koRule", Rules::koRuleStrings());
+    string scoringRule = cfg.getString("scoringRule", Rules::scoringRuleStrings());
+    bool multiStoneSuicideLegal = cfg.getBool("multiStoneSuicideLegal");
+    bool hasButton = cfg.contains("hasButton") ? cfg.getBool("hasButton") : false;
+    float komi = 7.5f;
+
+    rules.koRule = Rules::parseKoRule(koRule);
+    rules.scoringRule = Rules::parseScoringRule(scoringRule);
+    rules.multiStoneSuicideLegal = multiStoneSuicideLegal;
+    rules.hasButton = hasButton;
+    rules.komi = komi;
+
+    if(cfg.contains("taxRule")) {
+      string taxRule = cfg.getString("taxRule", Rules::taxRuleStrings());
+      rules.taxRule = Rules::parseTaxRule(taxRule);
+    }
+    else {
+      rules.taxRule = (rules.scoringRule == Rules::SCORING_TERRITORY ? Rules::TAX_SEKI : Rules::TAX_NONE);
+    }
+
+    if(rules.hasButton && rules.scoringRule != Rules::SCORING_AREA)
+      throw StringError("Config specifies hasButton=true on a scoring system other than AREA");
+
+    //Also handles parsing of legacy option whiteBonusPerHandicapStone
+    if(cfg.contains("whiteBonusPerHandicapStone") && cfg.contains("whiteHandicapBonus"))
+      throw StringError("May specify only one of whiteBonusPerHandicapStone and whiteHandicapBonus in config");
+    else if(cfg.contains("whiteHandicapBonus"))
+      rules.whiteHandicapBonusRule = Rules::parseWhiteHandicapBonusRule(cfg.getString("whiteHandicapBonus", Rules::whiteHandicapBonusRuleStrings()));
+    else if(cfg.contains("whiteBonusPerHandicapStone")) {
+      int whiteBonusPerHandicapStone = cfg.getInt("whiteBonusPerHandicapStone",0,1);
+      if(whiteBonusPerHandicapStone == 0)
+        rules.whiteHandicapBonusRule = Rules::WHB_ZERO;
+      else
+        rules.whiteHandicapBonusRule = Rules::WHB_N;
+    }
+    else
+      rules.whiteHandicapBonusRule = Rules::WHB_ZERO;
+
+
+    //Drop default komi to 6.5 for territory rules, and to 7.0 for button
+    if(rules.scoringRule == Rules::SCORING_TERRITORY)
+      rules.komi = 6.5f;
+    else if(rules.hasButton)
+      rules.komi = 7.0f;
+  }
+
+  if(loadKomi) {
+    rules.komi = cfg.getFloat("komi",Rules::MIN_USER_KOMI,Rules::MAX_USER_KOMI);
+  }
+
+  return rules;
+}
+
+bool Setup::loadDefaultBoardXYSize(
+  ConfigParser& cfg,
+  Logger& logger,
+  int& defaultBoardXSizeRet,
+  int& defaultBoardYSizeRet
+) {
+  const int defaultBoardXSize =
+    cfg.contains("defaultBoardXSize") ? cfg.getInt("defaultBoardXSize",2,Board::MAX_LEN) :
+    cfg.contains("defaultBoardSize") ? cfg.getInt("defaultBoardSize",2,Board::MAX_LEN) :
+    -1;
+  const int defaultBoardYSize =
+    cfg.contains("defaultBoardYSize") ? cfg.getInt("defaultBoardYSize",2,Board::MAX_LEN) :
+    cfg.contains("defaultBoardSize") ? cfg.getInt("defaultBoardSize",2,Board::MAX_LEN) :
+    -1;
+  if((defaultBoardXSize == -1) != (defaultBoardYSize == -1))
+    logger.write("Warning: Config specified only one of defaultBoardXSize or defaultBoardYSize and no other board size parameter, ignoring it");
+
+  if(defaultBoardXSize == -1 || defaultBoardYSize == -1) {
+    return false;
+  }
+  defaultBoardXSizeRet = defaultBoardXSize;
+  defaultBoardYSizeRet = defaultBoardYSize;
+  return true;
+}
+
+vector<pair<set<string>,set<string>>> Setup::getMutexKeySets() {
+  vector<pair<set<string>,set<string>>> mutexKeySets = {
+    std::make_pair<set<string>,set<string>>(
+    {"rules"},{"koRule","scoringRule","multiStoneSuicideLegal","taxRule","hasButton","whiteBonusPerHandicapStone","whiteHandicapBonus"}
+    ),
+  };
+  return mutexKeySets;
+}
+
+std::vector<std::unique_ptr<PatternBonusTable>> Setup::loadAvoidSgfPatternBonusTables(ConfigParser& cfg, Logger& logger) {
+  int numBots = 1;
+  if(cfg.contains("numBots"))
+    numBots = cfg.getInt("numBots",1,MAX_BOT_PARAMS_FROM_CFG);
+
+  std::vector<std::unique_ptr<PatternBonusTable>> tables;
+  for(int i = 0; i<numBots; i++) {
+    //Indexes different bots, such as in a match config
+    const string idxStr = Global::intToString(i);
+
+    std::unique_ptr<PatternBonusTable> patternBonusTable = nullptr;
+    for(int j = 1; j<100000; j++) {
+      //Indexes different sets of params for different sets of files, to combine into one bot.
+      const string setStr = j == 1 ? string() : Global::intToString(j);
+      const string prefix = "avoidSgf"+setStr;
+
+      //Tries to find prefix+suffix+optional index
+      //E.g. "avoidSgf"+"PatternUtility"+(optional integer indexing which bot for match)
+      auto contains = [&cfg,&idxStr,&prefix](const string& suffix) {
+        return cfg.containsAny({prefix+suffix+idxStr,prefix+suffix});
+      };
+      auto find = [&cfg,&idxStr,&prefix](const string& suffix) {
+        return cfg.firstFoundOrFail({prefix+suffix+idxStr,prefix+suffix});
+      };
+
+      if(contains("PatternUtility")) {
+        double penalty = cfg.getDouble(find("PatternUtility"),-3.0,3.0);
+        double lambda = contains("PatternLambda") ? cfg.getDouble(find("PatternLambda"),0.0,1.0) : 1.0;
+        int minTurnNumber = contains("PatternMinTurnNumber") ? cfg.getInt(find("PatternMinTurnNumber"),0,1000000) : 0;
+        size_t maxFiles = contains("PatternMaxFiles") ? (size_t)cfg.getInt(find("PatternMaxFiles"),1,1000000) : 1000000;
+        vector<string> allowedPlayerNames = contains("PatternAllowedNames") ? cfg.getStringsNonEmptyTrim(find("PatternAllowedNames")) : vector<string>();
+        vector<string> sgfDirs = cfg.getStrings(find("PatternDirs"));
+        if(patternBonusTable == nullptr)
+          patternBonusTable = std::make_unique<PatternBonusTable>();
+        string logSource = "bot " + idxStr;
+        patternBonusTable->avoidRepeatedSgfMoves(sgfDirs,penalty,lambda,minTurnNumber,maxFiles,allowedPlayerNames,logger,logSource);
+      }
+    }
+    tables.push_back(std::move(patternBonusTable));
+  }
+  return tables;
+}
+
+static string boardSizeToStr(int boardXSize, int boardYSize) {
+  return Global::intToString(boardXSize) + "x" + Global::intToString(boardYSize);
+}
+
+static int getAutoPatternIntParam(ConfigParser& cfg, const string& param, int boardXSize, int boardYSize, int min, int max) {
+  if(cfg.contains(param + boardSizeToStr(boardXSize,boardYSize)))
+    return cfg.getInt(param + boardSizeToStr(boardXSize,boardYSize), min, max);
+  if(!cfg.contains(param))
+    throw ConfigParsingError(param + " was not specified in the config");
+  return cfg.getInt(param, min, max);
+}
+static int64_t getAutoPatternInt64Param(ConfigParser& cfg, const string& param, int boardXSize, int boardYSize, int64_t min, int64_t max) {
+  if(cfg.contains(param + boardSizeToStr(boardXSize,boardYSize)))
+    return cfg.getInt64(param + boardSizeToStr(boardXSize,boardYSize), min, max);
+  if(!cfg.contains(param))
+    throw ConfigParsingError(param + " was not specified in the config");
+  return cfg.getInt64(param, min, max);
+}
+static double getAutoPatternDoubleParam(ConfigParser& cfg, const string& param, int boardXSize, int boardYSize, double min, double max) {
+  if(cfg.contains(param + boardSizeToStr(boardXSize,boardYSize)))
+    return cfg.getDouble(param + boardSizeToStr(boardXSize,boardYSize), min, max);
+  if(!cfg.contains(param))
+    throw ConfigParsingError(param + " was not specified in the config");
+  return cfg.getDouble(param, min, max);
+}
+
+bool Setup::saveAutoPatternBonusData(const std::vector<Sgf::PositionSample>& genmoveSamples, ConfigParser& cfg, Logger& logger, Rand& rand) {
+  if(genmoveSamples.size() <= 0)
+    return false;
+  if(!cfg.contains("autoAvoidRepeatDir"))
+    return false;
+
+  string autoAvoidPatternsDir = cfg.getString("autoAvoidRepeatDir");
+  MakeDir::make(autoAvoidPatternsDir);
+
+  std::map<std::pair<int,int>, std::unique_ptr<ofstream>> outByBoardSize;
+  string fileName = Global::uint64ToHexString(rand.nextUInt64()) + "_poses.txt";
+  for(const Sgf::PositionSample& sampleToWrite : genmoveSamples) {
+    int boardXSize = sampleToWrite.board.x_size;
+    int boardYSize = sampleToWrite.board.y_size;
+    std::pair<int,int> boardSize = std::make_pair(boardXSize, boardYSize);
+
+    int minTurnNumber = getAutoPatternIntParam(cfg,"autoAvoidRepeatMinTurnNumber",boardXSize,boardYSize,0,1000000);
+    int maxTurnNumber = getAutoPatternIntParam(cfg,"autoAvoidRepeatMaxTurnNumber",boardXSize,boardYSize,0,1000000);
+    if(sampleToWrite.initialTurnNumber < minTurnNumber || sampleToWrite.initialTurnNumber > maxTurnNumber)
+      continue;
+    assert(sampleToWrite.moves.size() == 0);
+    if(!contains(outByBoardSize,boardSize)) {
+      MakeDir::make(autoAvoidPatternsDir + "/" + boardSizeToStr(boardXSize, boardYSize));
+      outByBoardSize[boardSize] = std::make_unique<ofstream>();
+      string filePath = autoAvoidPatternsDir + "/" + boardSizeToStr(boardXSize, boardYSize) + "/" + fileName;
+      bool suc = FileUtils::tryOpen(*(outByBoardSize[boardSize]), filePath);
+      if(!suc) {
+        logger.write("ERROR: could not open " + filePath);
+        return false;
+      }
+    }
+    *(outByBoardSize[boardSize]) << Sgf::PositionSample::toJsonLine(sampleToWrite) << "\n";
+  }
+  for(auto iter = outByBoardSize.begin(); iter != outByBoardSize.end(); ++iter) {
+    iter->second->close();
+  }
+  logger.write("Saved " + Global::uint64ToString(genmoveSamples.size()) + " avoid poses to " + autoAvoidPatternsDir);
+  return true;
+}
+
+std::unique_ptr<PatternBonusTable> Setup::loadAndPruneAutoPatternBonusTables(ConfigParser& cfg, Logger& logger) {
+  std::unique_ptr<PatternBonusTable> patternBonusTable = nullptr;
+
+  if(cfg.contains("autoAvoidRepeatDir")) {
+    string baseDir = cfg.getString("autoAvoidRepeatDir");
+    std::vector<string> boardSizeDirs = FileUtils::listFiles(baseDir);
+
+    patternBonusTable = std::make_unique<PatternBonusTable>();
+
+    for(const string& dirName: boardSizeDirs) {
+      std::vector<string> pieces = Global::split(dirName,'x');
+      if(pieces.size() != 2)
+        continue;
+      int boardXSize;
+      int boardYSize;
+      bool suc = Global::tryStringToInt(pieces[0],boardXSize) && Global::tryStringToInt(pieces[1],boardYSize);
+      if(!suc)
+        continue;
+      if(boardXSize < 2 || boardXSize > Board::MAX_LEN || boardYSize < 2 || boardYSize > Board::MAX_LEN)
+        continue;
+
+      string dirPath = baseDir + "/" + dirName;
+      if(!FileUtils::isDirectory(dirPath))
+        continue;
+
+      double penalty = getAutoPatternDoubleParam(cfg,"autoAvoidRepeatUtility",boardXSize,boardYSize,-3.0,3.0);
+      double lambda = getAutoPatternDoubleParam(cfg,"autoAvoidRepeatLambda",boardXSize,boardYSize,0.0,1.0);
+      int minTurnNumber = getAutoPatternIntParam(cfg,"autoAvoidRepeatMinTurnNumber",boardXSize,boardYSize,0,1000000);
+      int maxTurnNumber = getAutoPatternIntParam(cfg,"autoAvoidRepeatMaxTurnNumber",boardXSize,boardYSize,0,1000000);
+      size_t maxPoses = getAutoPatternInt64Param(cfg,"autoAvoidRepeatMaxPoses",boardXSize,boardYSize,0,(int64_t)1000000000000LL);
+
+      const string& logSource = dirPath;
+      patternBonusTable->avoidRepeatedPosMovesAndDeleteExcessFiles({baseDir + "/" + dirName},penalty,lambda,minTurnNumber,maxTurnNumber,maxPoses,logger,logSource);
+    }
+
+
+    cfg.markAllKeysUsedWithPrefix("autoAvoidRepeatUtility");
+    cfg.markAllKeysUsedWithPrefix("autoAvoidRepeatLambda");
+    cfg.markAllKeysUsedWithPrefix("autoAvoidRepeatMinTurnNumber");
+    cfg.markAllKeysUsedWithPrefix("autoAvoidRepeatMaxTurnNumber");
+    cfg.markAllKeysUsedWithPrefix("autoAvoidRepeatMaxPoses");
+    cfg.markAllKeysUsedWithPrefix("autoAvoidRepeatSaveChunkSize");
+  }
+  return patternBonusTable;
+}
