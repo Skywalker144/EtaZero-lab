@@ -87,7 +87,7 @@ def test_placement_model_consumed_in_second_round(tmp_path, game):
     cfg = selfplay_config(tmp_path / 'selfplay.cfg', game, 100)
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game=game,
                        canvas=5, batch_size=8, bootstrap_games=4, train_steps=2,
-                       shuffle_rows_per_file=128, shuffle_keep_rows=1024, shuffle_args=('-min-rows','1'),
+                       shuffle_rows_per_file=8, shuffle_keep_rows=1024, shuffle_args=('-min-rows','1'),
                        train_args=(('-no-compile',) if game == 'renju' else ('-use-fp16',)) +
                                   ('-lookahead-k','6','-no-longterm-checkpoints')).validate()
     directory = tmp_path / 'run'
@@ -197,7 +197,7 @@ def test_imported_start_training_and_next_model(tmp_path, game, kind):
     cfg = imported_start_config(tmp_path, game, kind)
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game=game,
                        canvas=5, batch_size=8, bootstrap_games=4, train_steps=2,
-                       shuffle_rows_per_file=128, shuffle_keep_rows=1024, shuffle_args=('-min-rows','1'),
+                       shuffle_rows_per_file=8, shuffle_keep_rows=1024, shuffle_args=('-min-rows','1'),
                        train_args=('-no-compile','-use-fp16','-no-longterm-checkpoints')).validate()
     directory = tmp_path / 'run'
     state = run(directory, config, 2)
