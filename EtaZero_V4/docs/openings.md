@@ -2,15 +2,15 @@
 
 五子棋与 Hex 的平衡开局在原生 [balancedopening.cpp](../cpp/program/balancedopening.cpp) 实现，由 `GameRunner` 在来源 policy init 之前调用。selfplay、match、gatekeeper 共用这一入口，普通网络和 MuZero 共用 `Search::evaluatePosition`；MuZero 对候选真实棋盘执行 representation/initial，不用 latent 递归代替棋规转移。外围负责运行配置、任务编排和展示。
 
-来源是 [reference_sources.json](../reference_sources.json) 固定的两份 KataGomo 实现。范围包括无 VC 五子棋的随机骨架、平衡候选、后续 policy init，以及 Hex 首手拒绝采样，不包含 VC 棋规、Hex 特殊模板或随机填盘。Go 与象棋不支持此开关。Web/GTP 的交互入口共用此原生模块，见 [交互开局](web.md#平衡开局)。
+来源是 [reference_sources.json](../reference_sources.json) 固定的两份 KataGomo 实现。范围包括无 VC 五子棋的随机骨架、平衡候选、后续 policy init，以及 Hex 的特殊模板、随机填盘、首手拒绝采样和后续 policy init，不包含 VC 棋规或 Hex 限手规则。Go 与象棋不支持此开关。Web/GTP 的交互入口共用此原生模块，见 [交互开局](web.md#平衡开局)。
 
 ## 配置与执行边界
 
-原生 selfplay、match 或 gatekeeper 配置中设置 `balanceOpeningProb`，表示每局启用平衡开局的概率。五子棋与 Hex 缺省采用 KataGomo 的自对弈 0.99、比赛／gatekeeper 1.0；设为 0 可显式关闭。`balanceOpeningDropPow` 控制候选权重或接受率的指数。Hex 另外保留来源的 `makeOpeningFairRate` 和严格为正的 `minAcceptRate`，比赛／gatekeeper 的两层概率门控缺省均为 1。其余参数缺省值按来源的自对弈／比赛用途选择，唯一事实源是 [Settings::load](../cpp/program/balancedopening.cpp)。外围不翻译字段或重算接受率。
+原生 selfplay、match 或 gatekeeper 配置中设置 `balanceOpeningProb`，表示每局启用平衡开局的概率；Hex 在特殊模板和随机填盘均未选中后才判断此概率。五子棋与 Hex 缺省采用 KataGomo 的自对弈 0.99、比赛／gatekeeper 1.0；设为 0 可关闭该阶段；Hex 的模板和随机填盘分别由自己的概率控制。`balanceOpeningDropPow` 控制候选权重或接受率的指数。Hex 另外保留来源的 `makeOpeningFairRate` 和严格为正的 `minAcceptRate`，比赛／gatekeeper 的两层概率门控缺省均为 1。其余参数缺省值按来源的自对弈／比赛用途选择，唯一事实源是 [Settings::load](../cpp/program/balancedopening.cpp)。外围不翻译字段或重算接受率。
 
-`GameRunner` 只初始化未终局的空棋盘；已经落子的起点不会重做平衡开局。五子棋按 KataGomo 以棋盘是否为空判断，空的导入起点也可进入；Hex 另外要求黑先并排除显式 SGF、hint、fork 起点。五子棋先执行每局概率门控，再检查起点是否为空；空盘可由导入起点指定白先。五子棋的 AlphaZero 随机 evaluator 冷启动也执行平衡开局，Hex 的无模型冷启动跳过；MuZero 的随机 evaluator 与已发布模型均可使用。每次候选推理前后检查停止请求，未接受或被中断的尝试不写回棋盘；`GameRunner` 丢弃中断对局。
+`GameRunner` 只初始化未终局的空棋盘；已经落子的起点不会重做平衡开局。五子棋按 KataGomo 以棋盘是否为空判断，空的导入起点也可进入；Hex 另外要求黑先并排除显式 SGF、hint、fork 起点。五子棋先执行每局概率门控，再检查起点是否为空；空盘可由导入起点指定白先。五子棋和 Hex 的 AlphaZero／MuZero 随机 evaluator 冷启动与已发布模型均执行对应开局流程。每次候选推理前后检查停止请求，未接受或被中断的尝试不写回棋盘；`GameRunner` 丢弃中断对局。
 
-平衡完成后按棋类执行 policy init。五子棋使用 KataGomo 的指数长度与既有手数补偿；Go、Hex 和象棋保留 KataGo 的面积均值及 gamma／指数长度。策略温度采样、极小概率的均匀落子和提前终局停止沿用来源。两段前缀都进入原生棋谱和 `startHist`，训练从前缀之后开始；普通 writer 与 MuZero 完整轨迹均不为开局前缀伪造搜索目标。原生训练目标 C53 记录总前缀长度，C51 是当前实际手数；原生日志 `Balanced opening:` 记录平衡阶段的手数。
+平衡完成后按棋类执行 policy init。五子棋与 Hex 分别使用 KataGomo 对应分支的指数长度与既有手数补偿；Go 和象棋保留 KataGo 的面积均值及 gamma／指数长度。策略温度采样、极小概率的均匀落子和提前终局停止沿用来源。两段前缀都进入原生棋谱和 `startHist`，训练从前缀之后开始；普通 writer 与 MuZero 完整轨迹均不为开局前缀伪造搜索目标。原生训练目标 C53 记录已走前缀长度，C51 是当前实际手数；Hex 模板和填盘作为 `initialBoard` 摆子保存，进入 SGF 的 AB/AW，不伪造落子历史。原生日志 `Balanced opening:` 记录平衡阶段的手数，`Hex opening: special/random-fill` 记录摆子类型和棋子数。
 
 比赛每局独立生成开局，继续使用来源 `MatchPairer` 和 `GameRunner`，不额外强制黑白配对共享同一开局。恢复时在途游戏重新生成；改变开局配置须使用独立结果目录。Elo 继续使用来源拟合实现。
 
@@ -26,7 +26,16 @@
 
 ## Hex
 
+新空盘依次选择特殊模板、随机填盘、首手平衡，前一分支选中后不再进入后一分支。`specialOpeningProb` 与 `completelyRandomOpeningProb` 是顺序条件概率。特殊模板保留来源的 Gale、transfinite、infinite、十阶模板及旋转棋盘布局、尺寸条件、随机扰动和模板内价值筛选；十阶模板仅在编译允许且实际棋盘至少 25 路时出现。`completelyRandomOpeningFillRateAvg` 控制指数抽样的填盘密度，黑白各用该密度，沿用来源的概率截断和随机先手。直接摆子不发生提子，也不计入 policy 手数补偿；摆子后由真实棋规检查终局，已终局时不再走 policy 或搜索。
+
+selfplay 的原生缺省概率来自固定来源；[Hex selfplay 配置](../configs/games/hex/selfplay.cfg) 使用来源 `scripts/hex19x3` 的实际训练参数。match／gatekeeper 保留仅平衡首手的缺省口径，可显式配置模板和填盘；Web/GTP 的开局建议仍只生成可重放的落子前缀，不请求训练摆子。
+
 在 `balanceOpeningProb` 和 `makeOpeningFairRate` 两次概率门控之后，均匀提议黑方首手，由白方模型评估落子后的白方**获胜概率 W**。接受率为 `max((1−(2W−1)²)^dropPow, minAcceptRate)`，接受后轮到白方。这里沿用来源 W 的定义，不把 W−L 或包含和棋的期望得分代入公式。
+
+随后 Hex policy init 的新增手数为 `max(0, floor(指数随机数 × (mean − 2 × 已有手数)))`，补偿项在指数尺度的括号内，与五子棋的公式不同。`mean` 使用 `policyInitAvgMoveNum`，SGF 起点使用 `startPosesPolicyInitAvgMoveNum`；已有手数计入 `initialTurnNumber + moveHistory.size()`，不含摆子。Hex 不使用 `policyInitAreaProp` 或 `policyInitGammaShape`。实际训练配置使用固定均值和策略温度，见上述 Hex 配置；通用原生参数的缺省值仍由 `loadPolicyInit` 定义。
+
+[Hex 环境配置](../configs/games/hex/env.cfg) 显式定义来源 19 路阶段的 9–19 路尺寸权重与 19 路画布；不使用 Go 的尺寸分布。四种算法的 Hex 入口共用这些环境与开局设置。独立 [Hex 比赛配置](../configs/match/hex.cfg) 使用同一尺寸分布，policy init 默认关闭。
+
 
 ## 查看初始化后的局面
 
@@ -79,7 +88,7 @@ stdout 输出带字段名的 CSV，保留前两列的请求初始化手数和白
 
 ## 验证
 
-原生数学与状态边界检查在 [testbalancedopening.cpp](../cpp/tests/testbalancedopening.cpp)：Hex 可手算的条件抽样概率、参考模型和价值视角、五子棋候选及可重放历史、KataGomo 默认门控与 policy 长度／配置、零权重点排除、禁用时不消费随机数、取消和无效价值不修改原局面。真实 CUDA 链路检查在 [test_balanced_opening.py](../tests/test_balanced_opening.py)，覆盖四种算法的原生产样、前缀／轨迹边界、来源 shuffle 与 learner，以及普通／MuZero 混合比赛和来源 Elo。工程检查不构成平衡质量或棋力效果结论。
+原生数学与状态边界检查在 [testbalancedopening.cpp](../cpp/tests/testbalancedopening.cpp)：Hex 可手算的条件抽样概率、参考模型和价值视角、模板几何与零气子、摆子历史、随机填盘、两类 policy 长度公式、五子棋候选及可重放历史、KataGomo 默认门控与 policy 长度／配置、零权重点排除、禁用时不消费随机数、取消和无效价值不修改原局面。真实 CUDA 链路检查在 [test_balanced_opening.py](../tests/test_balanced_opening.py)，覆盖四种算法的原生产样、前缀／轨迹边界、来源 shuffle 与 learner，以及普通／MuZero 混合比赛和来源 Elo。工程检查不构成平衡质量或棋力效果结论。
 
 [test_web_opening.py](../tests/test_web_opening.py) 覆盖 GTP 建议不修改已有棋盘／搜索树、四算法的原生着法执行与逐手回退、生成中和排队时的取消、候选进程退出、失败保留旧会话，以及真实浏览器操作。交互生成的双方参考都是当前主模型；它不改用次级 HumanSL 模型，也不额外运行训练专用 policy init。
 
