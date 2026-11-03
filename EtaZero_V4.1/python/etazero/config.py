@@ -103,7 +103,7 @@ class RunConfig:
                            '-pos-len', '-batch-size', '-model-kind', '-input-features', '-max-epochs-this-instance',
                            '-max-training-samples', '-max-batches-this-instance', '-stop-at-samples', '-samples-per-epoch', '-multi-gpus',
                            '-no-export', '-gnorm-stats-debug', '-initial-checkpoint', '-initial-weights', '-always-initial-checkpoint',
-                           '-initialize-only', '-muzero-config',
+                           '-initialize-only', '-muzero-config', '-epoch-files', '-sub-epochs',
                            '-max-train-bucket-per-new-data', '-max-train-bucket-size', '-initial-train-bucket-level',
                            '-epochs-per-export', '-export-prob',
                            '-stop-when-train-bucket-limited', '-quit-if-no-data', '-no-repeat-files',
