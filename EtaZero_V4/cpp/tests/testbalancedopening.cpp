@@ -2,6 +2,7 @@
 #include "../program/balancedopening.h"
 #include "../program/playsettings.h"
 #include "../program/playutils.h"
+#include "../game/xiangqi.h"
 #include "../core/test.h"
 #include <limits>
 
@@ -22,7 +23,11 @@ void configuration() {
       testAssert(s.makeOpeningFairRate == (self ? 0.98 : 1.0));
       testAssert(s.dropPow == (self ? 6 : 20));
       testAssert(s.minAcceptRate == (self ? 0.005 : 0.001));
+      testAssert(s.specialOpeningProb == (self ? 0.02 : 0.0));
+      testAssert(s.completelyRandomOpeningProb == (self ? 0.1 : 0.0));
+      testAssert(s.completelyRandomOpeningFillRateAvg == 0.01);
     }
+    else testAssert(s.specialOpeningProb == 0 && s.completelyRandomOpeningProb == 0);
     cfg.overrideKey("balanceOpeningProb","0");
     testAssert(Settings::load(cfg,self).probability == 0);
   }
@@ -38,6 +43,8 @@ void configuration() {
       {{"game","xiangqi"},{"balanceOpeningProb","1"}},
       {{"game","hex"},{"minAcceptRate","0"}},
       {{"game","renju"},{"makeOpeningFairRate","1"}},
+      {{"game","go"},{"specialOpeningProb","0.1"}},
+      {{"game","renju"},{"completelyRandomOpeningProb","0.1"}},
       {{"game","hex"},{"balanceOpeningProb","nan"}}}) {
     ConfigParser cfg(values);
     bool rejected = false;
@@ -60,8 +67,25 @@ void policyLength() {
       testAssert(rand.nextUInt64() == reference.nextUInt64());
     }
   }
-  for(G game : {G::GO,G::HEX}) for(double gamma : {1.0,3.0}) {
-    Board board(9,9); auto hist = history(board,game);
+  for(int size : {9,19}) for(int played : {0,1,2,7}) {
+    Board board(size,size);
+    // Pure setup stones must not contribute to the played-turn compensation.
+    board.colors[Location::getLoc(2,2,size)] = P_BLACK;
+    board.regenChainsFromColors();
+    auto hist = history(board,G::HEX);
+    hist.setInitialTurnNumber(played);
+    Rand rand("Hex exponential scale"), reference("Hex exponential scale");
+    const double draw = reference.nextExponential();
+    // Choose an effective scale producing exactly 10.75 before truncation.
+    const double mean = 2.0*played + 10.75/draw;
+    testAssert(PlayUtils::samplePolicyInitMoveCount(hist,rand,mean,7) == 10);
+    testAssert(rand.nextUInt64() == reference.nextUInt64());
+    if(played > 0)
+      testAssert(PlayUtils::samplePolicyInitMoveCount(hist,rand,2.0*played-1,7) == 0);
+  }
+  for(G game : {G::GO,G::XIANGQI}) for(double gamma : {1.0,3.0}) {
+    Board board(9,9);
+    auto hist = game == G::XIANGQI ? BoardHistory(Xiangqi::State(),BoardHistoryModes(false,false)) : history(board,game);
     hist.setInitialTurnNumber(20);
     Rand rand("other policy draw"), reference("other policy draw");
     int expected = (int)std::floor(gamma == 1 ? reference.nextExponential()*6 : reference.nextGamma(gamma)*2);
@@ -95,6 +119,13 @@ void policyConfiguration() {
   }
   auto gate = PlaySettings::loadForGatekeeper(cfg);
   testAssert(gate.balancedOpening.probability == 1 && !gate.initGamesWithPolicy);
+  cfg.overrideKey("game","hex");
+  cfg.overrideKey("policyInitAreaProp","0.9");
+  cfg.overrideKey("policyInitGammaShape","7");
+  auto hex = PlaySettings::loadForSelfplay(cfg,false);
+  testAssert(hex.policyInitAvgMoveNum == 6 && hex.startPosesPolicyInitAvgMoveNum == 3);
+  testAssert(hex.policyInitAreaProp == 0 && hex.policyInitGammaShape == 1);
+  testAssert(hex.policyInitAreaTemperature == 1.6);
 }
 void disabledAndInterrupted() {
   Board board(7,7); auto hist = history(board,G::RENJU); Player pla = P_BLACK;
@@ -146,6 +177,97 @@ void hexAcceptance() {
   }
   // Uniform proposals, acceptance 1 and (3/4)^2: left probability 16/25.
   testAssert(left > 1180 && left < 1380 && calls > 2000);
+}
+// Select a known source template without prescribing the RNG's implementation.
+std::string templateSeed(int r) {
+  for(int i = 0; ; i++) {
+    std::string seed = "Hex template " + std::to_string(i);
+    Rand rand(seed);
+    rand.nextBool(1.0); // special-opening gate
+    if(rand.nextUInt(100) == (uint32_t)r) return seed;
+  }
+}
+void hexSetups() {
+  Settings settings;
+  settings.specialOpeningProb = 1;
+  settings.completelyRandomOpeningProb = 1; // special wins the branch ordering
+  for(int size : {9,13,19,25}) for(int kind : {5,20,45,65,90}) {
+    if(size > Board::MAX_LEN) continue;
+    Board board(size,size); auto hist = history(board,G::HEX); Player pla = P_BLACK;
+    Rand rand(templateSeed(kind));
+    int evaluations = 0;
+    Evaluate evaluate = [&](const Board& b,const BoardHistory& h,Player p,int reference) {
+      evaluations++;
+      testAssert(reference == 1 && p == P_WHITE && h.presumedNextMovePla == p);
+      testAssert(h.moveHistory.empty() && h.initialTurnNumber == 0);
+      testAssert(h.initialBoard.pos_hash == b.pos_hash && h.getRecentBoard(0).pos_hash == b.pos_hash);
+      b.checkConsistency(true);
+      return Value{0.5,0.5};
+    };
+    testAssert(initialize(board,hist,pla,rand,settings,evaluate,{}) == Result::APPLIED_SPECIAL);
+    testAssert(hist.initialPla == pla && hist.presumedNextMovePla == pla);
+    testAssert(hist.moveHistory.empty() && hist.initialTurnNumber == 0);
+    testAssert(hist.initialBoard.pos_hash == board.pos_hash && hist.getRecentBoard(0).pos_hash == board.pos_hash);
+    testAssert(board.numBlackCaptures == 0 && board.numWhiteCaptures == 0);
+    board.checkConsistency(true);
+    const auto at = [&](int x,int y) { return board.colors[Location::getLoc(x,y,size)]; };
+    if(kind == 5) {
+      // Every original Gale lattice stone survives, including zero-liberty groups.
+      for(int x = 0; x < size; x++) for(int y = 0; y < size; y++) {
+        if(x % 2 == 0 && y % 2 == 1) testAssert(at(x,y) == P_BLACK);
+        if(x % 2 == 1 && y % 2 == 0) testAssert(at(x,y) == P_WHITE);
+      }
+    }
+    else if(kind == 20) {
+      testAssert(board.numPlaStonesOnBoard(P_BLACK) == 2*size-1);
+      testAssert(board.numPlaStonesOnBoard(P_WHITE) == 2*size-2);
+      testAssert(at(0,size-1) == P_BLACK && at(1,size-2) == P_BLACK);
+    }
+    else if(kind == 45 && size >= 13) {
+      testAssert(evaluations > 0 && pla == P_WHITE);
+      testAssert(at(0,size-1) == P_WHITE && at(1,size-1) == P_BLACK);
+    }
+    else if(kind == 65 && size >= 25) {
+      // The vertical black stem overwrites one stone of the white template.
+      testAssert(board.numPlaStonesOnBoard(P_WHITE) == size-1);
+      testAssert(board.numPlaStonesOnBoard(P_BLACK) == size-9);
+      testAssert(pla == P_WHITE);
+    }
+    else {
+      testAssert(at(0,0) == P_BLACK && at(size-1,0) == P_WHITE);
+      testAssert(at(0,size-1) == P_WHITE && at(size-1,size-1) == P_BLACK);
+      testAssert(at(0,1) == P_BLACK && at(size-1,size-2) == P_BLACK);
+    }
+    if(!(kind == 45 && size >= 13)) testAssert(evaluations == 0);
+  }
+  // A random-fill branch must not call the first-move evaluator or invent moves.
+  settings.specialOpeningProb = 0;
+  settings.completelyRandomOpeningFillRateAvg = 0.2;
+  int whiteStarts = 0, blackStarts = 0, totalStones = 0;
+  Rand rand("Hex random fill");
+  Evaluate unavailable = [](const Board&,const BoardHistory&,Player,int)->Value { ASSERT_UNREACHABLE; };
+  for(int i = 0; i < 100; i++) {
+    Board board(9,9); auto hist = history(board,G::HEX); Player pla = P_BLACK;
+    testAssert(initialize(board,hist,pla,rand,settings,unavailable,{}) == Result::APPLIED_RANDOM);
+    totalStones += board.numStonesOnBoard();
+    whiteStarts += pla == P_WHITE; blackStarts += pla == P_BLACK;
+    testAssert(hist.moveHistory.empty() && hist.initialTurnNumber == 0);
+    testAssert(hist.initialBoard.pos_hash == board.pos_hash && hist.initialPla == pla);
+    board.checkConsistency(true);
+  }
+  testAssert(totalStones > 0 && whiteStarts > 0 && blackStarts > 0);
+  // Cancelling a value-filtered template preserves the original empty state.
+  settings.specialOpeningProb = 1;
+  Board board(19,19); auto hist = history(board,G::HEX); Player pla = P_BLACK;
+  Rand cancelRand(templateSeed(45));
+  bool cancel = false;
+  Evaluate interrupt = [&](const Board&,const BoardHistory&,Player,int) { cancel = true; return Value{0.5,0.5}; };
+  testAssert(initialize(board,hist,pla,cancelRand,settings,interrupt,[&](){return cancel;}) == Result::INTERRUPTED);
+  testAssert(board.numStonesOnBoard() == 0 && hist.initialBoard.numStonesOnBoard() == 0 && pla == P_BLACK);
+  hist.makeBoardMoveAssumeLegal(board,Location::getLoc(3,3,19),P_BLACK,nullptr);
+  pla = P_WHITE;
+  testAssert(initialize(board,hist,pla,cancelRand,settings,unavailable,{}) == Result::SKIPPED);
+  testAssert(board.numStonesOnBoard() == 1 && hist.moveHistory.size() == 1 && pla == P_WHITE);
 }
 void gomokuCandidates() {
   Settings settings; settings.probability = 1;
@@ -215,6 +337,6 @@ void gomokuCandidates() {
 }
 
 void Tests::runBalancedOpeningTests() {
-  configuration(); policyLength(); policyConfiguration(); disabledAndInterrupted(); hexAcceptance(); gomokuCandidates();
+  configuration(); policyLength(); policyConfiguration(); disabledAndInterrupted(); hexAcceptance(); hexSetups(); gomokuCandidates();
   std::cout << "Balanced opening tests passed" << std::endl;
 }

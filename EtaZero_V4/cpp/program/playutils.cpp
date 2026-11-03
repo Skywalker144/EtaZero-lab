@@ -177,6 +177,12 @@ Loc PlayUtils::getGameInitializationMove(
 int PlayUtils::samplePolicyInitMoveCount(
   const BoardHistory& hist, Rand& gameRand, double mean, double gammaShape
 ) {
+  if(hist.rules.game == Rules::Game::HEX) {
+    // Hex's compensation is inside the exponential scale, unlike Gomoku.
+    // Setup stones do not count as played moves.
+    const double played = (double)hist.initialTurnNumber + hist.moveHistory.size();
+    return std::max(0,(int)floor(gameRand.nextExponential() * (mean - 2.0 * played)));
+  }
   if(hist.rules.isPlacement() && hist.rules.game != Rules::Game::HEX) {
     // KataGomo's board.movenum counts played moves, not setup stones. Imported
     // positions retain earlier played turns in initialTurnNumber.

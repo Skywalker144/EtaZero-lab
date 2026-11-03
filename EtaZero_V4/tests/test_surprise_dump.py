@@ -31,6 +31,9 @@ def configure(path, game, muzero=False, gumbel=False, random=True, **changes):
         rootSearchAlgorithm='gumbel' if gumbel else 'puct', nonrootSearchAlgorithm='gumbel' if gumbel else 'puct',
         gumbelMaxConsideredActions=4, debugSkipNeuralNet=str(random).lower(),
         rootPolicyTemperature=1, rootPolicyTemperatureEarly=1, nnRandomize='false')
+    if game == 'hex':
+        # These diagnostics exercise played prefixes, not random setup boards.
+        values.update(specialOpeningProb=0, completelyRandomOpeningProb=0)
     values.update(changes)
     return selfplay_config(path, 10 if game == 'xiangqi' else 5, **values)
 

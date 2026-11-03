@@ -37,8 +37,7 @@ static void rejectKomiCompensation(ConfigParser& cfg) {
 
 static void loadPolicyInit(PlaySettings& settings, ConfigParser& cfg, bool selfplay) {
   const auto game = cfg.contains("game") ? Rules::parseGame(cfg.getString("game")) : Rules::Game::GO;
-  const bool gomoku = Rules::forGame(game).isPlacement() && game != Rules::Game::HEX;
-  if(gomoku) {
+  if(Rules::forGame(game).isPlacement()) {
     settings.policyInitAvgMoveNum = selfplay && !cfg.contains("policyInitAvgMoveNum") ? 12.0 :
       cfg.getDouble("policyInitAvgMoveNum",0.0,100.0);
     settings.startPosesPolicyInitAvgMoveNum = cfg.contains("startPosesPolicyInitAvgMoveNum") ?

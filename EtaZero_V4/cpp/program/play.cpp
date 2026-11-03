@@ -1622,7 +1622,9 @@ FinishedGameData* Play::runGame(
   };
 
   const bool gomokuOpening = hist.rules.isPlacement() && hist.rules.game != Rules::Game::HEX;
-  if(playSettings.balancedOpening.probability > 0.0 &&
+  const bool hexSetup = hist.rules.game == Rules::Game::HEX &&
+    (playSettings.balancedOpening.specialOpeningProb > 0.0 || playSettings.balancedOpening.completelyRandomOpeningProb > 0.0);
+  if((playSettings.balancedOpening.probability > 0.0 || hexSetup) &&
      (gomokuOpening || (!otherGameProps.isSgfPos && !otherGameProps.isHintPos &&
                        !otherGameProps.isFork && !otherGameProps.isHintFork))) {
     const auto result = BalancedOpening::initialize(botB,botW,board,hist,pla,gameRand,playSettings.balancedOpening,shouldStop);
@@ -1637,10 +1639,13 @@ FinishedGameData* Play::runGame(
     }
     if(result == BalancedOpening::Result::APPLIED)
       logger.write("Balanced opening: " + Rules::gameName(hist.rules.game) + " moves=" + Global::intToString(hist.moveHistory.size()));
+    else if(result == BalancedOpening::Result::APPLIED_SPECIAL || result == BalancedOpening::Result::APPLIED_RANDOM)
+      logger.write(std::string("Hex opening: ") + (result == BalancedOpening::Result::APPLIED_SPECIAL ? "special" : "random-fill") +
+                   " setupStones=" + Global::intToString(board.numStonesOnBoard()));
   }
 
   if(playSettings.initGamesWithPolicy && otherGameProps.allowPolicyInit && !hist.isGameFinished) {
-    const double mean = gomokuOpening ?
+    const double mean = hist.rules.isPlacement() ?
       (otherGameProps.isSgfPos ? playSettings.startPosesPolicyInitAvgMoveNum : playSettings.policyInitAvgMoveNum) :
       board.x_size * board.y_size * (otherGameProps.isSgfPos ? playSettings.startPosesPolicyInitAreaProp : playSettings.policyInitAreaProp);
     if(mean > 0) {
