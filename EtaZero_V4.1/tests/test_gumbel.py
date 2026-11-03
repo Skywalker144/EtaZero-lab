@@ -69,7 +69,7 @@ def test_gumbel_two_round_cuda_training(tmp_path):
     cfg = gumbel_config(tmp_path / 'selfplay.cfg', 'renju', 3, 'gumbel', budget)
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game='renju',
                        algorithm='gumbel_alphazero', canvas=5, batch_size=8, bootstrap_games=4,
-                       train_steps=2, shuffle_rows_per_file=128, shuffle_keep_rows=1024,
+                       train_steps=2, shuffle_rows_per_file=8, shuffle_keep_rows=1024,
                        shuffle_args=('-min-rows','1'),
                        train_args=('-no-compile','-use-fp16','-no-longterm-checkpoints')).validate()
     directory = tmp_path / 'run'
