@@ -1,13 +1,25 @@
 
-# Compiling KataGo
-KataGo is written in C++. It should compile on Linux or OSX via g++ that supports at least C++14, or on Windows via MSVC 15 (2017) and later or MinGW. Other compilers and systems have not been tested yet. This is recommended if you want to run the full KataGo self-play training loop on your own and/or do your own research and experimentation, or if you want to run KataGo on an operating system for which there is no precompiled executable available.
+# Compiling EtaZero V4.1
+The main C++ target uses C++17, and the Xiangqi rules target uses C++20. A compiler supporting both standards and the selected backend is required; C++14 or the old MSVC 2017 requirement is not sufficient for the full current build. See [CMakeLists.txt](cpp/CMakeLists.txt) for the actual target requirements.
+
+From this version directory, the configured CUDA build entrypoint is:
+
+```bash
+bash scripts/build.sh
+```
+
+The script enters the `pytorch` Conda environment, resolves CUDA/cuDNN/cuBLAS from that environment and its Python packages, disables distributed contribution, and writes `build/katago`. Build variables and additional CMake arguments are defined in [scripts/build.sh](scripts/build.sh); select a CUDA architecture supported by the target device. This command requires those environment dependencies to be installed.
+
+The backend and platform notes below are inherited from KataGo. Their upstream clone commands build KataGo, not EtaZero V4.1; when configuring this version directly, use this directory's `cpp/` as the CMake source and a separate build directory. Upstream platform/provider test claims are not validation of this fork. Current verified backend scope is in [README](README.md) and [architecture](docs/architecture.md). Public upstream neural nets have an incompatible three-result layout; use compatible exports from this version.
+
+## Upstream backend and platform reference
 
 ### Building for Distributed
 As also mentioned in the instructions below but repeated here for visibility, if you also are building KataGo with the intent to use it in distributed training on https://katagotraining.org, then keep in mind:
 * You'll need to specify `-DBUILD_DISTRIBUTED=1` or `BUILD_DISTRIBUTED` and have OpenSSL installed.
 * Building will need to happen within a Git clone of the KataGo repo, rather than a zipped copy of the source (such as what you might download from a packaged release).
 * The version will need to be supported for distributed training. **The `master` branch will NOT work** - instead please use the either latest release tag or the tip of the `stable` branch, these should both work.
-* Please do NOT attempt to bypass any versioning or safety checks - if you feel you need to do so, please first reach out by opening an issue or messaging in [discord](https://discord.gg/bqkZAz3). There is an alternate site [test.katagodistributed.org](test.katagodistributed.org) you can use if you are working on KataGo development or want to test things more freely, ask in the KataGo channel of discord to set up a test account.
+* Please do NOT attempt to bypass any versioning or safety checks - if you feel you need to do so, please first reach out by opening an issue or messaging in [discord](https://discord.gg/bqkZAz3). There is an alternate site [test.katagodistributed.org](https://test.katagodistributed.org) you can use if you are working on KataGo development or want to test things more freely, ask in the KataGo channel of discord to set up a test account.
 
 ## Linux
    * TLDR (if you have a working GPU):
@@ -29,7 +41,7 @@ As also mentioned in the instructions below but repeated here for visibility, if
      ```
    * Requirements
       * CMake with a minimum version of 3.18.2 - for example `sudo apt install cmake` on Debian, or download from https://cmake.org/download/ if that doesn't give you a recent-enough version.
-      * Some version of g++ that supports at least C++14.
+      * A C++20-capable g++ compatible with the chosen backend (the main target itself uses C++17).
       * If using the OpenCL backend, a modern GPU that supports OpenCL 1.2 or greater, or else something like [this](https://software.intel.com/en-us/opencl-sdk) for CPU. But if using CPU, Eigen should be better.
       * If using the CUDA backend, CUDA 11 or later and a compatible version of CUDNN based on your CUDA version (https://developer.nvidia.com/cuda-toolkit) (https://developer.nvidia.com/cudnn) and a GPU capable of supporting them.
       * If using the TensorRT backend, in addition to a compatible CUDA Toolkit (https://developer.nvidia.com/cuda-toolkit), you also need TensorRT (https://developer.nvidia.com/tensorrt) version 10 or newer (as of KataGo v1.17.0, TensorRT versions older than 10 are no longer supported).
@@ -98,7 +110,7 @@ As also mentioned in the instructions below but repeated here for visibility, if
       * Building from source on Windows is actually a bit tricky, depending on what version you're building, there's not necessarily a super-fast way.
    * Requirements
       * CMake with a minimum version of 3.18.2, GUI version strongly recommended (https://cmake.org/download/)
-      * Microsoft Visual Studio for C++. Version 15 (2017) has been tested and should work, MinGW version also should work but only with Eigen and OpenCL backends (CUDA and TensorRT MinGW backends are [not supported by NVIDIA](https://forums.developer.nvidia.com/t/cuda-with-mingw-how-to-get-cuda-running-under-mingw)).
+      * A C++20-capable Microsoft Visual Studio C++ toolchain is required for this fork; Windows builds have not been verified here. The upstream notes also describe MinGW for Eigen and OpenCL backends (CUDA and TensorRT MinGW backends are [not supported by NVIDIA](https://forums.developer.nvidia.com/t/cuda-with-mingw-how-to-get-cuda-running-under-mingw)).
       * If using the OpenCL backend, a modern GPU that supports OpenCL 1.2 or greater, or else something like [this](https://software.intel.com/en-us/opencl-sdk) for CPU. But if using CPU, Eigen should be better.
       * If using the CUDA backend, CUDA 11 or later and a compatible version of CUDNN based on your CUDA version (https://developer.nvidia.com/cuda-toolkit) (https://developer.nvidia.com/cudnn) and a GPU capable of supporting them. I'm unsure how version compatibility works with CUDA, there's a good chance that later versions than these work just as well, but they have not been tested.
       * If using the TensorRT backend, in addition to a compatible CUDA Toolkit (https://developer.nvidia.com/cuda-toolkit), you also need TensorRT (https://developer.nvidia.com/tensorrt) version 10 or newer (as of KataGo v1.17.0, TensorRT versions older than 10 are no longer supported).
@@ -265,7 +277,7 @@ Set `onnxProvider` in your config to choose the execution provider:
 > **Note**: This backend is more involved to set up than KataGo's other backends. Most execution providers are not included in the official prebuilt ONNX Runtime packages - in particular, using the OpenVINO provider requires building ONNX Runtime from source with that provider enabled.
 
 ### Requirements
-   * Everything KataGo normally needs (CMake, a C++17 compiler, zlib).
+   * The current native build requirements (CMake, a compiler supporting C++17 and the Xiangqi target's C++20, zlib).
    * ONNX Runtime including the execution provider you want - either an official prebuilt package, or built from source with the provider enabled (see the table above and https://onnxruntime.ai/docs/install/).
    * Protobuf 3.x, such that CMake's `find_package(Protobuf)` succeeds. On Linux the usual system packages work. If you build ONNX Runtime from source, the protobuf inside its build tree also works.
    * For the OpenVINO provider, the OpenVINO toolkit.
