@@ -13,11 +13,11 @@ V4 的会话由常驻 `katago gtp` 进程持有，棋规、合法着法、落子
 bash web/webui.sh
 
 # 显式选择 V4，限定模型目录并指定独立推理配置。
-bash web/webui.sh --version EtaZero_V4 --models-dir /absolute/path/to/runs \
+bash web/webui.sh --version EtaZero_V4.1 --models-dir /absolute/path/to/runs \
   --config /absolute/path/to/gtp.cfg
 
 # 直接加载原生模型；MuZero 的 --model 指向三组件 bundle 目录。
-bash web/webui.sh --version EtaZero_V4 --model /absolute/path/to/model.bin.gz \
+bash web/webui.sh --version EtaZero_V4.1 --model /absolute/path/to/model.bin.gz \
   --config-dir /absolute/path/to/inference-config --no-open
 ```
 
