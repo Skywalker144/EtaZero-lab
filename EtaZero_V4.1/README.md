@@ -2,11 +2,11 @@
 
 V4 以固定 KataGo `d91ea855110dae533f0aada947b2b7d78cc8a4e1` 的完整源码为底座，保留来源模块和调用关系，在实际职责边界接入 EtaZero。来源信息见 [reference_sources.json](reference_sources.json)，来源说明与许可证见 [KATAGO_README.md](KATAGO_README.md) 和 [LICENSE](LICENSE)。
 
-目标定位是 **基于 KataGo 合理接入多棋类、Gumbel 与 MuZero 的“KataZero”，配合 EtaZero 外层调度与工具**。引擎层支持 AlphaZero、Gumbel AlphaZero、MuZero、Gumbel MuZero 及多棋类；外层采用 EtaZero 的同步逐轮调度，并提供实验管理、评估、绘图和 Web 等功能。共有搜索、网络、采样和 learner 机制保留 KataGo 实现，必要扩展在来源模块内接入，不另造一套引擎。[目标与适配边界](docs/katago-target.md) 是可修正的设计记录，具体接入以用户目标、算法语义和来源实现为依据。以下说明当前已实现范围。
+目标定位是 **基于 KataGo 合理接入多棋类、Gumbel 与 MuZero 的“KataZero”，配合 EtaZero 外层调度与工具**。引擎层支持 AlphaZero、Gumbel AlphaZero、MuZero、Gumbel MuZero 及多棋类；外层采用 EtaZero 的同步逐轮调度，并提供实验管理、评估、绘图和 Web 等功能。共有搜索、网络、采样和 learner 机制保留 KataGo 实现，必要扩展在来源模块内接入，不另造一套引擎。具体接入以用户目标、算法语义和来源实现为依据。以下说明当前已实现范围。
 
 当前已贯通的外层闭环是 **采用 W/D/L/NR 的 AlphaZero、Gumbel AlphaZero、MuZero、Gumbel MuZero 训练链及 EtaZero 逐轮控制器，支持围棋、Freestyle/Standard/Renju 五子棋、Hex 和中国象棋**：原生 selfplay → 来源 shuffle → 来源 learner → 来源模型导出 → 直接接受或来源 gatekeeper。每轮固定一个输入模型，阶段顺序执行，训练目录跨轮保留，下一轮使用已接受的模型。原生 GTP、JSON analysis、比赛和测试命令由来源引擎直接提供。
 
-控制器通过 `publish_weights` 选择 checkpoint 的普通权重（`ordinary`，默认）或来源 SWA 权重（`swa`）供下一轮 selfplay 使用。learner 始终续用完整 checkpoint 中的训练权重、optimizer 和来源内部时钟。
+控制器通过 `publish_weights` 选择 checkpoint 的普通权重（`ordinary`，默认）或来源 SWA 权重（`swa`）供下一轮 selfplay 使用。learner 始终续用完整 checkpoint 中的训练状态；每个有训练更新的 iteration 完成一个 epoch，样本时钟按实际消费量推进，详见 [调度与恢复](docs/controller.md#自适应逐轮调度)。
 
 底层 `Rules`／`BoardHistory` 支持 Freestyle、Standard、Renju 和 Hex，复用来源 PUCT、图搜索和树复用。Renju 禁手是落子判负；Hex 使用六邻接和保持双方目标边的对称。规则、历史、图身份及搜索的边界检查见 `cpp/tests/testplacement.cpp`，搜索检查使用来源随机 evaluator。
 
@@ -49,7 +49,7 @@ bash scripts/run.sh native version
 bash scripts/run.sh check-config --config configs/checks/source_go
 ```
 
-原生程序位于 `build/katago`，保留来源命令和版本标识。`native` 后的参数原样转发，不重写 GTP/JSON 输出。原生用法见 [Compiling.md](Compiling.md)、[SelfplayTraining.md](SelfplayTraining.md) 及来源文档；其中示例的源码根目录应理解为本目录。
+原生程序位于 `build/katago`，保留来源命令和版本标识。`native` 后的参数原样转发，不重写 GTP/JSON 输出。本版本构建入口见 [Compiling.md](Compiling.md)。[SelfplayTraining.md](SelfplayTraining.md) 保留独立原生组件的使用说明；同步逐轮训练以 [配置与启动](docs/configuration.md) 和 [调度与恢复](docs/controller.md) 为准，上游模型与配置不能直接视为本版本兼容输入。
 
 CPU 推理可单独构建来源 Eigen 后端，支持全部六种棋类的普通／MuZero 网络与 PUCT／Gumbel 搜索。它沿用来源 FP32、NHWC 输入要求；MuZero API 的 NCHW 观测在适配边界转为 NHWC。安装 Eigen3，或给 CMake 添加 `-DEIGEN3_INCLUDE_DIRS=/absolute/path/to/eigen` 后执行：
 
@@ -88,7 +88,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
   --run-dir /absolute/path/to/new-run --iterations 2
 ```
 
-`--iterations` 是累计完成轮数；也可使用 `--max-hours` 指定累计时间预算。配置和命令行都未指定这两项时默认无限运行，直到手动中断；两项并用时任一达到即停止开始新轮次。时间预算在完整轮次边界检查，允许最后一轮超出预算；统计扣除实际 learner 编译时间，包含实际执行的权重初始化与导出。已完成轮次可以继续增加上限，达到目标后再次运行不重复训练。计时失效和恢复口径见 [调度与恢复](docs/controller.md)。AlphaZero 与 MuZero 在未指定初始权重时均使用 random evaluator 冷启动；MuZero 的根与递归节点使用随机预测，不执行 NN 推理。攒足首轮数据并训练后，后续轮次使用已接受的原生模型。工程检查也可使用 `configs/checks/source_placement`，其 `game` 可选择四种已接入的落子棋；象棋配置入口为 `configs/checks/source_xiangqi`。非围棋原生配置省略 `komiMean` 或设为 0，禁止 Go 让子。以上配置只用于工程检查，不是推荐训练配方。
+`--iterations N` 指定最后一个 iteration 的编号，0 为 bootstrap；例如新运行的 `--iterations 2` 执行 iteration 0、1、2。也可使用 `--max-hours` 指定累计时间预算。配置和命令行都未指定这两项时默认无限运行，直到手动中断；两项并用时任一达到即停止开始新轮次。时间预算在完整轮次边界检查，允许最后一轮超出预算；统计扣除实际 learner 编译时间，包含实际执行的权重初始化与导出。已完成轮次可以继续增加上限，达到目标后再次运行不重复训练。计时失效和恢复口径见 [调度与恢复](docs/controller.md)。AlphaZero 与 MuZero 在未指定初始权重时均使用 random evaluator 冷启动；MuZero 的根与递归节点使用随机预测，不执行 NN 推理。攒足首轮数据并训练后，后续轮次使用已接受的原生模型。工程检查也可使用 `configs/checks/source_placement`，其 `game` 可选择四种已接入的落子棋；象棋配置入口为 `configs/checks/source_xiangqi`。非围棋原生配置省略 `komiMean` 或设为 0，禁止 Go 让子。以上配置只用于工程检查，不是推荐训练配方。
 
 `run.cfg` 使用 `bootstrap_games`、`train_steps` 和 `replay_ratio` 规划采样与实际训练预算，首轮数据门槛来自 shuffle 的 `min-rows`。`train.cfg` 保留优化器、SWA 和 Lookahead 参数；基准步数与 batch size 用于规划产样和首轮额度，实际步数由累计额度和完整文件选择决定，不受基准步数硬截断；轮内中断保存文件/batch 游标，正常完成轮次不跨轮续接文件组。具体调度、SWA 与恢复口径见 [调度与恢复](docs/controller.md)。
 
@@ -122,7 +122,7 @@ conda run --no-capture-output -n pytorch python -m pytest -q tests python/tests
 ETAZERO_GPU_TESTS=1 conda run --no-capture-output -n pytorch python -m pytest -q tests/test_four_results.py tests/test_controller.py -k 'compiled_training or exported_cuda or training_only_heads or pass_prior or source_model'
 ```
 
-来源 GPU 专项按其自身条件运行；CPU 测试通过不代表 CUDA 或训练效果已经验证。Web 工作台从仓库根目录执行 `bash web/webui.sh --version EtaZero_V4`，使用各算法 baseline／棋类入口配套的原生 `gtp.cfg`，推理参数独立于训练配置；默认启动选择最高版本，参数与自定义模型配置方式见 [Web 与原生会话](docs/web.md)。
+来源 GPU 专项按其自身条件运行；CPU 测试通过不代表 CUDA 或训练效果已经验证。Web 工作台从仓库根目录执行 `bash web/webui.sh --version EtaZero_V4.1`，使用各算法 baseline／棋类入口配套的原生 `gtp.cfg`，推理参数独立于训练配置；默认启动选择最高版本，参数与自定义模型配置方式见 [Web 与原生会话](docs/web.md)。
 
 V4 的 Web 已接通结构化棋局查询、来源分析 JSON、可取消的常驻 GTP 传输、发布模型目录、异步会话控制及共享 HTTP 传输。创建、落子、悔棋、历史分支、分析中修改局面、参数设置与模型切换均由原生会话执行。页面与启动路由已接通，支持六种棋类、四种算法；会话接口支持原生 SGF 导入；平衡开局和按需网络诊断使用原生命令，象棋逐手动画仍待接入，接口语义与验证范围见 [Web 与原生会话](docs/web.md)。
 
@@ -133,7 +133,6 @@ V4 的 Web 已接通结构化棋局查询、来源分析 JSON、可取消的常�
 | 修改 MuZero 三组件网络与展开 loss | [MuZero 网络与展开训练](docs/muzero.md) |
 | 修改 Gumbel 根/非根选择、改进策略与报告 | [Gumbel 搜索](docs/gumbel.md) |
 | 配置五子棋／Hex 的原生平衡开局、检查初始化局面 | [平衡开局与初始化诊断](docs/openings.md) |
-| 查看最终能力与允许偏差 | [KataGo 对齐目标](docs/katago-target.md) |
 | 修改配置目录、启动单臂与多臂 | [配置与启动](docs/configuration.md) |
 | 查看阶段恢复、并发锁与计时边界 | [调度与恢复](docs/controller.md) |
 | 查看训练图、loss 图及性能统计 | [训练观测与绘图](docs/observations.md) |
