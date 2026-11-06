@@ -1,4 +1,6 @@
 ## Python Source Code Overview
+The EtaZero V4.1 controller is in `etazero/`; its entrypoints and configuration are documented in [configuration](../docs/configuration.md) and [controller](../docs/controller.md). The native learner and shuffle implementation are shared by the controller and standalone tools.
+
 This is a summary of some of the most notable python files here. Some of the less important or minor scripts are left out, but this covers the most notable ones:
 
 ### Main Training Loop
@@ -9,8 +11,10 @@ These are the most critical scripts needed for training neural nets.
 * `katago/train/model_pytorch.py` - Implementation of the neural net and all the subcomponents of the neural net architecture.
 * `katago/train/metrics_pytorch.py` - Implementation of loss functions and other metrics for training.
 * `katago/train/modelconfigs.py` - Specific channel and block configurations for different-sized nets. These are codes that you can supply to `train.py` as an argument to pick the net size.
-* `train.py` - Trains the neural net using the shuffled data and saves it to a SavedModel periodically, used by `selfplay/train.sh`.
-* `export_model.py` - Exports the trained neural net pytorch checkpoints to KataGo's .bin.gz format. Used by `selfplay/export_model_for_selfplay.sh`.
+* `train.py` - Trains the neural net using the shuffled data and saves PyTorch `.ckpt` checkpoints periodically, used by `selfplay/train.sh`.
+* `export_model_pytorch.py` - Exports the trained neural net pytorch checkpoints to KataGo's .bin.gz format. Used by `selfplay/export_model_for_selfplay.sh`.
+
+* `export_muzero.py` - Exports a MuZero checkpoint as a manifest and three component models; see [MuZero](../docs/muzero.md).
 
 And:
 
@@ -23,6 +27,8 @@ These are some scripts on the side that might be useful for debugging or experim
 * `katago/game/features.py` - Implements input features to the neural net, which are NOT used during training because all of it has been computed by the C++ already for training data. But supports other scripts like `play.py` to perform queries to the neural net for board positions and SGF files from the python code.
 * `katago/game/data.py` - Loads SGF files.
 * `test.py` - Runs a model on some shuffled training data *without* doing gradient updates - instead just reports the stats.
+
+* `export_muzero.py` - Exports a MuZero checkpoint as a manifest and three component models; see [MuZero](../docs/muzero.md).
 
 And:
 * `play.py` - A working very primitive GTP engine that just uses the raw neural net to make moves. Also implements a ton of GTP extensions to draw colored heatmaps in GoGUI. This or `test.py` are good places to look if you're interested in how to use the raw pytorch checkpoints for direct inference in python, rather than using the C++ KataGo engine.
