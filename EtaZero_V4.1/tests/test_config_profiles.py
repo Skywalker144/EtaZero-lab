@@ -83,6 +83,22 @@ def test_outer_profile_rejects_unowned_or_mistyped_settings(tmp_path, change):
         load_config(tmp_path)
 
 
+def test_lr_cycle_profile_preserves_outer_publication_ownership(tmp_path):
+    from etazero.run import learner_command
+    write_profile(tmp_path)
+    (tmp_path / 'train.cfg.local').write_text(
+        '[learning_rate]\nepochs-per-export = 3\nlr-cycle-low = 1\nlr-cycle-high = 4\n'
+        'lr-cycle-up-epochs = 1\nlr-cycle-down-epochs = 1\n')
+    config = load_config(tmp_path)
+    command = learner_command(tmp_path / 'run', config)
+    assert command[command.index('-epochs-per-export') + 1] == '3'
+    assert command[command.index('-lr-cycle-high') + 1] == '4'
+    assert command.count('-no-export') == 1
+    for option in ('-no-export', '-exportdir', '-exportprefix', '-export-prob'):
+        with pytest.raises(ValueError, match='owned by the outer controller'):
+            replace(config, train_args=(*config.train_args, option)).validate()
+
+
 def test_shared_native_option_files_and_muzero_network_paths(tmp_path):
     from test_controller_recovery import recovery_config
     shared = tmp_path / 'shared'; shared.mkdir()
