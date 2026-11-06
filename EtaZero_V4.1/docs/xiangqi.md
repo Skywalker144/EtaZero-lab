@@ -58,7 +58,7 @@ fork 重放从 `BoardHistory::copyToInitial()` 恢复完整起始快照，保留
 
 原生 `selfplay` 使用 `game=xiangqi`、`bSizesXY=9-10`，不能同时配置 `bSizes` 或 `allowRectangleProb`。写入画布 `dataBoardLen` 至少为 10，输入版本缺省为 9，显式选择其他输入族会拒绝。普通模型目录为空时使用来源 random evaluator；真实模型必须为版本 19。`useMuZero=true` 且模型目录为空时使用 MuZero 随机 evaluator，保留完整联合动作域和 latent 搜索语义，不执行真实 NN 推理；已有三组件 bundle 时使用真实模型，其画布须等于 `dataBoardLen`。来源模型发现、组批、manager、写入线程和停止流程保持同一调用链。普通模型默认推理缓冲区按实际 9×10 棋盘分配，MuZero 使用组件画布，写入画布均为方形；缓冲区选项沿用原生配置。
 
-外层配置仍使用 [配置目录](configuration.md) 的 `run.cfg`、`selfplay.cfg`、`train.cfg` 和 `shuffle.cfg`。`[run]` 选择 `game=xiangqi` 和四种算法之一，`train.cfg` 的 `pos-len` 至少为 10；控制器以该画布设置原生 writer。普通网络使用 `model-kind`，MuZero 使用 `muzero-config` 和展开步数，零样本初始化与后续训练都由正式 learner 执行。现有 `run.sh`、`autoexp.sh`、共享初始化、普通／SWA 发布和轮次恢复使用同一流程。普通网络支持原生 `subtreeValueBiasFactor`、`avoidRepeatedPatternUtility` 和外部模式表；MuZero 的这些真实棋盘选项需关闭，同时关闭真实棋盘 graph，Gumbel 组合限制见 [Gumbel](gumbel.md)。
+外层使用 [配置目录](configuration.md) 的标准拆分：`env.cfg` 的 `[environment]` 选择 `game=xiangqi` 和至少为 10 的 `canvas`；`selfplay.cfg` 的 `[agent]` 选择普通／MuZero 与 PUCT／Gumbel；`net.cfg` 配置普通网络或 MuZero 三组件及展开长度。`run.cfg` 管理调度，`train.cfg` 和 `shuffle.cfg` 管理其余原生选项。转换层生成 learner 的 `-pos-len`、`-model-kind`／`-muzero-config` 及 writer 画布，不在 run/train/shuffle 重复填写这些字段。独立运行省略初始权重时随机冷启动；显式权重或共享初始化才先执行零样本初始化，后续训练由正式 learner 完成。现有 `run.sh`、`autoexp.sh`、共享初始化、普通／SWA 发布和轮次恢复使用同一流程。普通网络支持原生 `subtreeValueBiasFactor`、`avoidRepeatedPatternUtility` 和外部模式表；MuZero 的这些真实棋盘选项需关闭，同时关闭真实棋盘 graph，Gumbel 组合限制见 [Gumbel](gumbel.md)。
 
 `tests/test_xiangqi_controller.py` 验证正式命令的随机冷启动、两种画布、三种搜索组合、SGF/hint 导入后的实际终局、脚本入口与共享初始化。真实 CUDA FP16 两轮检查覆盖 AlphaZero 普通权重与 Gumbel AlphaZero SWA 权重的发布、重启和下一轮真实模型消费，以及恢复到已完成轮数时不重复训练。这些小规模检查验证执行链，不构成棋力或吞吐结论。
 
