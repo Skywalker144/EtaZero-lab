@@ -8,6 +8,8 @@
 
 同步控制器在持有运行目录锁、selfplay 正常退出且 writer 排空后，以 `-input-files-stable` 调用 shuffle，省去来源工具为并发写入保留的 3 秒文件系统等待。独立 shuffle 默认仍等待；只有输入已停止写入且已发布文件不再修改时才可指定此选项。窗口选择、随机打散、压缩和训练快照发布流程不变。
 
+控制器在轮次提交后，以及持有运行目录锁的启动阶段，回收最近两轮已提交快照之外的旧 `shuffleddata/轮次` 目录。未完成轮次和未发布的临时目录不参与回收；清理失败会告警，下一次启动或轮次提交后重试。回收在轮次计时结算之后执行，只删除不再用于当前续训的派生快照；原始 selfplay、checkpoint、历史模型、源码及轮次记录保留。回放窗口仍从全部原始自对弈数据中选取，不受保留快照数量限制。历史快照回收后不能用它精确重演旧轮次。
+
 网络预设表在首次按名称选择网络时构造，保留来源的全部名称与派生配置。从 checkpoint 恢复或导出时使用其中保存的完整配置，无需为导入网络与特征工具而生成全部预设。
 
 普通与 MuZero 导出在持锁的控制器进程内调用来源入口，跨轮复用 Python/PyTorch 模块；每次仍从已提交 checkpoint 加载独立 CPU 模型。调用结束或失败时恢复调用者的 CPU RNG、日志处理器、输出流、命令行参数与 NumPy 打印设置。导出仍独立计时、写入本次阶段日志，并在完整文件生成后原子发布目录；独立 CLI 导出入口继续可用。
@@ -97,7 +99,7 @@ AlphaZero 与 MuZero 共用此流程。MuZero manifest 和三个组件以整个�
 
 恢复不会保存或重建自对弈进程的内存状态：在途对局、尚未写出的行、fork 队列、搜索树及其 RNG 会丢失，重新启动后产生新对局。已发布行来自已经结束的对局，目标不会被改成虚假的部分对局目标；MuZero shard 保留所引用位置的完整轨迹。同一游戏跨多个 shard 时只计一次。被中断尝试中没有留下任何训练行的游戏无法从 NPZ 计数，可能额外补产；正常完成的原生回执则包含零训练行游戏的额度完成情况。故恢复保证已发布数据可继续使用，不承诺精确重演中断前的自对弈过程或恢复全部 buffered rows。
 
-同步 learner 在完整 epoch 和正常停止边界保存，不逐 batch 写 checkpoint。单设备 learner 收到 SIGINT/SIGTERM 后完成当前 batch 的更新、AMP 跳步、Lookahead/SWA 和游标推进再保存；若已到 epoch 末尾则完成该 epoch 的收尾。异常或强杀退出后，最后一次保存以来的内存更新需要重做。完整 checkpoint 保存模型、optimizer、Lookahead slow 权重与同步计数、SWA 及累计余量、LR/brenorm 更新时钟、本轮文件计划与已消费游标，以及训练／验证 reader RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备 RNG 和 AMP scaler。读取游标恢复时跳过已消费 batch，不重复消耗增强随机数。已发布 shuffle 快照继续保留。
+同步 learner 在完整 epoch 和正常停止边界保存，不逐 batch 写 checkpoint。单设备 learner 收到 SIGINT/SIGTERM 后完成当前 batch 的更新、AMP 跳步、Lookahead/SWA 和游标推进再保存；若已到 epoch 末尾则完成该 epoch 的收尾。异常或强杀退出后，最后一次保存以来的内存更新需要重做。完整 checkpoint 保存模型、optimizer、Lookahead slow 权重与同步计数、SWA 及累计余量、LR/brenorm 更新时钟、本轮文件计划与已消费游标，以及训练／验证 reader RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备 RNG 和 AMP scaler。读取游标恢复时跳过已消费 batch，不重复消耗增强随机数。未完成轮次的 shuffle 快照保留至该轮提交，之后按上述快照回收策略管理。
 
 checkpoint 同时保存原生训练／验证指标日志的字节位置。恢复时将该位置之后的旧记录区间记入 `train/metrics_recovery.jsonl`，绘图排除这些已回退更新的观测，原始日志保留不变。已有 checkpoint 缺少日志位置时，按其已保存样本数筛除此前日志中的超界更新，同样本数的验证记录保守留空。指标与模型恢复分开处理，不从日志恢复 optimizer，也不因丢弃作废指标而扣除已花掉的时间。
 
