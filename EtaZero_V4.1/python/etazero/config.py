@@ -105,7 +105,7 @@ class RunConfig:
                            '-no-export', '-gnorm-stats-debug', '-initial-checkpoint', '-initial-weights', '-always-initial-checkpoint',
                            '-initialize-only', '-muzero-config', '-epoch-files', '-sub-epochs',
                            '-max-train-bucket-per-new-data', '-max-train-bucket-size', '-initial-train-bucket-level',
-                           '-epochs-per-export', '-export-prob',
+                           '-export-prob',
                            '-stop-when-train-bucket-limited', '-quit-if-no-data', '-no-repeat-files',
                            '-required-initial-checkpoint-train-steps'},
             'shuffle_args': {'-out-dir', '-out-tmp-dir', '-batch-size', '-num-processes',
