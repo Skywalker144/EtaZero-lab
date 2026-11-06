@@ -132,6 +132,9 @@ def test_cuda_pause_restores_fast_slow_rng_scaler_and_file_cursor(tmp_path, algo
     args = list(config.train_args)
     args[args.index('-lookahead-k') + 1] = '6'
     args[args.index('-swa-period-samples') + 1] = '12'
+    if synchronous:
+        args.extend(['-epochs-per-export', '2', '-lr-cycle-low', '1', '-lr-cycle-high', '4',
+                     '-lr-cycle-up-epochs', '1', '-lr-cycle-down-epochs', '1'])
     config = replace(config, train_args=tuple(args))
     root = tmp_path / 'source'
     bootstrap = controller.run(root, config, 0)
@@ -196,6 +199,9 @@ def test_cuda_pause_restores_fast_slow_rng_scaler_and_file_cursor(tmp_path, algo
     assert first['train_state']['epoch_cursor']['batches'] == 5
     assert first['swa_model']['n_averaged'] == 0
     assert first['train_state']['swa_sample_accum'] == 20
+    if synchronous:
+        assert first['train_state']['epochs_per_export'] == 2
+        assert first['train_state']['export_cycle_counter'] == 0
     train(split, final_target if synchronous else 28, 'second.log', interrupt_after=2 if synchronous else None)
     second = load_checkpoint(split / 'train/checkpoint.ckpt')
     assert second['swa_model']['n_averaged'] == 1
@@ -212,6 +218,37 @@ def test_cuda_pause_restores_fast_slow_rng_scaler_and_file_cursor(tmp_path, algo
         assert resumed['lookahead']['counter'] == 0
     for key in ('model', 'optimizer', 'lookahead', 'swa_model', 'train_state', 'learner_runtime'):
         assert_same_state(expected[key], resumed[key], key)
+
+
+@gpu
+@pytest.mark.parametrize('algorithm', ['alphazero', 'gumbel_muzero'])
+def test_lr_cycle_advances_across_rounds_without_delaying_publication(tmp_path, algorithm):
+    config = recovery_config(tmp_path, algorithm)
+    config = replace(config, auto_plot=False, train_args=(*config.train_args,
+        '-no-lr-warmup', '-epochs-per-export', '2', '-lr-cycle-low', '1', '-lr-cycle-high', '4',
+        '-lr-cycle-up-epochs', '1', '-lr-cycle-down-epochs', '1')).validate()
+    root = tmp_path / 'run'
+    rates = []
+    samples = 0
+    for iteration in range(1, 4):
+        # Each invocation restarts the learner from its saved checkpoint.
+        result = controller.run(root, config, iteration)
+        ckpt = load_checkpoint(root / 'train/checkpoint.ckpt')
+        state = ckpt['train_state']
+        assert state['epochs_per_export'] == 2
+        assert state['export_cycle_counter'] == iteration
+        assert state['global_step_samples'] > samples
+        samples = state['global_step_samples']
+        assert 'epoch_cursor' not in state
+        rates.append({group['group_name']: group['lr'] for group in ckpt['optimizer']['param_groups']})
+        # Also publish on odd epochs, before the learner's export-cycle boundary.
+        candidates = list((root / 'models').glob(f'round-{iteration:06d}-s*'))
+        assert len(candidates) == 1
+        assert root / result['accepted_model'] == candidates[0]
+    assert rates[0] and all(rate > 0 for rate in rates[0].values())
+    for group, high in rates[0].items():
+        assert rates[1][group] == pytest.approx(high / 4)
+        assert rates[2][group] == pytest.approx(high)
 
 
 @gpu
