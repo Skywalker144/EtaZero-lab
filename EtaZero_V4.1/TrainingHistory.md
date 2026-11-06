@@ -1,7 +1,7 @@
 # KataGo Older Training History and Research
 
 * [Current Status](#current-status)
-* [History](#history)
+* [History](#older-history)
   * [Third Major Run](#third-major-run)
     * [Comparisons to Other Bots](#comparisons-to-other-bots)
   * [First and Second Major Runs](#first-and-second-major-runs)
