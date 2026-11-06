@@ -7,7 +7,7 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run
 bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/path/to/figures
 ```
 
-**训练图的算法与性能指标从原生日志读取，累计进度从已提交状态读取。** 原生 learner 的文本日志、metrics JSON、selfplay 和 gatekeeper 日志保留原样。外层只解析、筛选、汇总和绘制，不读取 SGF、checkpoint 或 NPZ 为图补充观测指标，不修改来源日志的打印频率。selfplay 完整游戏结果由原生 writer 线程逐局汇总，随排空后的 `Final ...` 日志输出；这些统计不进入搜索热路径或训练目标。累计根行数采用 `commit.state.replay.rows`，某轮观测缺失不会使后续轮次失去横轴。时间横轴采用 EtaZero 调度计时，图上明确标为 `EtaZero controller ... time`；不能把它称为 KataGo 原生计时。
+**训练图的算法与性能指标从原生日志读取，累计进度从已提交状态读取。** 绘图不改写原生 learner 的文本日志、metrics JSON、selfplay 和 gatekeeper 日志。外层只解析、筛选、汇总和绘制，不读取 SGF、checkpoint 或 NPZ 为图补充观测指标，不修改来源日志的打印频率。本版本在来源 writer 中增加完整游戏结果计数，由该线程逐局汇总，随排空后的 `Final ...` 日志输出；这些统计不进入搜索热路径或训练目标。累计根行数采用 `commit.state.replay.rows`，某轮观测缺失不会使后续轮次失去横轴。时间横轴采用 EtaZero 调度计时，图上明确标为 `EtaZero controller ... time`；不能把它称为 KataGo 原生计时。
 
 实现入口为 [plotting.py](../python/etazero/plotting.py) 与 [observations.py](../python/etazero/observations.py)。绘图仅原子替换派生图片，不改写原始日志。旧运行的外层 `metrics.json` 不作为图表数据源。
 
