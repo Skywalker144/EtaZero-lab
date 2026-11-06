@@ -1,6 +1,8 @@
 # KataGo Parallel Analysis Engine
 
-EtaZero V4 does not expose score or ownership predictions. Result values use W/D/L/NR; `winrate` is `0.5 + 0.5 * (W-L)`, whereas `winValue` is W. Requests containing `includeOwnership`, `includeOwnershipStdev`, `includeMovesOwnership`, or `includeMovesOwnershipStdev` are rejected, including `false` values.
+EtaZero V4.1 does not expose score or ownership predictions. Result values use W/D/L/NR; `winrate` is `0.5 + 0.5 * (W-L)`, whereas `winValue` is W. Requests containing `includeOwnership`, `includeOwnershipStdev`, `includeMovesOwnership`, or `includeMovesOwnershipStdev` are rejected, including `false` values.
+
+Models must use this version's four-result heads and match the game and input layout. The filenames below are illustrative compatible exports, not public upstream downloads. `antiMirror` and other removed search parameters are rejected, including when passed through `overrideSettings`.
 
 KataGo contains an engine that can be used to analyze large numbers of positions in parallel (entire games, or multiple games).
 When properly configured and used with modern GPUs that can handle large batch sizes, this engine can be much faster than using
@@ -107,9 +109,8 @@ Explanation of fields (including some optional fields not present in the above q
       * `visitCapContempt (int)`. Model the opponent of the player to move as searching with only this many visits per position (at least 2, or set to 0 to disable). Analysis values then reflect play against such an opponent. Set `visitCapContemptPla` to `B` or `W` to instead specify which player is capped. See [GTP example config](../cpp/configs/gtp_example.cfg), including for other parameters you may want to change along with this one.
       * `wideRootNoise (float)`. See documentation for this parameter in [the example config](../cpp/configs/analysis_example.cfg)
       * `ignorePreRootHistory (boolean)`. Whether to ignore pre-root history during analysis.
-      * `antiMirror (boolean)`. Whether to enable anti-mirror play during analysis. Off by default. Will probably result in biased and nonsensical winrates and other analysis values, but moves may detect and crudely respond to mirror play.
-      * `rootNumSymmetriesToSample (int from 1 to 8)`. How many of the 8 possible random symmetries to evaluate the neural net with and average. Defaults to 1, but if you set this to 2, or 8 you might get a slightly higher-quality policy at the root due to noise reduction.
-      * `humanSLProfile (string)`. Set the human-like play that KataGo should imitate. Requires that a human SL model like `b18c384nbt-humanv0.bin.gz` is being used, typically via the command line parameter `-human-model`. Available profiles include:
+      * `rootNumSymmetriesToSample (int from 1 to 8)`. The requested number of random symmetries to evaluate and average, capped by the current game's supported symmetry set. Defaults to 1, but if you set this to 2, or 8 you might get a slightly higher-quality policy at the root due to noise reduction.
+      * `humanSLProfile (string)`. Set the human-like play that KataGo should imitate. Requires that a compatible four-result human SL model trained for these profiles is being used, typically via the command line parameter `-human-model`. Available profiles include:
            * `preaz_20k` through `preaz_9d`: Imitate human players of the given rank. (based on 2016 pre-AlphaZero opening style).
            * `rank_20k` through `rank_9d`: Imitate human players of the given rank (modern opening style).
            * `preaz_{BR}_{WR}` or `rank_{BR}_{WR}`: Same, but predict how black with the rank BR and white with the rank WR would play against each other, *knowing* that the other player is stronger/weaker than them. Warning: for rank differences > 9 ranks, or drastically mis-matched to the handicap used in the game, this may be out of distribution due to lack of training data and the model might not behave well! Experiment with care.
@@ -388,8 +389,8 @@ The response to this query will echo back the same keys passed in, along with a 
       "usingFP16": "auto"
     },
     {
-      "name": "b18c384nbt-humanv0.bin.gz",
-      "internalName": "b18c384nbt-humanv0",
+      "name": "compatible-human-sl.bin.gz",
+      "internalName": "compatible-human-sl",
       "maxBatchSize": 256,
       "usesHumanSLProfile": true,
       "version": 15,
@@ -401,7 +402,7 @@ The response to this query will echo back the same keys passed in, along with a 
 
 ## Human SL Analysis Guide
 
-As of version 1.15.0, released July 2024, KataGo supports a new human supervised learning ("human SL") model `b18c384nbt-humanv0.bin.gz` that was trained on a large number of human games to predict moves by players of all different ranks and the outcomes of those games. People have only just started to experiment with the model and there might be many creative possibilities for analysis or play.
+HumanSL uses a secondary evaluator and optional player-rank metadata. The examples require a model trained for the requested profiles and exported with EtaZero V4.1's four-result heads, game and input layout. A compatible model file is not supplied by these examples. Profile names and interface support alone do not guarantee human-like play or calibrated rank strength.
 
 See also the notes on "humanSL" and other parameters within the [GTP human 5k example config](../cpp/configs/gtp_human5k_example.cfg). Although this is a GTP config, not an analysis engine config, the inline documentation about how the "humanSL" parameters behave is just as applicable to the analysis engine.
 
@@ -411,22 +412,24 @@ Below are some notes and suggestions for starting points on playing with the hum
 
 ### Setting Up to Use the Model
 
+The public upstream `b18c384nbt-humanv0.bin.gz` has the old three-result layout and cannot be loaded directly. Both the main model and secondary model must satisfy the current loader; there is no automatic conversion.
+
 There are two ways to pass in the human SL model.
 
-* The basic intended way: pass an additional argument `-human-model b18c384nbt-humanv0.bin.gz` in addition to still passing in KataGo's normal model.
-   * For example: `./katago analysis -config configs/analysis_example.cfg -model models/kata1-b28c512nbt-s7382862592-d4374571218.bin.gz -human-model models/b18c384nbt-humanv0.bin.gz`.
+* The basic intended way: pass an additional argument `-human-model compatible-human-sl.bin.gz` in addition to still passing in KataGo's normal model.
+   * For example: `./katago analysis -config configs/analysis_example.cfg -model models/compatible-main.bin.gz -human-model models/compatible-human-sl.bin.gz`.
    * Additionally, provide `humanSLProfile` via `overrideSettings` on queries. See documentation above for `overrideSettings`.
    * Additionally, make sure to request `"includePolicy":true` in the query.
    * Then, a new `humanPolicy` field will be reported on the result, indicating KataGo's prediction of how random human players matching the given humanSLProfile (e.g. 5 kyu rank) might play.
    * If no further parameters are set, KataGo's main model will still be used for all other analysis.
    * If further parameters are set, interesting *blended* usages of the KataGo's main model and the human SL model are possible. See some "recipes" below.
 
-* An alternative way: pass `-model b18c384nbt-humanv0.bin.gz` instead of KataGo's normal model, using the human model exclusively.
-   * For example: `./katago analysis -config configs/analysis_example.cfg -model models/b18c384nbt-humanv0.bin.gz`.
+* An alternative way: pass `-model compatible-human-sl.bin.gz` instead of KataGo's normal model, using the human model exclusively.
+   * For example: `./katago analysis -config configs/analysis_example.cfg -model models/compatible-human-sl.bin.gz`.
    * Additionally, provide `humanSLProfile` via `overrideSettings` on queries. See documentation above for `overrideSettings`. (In the case of GTP, set `humanSLProfile` in the GTP config, and update it at runtime via `kata-set-param` if you want to change it dynamically).
    * Then, KataGo will use the human model at the configured profile for all analysis, rather than its normal typically-superhuman analysis.
    * Note that if you are searching with many visits (or even just a few visits!), typically you can expect that KataGo will NOT match the strength of a player of the given humanSLProfile, but will still be stronger because the search will probably solve a lot of tactics that players of a weaker rank would not solve.
-      * The human SL model is trained such that using only *one* visit, and full temperature (i.e. choosing random moves from the policy proportionally often, rather than always choosing the top move), will give the closest match to how players of the given rank might play. This should be true up to mid-high dan level, at which point the raw model might start to fall short and need more than 1 visit to keep up in strength.
+      * Using only *one* visit and full temperature samples directly from the model's predicted policy. How well that matches human play, and at which ranks, depends on the compatible model's training and validation; no rank-strength calibration is established here.
 
    * If used as the main model, the human SL model may have significantly more pathologies and biases in its reported winrates than KataGo's normal model, due to the SGF data it trained on.
       * For example, in handicap games it might not report accurate winrates because in recorded human handicap SGFs, White is usually a stronger player than Black and/or some servers may underhandicap games, biasing the result.
