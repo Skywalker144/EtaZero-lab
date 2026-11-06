@@ -24,7 +24,7 @@
 
 ## 多实验臂调度
 
-`scripts/autoexp.sh`（等同于 `run.sh experiment`）启动独立逐轮控制器，每个 GPU 槽位同时运行一个实验臂；单个 learner 仍为单设备。实验目录的 `exp.cfg` 使用 `[experiment]` 配置预算与槽位，默认自动发现直接子目录中的 `run.cfg`；可选 `[arms]` 显式指定参与臂。格式与路径规则见 [配置目录](configuration.md#实验目录)。
+`scripts/autoexp.sh`（等同于 `run.sh experiment`）启动独立逐轮控制器，每个 GPU 槽位同时运行一个实验臂；单个 learner 仍为单设备。实验目录的 `exp.cfg` 使用 `[experiment]` 配置预算与槽位，默认自动发现直接子目录中的 `run.cfg`；可选 `[arms]` 显式指定参与臂。格式与路径规则见 [配置目录](configuration.md#新建实验配置目录)。
 
 ```bash
 bash scripts/autoexp.sh --config-dir /absolute/path/to/experiment \
@@ -66,6 +66,8 @@ V4 逐轮控制器当前仅生成 `train/` 和 `train.json`，没有接入可选
 优化器、SWA、样本计数和学习率状态跨轮延续。Lookahead 保留来源 epoch 收尾：将 fast 权重恢复到 slow 权重并清零同步计数，因此最后不足 k 步的 fast 增量不会进入发布权重。SWA 继续按实际消费样本间隔、在 Lookahead 已同步时更新，不因发布强制追加采样。按 epoch 的周期学习率以新定义的完整 epoch 推进；按样本数的计划继续使用实际累计消费量。每个训练轮只收尾一次、保存并产生一个候选；验证仍按下述既有数据边界执行。
 
 选择 SWA 发布时，若 `n_averaged` 仍为零则警告并跳过候选，继续后续采样和训练，不回退到普通权重。已有有效 SWA 但本轮未更新时，发布已有的平均权重。候选保存在 `torchmodels_toexport/round-N-s样本数-d累计数据行数/`；续训使用 `train/checkpoint.ckpt` 的完整训练状态。
+
+周期学习率在 `train.cfg` 中同时配置 `epochs-per-export` 和四个 `lr-cycle-*` 选项；周期长度必须为正整数，且不小于上升与下降 epoch 数之和。同步控制器始终传入 `-no-export`，所以这里的 `epochs-per-export` 只控制学习率周期，不改变外层每个训练轮产生候选的频率。一个有训练更新的轮次推进一个 epoch，零训练轮不推进；周期计数随 checkpoint 跨轮延续，中途恢复不会重新开始周期。学习率公式及互斥约束仍由来源 learner 处理；未配置周期学习率时保留既有学习率计划。
 
 `result.json` 记录采样计划、实际 rows/games、文件列表、快照 batch 数、可用及剩余额度、实际步数和完成 epoch 数（训练轮为 1，零训练轮为 0）。`state.json.completed_rounds` 保存最大已完成 iteration 编号，新运行为 -1。
 
