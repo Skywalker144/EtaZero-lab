@@ -33,6 +33,42 @@ def save_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+def prune_shuffle_snapshots(root, state, *, protected=()):
+    """Keep two committed snapshots; the caller must hold the run directory lock.
+
+    An unfinished round is outside the committed range. V4.1 finishes its epoch
+    before committing a round, so older committed inputs are no longer needed.
+    Explicit protections also allow maintenance of runs with older readers.
+    """
+    directory = Path(root) / 'shuffleddata'
+    try:
+        snapshots = sorted((path for path in directory.iterdir()
+                            if path.name.isascii() and path.name.isdigit()
+                            and int(path.name) <= state['completed_rounds']
+                            and not path.is_symlink() and path.is_dir()),
+                           key=lambda path: int(path.name))
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        print(f'WARNING: shuffle snapshot cleanup failed: {error}', file=sys.stderr, flush=True)
+        return []
+    protected = set(protected)
+    removed = []
+    for path in snapshots[:-2]:
+        if path.name in protected or int(path.name) == state['active_round']:
+            continue
+        try:
+            shutil.rmtree(path)
+            removed.append(path.name)
+        except OSError as error:
+            # A partially removed old directory remains eligible on the next call.
+            print(f'WARNING: could not remove old shuffle snapshot {path}: {error}',
+                  file=sys.stderr, flush=True)
+    if removed:
+        print(f'Removed {len(removed)} old shuffle snapshots from {directory}', flush=True)
+    return removed
+
+
 def execute(argv, log, *, lock_fd=None, stopping=None):
     """Run source stages; CPU exporters reuse this process's imports."""
     if stopping is not None:
@@ -541,6 +577,7 @@ def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights
         if not state['timing_valid']:
             print('WARNING: cumulative timing is incomplete; budgets use observed wall time, not equal-time comparison data',
                   file=sys.stderr, flush=True)
+        prune_shuffle_snapshots(root, state)
         plotted = False
         while state['active_round'] is not None or iterations is None or state['completed_rounds'] < iterations:
             stopping.check()
@@ -549,6 +586,7 @@ def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights
                       f'{state["elapsed_seconds"]:.3f}s >= {max_seconds:.3f}s', flush=True)
                 break
             run_round(root, config, state, binary, (lock.fileno(), *inherited_fds), stopping=stopping)
+            prune_shuffle_snapshots(root, state)
             refresh_plots(root, config)
             plotted = True
         if not plotted and state['completed_rounds'] >= 0:
