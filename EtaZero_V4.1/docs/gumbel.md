@@ -40,7 +40,7 @@ Gumbel 按约定使用 fresh tree，每次 `beginSearch` 都清树，`makeMove` 
 
 固定 Mctx 的 `policies.gumbel_muzero_policy` 从本次 root 输入和新 Gumbel 噪声发起搜索；`action_selection.gumbel_muzero_root_action_selection` 用根边访问之和作为 considered-visit 表的阶段索引。当前 C++ 调度器也从零预约并要求完成计数与实际根边访问一致。KataGo 的原生跨手提升会保留子树访问及加权价值；直接保留这些访问、只重置 SH 调度器，会使阶段索引、剩余预算和最终胜出条件不一致，旧访问还会进入 completed Q 的混合与缩放。只清根边计数也不是等价修复，因为子树仍包含旧统计。
 
-因此保留 fresh tree，不为继承树访问重新定义 SH 阶段、预算和 completed Q。Gumbel 的同根续搜及跨手复用不属于当前接入要求；这是 [目标约定](katago-target.md) 中明确允许的算法差异。普通 PUCT 继续使用来源树复用，不能将这一差异扩展到其他共有机制。
+因此保留 fresh tree，不为继承树访问重新定义 SH 阶段、预算和 completed Q。Gumbel 的同根续搜及跨手复用不属于当前接入要求。普通 PUCT 继续使用来源树复用，不能将这一差异扩展到其他共有机制。
 
 来源常规 selfplay 本就要求清树，使新根噪声生效；但零训练权重的 cheap-search 路径可允许复用，Gumbel 仍清树。比赛、GTP、analysis 及该 cheap-search 分支因此与来源复用行为有差异，不能据常规训练清树推断所有路径已经对齐，也不能据固定 visits 推断相同耗时或棋力。
 
