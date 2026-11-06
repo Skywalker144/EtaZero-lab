@@ -114,7 +114,7 @@ bash scripts/run.sh run --config configs/checks/source_go \
 
 ## 文件与验证
 
-运行目录保存 `config.json`、`source.json` 和包括未提交适配代码的 `source.tar.gz`；`rounds/` 保存逐轮输入模型目录、阶段日志和结果，`selfplay/` 保存原始数据，`shuffleddata/` 保存训练快照，`train/` 保存来源 checkpoint，`models/` 保存不可覆盖的发布模型。显式提供初始权重时，`initial/checkpoint.ckpt` 保存原始零样本状态；MuZero 的 `muzero_network.json` 是交给 learner 的网络配置副本。阶段失败不推进完成轮数或 accepted 指针；已经导出的候选与已提交 learner checkpoint 保留。配置 `gatekeeper_config` 时使用独立原生比赛配置，拒绝候选不回滚训练；规则和恢复范围见 [调度与恢复](docs/controller.md)。
+运行目录保存 `config.json`、`source.json` 和包括未提交适配代码的 `source.tar.gz`；`rounds/` 保存逐轮输入模型目录、阶段日志和结果，`selfplay/` 保存原始数据，`shuffleddata/` 保留最近两轮已提交训练快照及未完成轮次的快照，`train/` 保存来源 checkpoint，`models/` 保存不可覆盖的发布模型。显式提供初始权重时，`initial/checkpoint.ckpt` 保存原始零样本状态；MuZero 的 `muzero_network.json` 是交给 learner 的网络配置副本。阶段失败不推进完成轮数或 accepted 指针；已经导出的候选与已提交 learner checkpoint 保留。配置 `gatekeeper_config` 时使用独立原生比赛配置，拒绝候选不回滚训练；规则和恢复范围见 [调度与恢复](docs/controller.md)。
 
 ```bash
 conda run --no-capture-output -n pytorch ctest --test-dir build --output-on-failure
