@@ -1,9 +1,8 @@
 ## KataGo GTP Extensions
 
-V4 does not report predicted scores or ownership. Standard GTP `final_score` requires a completed, non-resignation rules terminal; unfinished positions return an error.
+EtaZero V4.1 does not report predicted scores or ownership, or accept ownership analysis options. Standard GTP `final_score` requires a completed, non-resignation rules terminal. `final_status_list` also requires a finished game and reports rule-based status; unfinished positions return an error.
 
-
-EtaZero V4 does not expose ownership predictions or accept ownership analysis options. `final_status_list` requires a finished game and reports rule-based status; unfinished positions return an error.
+Models must use this version's W/D/L/NR heads and match the game and input layout. Public upstream three-result models, including `b18c384nbt-humanv0.bin.gz`, cannot be loaded directly. HumanSL commands require a compatible model; the availability of rank profiles does not establish that a model has learned those ranks. Game-specific setup, actions and symmetry limits are described in [Web and native sessions](web.md) and [Xiangqi](xiangqi.md). Removed parameters such as `friendlyPassOk`, `antiMirror` and `genmoveAntiMirror` are rejected.
 
 In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/gtp/), KataGo supports a few additional commands:
 
@@ -18,7 +17,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
       * Part of the reason for this command is because modern neural-net-based bots, KataGo included, may mildly bias their move suggestions based on the recent moves. This command provides a way to set initial board positions (e.g. whole-board tsumego) without using successive `play` commands which might imply a ridiculous move history.
       * It is NOT recommended to use this command to place the starting stones for handicap games. Use the standard GTP commands `fixed_handicap`, `place_free_handicap`, and/or `set_free_handicap` instead.
       * Calling `set_position` with zero arguments is equivalent to calling `clear_board`.
-      * Fails, reports a normal GTP error message, and leaves the board state unchanged if any vertex is specified more than once or if the final configuration would contain stones with zero liberties.
+      * Fails, reports a normal GTP error message, and leaves the board state unchanged if any vertex is specified more than once, or for Go if the final configuration would contain stones with zero liberties. Point-placement games preserve zero-liberty stones; Xiangqi uses its own state setup commands described in [Xiangqi](xiangqi.md).
    * `clear_cache`
       * Clears the search tree and the NN cache. Can be used to force KataGo to re-search a position freshly, re-randomizing the search on that position, or to free up memory.
    * `stop`
@@ -27,7 +26,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
       * Report what komi KataGo is currently set to use.
    * `kata-get-rules`
       * Returns a JSON dictionary indicating the current rules KataGo is using.
-      * For example: `{"hasButton":false,"ko":"POSITIONAL","scoring":"AREA","suicide":true,"tax":"NONE","whiteHandicapBonus":"N-1","friendlyPassOk":true}`
+      * For example: `{"hasButton":false,"ko":"POSITIONAL","scoring":"AREA","suicide":true,"tax":"NONE","whiteHandicapBonus":"N-1"}`
       * See https://lightvector.github.io/KataGo/rules.html for a detailed description of the rules implemented.
       * Explanation of individual fields:
          * `ko: ("SIMPLE" | "POSITIONAL" | "SITUATIONAL")` - The rule used for preventing cycles.
@@ -36,22 +35,21 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
          * `suicide: (true | false)` - Whether multi-stone suicide is legal.
          * `hasButton: (true | false)` - Whether [button Go](https://senseis.xmp.net/?ButtonGo) is being used.
          * `whiteHandicapBonus ("0" | "N-1" | "N")` - In handicap games, whether white gets 0, N-1, or N bonus points, where N is the number of black handicap stones.
-         * `friendlyPassOk: (true | false)` - When false, indicates that in this ruleset a player should capture all dead stones before passing.
       * **NOTE: It is possible that more fields and more options for these fields will be added in the future.**
    * `kata-set-rules RULES`
       * Sets the current rules KataGo should be using. Does NOT otherwise affect the board position.
       * `RULES` should either be a JSON dictionary in the same format of `kata-get-rules`, or be a shorthand string like `tromp-taylor`. Some possible shorthand strings are:
-         * `tromp-taylor  : Equivalent to {"hasButton":false,"ko":"POSITIONAL", "scoring":"AREA",     "suicide":true, "tax":"NONE","whiteHandicapBonus":"0","friendlyPassOk":false}`
-         * `chinese       : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N","friendlyPassOk":true}`
-         * `chinese-ogs   : Equivalent to {"hasButton":false,"ko":"POSITIONAL", "scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N","friendlyPassOk":true}`
-         * `chinese-kgs   : Equivalent to {"hasButton":false,"ko":"POSITIONAL", "scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N","friendlyPassOk":true}`
-         * `japanese      : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"TERRITORY","suicide":false,"tax":"SEKI","whiteHandicapBonus":"0","friendlyPassOk":true}`
-         * `korean        : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"TERRITORY","suicide":false,"tax":"SEKI","whiteHandicapBonus":"0","friendlyPassOk":true}`
-         * `stone-scoring : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"AREA",     "suicide":false,"tax":"ALL", "whiteHandicapBonus":"0","friendlyPassOk":true}`
-         * `aga           : Equivalent to {"hasButton":false,"ko":"SITUATIONAL","scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N-1","friendlyPassOk":true}`
-         * `bga           : Equivalent to {"hasButton":false,"ko":"SITUATIONAL","scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N-1","friendlyPassOk":true}`
-         * `new-zealand   : Equivalent to {"hasButton":false,"ko":"SITUATIONAL","scoring":"AREA",     "suicide":true, "tax":"NONE","whiteHandicapBonus":"0","friendlyPassOk":true}`
-         * `aga-button    : Equivalent to {"hasButton":true, "ko":"SITUATIONAL","scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N-1","friendlyPassOk":true}`
+         * `tromp-taylor  : Equivalent to {"hasButton":false,"ko":"POSITIONAL", "scoring":"AREA",     "suicide":true, "tax":"NONE","whiteHandicapBonus":"0"}`
+         * `chinese       : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N"}`
+         * `chinese-ogs   : Equivalent to {"hasButton":false,"ko":"POSITIONAL", "scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N"}`
+         * `chinese-kgs   : Equivalent to {"hasButton":false,"ko":"POSITIONAL", "scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N"}`
+         * `japanese      : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"TERRITORY","suicide":false,"tax":"SEKI","whiteHandicapBonus":"0"}`
+         * `korean        : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"TERRITORY","suicide":false,"tax":"SEKI","whiteHandicapBonus":"0"}`
+         * `stone-scoring : Equivalent to {"hasButton":false,"ko":"SIMPLE",     "scoring":"AREA",     "suicide":false,"tax":"ALL", "whiteHandicapBonus":"0"}`
+         * `aga           : Equivalent to {"hasButton":false,"ko":"SITUATIONAL","scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N-1"}`
+         * `bga           : Equivalent to {"hasButton":false,"ko":"SITUATIONAL","scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N-1"}`
+         * `new-zealand   : Equivalent to {"hasButton":false,"ko":"SITUATIONAL","scoring":"AREA",     "suicide":true, "tax":"NONE","whiteHandicapBonus":"0"}`
+         * `aga-button    : Equivalent to {"hasButton":true, "ko":"SITUATIONAL","scoring":"AREA",     "suicide":false,"tax":"NONE","whiteHandicapBonus":"N-1"}`
       * KataGo does NOT claim that the above rules are _exactly_ a match. These are merely the _closest_ settings that KataGo has to those countries' rulesets.
       * A small number of combinations are currently not supported by even the latest neural nets, for example `scoring TERRITORY` and `hasButton true`.
       * Older neural nets for KataGo (nets released before v1.3) will also not support many of the options, and setting these rules will fail if these neural nets are being used.
@@ -130,7 +128,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
             * `prior` - The policy prior of the move, as a float in [0,1].
             * `drawValue` - The predicted probability of an ordinary draw.
             * `noResultValue` - The predicted probability that the game ends in a no-result (e.g. triple ko/long cycle), as a float in [0,1]. Only present if `noResultValue true` was requested. Relevant for rulesets like Japanese rules without superko.
-            * `utility` - The utility of the move, using result utility W−L (D and NR have zero utility), as a float in [-C,C] where C is the maximum possible utility.
+            * `utility` - The utility of the move, using white-perspective result utility `winLossUtilityFactor * (W−L) + noResultUtilityForWhite * NR`, sign-adjusted to the reporting player (D has zero utility), as a float in [-C,C] where C is the maximum possible utility.
             * `lcb` - The [LCB](https://github.com/leela-zero/leela-zero/issues/2282) of the move's winrate, as a float in [0,1].
             * `utilityLcb` - The LCB of the move's utility.
             * `weight` - The total weight of the visits invested into the move. The average weight of visits may be lower when less certain, and larger when more certain.
@@ -142,7 +140,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
          * `rootInfo` - Top level field that follows after all `info` fields, followed by key-value pairs. Current key-value pairs:
             * **NOTE: Consumers of this data should attempt to be robust to the order of these fields, as well as to possible addition of new fields in the future.**
             * `visits` - The number of visits invested into the search so far.
-            * `utility` - The utility of the move, using result utility W−L (D and NR have zero utility), as a float in [-C,C] where C is the maximum possible utility.
+            * `utility` - The utility of the move, using white-perspective result utility `winLossUtilityFactor * (W−L) + noResultUtilityForWhite * NR`, sign-adjusted to the reporting player (D has zero utility), as a float in [-C,C] where C is the maximum possible utility.
             * `winrate` - The average winrate of the search overall for the player to move, as a float in [0,1].
             * `weight` - The total weight of the visits invested into the search. The average weight of visits may be lower when less certain, and larger when more certain.
             * `rawStWrError` - The short-term uncertainty the raw neural net believed there would be in the winrate of the position, prior to searching it.
@@ -176,7 +174,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
      * The same note about pondering as for `kata-search` and `kata-search_cancellable` applies here. GTP controllers should reply with the `play` command confirming the move they wish to make as soon as possible.
 
   * `kata-raw-nn [COLOR] SYMMETRY [OPTIMISM]`
-     * `SYMMETRY` should be an integer from 0-7 or "all".
+     * `SYMMETRY` must be a valid symmetry ID from 0-7 for the current game, or "all" to enumerate only that game's supported symmetries. Unsupported individual IDs are rejected.
      * `COLOR` is optional and should be `b`/`black` or `w`/`white`. If specified, it must come before `SYMMETRY`, and the raw evaluation is performed as if it were that player's turn to move (similar to how `genmove COLOR` specifies the player). If omitted, the current player to move is used.
      * `OPTIMISM` is optional and, if specified, must come after `SYMMETRY`. It is a value from 0 to 1 that overrides the policy optimism used for the evaluation. If omitted, the configured `rootPolicyOptimism` is used.
      * Reports the result of a raw neural net evaluation from KataGo, or multiple raw evaluations in the case of "all".
@@ -184,21 +182,23 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
      * Possible keys are currently
      ```
      whiteWin (1 float)  - believed probability that white wins
-     whiteDraw (1 float) - believed probability of an ordinary draw
+     draw (1 float) - believed probability of an ordinary draw
      whiteLoss (1 float) - believed probability that black wins
      noResult (1 float)  - believed probability of noresult due to triple ko
      varTimeLeft (1 float) - guess of how "soon" on average in moves until the game's winner/loser will become clear. This value has not been heavily studied, but could still be meaningful for research.
      shorttermWinlossError (1 float) - predicted square root of the mean squared difference between (whiteWin-whiteLoss) and the MCTS (whiteWin-whiteLoss) in low-playout noisy selfplay after a few turns. Generally unavailable for nets prior to December 2020, in which case this value will always equal -1.
      policy (boardXSize * boardYSize floats, including possibly NAN for illegal moves) - policy distribution for next move
-     policyPass (1 floats) - policy probability for the pass move
+     policyPass (1 float) - policy probability for Go pass; NAN for point-placement games without pass
      ```
+     Xiangqi uses `policy` followed by action-coordinate/probability pairs over its joint action domain, with NAN for illegal actions, and omits `policyPass`; it does not use the point-grid policy layout above.
+
      Any consumers of this data should attempt to be robust to any pattern of whitespace within the output, as well as possibly the future addition of new keys and values. The ordering of the keys is also not guaranteed - consumers should be capable of handling any permutation of them.
 
   * `kata-raw-human-nn [COLOR] SYMMETRY`
      * Similar to `kata-raw-nn`, but uses the human SL model for evaluation.
-     * `SYMMETRY` should be an integer from 0-7 or "all".
+     * `SYMMETRY` must be a valid symmetry ID from 0-7 for the current game, or "all" to enumerate only that game's supported symmetries. Unsupported individual IDs are rejected.
      * `COLOR` is optional and behaves as in `kata-raw-nn`.
-     * This command is only available if a human SL model was provided using the `-human-model` command line option. Typically, this should be a model like `b18c384nbt-humanv0.bin.gz`.
+     * This command is only available if a human SL model was provided using the `-human-model` command line option. It must be a compatible four-result model with the appropriate input and metadata layout.
      * Uses the same W/D/L/NR and policy fields as `kata-raw-nn`, but does not report `varTimeLeft`.
 
   * `kata-get-param PARAM`, `kata-set-param PARAM VALUE`
@@ -210,9 +210,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
         * `numSearchThreads (int)`. The number of CPU threads to use in parallel, see documentation for this parameter in [the example config](../cpp/configs/gtp_example.cfg).
         * `maxVisits (int), maxPlayouts (int), maxTime (float)`. Set or override one or more limits on the search, see [the example config](../cpp/configs/gtp_example.cfg). KataGo will obey the *combination* of all three.
         * `analysisIgnorePreRootHistory (boolean)`. Whether to ignore pre-root history during analysis.
-        * `genmoveAntiMirror (boolean)`. Whether to enable anti-mirror play during genmove.
-        * `antiMirror (boolean)`. Whether to enable anti-mirror play during analysis.
-        * `humanSLProfile (string)`. Set the human-like play that KataGo should imitate. Requires that a human SL model like `b18c384nbt-humanv0.bin.gz` is being used, typically via the command line parameter `-human-model`. Available profiles include:
+        * `humanSLProfile (string)`. Set the human-like play that KataGo should imitate. Requires that a compatible four-result human SL model trained for the requested profiles is being used, typically via the command line parameter `-human-model`. Available profiles include:
            * `preaz_20k` through `preaz_9d`: Imitate human players of the given rank. (based on 2016 pre-AlphaZero opening style).
            * `rank_20k` through `rank_9d`: Imitate human players of the given rank (modern opening style).
            * `proyear_1800` through `proyear_2023`: Imitate pro and strong insei moves based on historical game records from the specified year and surrounding years.
