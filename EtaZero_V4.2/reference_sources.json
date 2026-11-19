@@ -1,0 +1,83 @@
+{
+  "KataGo": {
+    "root": "/home/sky/RL/SkyZero-lab/KataGo",
+    "commit": "d91ea855110dae533f0aada947b2b7d78cc8a4e1",
+    "import": "Complete git archive of the fixed commit, without repository metadata or local build artifacts",
+    "license": "LICENSE",
+    "readme": "KATAGO_README.md"
+  },
+  "EtaZero_placement_rules": {
+    "root": "../EtaZero_V3.4",
+    "repository_commit": "31ed3277622d286b176bee20611ecd2bd08e7adc",
+    "files": [
+      "cpp/game/gomoku.cpp",
+      "cpp/game/hex.cpp"
+    ],
+    "adaptation": "Renju continuation analysis and Hex connectivity adapted to source Board, Rules and BoardHistory; no runtime dependency on V3.4"
+  },
+  "Mctx": {
+    "repository": "https://github.com/google-deepmind/mctx",
+    "commit": "428bfb7e1c931715cd3d74f9c65e9991afd86df8",
+    "sha256": {
+      "mctx/_src/action_selection.py": "6b4039bd6a436a5efa67cff6c74026016892f9fd6466f65a62b8b396f1c87b50",
+      "mctx/_src/qtransforms.py": "71b827f5b32b2edfd2ec67ed90f94b2d37f87ab5eb44b3290702ed178e354c99",
+      "mctx/_src/seq_halving.py": "a42351c2a800f9c13755ae03aea12f4ff3422c68779347a6d5516ceffc71faeb",
+      "mctx/_src/policies.py": "3892bf45b18631167a7c508bcb9c5eea269b97c08c97583cec69e95a8cd5d346",
+      "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "adaptation": "Completed-Q, improved policy, deterministic interior rule, and sequential-halving visit schedule; C++ adaptation in cpp/search/gumbel.cpp. Includes EtaZero parallel root reservations. Adapted via EtaZero_V3.4 cpp/search/gumbel.cpp; no runtime dependency on that version. Interior selection is connected as an optional alternative to source PUCT; Q uses completed visits and allocation deficits include in-flight work.",
+    "license": "licenses/Mctx.txt"
+  },
+  "MiniZero": {
+    "repository": "https://github.com/rlglab/minizero",
+    "commit": "394b2e483d00cb658d5a24ccca297f864c3280c7",
+    "sha256": {
+      "minizero/network/py/muzero_network.py": "6816d072a71d7eb54128b09d57724a5aab9d96428e80faced6209fb865cb2232",
+      "LICENSE": "4974455b3117070339506dd6ab4d30709edb7a7e70133297b4ee1323d7be264a"
+    },
+    "license": "licenses/MiniZero.txt",
+    "adaptation": "Masked latent min/max with small-span guard, adapted via EtaZero_V3.4 python/etazero/models/muzero/network.py. Runtime implementations are python/katago/train/muzero_model.py and cpp/neuralnet/muzerohelpers.cu."
+  },
+  "EtaZero_MuZero": {
+    "root": "../EtaZero_V3.4",
+    "repository_commit": "31ed3277622d286b176bee20611ecd2bd08e7adc",
+    "files": [
+      "python/etazero/models/muzero/network.py",
+      "python/etazero/train/muzero/training.py",
+      "cpp/neuralnet/muzerohelpers.h",
+      "cpp/neuralnet/muzerohelpers.cu"
+    ],
+    "adaptation": "Latent mask/action encoding, normalization kernels and unroll gradient boundaries. V4 reuses its own source Model, Metrics and CUDA learned layers directly; no runtime dependency on V3.4."
+  },
+  "Pikafish": {
+    "repository": "https://github.com/official-pikafish/Pikafish",
+    "commit": "545c4e3b251afbb94f493c6c5f32549f900e76fd",
+    "scope": "Position, legal move generation and full-history adjudication only; no alpha-beta search or evaluation network",
+    "license": "licenses/Pikafish.txt",
+    "adaptation": "Vendored from EtaZero_V3.4 cpp/external/pikafish, including its state-copy/rebinding API, adjudication reasons and removal of alpha-beta prefetch hooks. The V4 wrapper owns all history; no runtime dependency on V3.4."
+  },
+  "KataGomo_opening": {
+    "repository": "https://github.com/hzyhhzy/KataGomo",
+    "commit": "df152116e3787c75c6a3de099d261ca092b7dfc1",
+    "sha256": {
+      "cpp/game/randomopening.cpp": "7e94a55e8bbbf152d1b5f45f63333c54e9bff1c93850e3a40d597239f46756b5",
+      "cpp/program/play.cpp": "c119b1aa4fc64e32d96f723ce0539b3ecf523a7ca041f4d0d2b79a8c19288f87",
+      "cpp/program/playutils.cpp": "f87f975c8564f84f98da4005e24a1182fe94982d6babced078ce30ebba09b0c6",
+      "cpp/program/playsettings.cpp": "c9f17dc6a2ae031bbfdea624cbf05d8c1014929c909d20f255d8e08b521899b1"
+    },
+    "license": "licenses/KataGomo.txt",
+    "adaptation": "No-VC Gomoku opening pipeline: random skeleton, candidate rejection sampling, source selfplay/match probability defaults, random-evaluator cold start, and exponential policy initialization with existing-move compensation and source mean/SGF/temperature settings. Native BoardHistory rules, four-result W-L, shared ordinary/MuZero initial inference and cancellation. Strict positive cumulative sampling retains the documented numerical fix for source negative epsilon selecting a zero-weight point; VC-specific rules/distributions are not included."
+  },
+  "KataGomo_Hex_opening": {
+    "repository": "https://github.com/hzyhhzy/KataGomo",
+    "commit": "4bbf953596e96a78daa2008811187a61381a886f",
+    "sha256": {
+      "cpp/game/randomopening.cpp": "efed8b11a4a5fd0ac240ed5479a7f0d476bc9ac36a8723017d83b1c49d0fa177",
+      "cpp/program/play.cpp": "19901c522324f7fa73ca5dd0b6447fd1427d8e494019f1adef74a3da68ac3460",
+      "cpp/program/playsettings.cpp": "b655043090aac009b374b44d92eaccfc0cf277c3a8b6f9417f9a6562da557f2c",
+      "cpp/program/playutils.cpp": "64dbe67c8da258c5b9ac0ff64d0a9987fe32c36ecb9d077fd57aa5d32325e2d5"
+    },
+    "license": "licenses/KataGomo.txt",
+    "adaptation": "Hex selfplay opening pipeline: source special templates (including size conditions and value filtering), random fill, white-model first-move rejection sampling, random-evaluator cold start, and exponential policy initialization with existing-move compensation inside the scale. Uses native BoardHistory setup stones without captures or fabricated moves, shared ordinary/MuZero initial evaluation, and cancellation. Hex profiles use scripts/hex19x3 opening parameters and board-size weights. Classic Hex rules only, no source maxMoves variant. Imported/fork starts are preserved. Match/gatekeeper retain first-move-only defaults unless setup probabilities are explicitly configured; interactive GTP suggestions remain move-prefix-only."
+  }
+}
