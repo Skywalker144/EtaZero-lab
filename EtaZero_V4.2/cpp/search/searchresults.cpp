@@ -77,7 +77,7 @@ void Search::blendHumanPolicy(const SearchNode& node, vector<Loc>& locs, vector<
           humanProb = 0.0;
 
         shiftedPolicy[moveLoc] = humanProb;
-        selfUtilities[moveLoc] = (rootPla == P_WHITE ? 1 : -1) * child->stats.utilityAvg.load(std::memory_order_acquire);
+        selfUtilities[moveLoc] = (node.nextPla == P_WHITE ? 1 : -1) * child->stats.utilityAvg.load(std::memory_order_acquire);
         selfUtilityMax = std::max(selfUtilityMax, selfUtilities[moveLoc]);
         selfUtilitySum += selfUtilities[moveLoc];
       }
@@ -567,6 +567,7 @@ bool Search::getNodeRawNNValues(const SearchNode& node, ReportedSearchValues& va
   if(winLossValue < -1.0) winLossValue = -1.0;
   values.winLossValue = winLossValue;
 
+  values.utility = getUtilityFromNN(*nnOutput);
   values.weight = computeWeightFromNNOutput(nnOutput);
   values.visits = 1;
 
@@ -1718,12 +1719,7 @@ bool Search::getAnalysisJson(
 
   // Raw policy prior
   if(includePolicy) {
-    {
-      SearchPolicyBuffer<float> policyProbsStorage(getPolicyBufferSize());
-      float* policyProbs = policyProbsStorage.data();
-      if(!hist.rules.isGo() && hist.isGameFinished)
-        std::fill(policyProbs,policyProbs+policySize,-1.0f);
-      else if(!getPolicy(policyProbs)) return false;
+    auto policyJson = [&](const float* policyProbs) {
       json policy = json::array();
       if(hist.rules.isXiangqi()) {
         for(int pos = 0; pos < policySize; pos++)
@@ -1740,29 +1736,15 @@ bool Search::getAnalysisJson(
         int passPos = NNPos::locToPos(Board::PASS_LOC, board.x_size, nnXLen, nnYLen);
         policy.push_back(Global::roundDynamic(policyProbs[passPos],OUTPUT_PRECISION));
       }
-      ret["policy"] = policy;
-    }
-
-    if(humanOutput != NULL) {
-      const float* policyProbs = humanOutput->getPolicyProbsMaybeNoised();
-      json policy = json::array();
-      if(hist.rules.isXiangqi()) {
-        for(int pos = 0; pos < policySize; pos++)
-          policy.push_back(Global::roundDynamic(policyProbs[pos],OUTPUT_PRECISION));
-      }
-      else {
-        for(int y = 0; y < board.y_size; y++) {
-          for(int x = 0; x < board.x_size; x++) {
-            int pos = NNPos::xyToPos(x, y, nnXLen);
-            policy.push_back(Global::roundDynamic(policyProbs[pos],OUTPUT_PRECISION));
-          }
-        }
-
-        int passPos = NNPos::locToPos(Board::PASS_LOC, board.x_size, nnXLen, nnYLen);
-        policy.push_back(Global::roundDynamic(policyProbs[passPos],OUTPUT_PRECISION));
-      }
-      ret["humanPolicy"] = policy;
-    }
+      return policy;
+    };
+    SearchPolicyBuffer<float> policyProbsStorage(getPolicyBufferSize());
+    float* policyProbs = policyProbsStorage.data();
+    if(!hist.rules.isGo() && hist.isGameFinished)
+      std::fill(policyProbs,policyProbs+policySize,-1.0f);
+    else if(!getPolicy(policyProbs)) return false;
+    ret["policy"] = policyJson(policyProbs);
+    if(humanOutput != NULL) ret["humanPolicy"] = policyJson(humanOutput->getPolicyProbsMaybeNoised());
   }
 
   return true;
