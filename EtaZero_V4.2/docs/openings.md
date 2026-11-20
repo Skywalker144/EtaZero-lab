@@ -97,3 +97,5 @@ stdout 输出带字段名的 CSV，保留前两列的请求初始化手数和白
 [test_random_initializations.py](../tests/test_random_initializations.py) 使用固定的零手／110 手前缀请求验证真实搜索和 policy 转移，覆盖来源 Go 缺省行为、非围棋终局、有限／无限运行和普通／MuZero 服务的中断退出。
 
 [test_generated_initializations.py](../tests/test_generated_initializations.py) 检查六棋类／四算法的真实模型导出与重新加载、有效对称和无气子保留、矩形棋盘着法变换、象棋完整历史再次进入 selfplay writer，以及中断后的文件与模型服务清理。象棋状态镜像的循环及终局裁定另由原生规则测试核对。
+
+Hex 的特殊模板和随机填盘均要求生成未终局的开局。如已有一方连通，在已选分支重新抽样；等待期间仍响应取消。
