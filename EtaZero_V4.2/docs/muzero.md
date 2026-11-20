@@ -34,7 +34,7 @@ prediction 只读取 latent。目录配置的 `prediction_blocks` 默认 0，对
 
 来源 `shuffle.py -muzero-unroll-steps K` 在加载 raw shard 时展开 K 步目标，再与根数组一起使用来源的窗口、keep 比例、同一排列、分桶、合并及多 wave 流程。改变 K 不需要重新采样原始对局。选定文件窗口后、起点 keep 采样前，按 game hash 去重计算真实主线位置的平均未取整权重；均值和 K 写入来源 snapshot JSON。根已由 multiplicity 加权，不能再次乘主线采样权重；真实未来步乘自己的未取整权重除以该窗口均值，再保留来源 `trainingWeight`。终局和截断末状态不计入均值，side 也不计入主线均值。
 
-side position 只在根有效，不沿原对局伪造分支后续。主线的真实终局使用终局四结果延伸吸收态，按每步执色交换 W/L，D/NR 不变；策略为静态动作域均匀分布，Q/visits 为零，未来棋盘沿用终局棋盘并翻转视角。吸收态动作由 reader 在每次消费时从根的静态域采样，包含 Go pass，不使用真实终局合法性裁剪。手数截断只展开到最后观测状态：该末状态保留 TD 末端目标，屏蔽不存在的 policy、终局及空间辅助监督，后续步骤不进入 dynamics 或 BatchNorm。Go 真实步骤的来源手数上限裁定标签不因此改变，但人工裁定不会被当作真实终局延伸。
+side position 只在根有效。其主价值来自分支自身的搜索，原对局触及手数上限时仍参与训练。主线的真实终局使用终局四结果延伸吸收态，按每步执色交换 W/L，D/NR 不变；策略为静态动作域均匀分布，Q/visits 为零，未来棋盘沿用终局棋盘并翻转视角。吸收态动作由 reader 在每次消费时从根的静态域采样，包含 Go pass，不使用真实终局合法性裁剪。手数截断只展开到最后观测状态：该末状态保留 TD 末端目标，屏蔽不存在的 policy、终局及空间辅助监督，后续步骤不进入 dynamics 或 BatchNorm。Go 真实步骤的来源手数上限裁定标签不因此改变，但人工裁定不会被当作真实终局延伸。
 
 `read_npz_muzero_data` 复用来源有序文件预取，按每文件整 batch 消费并丢弃不足一 batch 的尾部，根特征在预取线程解包。future 目标保持紧凑存储，到 batch 消费时转为训练张量。根、所有动作和 future 目标使用同一次来源对称采样，Hex 只使用恒等/180°，象棋只使用恒等/物理左右镜像；Go 与象棋的历史 dropout 只应用于根，象棋复用普通 reader 的七帧历史遮蔽及可见帧数更新。象棋吸收态动作从完整 2086 联合动作域采样。RNG 由 learner 持有并保存到 checkpoint，预取线程不推进它。普通 AlphaZero reader 明确拒绝 MuZero 文件。
 
@@ -72,7 +72,7 @@ PCR/cheap、reduce visits、surprise、主线 reanalysis、side 搜索、fork/hi
 
 三组件可分别配置归一化，因此自适应 weight decay 使用各组件的初始范数与观测范数，梯度裁剪按各组件的来源阈值独立执行；不把 prediction 的 norm 设置或范数比例用于 representation/dynamics。全局 gnorm 上界仅用于报告，没有第二次整体裁剪。来源共有公式与调用频率保留；拆分范数和裁剪域是三网络扩展。既有 `wdnormal` 指标对应 prediction，其他组件的真实衰减保存在 optimizer 参数组中。组件梯度范数及 excess 统计沿用来源 `detensorify_metrics` 的有效性判断，在一次设备传输后处理标量；失效批次不计入对应统计的平均，不补零。
 
-编译作用于三个组件的 forward 和来源 loss，展开的 CPU 有效行控制留在编译图外。AMP 包含网络 forward，来源后处理与 loss 保持 FP32。attention penalty 在每步 forward 后取得，未来步采用与 loss 相同的反向系数；未执行的 dynamics 不产生 penalty。日志的普通准确率、权重和样本数保持根语义，`mu_root_*` 与 `mu_recurrent_*` 区分根和展开监督，`loss` 为未施加反向缩放的总 loss。
+编译作用于三个组件的 forward 和来源 loss，展开的 CPU 有效行控制留在编译图外。MuZero loss 遇到变化的有效 batch 大小时允许编译器自动泛化该维度。AMP 包含网络 forward，来源后处理与 loss 保持 FP32。attention penalty 在每步 forward 后取得，未来步采用与 loss 相同的反向系数；未执行的 dynamics 不产生 penalty。日志的普通准确率、权重和样本数保持根语义，`mu_root_*` 与 `mu_recurrent_*` 区分根和展开监督，`loss` 为未施加反向缩放的总 loss。
 
 完整 checkpoint 保存三组件权重、optimizer、SWA、来源训练状态与文件消费状态，以及 MuZero reader 的训练/验证 RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备的 RNG 和 FP16 GradScaler。`-muzero-hidden-gradient-scale` 省略时使用已保存值，新模型默认 0.5。恢复仍以来源 checkpoint 保存点为边界，未保存的批次不能恢复；不承诺跨硬件逐位一致；外层恢复范围见 [调度与恢复](controller.md)。来源供导出使用的 `skip_optimizer` checkpoint 不包含 optimizer/runtime，不能当作同目录完整恢复状态。
 
