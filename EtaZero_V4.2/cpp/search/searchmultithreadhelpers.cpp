@@ -13,25 +13,8 @@ static void threadTaskLoop(Search* search, int threadIdx) {
     if(!suc)
       return;
 
-    try {
-      (*task)(threadIdx);
-      //Don't delete task, the convention is tasks are owned by the joining thread
-    }
-    catch(const std::exception& e) {
-      search->logger->write(string("ERROR: Search thread failed: ") + e.what());
-      search->threadTasksRemaining->add(-1);
-      throw;
-    }
-    catch(const string& e) {
-      search->logger->write("ERROR: Search thread failed: " + e);
-      search->threadTasksRemaining->add(-1);
-      throw;
-    }
-    catch(...) {
-      search->logger->write("ERROR: Search thread failed with unexpected throw");
-      search->threadTasksRemaining->add(-1);
-      throw;
-    }
+    (*task)(threadIdx);
+    // The joining thread owns the task until all workers complete.
     search->threadTasksRemaining->add(-1);
   }
 }
@@ -45,17 +28,20 @@ void Search::spawnThreadsIfNeeded() {
   if(numThreadsSpawned >= desiredNumAdditionalThreads)
     return;
   killThreads();
-  threadTasks = new ThreadSafeQueue<std::function<void(int)>*>[desiredNumAdditionalThreads];
-  threadTasksRemaining = new ThreadSafeCounter();
-  threads = new std::thread[desiredNumAdditionalThreads];
-  for(int i = 0; i<desiredNumAdditionalThreads; i++)
-    threads[i] = std::thread(threadTaskLoop,this,i+1);
-  numThreadsSpawned = desiredNumAdditionalThreads;
+  try {
+    threadTasks = new ThreadSafeQueue<std::function<void(int)>*>[desiredNumAdditionalThreads];
+    threadTasksRemaining = new ThreadSafeCounter();
+    threads = new std::thread[desiredNumAdditionalThreads];
+    for(; numThreadsSpawned < desiredNumAdditionalThreads; numThreadsSpawned++)
+      threads[numThreadsSpawned] = std::thread(threadTaskLoop,this,numThreadsSpawned+1);
+  }
+  catch(...) {
+    killThreads();
+    throw;
+  }
 }
 
 void Search::killThreads() {
-  if(numThreadsSpawned <= 0)
-    return;
   for(int i = 0; i<numThreadsSpawned; i++)
     threadTasks[i].close();
   for(int i = 0; i<numThreadsSpawned; i++)
@@ -82,11 +68,30 @@ void Search::performTaskWithThreads(std::function<void(int)>* task, int capThrea
   }
   else {
     testAssert(numAdditionalThreadsToUse <= numThreadsSpawned);
+    std::mutex errorMutex;
+    std::exception_ptr error;
+    std::function<void(int)> guarded = [&](int idx) {
+      try { (*task)(idx); }
+      catch(...) {
+        std::lock_guard<std::mutex> lock(errorMutex);
+        if(!error) error = std::current_exception();
+      }
+    };
     threadTasksRemaining->add(numAdditionalThreadsToUse);
-    for(int i = 0; i<numAdditionalThreadsToUse; i++)
-      threadTasks[i].forcePush(task);
-    (*task)(0);
+    int submitted = 0;
+    try {
+      for(; submitted < numAdditionalThreadsToUse; submitted++)
+        if(!threadTasks[submitted].forcePush(&guarded))
+          throw StringError("Search worker queue closed during dispatch");
+      guarded(0);
+    }
+    catch(...) {
+      threadTasksRemaining->add(submitted-numAdditionalThreadsToUse);
+      threadTasksRemaining->waitUntilZero();
+      throw;
+    }
     threadTasksRemaining->waitUntilZero();
+    if(error) std::rethrow_exception(error);
   }
 }
 
