@@ -972,7 +972,7 @@ static void recordTreePositionsRec(
   //Best child is the one with the largest number of visits, find it
   int bestChildIdx = 0;
   int64_t bestChildVisits = 0;
-  for(int i = 1; i<numChildren; i++) {
+  for(int i = 0; i<numChildren; i++) {
     const SearchNode* child = children[i].getIfAllocated();
     while(child->statsLock.test_and_set(std::memory_order_acquire));
     int64_t numVisits = child->stats.visits;
@@ -2134,12 +2134,10 @@ FinishedGameData* Play::runGame(
         if(responseLoc == Board::NULL_LOC || !sp->hist.isLegal(sp->board,responseLoc,sp->pla))
           failIllegalMove(toMoveBot,logger,sp->board,responseLoc);
 
-        SidePosition* sp2 = new SidePosition(sp->board,sp->hist,sp->pla,(int)gameData->changedNeuralNets.size());
+        auto sp2 = std::make_unique<SidePosition>(sp->board,sp->hist,sp->pla,(int)gameData->changedNeuralNets.size());
         sp2->hist.makeBoardMoveAssumeLegal(sp2->board,responseLoc,sp2->pla,NULL);
         sp2->pla = getOpp(sp2->pla);
-        if(sp2->hist.isGameFinished)
-          delete sp2;
-        else {
+        if(!sp2->hist.isGameFinished) {
           Search* toMoveBot2 = sp2->pla == P_BLACK ? botB : botW;
           MiscNNInputParams nnInputParams;
           nnInputParams.drawEquivalentWinsForWhite = toMoveBot2->searchParams.drawEquivalentWinsForWhite;
@@ -2156,8 +2154,7 @@ FinishedGameData* Play::runGame(
           if(forkLoc != Board::NULL_LOC) {
             sp2->hist.makeBoardMoveAssumeLegal(sp2->board,forkLoc,sp2->pla,NULL);
             sp2->pla = getOpp(sp2->pla);
-            if(sp2->hist.isGameFinished) delete sp2;
-            else sidePositionsToSearch.push_back(sp2);
+            if(!sp2->hist.isGameFinished) sidePositionsToSearch.push_back(sp2.release());
           }
         }
       }
@@ -2491,16 +2488,14 @@ FinishedGameData* GameRunner::runGame(
   else {
     gameInit->createGame(board,pla,hist,numExtraBlack,initialPosition,playSettings,otherGameProps,startPosSample,gameHistoryModes);
 
-    bool rulesWereSupported;
-    if(botSpecB.nnEval != NULL) {
-      botSpecB.nnEval->getSupportedRules(hist.rules,rulesWereSupported);
-      if(!rulesWereSupported)
-        logger.write("WARNING: Match is running bot on rules that it does not support: " + botSpecB.botName);
-    }
-    if(botSpecW.nnEval != NULL) {
-      botSpecW.nnEval->getSupportedRules(hist.rules,rulesWereSupported);
-      if(!rulesWereSupported)
-        logger.write("WARNING: Match is running bot on rules that it does not support: " + botSpecW.botName);
+    for(const auto* spec : {&botSpecB, &botSpecW}) {
+      bool supported = true;
+      if(spec->nnEval)
+        spec->nnEval->getSupportedRules(hist.rules,supported);
+      else if(spec->muZeroEval)
+        spec->muZeroEval->getModel().representationDesc().getSupportedRules(hist.rules,supported);
+      if(!supported)
+        logger.write("WARNING: Match is running bot on rules that it does not support: " + spec->botName);
     }
   }
 
@@ -2567,6 +2562,7 @@ FinishedGameData* GameRunner::runGame(
       delete botW;
     delete botB;
     delete finishedGameData;
+    delete initialPosition;
     return NULL;
   }
 
