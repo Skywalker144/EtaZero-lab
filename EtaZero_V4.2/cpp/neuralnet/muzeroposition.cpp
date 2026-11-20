@@ -231,5 +231,10 @@ std::shared_ptr<Evaluation> PositionEvaluator::averageMultipleSymmetries(const B
 void PositionEvaluator::clearCache() { if(cache) cache->clear(); }
 uint64_t PositionEvaluator::numCacheHits() const { return cacheHits.load(std::memory_order_relaxed); }
 void PositionEvaluator::setDoRandomize(bool enabled) { randomize.store(enabled,std::memory_order_release); }
-void PositionEvaluator::setDefaultSymmetry(int symmetry) { defaultSymmetry.store(symmetry,std::memory_order_release); }
+void PositionEvaluator::setDefaultSymmetry(int symmetry) {
+  if(symmetry < 0 || symmetry >= SymmetryHelpers::NUM_SYMMETRIES ||
+     !Rules::forGame(Rules::parseGame(model.game())).allowsSymmetry(symmetry))
+    throw StringError("Invalid default symmetry for " + model.game());
+  defaultSymmetry.store(symmetry,std::memory_order_release);
+}
 }
