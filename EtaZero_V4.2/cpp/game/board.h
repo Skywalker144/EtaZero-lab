@@ -244,6 +244,9 @@ struct Board
   //based purely on the current colors[] array. Does not modify colors[] or ko_loc. Requires that colors[]
   //already be a valid configuration (walls intact); any stone group is allowed, including zero-liberty groups.
   void regenChainsFromColors();
+  // Change one on-board square without Go captures or suicide. Also maintains
+  // hash and liberties for placement games and the Xiangqi color view.
+  void setStoneWithoutCaptures(Loc loc, Color color);
 
   //Attempts to play the specified move. Returns true if successful, returns false if the move was illegal.
   bool playMove(Loc loc, Player pla, bool isMultiStoneSuicideLegal);
@@ -349,6 +352,8 @@ struct Board
   void mergeChains(Loc loc1, Loc loc2);
   int removeChain(Loc loc);
   void removeSingleStone(Loc loc);
+  void detachStone(Loc loc, Player pla);
+  template<bool capture> void playStone(Loc loc, Player pla);
 
   void addChain(Loc loc, Player pla);
   Loc addChainHelper(Loc head, Loc tailTarget, Loc loc, Color color);
