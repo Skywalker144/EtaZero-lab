@@ -157,21 +157,18 @@ class GameState:
 
         board = self.board
 
-        moves_and_probs0 = []
+        legal_indices = []
+        legal_moves = []
         for i in range(len(policy0)):
             move = features.tensor_pos_to_loc(i,board)
-            if i == len(policy0)-1:
-                moves_and_probs0.append((Board.PASS_LOC,policy0[i]))
-            elif board.would_be_legal(board.pla,move):
-                moves_and_probs0.append((move,policy0[i]))
-
-        moves_and_probs1 = []
-        for i in range(len(policy1)):
-            move = features.tensor_pos_to_loc(i,board)
-            if i == len(policy1)-1:
-                moves_and_probs1.append((Board.PASS_LOC,policy1[i]))
-            elif board.would_be_legal(board.pla,move):
-                moves_and_probs1.append((move,policy1[i]))
+            if i == features.pass_pos:
+                move = Board.PASS_LOC
+            elif not board.would_be_legal(board.pla,move):
+                continue
+            legal_indices.append(i)
+            legal_moves.append(move)
+        moves_and_probs0 = list(zip(legal_moves, policy0[legal_indices]))
+        moves_and_probs1 = list(zip(legal_moves, policy1[legal_indices]))
 
         futurepos0_flat = futurepos[0,:,:].reshape([features.pos_len * features.pos_len])
         futurepos0_by_loc = []
@@ -197,22 +194,15 @@ class GameState:
                 else:
                     futurepos1_by_loc.append((loc,-futurepos1_flat[pos]))
 
-        moves_and_probs = sorted(moves_and_probs0, key=lambda moveandprob: moveandprob[1], reverse=True)
-        # Generate a random number biased small and then find the appropriate move to make
-        # Interpolate from moving uniformly to choosing from the triangular distribution
-        alpha = 1
+        # Condition the sampling distribution on legality before softmax. Even
+        # the most likely legal move can underflow in the full-board softmax.
+        legal_logits = policy_logits[0].float().cpu().numpy()[legal_indices].astype(np.float64)
+        weights = np.exp(legal_logits - legal_logits.max())
+        order = np.argsort(-weights, kind="stable")
         beta = 1 + math.sqrt(max(0,len(self.moves)-20))
-        r = np.random.beta(alpha,beta)
-        probsum = 0.0
-        i = 0
-        genmove_result = Board.PASS_LOC
-        while True:
-            (move,prob) = moves_and_probs[i]
-            probsum += prob
-            if i >= len(moves_and_probs)-1 or probsum > r:
-                genmove_result = move
-                break
-            i += 1
+        cumulative = np.cumsum(weights[order])
+        index = np.searchsorted(cumulative, np.random.beta(1,beta) * cumulative[-1], side="right")
+        genmove_result = legal_moves[order[min(index, len(order) - 1)]]
 
         # Transpose attention so that both it and reverse attention are in n c (hw) format.
         for name in list(extra_outputs.returned.keys()):
