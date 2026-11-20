@@ -11,7 +11,7 @@ void GumbelSettings::validate() const {
        !std::isfinite(noise_scale) || noise_scale<0)
         throw StringError("Invalid Gumbel settings");
 }
-std::vector<double> gumbel_completed_q(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s) {
+void fill_completed_q(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s,std::vector<double>& q) {
     double total=0,maxvisit=0,mass=0,weighted=0;
     for(const auto& c:children) {
         if(c.prior<0)continue;
@@ -19,7 +19,8 @@ std::vector<double> gumbel_completed_q(const std::vector<GumbelChild>& children,
         if(c.visits>0){double p=std::max(c.prior,std::numeric_limits<double>::min());mass+=p;weighted+=p*c.q;}
     }
     double mix=mass>0?(raw+total*(weighted/mass))/(1+total):raw;
-    std::vector<double> q;q.reserve(children.size());
+    q.clear();
+    q.reserve(children.size());
     for(const auto& c:children)q.push_back(c.visits>0?c.q:mix);
     if(s.rescale_q_values) {
         double low=std::numeric_limits<double>::infinity(),high=-low;
@@ -29,33 +30,52 @@ std::vector<double> gumbel_completed_q(const std::vector<GumbelChild>& children,
     }
     double scale=(s.c_visit+maxvisit)*s.c_scale;
     for(auto& value:q)value*=scale;
+}
+
+std::vector<double> gumbel_completed_q(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s) {
+    std::vector<double> q;
+    fill_completed_q(children,raw,s,q);
     return q;
 }
+
+static void fill_policy(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s,std::vector<double>& policy) {
+    fill_completed_q(children,raw,s,policy);
+    double maximum = -std::numeric_limits<double>::infinity();
+    for(size_t i = 0; i < policy.size(); i++) {
+        if(children[i].prior < 0) policy[i] = -std::numeric_limits<double>::infinity();
+        else policy[i] += std::log(std::max(children[i].prior,std::numeric_limits<double>::min()));
+        maximum = std::max(maximum,policy[i]);
+    }
+    double mass = 0;
+    for(auto& p : policy) {
+        p = std::exp(p-maximum);
+        mass += p;
+    }
+    for(auto& p : policy) p /= mass;
+}
+
 std::vector<double> gumbel_policy(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s) {
-    auto policy=gumbel_completed_q(children,raw,s);double maximum=-std::numeric_limits<double>::infinity();
-    for(size_t i=0;i<policy.size();++i){if(children[i].prior<0)policy[i]=-std::numeric_limits<double>::infinity();else policy[i]+=std::log(std::max(children[i].prior,std::numeric_limits<double>::min()));maximum=std::max(maximum,policy[i]);}
-    double mass=0;for(auto& p:policy){p=std::exp(p-maximum);mass+=p;}
-    for(auto& p:policy)p/=mass;
+    std::vector<double> policy;
+    fill_policy(children,raw,s,policy);
     return policy;
 }
+
 int gumbel_interior_selection(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s) {
+    std::vector<double> policy;
+    return gumbel_interior_selection(children,raw,s,policy);
+}
+
+int gumbel_interior_selection(const std::vector<GumbelChild>& children,double raw,const GumbelSettings& s,std::vector<double>& policy) {
     double total=1;
     bool any=false;
     for(const auto& c:children)if(c.prior>=0){total+=c.visits+c.pending;any=true;}
     if(!any)return -1;
     // Completed visits alone enter Q. In-flight work only reduces the allocation deficit.
-    auto policy=gumbel_policy(children,raw,s);
+    fill_policy(children,raw,s,policy);
     int best=-1;double score=-std::numeric_limits<double>::infinity();
     for(size_t i=0;i<children.size();++i)if(children[i].prior>=0){double x=policy[i]-(children[i].visits+children[i].pending)/total;
         if(x>score){score=x;best=int(i);}}
     return best;
-}
-std::vector<int16_t> quantize_gumbel_policy(const std::vector<double>& policy) {
-    double maximum=0;
-    for(double p:policy)maximum=std::max(maximum,p);
-    std::vector<int16_t> out;out.reserve(policy.size());
-    for(double p:policy)out.push_back(static_cast<int16_t>(std::round(30000*(p/maximum))));
-    return out;
 }
 GumbelRoot::GumbelRoot(const std::vector<double>& priors,int64_t budget,const GumbelSettings& s,Rand& rng)
     :visits_(priors.size(),0),pending_(priors.size(),0),budget_(budget) {
