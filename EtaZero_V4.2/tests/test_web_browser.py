@@ -46,6 +46,15 @@ def test_native_browser_board_history_analysis_and_parameters(tmp_path, game, gu
                 before=app.snapshot()['game']
                 if game=='xiangqi':
                     assert page.locator('.xiangqi-piece').count()==32
+                    page.evaluate("""() => {
+                        window.animatedPoints = [];
+                        const animate = Element.prototype.animate;
+                        Element.prototype.animate = function(...args) {
+                            if (this.matches('.xiangqi-piece'))
+                                animatedPoints.push(this.closest('[data-point]').dataset.point);
+                            return animate.apply(this, args);
+                        };
+                    }""")
                     page.click('[data-point="b0"]');page.click('[data-point="c2"]')
                     first='b0c2'
                 else:
@@ -53,9 +62,19 @@ def test_native_browser_board_history_analysis_and_parameters(tmp_path, game, gu
                 ready(page, 'state.game.moves.length === 1 && !state.busy')
                 assert app.snapshot()['game']['moves']==[['B',first]]
                 page.click('#step');ready(page, 'state.game.moves.length === 2 && !state.busy')
+                if game=='xiangqi':
+                    second = app.snapshot()['game']['moves'][1][1]
+                    played = [first[2:], second[2:]]
+                    assert page.evaluate('animatedPoints') == played
+                    page.click('#undo');ready(page, 'state.game.moves.length === 1 && !state.busy')
+                    assert page.evaluate('animatedPoints') == played
+                    page.click(f'[data-point="{second[:2]}"]');page.click(f'[data-point="{second[2:]}"]')
+                    ready(page, 'state.game.moves.length === 2 && !state.busy')
                 page.locator('#timeline').evaluate("el => {el.value='1';el.dispatchEvent(new Event('input',{bubbles:true}));}")
                 assert page.locator('#view-note').is_visible()
                 assert page.evaluate('displayedGame().board')==app.snapshot()['history'][1]['board']
+                if game=='xiangqi':
+                    assert page.evaluate('animatedPoints') == [*played, second[2:]]
                 page.click('#branch');ready(page,'state.game.moves.length === 1 && !state.busy')
                 page.click('#undo');ready(page,'state.game.moves.length === 0 && !state.busy')
                 assert app.snapshot()['game']==before
@@ -173,7 +192,7 @@ def test_cuda_model_browser_move_and_native_analysis(tmp_path,game,muzero,gumbel
     model=model_for(tmp_path/'model',game,muzero)
     config=profile(tmp_path/'gtp.cfg',game,random=False,muzero=muzero,gumbel=gumbel,
                    cudaUseFP16='true',maxVisits=8)
-    with App(lambda:catalog_for(config,game,model)) as app:
+    with App(lambda:server_catalog(tmp_path/'runs',config,model)) as app:
         server=make_server(app,'127.0.0.1',0)
         thread=Thread(target=server.serve_forever);thread.start()
         try:
@@ -182,17 +201,98 @@ def test_cuda_model_browser_move_and_native_analysis(tmp_path,game,muzero,gumbel
                 page=browser.new_page(viewport={'width':1440,'height':1000})
                 errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
                 open_game(page,f'http://127.0.0.1:{server.server_port}')
+                assert app.snapshot()['models'][0]['isMuZero'] is muzero
+                assert page.evaluate('isMuZero()') is muzero
                 page.click('#step');ready(page,'state.game.moves.length === 1 && !state.busy')
                 state=app.snapshot()
                 assert state['analysis']['move']==state['game']['moves'][-1][1]
                 assert json.loads(page.locator('#raw-analysis').text_content())==state['analysis']['report']
                 assert state['analysis']['report']['rootInfo']['visits']>0
                 assert '★' in page.locator('#candidates').inner_text()
+                if game != 'xiangqi':
+                    row = next(r for r in state['analysis']['report']['moveInfos'] if r['pv'] and r['move'] != 'pass')
+                    candidate = page.locator(f'#candidates [data-candidate="{row["move"]}"]')
+                    candidate.click()
+                    candidate.hover()
+                    assert page.locator('#candidate-detail .pv-move').all_text_contents() == row['pv']
+                    assert page.locator('#candidate-detail .pv-tag').inner_text() == ('潜空间 PV' if muzero else 'PV')
+                    assert (page.locator('#board .pv-stone').count() > 0) == (not muzero)
                 page.click('#undo');ready(page,'state.game.moves.length === 0 && !state.busy')
                 assert app.snapshot()['game']['result'] is None and not errors
                 browser.close()
         finally:
             app.close();server.shutdown();server.server_close();thread.join(timeout=5)
+
+
+def test_imported_sgf_survives_mode_change_and_refresh(tmp_path, monkeypatch):
+    from threading import Event
+    import etazero.web_app as module
+    original_session = module.Session
+    started, release = Event(), Event()
+
+    def delayed_import(*args, **kwargs):
+        if 'SZ[8:6]' in kwargs.get('sgf', '') and not release.is_set():
+            started.set()
+            assert release.wait(20)
+        return original_session(*args, **kwargs)
+
+    monkeypatch.setattr(module, 'Session', delayed_import)
+    config = profile(tmp_path / 'gtp.cfg', 'go', defaultBoardSize=5)
+    catalog = catalog_for(config, 'go')
+    catalog['runs'][0].update(canvas=5, trained_board_sizes=[5, 7])
+    catalog['runs'][0]['models'].append(dict(id='second', path='/dev/null', game='go'))
+    with App(lambda: catalog) as app:
+        server = make_server(app, '127.0.0.1', 0)
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with sync_playwright() as api:
+                browser = api.chromium.launch()
+                page = browser.new_page()
+                open_game(page, f'http://127.0.0.1:{server.server_port}')
+                page.locator('#import-panel summary').click()
+                for sgf_size, dims, rule, ui_rule, scoring in [
+                    ('7', [7, 7], 'Japanese', 'japanese', 'TERRITORY'),
+                    ('8:6', [8, 6], 'Chinese-OGS', 'Chinese-OGS', 'AREA'),
+                ]:
+                    page.fill('#import-sgf', f'(;GM[1]SZ[{sgf_size}]RU[{rule}]KM[6.5];B[dd];W[cd])')
+                    page.click('#import-apply')
+                    if sgf_size == '8:6':
+                        assert started.wait(10)
+                        page.select_option('#mode', 'play')
+                        release.set()
+                    ready(page, f'state.game.boardXSize === {dims[0]} && !state.busy && !setupFlight && setupRevision === setupSent')
+                    game = app.snapshot()
+                    assert game['ui_setup']['size'] == dims
+                    assert page.evaluate('setupPayload().size') == dims
+                    assert page.locator('#rules').input_value() == ui_rule
+                    assert game['game']['rules']['scoring'] == scoring
+                    assert len(game['game']['moves']) == 2 and len(game['history']) == 3
+                    page.click('#refresh-models')
+                    ready(page, 'catalogRevision === state.catalog_revision && !loadingCatalog && !state.busy')
+                    page.select_option('#mode', 'play')
+                    ready(page, 'state.mode === "play" && !state.busy && !setupFlight')
+                    after = app.snapshot()
+                    assert (after['game_id'], after['game'], after['history']) == (game['game_id'], game['game'], game['history'])
+                    page.select_option('#mode', 'manual')
+                    ready(page, 'state.mode === "manual" && !setupFlight')
+                    page.reload()
+                    ready(page, 'setupInitialized && !loadingCatalog && !state.busy && !setupFlight')
+                    assert page.evaluate('setupPayload().size') == dims
+                    assert page.locator('#rules').input_value() == ui_rule
+                    next_model = 'second' if game['selected_model']['id'] == 'model' else 'model'
+                    page.select_option('#model', next_model)
+                    ready(page, f'state.selected_model.id === "{next_model}" && !state.busy && !setupFlight')
+                    after = app.snapshot()
+                    assert (after['game'], after['history']) == (game['game'], game['history'])
+                    if sgf_size == '7':
+                        page.locator('#import-panel summary').click()
+                browser.close()
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 @pytest.mark.parametrize('game,rule', [('freestyle', 'standard'), ('hex', 'hex')])
