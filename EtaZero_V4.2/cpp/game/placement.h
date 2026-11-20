@@ -8,6 +8,7 @@ namespace Placement {
 enum class Forbidden { NONE, OVERLINE, DOUBLE_FOUR, DOUBLE_THREE };
 // Renju forbidden placements are legal actions that lose, not masked actions.
 Forbidden renjuForbidden(const Board& board, Loc loc);
+void fillRenjuForbidden(const Board& board, float* plane, int rowStride, int pointStride);
 bool hexConnected(const Board& board, Player pla);
 struct Result { bool finished; Player winner; };
 // Setup nodes have no last move. Detect geometric terminal states; historical
