@@ -155,7 +155,6 @@ struct SearchNodeChildrenReference {
   int iterateAndCountChildren() const;
 };
 struct ConstSearchNodeChildrenReference {
-  int capacity;
   SearchNodeState snapshottedState;
   const SearchNode* node;
 
