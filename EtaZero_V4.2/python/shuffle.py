@@ -18,7 +18,6 @@ import datetime
 import gc
 
 import multiprocessing
-import zipfile
 
 import numpy as np
 from typing import Sequence
@@ -26,10 +25,7 @@ from typing import Sequence
 # Needs to be kept in sync with QVALUE_SPATIAL_TARGET_NUM_CHANNELS in trainingwrite.cpp C++ code among other places.
 EXPECTED_Q_VALUE_TARGETS_NCMOVE_CHANNELS = 2
 
-# Needs to be kept in sync with GLOBAL_TARGET_NUM_CHANNELS in trainingwrite.cpp C++ code among other places.
-# Data format version 2 files (recorded in channel 63 of each row) had only 64 channels; they are zero-padded
-# up to this width when shuffling, which correctly encodes "not reanalyzed" for the version 3 channels.
-GLOBAL_TARGETS_NC_CHANNELS = 80
+from katago.train.target_layout import pad_global_targets_nc
 
 # Empirically measured per-row sizes for 19x19 data, used only for the rough resource-cost
 # estimates printed by -dry-run-print-resource-cost (and informationally on normal runs).
@@ -169,16 +165,6 @@ def save_output_npz(
                 else:
                     np.lib.format.write_array(stream, array, allow_pickle=False)
 
-def pad_global_targets_nc(globalTargetsNC: np.ndarray) -> np.ndarray:
-    """Zero-pad older-format globalTargetsNC rows up to the current channel count."""
-    num_channels = globalTargetsNC.shape[1]
-    if num_channels == GLOBAL_TARGETS_NC_CHANNELS:
-        return globalTargetsNC
-    assert num_channels < GLOBAL_TARGETS_NC_CHANNELS, f"globalTargetsNC has {num_channels} channels, more than the expected {GLOBAL_TARGETS_NC_CHANNELS}"
-    padded = np.zeros((globalTargetsNC.shape[0], GLOBAL_TARGETS_NC_CHANNELS), dtype=globalTargetsNC.dtype)
-    padded[:, :num_channels] = globalTargetsNC
-    return padded
-
 def load_and_accumulate_input_contents(
     input_file: str,
     binaryInputNCHWPackedList: list[np.ndarray],
@@ -264,6 +250,8 @@ def shardify(
             load_and_accumulate_input_contents(input_file,binaryInputNCHWPackedList,globalInputNCList,policyTargetsNCMoveList,globalTargetsNCList,valueTargetsNCHWList,metadataInputNCList,qValueTargetsNCMoveList,include_meta,include_qvalues,fill_in_qvalues=fill_in_qvalues,muzero_lists=muzero_lists,muzero_unroll_steps=muzero_unroll_steps)
 
         except FileNotFoundError:
+            if muzero_unroll_steps and fill_in_qvalues:
+                raise  # The snapshot mean already includes every selected raw file.
             num_files_not_found += 1
             print("WARNING: file not found by shardify: ", input_file)
             pass
@@ -864,7 +852,7 @@ if __name__ == '__main__':
     add_to_data_rows = args.add_to_data_rows
 
     summary_file = args.summary_file
-    out_dir = args.out_dir
+    out_dir = os.path.normpath(args.out_dir) if args.out_dir is not None else None
     out_tmp_dir = args.out_tmp_dir
     approx_rows_per_out_file = args.approx_rows_per_out_file
     approx_rows_per_bucket = args.approx_rows_per_bucket
