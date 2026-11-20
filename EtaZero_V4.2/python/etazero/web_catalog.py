@@ -1,6 +1,7 @@
 """Workbench model discovery from V4 publication commits, without loading nets."""
 import json
 import math
+import os
 from pathlib import Path
 
 from . import ROOT
@@ -125,9 +126,15 @@ def discover_catalog(root=None, *, config=None):
         raise ValueError(f'Run discovery root is not a directory: {root}')
     # A run's state pointer bounds this snapshot. Models published by an active
     # but uncommitted round are intentionally absent until the next refresh.
-    paths = sorted(path.parent for path in root.rglob('state.json')
-                   if (path.parent / 'config.json').is_file() and
-                   not any(part.startswith('.') for part in path.relative_to(root).parts))
+    paths = []
+    for directory, children, files in os.walk(root):
+        children[:] = [name for name in children if not name.startswith('.')]
+        if 'state.json' in files and 'config.json' in files:
+            paths.append(Path(directory))
+            # Published run artifacts can contain millions of files.
+            children[:] = [name for name in children
+                           if name not in {'rounds', 'selfplay', 'shuffleddata', 'models', 'train', 'initial'}]
+    paths.sort()
     runs, errors = [], []
     for directory in paths:
         try:
