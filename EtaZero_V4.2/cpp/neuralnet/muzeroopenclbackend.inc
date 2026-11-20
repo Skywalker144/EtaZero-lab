@@ -76,7 +76,6 @@ struct StateData {
   std::shared_ptr<const std::vector<uint8_t>> mask;
   size_t offset;
 };
-const void* stateOwner(const State& state) { return state ? state->owner.get() : nullptr; }
 
 struct OpenCLBody {
   const ModelDesc& desc;
@@ -133,7 +132,10 @@ struct Evaluator::Impl {
       actionPlanes(bundle_->game() == "xiangqi" ? 2 : 1), gameName(bundle_->game()), bundle(std::move(bundle_)),
       representation(bundle->impl->representation.get()), dynamics(bundle->impl->dynamics.get()), prediction(bundle->impl->prediction.get()) {
     if(maxBatch <= 0) throw StringError("MuZero maxBatch must be positive");
-    context.reset(NeuralNet::createComputeContext({device},logger,canvas,canvas,"",fp16,prediction,config));
+    const auto* tuningModel = representation->modelDesc.hasAnyTransformerBlocks() ? representation :
+      dynamics->modelDesc.hasAnyTransformerBlocks() ? dynamics : prediction;
+    const std::string home = config.contains("homeDataDir") ? config.getString("homeDataDir") : "";
+    context.reset(NeuralNet::createComputeContext({device},logger,canvas,canvas,home,fp16,tuningModel,config));
     handle.reset(NeuralNet::createComputeHandle(context.get(),prediction,logger,maxBatch,false,inputsUseNHWC,device,0));
     auto* h = handle->handle.get();
     if((int64_t)channels+1+actionPlanes > (((int64_t)1<<31)-1)/maxBatch/h->paddedNNXYLen)
@@ -145,6 +147,7 @@ struct Evaluator::Impl {
     packKernel = clCreateKernel(program,"packState",&err); CHECK_ERR(err);
     normalizeKernel = clCreateKernel(program,"normalizeState",&err); CHECK_ERR(err);
     gathered = createReadWriteBuffer(h,maxBatch*stateSize(),false);
+    static_assert(sizeof(int) == sizeof(float));
     actionBuffer = createReadWriteBuffer(h,(size_t)maxBatch*actionPlanes,false);
   }
   ~Impl() { if(handle) (void)clFinish(queue()); }
@@ -192,77 +195,30 @@ struct Evaluator::Impl {
       buffers.mask,buffers.maskSum,buffers.trunk,buffers.policyPass,buffers.policy,buffers.value,buffers.auxValue,
       buffers.convWorkspace,buffers.convWorkspace2);
     const auto& desc = prediction->modelDesc;
-    const int area = canvas*canvas, padded = h->paddedNNXYLen;
+    const int padded = h->paddedNNXYLen;
     const int policies = desc.numPolicyChannels, spatialChannels = desc.policyHead.p2Conv.outChannels;
-    const int actions = gameName == "xiangqi" ? Xiangqi::NUM_ACTIONS : area+(gameName == "go");
     std::vector<float> policy, pass, value, aux;
     blockingReadBuffer(queue(),buffers.policy,(size_t)batch*spatialChannels*padded,policy,h->usingFP16Storage);
     if(gameName == "go") blockingReadBuffer(queue(),buffers.policyPass,(size_t)batch*policies,pass);
     blockingReadBuffer(queue(),buffers.value,(size_t)batch*4,value);
     blockingReadBuffer(queue(),buffers.auxValue,(size_t)batch*2,aux);
     finishKernelProfiles(h);
-    const float scale = desc.postProcessParams.outputScaleMultiplier;
     std::vector<Output> results(batch);
     for(int row = 0; row < batch; row++) {
       auto& result = results[row];
       result.state = std::make_shared<StateData>(StateData{storage,owner,masks[row],row*stateSize()});
-      result.policy.resize(policies*actions);
-      for(int channel = 0; channel < policies; channel++) {
-        if(gameName == "xiangqi") {
-          for(int action = 0; action < actions; action++) {
-            const int index = Xiangqi::policyIndex(action,canvas,canvas);
-            const int offset = (row*spatialChannels+channel*Xiangqi::NUM_DELTAS+index/area)*padded+index%area;
-            result.policy[channel*actions+action] = policy[offset]*scale;
-          }
-        }
-        else for(int point = 0; point < area; point++)
-          result.policy[channel*actions+point] = (*masks[row])[point] ? policy[(row*policies+channel)*padded+point]*scale : -5000.0f;
-        if(gameName == "go") result.policy[channel*actions+area] = pass[row*policies+channel]*scale;
-      }
-      for(int c = 0; c < 4; c++) result.value[c] = value[row*4+c]*scale;
-      for(int c = 0; c < 2; c++) result.auxiliary[c] = aux[row*2+c]*scale;
+      unpackPrediction(result,gameName,canvas,desc,*masks[row],row,policy.data(),pass.data(),value.data(),aux.data(),padded,false);
     }
     return results;
   }
 };
 
-Evaluator::Evaluator(const std::string& directory, int maxBatch, int device, enabled_t fp16, ConfigParser& cfg, Logger* logger, bool inputsUseNHWC)
-  : Evaluator(std::make_shared<ModelBundle>(directory),maxBatch,device,fp16,cfg,logger,inputsUseNHWC) {}
-Evaluator::Evaluator(std::shared_ptr<const ModelBundle> bundle, int maxBatch, int device, enabled_t fp16, ConfigParser& cfg, Logger* logger, bool inputsUseNHWC) {
-  if(!bundle) throw StringError("MuZero model bundle must not be null");
-  impl = std::make_unique<Impl>(std::move(bundle),maxBatch,device,fp16,cfg,logger,inputsUseNHWC);
-}
-Evaluator::~Evaluator() = default;
-const ModelDesc& Evaluator::representationDesc() const { return impl->representation->modelDesc; }
-const ModelDesc& Evaluator::predictionDesc() const { return impl->prediction->modelDesc; }
-const void* Evaluator::identity() const { return impl->owner.get(); }
-bool Evaluator::isUsingFP16() const { return impl->handle->handle->usingFP16Storage; }
-int Evaluator::posLen() const { return impl->canvas; }
-int Evaluator::latentChannels() const { return impl->channels; }
-const std::string& Evaluator::game() const { return impl->gameName; }
+#include "muzeroevaluator.inc"
 
 std::vector<Output> Evaluator::initial(int batch, const std::vector<float>& spatial,
                                     const std::vector<float>& global, const std::vector<float>& metadata) {
   impl->checkBatch(batch);
-  const auto& desc = representationDesc();
-  const int area = posLen()*posLen();
-  if(spatial.size() != (size_t)batch*desc.numInputChannels*area ||
-     global.size() != (size_t)batch*desc.numInputGlobalChannels || metadata.size() != (size_t)batch*desc.numInputMetaChannels)
-    throw StringError("MuZero initial observation dimensions differ");
-  std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
-  for(int row = 0; row < batch; row++) {
-    auto mask = std::make_shared<std::vector<uint8_t>>(area);
-    bool nonempty = false;
-    for(int point = 0; point < area; point++) {
-      const float v = spatial[(size_t)row*desc.numInputChannels*area+point];
-      if(v != 0 && v != 1) throw StringError("MuZero observation mask must be binary");
-      if(game() == "xiangqi" && (v != 0) != (point%posLen() < Xiangqi::WIDTH && point/posLen() < Xiangqi::HEIGHT))
-        throw StringError("Xiangqi MuZero observation mask must cover exactly the 9 x 10 board");
-      (*mask)[point] = v != 0; nonempty |= v != 0;
-    }
-    if(!nonempty) throw StringError("MuZero observation mask must be nonempty");
-    masks.push_back(std::move(mask));
-  }
+  auto masks = observationMasks(batch,posLen(),game(),representationDesc(),spatial,global,metadata);
   try {
     impl->uploadSpatial(spatial,batch);
     impl->upload(impl->representationBody->global,global);
@@ -275,21 +231,14 @@ std::vector<Output> Evaluator::initial(int batch, const std::vector<float>& spat
 std::vector<Output> Evaluator::recurrent(const std::vector<State>& states, const std::vector<int>& actions) {
   impl->checkBatch(states.size());
   if(actions.size() != states.size()) throw StringError("MuZero recurrent action count differs");
-  const int batch = states.size(), area = posLen()*posLen();
+  const int batch = states.size();
   std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
   std::vector<int> squares((size_t)batch*impl->actionPlanes);
   for(int row = 0; row < batch; row++) {
     impl->checkState(states[row]);
-    const int action = actions[row];
-    if(action < 0 || action >= (game() == "xiangqi" ? Xiangqi::NUM_ACTIONS : area+(game() == "go")) ||
-       (game() != "xiangqi" && action < area && !(*states[row]->mask)[action]))
-      throw StringError("MuZero recurrent action is outside the static game domain");
+    const auto squaresForAction = actionSquares(actions[row],posLen(),game(),*states[row]->mask);
     masks.push_back(states[row]->mask);
-    if(game() == "xiangqi") {
-      const auto& move = Xiangqi::MOVES[action];
-      squares[2*row] = move[1]*posLen()+move[0]; squares[2*row+1] = move[3]*posLen()+move[2];
-    }
-    else squares[row] = action;
+    std::copy_n(squaresForAction.data(),impl->actionPlanes,squares.data()+row*impl->actionPlanes);
   }
   try {
     // OpenCL 1.2 buffers cannot be passed as a device pointer array. Gather only
