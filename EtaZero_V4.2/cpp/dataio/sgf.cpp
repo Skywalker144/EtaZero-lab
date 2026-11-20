@@ -2342,14 +2342,18 @@ void WriteSgf::writeSgf(
       if(turnAfterStart < gameData->whiteValueTargetsByTurn.size()) {
         const ValueTargets& targets = gameData->whiteValueTargetsByTurn[turnAfterStart];
         char winBuf[32];
+        char drawBuf[32];
         char lossBuf[32];
         char noResultBuf[32];
         sprintf(winBuf,"%.2f",targets.win);
+        sprintf(drawBuf,"%.2f",targets.draw);
         sprintf(lossBuf,"%.2f",targets.loss);
         sprintf(noResultBuf,"%.2f",targets.noResult);
         if(comment.length() > 0)
           comment += " ";
         comment += winBuf;
+        comment += " ";
+        comment += drawBuf;
         comment += " ";
         comment += lossBuf;
         comment += " ";
