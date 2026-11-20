@@ -883,13 +883,17 @@ void Board::undo(Board::MoveRecord record)
       numWhiteCaptures -= numUncaptured;
   }
 
+  detachStone(loc,record.pla);
+}
+
+void Board::detachStone(Loc loc, Player pla) {
   //Delete the stone played here.
   pos_hash ^= ZOBRIST_BOARD_HASH[loc][colors[loc]];
   colors[loc] = C_EMPTY;
   // empty_list.add(loc);
 
   //Uneat opp liberties
-  changeSurroundingLiberties(loc, getOpp(record.pla),+1);
+  changeSurroundingLiberties(loc, getOpp(pla),+1);
 
   //If this was not a single stone, we may need to recompute the chain from scratch
   if(chain_data[chain_head[loc]].num_locs > 1)
@@ -897,7 +901,7 @@ void Board::undo(Board::MoveRecord record)
     int numNeighbors = 0;
     FOREACHADJ(
       int adj = loc + ADJOFFSET;
-      if(colors[adj] == record.pla)
+      if(colors[adj] == pla)
         numNeighbors++;
     );
 
@@ -960,8 +964,8 @@ void Board::undo(Board::MoveRecord record)
       for(int i = 0; i<4; i++)
       {
         int adj = loc + adj_offsets[i];
-        if(colors[adj] == record.pla && chain_head[adj] == NULL_LOC)
-          rebuildChain(adj, record.pla);
+        if(colors[adj] == pla && chain_head[adj] == NULL_LOC)
+          rebuildChain(adj, pla);
       }
     }
   }
@@ -1057,6 +1061,19 @@ void Board::playMoveAssumeLegal(Loc loc, Player pla)
     return;
   }
 
+  playStone<true>(loc,pla);
+}
+
+void Board::setStoneWithoutCaptures(Loc loc, Color color) {
+  assert(isOnBoard(loc) && (color == C_EMPTY || color == P_BLACK || color == P_WHITE));
+  ko_loc = NULL_LOC;
+  if(colors[loc] == color) return;
+  if(colors[loc] != C_EMPTY) detachStone(loc,colors[loc]);
+  if(color != C_EMPTY) playStone<false>(loc,color);
+}
+
+template<bool capture>
+void Board::playStone(Loc loc, Player pla) {
   Player opp = getOpp(pla);
 
   //Add the new stone as an independent group
@@ -1110,13 +1127,15 @@ void Board::playMoveAssumeLegal(Loc loc, Player pla)
       opp_heads_seen[num_opps_seen++] = opp_head;
 
       //Kill it?
-      if(getNumLiberties(adj) == 0)
+      if(capture && getNumLiberties(adj) == 0)
       {
         num_captured += removeChain(adj);
         possible_ko_loc = adj;
       }
     }
   }
+
+  if(!capture) return;
 
   //We have a ko if 1 stone was captured and the capturing move is one isolated stone
   //And the capturing move itself now only has one liberty
