@@ -1,6 +1,6 @@
 # KataGo
 
-> Upstream reference retained with the source attribution in [reference_sources.json](reference_sources.json). Its features, model downloads, commands and validation claims describe KataGo. For EtaZero V4.1 capabilities, compatible models and entrypoints, use [README.md](README.md); public three-result KataGo models cannot be loaded directly by this version.
+> Upstream reference retained with the source attribution in [reference_sources.json](reference_sources.json). Its features, model downloads, commands and validation claims describe KataGo. For EtaZero V4.2 capabilities, compatible models and entrypoints, use [README.md](README.md); public three-result KataGo models cannot be loaded directly by this version.
 
 - [KataGo](#katago)
   - [Overview](#overview)
