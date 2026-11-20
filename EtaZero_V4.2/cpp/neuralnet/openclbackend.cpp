@@ -3271,7 +3271,6 @@ struct PolicyHead {
     SizedBuf<cl_mem> gpoolOut(scratch->allocator, scratch->getBufSizeXY(g1Channels));
     SizedBuf<cl_mem> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(g1Channels*3));
     SizedBuf<cl_mem> gpoolBias(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
-    SizedBuf<cl_mem> p1Pass(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
 
     p1Conv->apply(handle,batchSize,trunk,p1Out.buf,convWorkspace,convWorkspace2);
 
@@ -3294,22 +3293,22 @@ struct PolicyHead {
     p1BN->apply(handle,batchSize,p1Out.buf,p1Out.buf,mask);
 
     p2Conv->apply(handle,batchSize,p1Out.buf,policy,convWorkspace,convWorkspace2);
-    if(modelVersion == 18 || modelVersion == 19) {
-      // Placement points and Xiangqi joint actions have no pass output.
-    }
-    else if(modelVersion >= 15) {
-      gpoolToPassMul->apply(handle,batchSize,gpoolConcat.buf,p1Pass.buf);
-      gpoolToPassBias->apply(handle,batchSize,p1Pass.buf);
-      gpoolToPassMul2->apply(handle,batchSize,p1Pass.buf,policyPass);
-    }
-    else {
-      gpoolToPassMul->apply(handle,batchSize,gpoolConcat.buf,policyPass);
+    if(NNModelVersion::hasPassHead(modelVersion)) {
+      if(modelVersion >= 15) {
+        SizedBuf<cl_mem> p1Pass(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
+        gpoolToPassMul->apply(handle,batchSize,gpoolConcat.buf,p1Pass.buf);
+        gpoolToPassBias->apply(handle,batchSize,p1Pass.buf);
+        gpoolToPassMul2->apply(handle,batchSize,p1Pass.buf,policyPass);
+      }
+      else {
+        gpoolToPassMul->apply(handle,batchSize,gpoolConcat.buf,policyPass);
+      }
     }
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
     debugPrint3D(string("p1 after-gpool-sum"), handle, p1Out.buf, batchSize, p1Channels);
     debugPrint3D(string("p2"), handle, policy, batchSize, p2Channels);
-    debugPrint2D(string("p2pass"), handle, policyPass, batchSize, 1);
+    if(NNModelVersion::hasPassHead(modelVersion)) debugPrint2D(string("p2pass"), handle, policyPass, batchSize, 1);
     #endif
   }
 
@@ -3695,8 +3694,8 @@ struct Buffers {
     else
       testAssert(m.policyHead->p2Channels == 1);
 
-    policyPassElts = m.numPolicyChannels * batchElts;
-    policyPass = createReadWriteBuffer(handle, policyPassElts, false);
+    policyPassElts = NNModelVersion::hasPassHead(m.modelVersion) ? m.numPolicyChannels * batchElts : 0;
+    policyPass = policyPassElts ? createReadWriteBuffer(handle, policyPassElts, false) : nullptr;
     policyElts = m.policyHead->p2Channels * batchXYElts;
     policy = createReadWriteBuffer(handle, policyElts, useFP16);
 
@@ -3723,7 +3722,7 @@ struct Buffers {
 
     clReleaseMemObject(trunk);
 
-    clReleaseMemObject(policyPass);
+    if(policyPass) clReleaseMemObject(policyPass);
     clReleaseMemObject(policy);
 
     clReleaseMemObject(value);
@@ -3916,7 +3915,7 @@ struct InputBuffers {
     userInputBufferElts = (size_t)m.numInputChannels * maxBatchSize * nnXLen * nnYLen;
     userInputGlobalBufferElts = (size_t)m.numInputGlobalChannels * maxBatchSize;
     userInputMetaBufferElts = (size_t)m.numInputMetaChannels * maxBatchSize;
-    policyPassResultBufferElts = (size_t)maxBatchSize * m.numPolicyChannels;
+    policyPassResultBufferElts = NNModelVersion::hasPassHead(m.modelVersion) ? (size_t)maxBatchSize * m.numPolicyChannels : 0;
     policyResultBufferElts = (size_t)maxBatchSize * spatialPolicyChannels * nnXLen * nnYLen;
     valueResultBufferElts = (size_t)maxBatchSize * m.numValueChannels;
     auxValueResultBufferElts = (size_t)maxBatchSize * m.numAuxValueChannels;
@@ -3931,7 +3930,7 @@ struct InputBuffers {
     else
       userInputMetaBuffer = NULL;
 
-    policyPassResults = new float[(size_t)maxBatchSize * m.numPolicyChannels];
+    policyPassResults = policyPassResultBufferElts ? new float[policyPassResultBufferElts] : nullptr;
     policyResults = new float[(size_t)maxBatchSize * spatialPolicyChannels * nnXLen * nnYLen];
     policyResultsHalf = new half_t[(size_t)maxBatchSize * spatialPolicyChannels * maxPaddedNNXYLen];
     valueResults = new float[(size_t)maxBatchSize * m.numValueChannels];
@@ -4235,7 +4234,7 @@ void NeuralNet::getOutput(
     assert(output->nnYLen == nnYLen);
     float policyOptimism = (float)inputBufs[row]->policyOptimism;
 
-    const float* policyPassSrcBuf = inputBuffers->policyPassResults + row * numPolicyChannels;
+    const float* policyPassSrcBuf = NNModelVersion::hasPassHead(modelVersion) ? inputBuffers->policyPassResults + row * numPolicyChannels : nullptr;
     const float* policySrcBuf = inputBuffers->policyResults + row * spatialPolicyChannels * nnXLen * nnYLen;
     output->resizePolicy(modelVersion == 19 ? Xiangqi::NUM_ACTIONS : NNPos::MAX_NN_POLICY_SIZE);
     float* policyProbs = output->policyProbs;
