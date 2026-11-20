@@ -40,7 +40,7 @@ from muon.muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
 
 from katago.train import modelconfigs
 from katago.train.model_pytorch import Model, ExtraOutputs, MetadataEncoder
-from katago.train.metrics_pytorch import Metrics
+from katago.train.metrics_pytorch import Metrics, learner_display_settings
 from katago.utils.training_data_generator import TrainingDataGenerator
 from katago.train import load_model
 from katago.train import data_processing_pytorch
@@ -1064,7 +1064,21 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
             state_dict = load_model.load_checkpoint(path_to_load_from, map_location=device)
             if not loading_initial_checkpoint:
                 resume_log_offsets = state_dict.get('metrics_log_offsets')
-            resume_lookahead = state_dict.get("lookahead")
+                required = ["optimizer", "train_state"]
+                if world_size == 1:
+                    required.extend(["learner_runtime", "lookahead"])
+                missing = [key for key in required if key not in state_dict]
+                if missing:
+                    raise ValueError(f"Full resume requires {', '.join(missing)} (optimizer, RNG/scaler and Lookahead state). Use -initial-weights for weights only.")
+                cursor = state_dict["train_state"].get("epoch_cursor")
+                if cursor is not None:
+                    saved_batch_size = cursor.get("batch_size")
+                    if saved_batch_size != batch_size or world_size != 1:
+                        raise ValueError(f"Unfinished epoch requires the saved single-device batch size "
+                                         f"(checkpoint={saved_batch_size}, requested={batch_size}, devices={world_size})")
+                resume_lookahead = state_dict.get("lookahead")
+                if resume_lookahead is not None and bool(resume_lookahead["slow"]) != (lookahead_k is not None):
+                    raise ValueError("Lookahead mode differs from checkpoint; use the original configuration for full resume")
 
             config_to_create = state_dict["config"] if "config" in state_dict else modelconfigs.config_of_name[model_kind]
             if requested_muzero_config is not None and config_to_create != {"algorithm": "muzero", "network": requested_muzero_config}:
@@ -1097,6 +1111,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                 # Adopting an initial checkpoint starts a new run, so its export cycle starts
                 # fresh regardless of the counter stored in that checkpoint.
                 train_state["export_cycle_counter"] = 0
+                for key in ("epoch_cursor", "data_snapshot", "rev_data_files_remaining", "data_files_used", "old_train_data_dirs"):
+                    train_state.pop(key, None)
 
             # Do this before loading the state dict, while the model is initialized to fresh values, to get a good baseline.
             # Each rank initializes with its own seed, so rank 0's values are broadcast to keep the
@@ -1188,9 +1204,13 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         else:
                             optimizer.load_state_dict(state_dict["optimizer"])
                     except ValueError as e:
+                        if not loading_initial_checkpoint:
+                            raise ValueError("Optimizer state differs from full-resume configuration") from e
                         logging.info(f"WARNING: Failed to load optimizer state dict: {e}, dropping old optimizer state")
                     train_state["optimizer_name"] = optimizer_name
                 else:
+                    if not loading_initial_checkpoint:
+                        raise ValueError(f"Full resume requires checkpoint optimizer {old_optimizer_name}, got {optimizer_name}")
                     train_state["optimizer_name"] = optimizer_name
                     logging.info(f"WARNING: Optimizer name {old_optimizer_name} in checkpoint but we are set to use {optimizer_name} now, dropping old optimizer state")
             else:
@@ -1262,6 +1282,10 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         elif intermediate_loss_scale is None:
             assert False, "Please specify both of main_loss_scale and intermediate_loss_scale or neither when using an architecture with an intermediate head."
 
+    if rank == 0:
+        display = learner_display_settings(model_config["version"], batch_size * world_size,
+            soft_policy_weight_scale, value_loss_scale, td_value_loss_scales, main_loss_scale, intermediate_loss_scale)
+        logging.info("learner_display " + json.dumps(display))
     logging.info(f"epochs_per_export {epochs_per_export}")
     logging.info(f"swa_period_samples {swa_period_samples}")
     logging.info(f"swa_scale {swa_scale}")
@@ -1493,15 +1517,13 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
     # DATA RELOADING GENERATOR ------------------------------------------------------------
 
     # Some globals
-    # Native invocations reload the directory on process start. Exact-budget
-    # invocations restore the active snapshot first, preserving its pending
-    # subepoch, file queue and RNG until the next normal data selection boundary.
+    # An unfinished epoch resumes its snapshot. At a clean boundary the next
+    # selection reads the current data directory.
     last_curdatadir = None
     vdatadir = None
     # Owns all "which training files have been used" logic.
     trainingdatagenerator = TrainingDataGenerator(train_state, no_repeat_files) if epoch_files is None else None
-    if (stop_at_samples is not None and train_state.get('data_snapshot') is not None and
-            (epoch_files is None or train_state.get('epoch_cursor') is not None)):
+    if train_state.get('epoch_cursor') is not None:
         last_curdatadir = train_state['data_snapshot']
         vdatadir = os.path.join(last_curdatadir, 'val')
         if trainingdatagenerator is not None:
@@ -1532,8 +1554,9 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                 )
 
 
-            # Different directory - new shuffle
-            if curdatadir != last_curdatadir:
+            # Attach the selected directory on startup or after a shuffle change.
+            if (curdatadir != last_curdatadir or
+                    (trainingdatagenerator is not None and not trainingdatagenerator.has_any_remaining_data())):
                 if not os.path.exists(curdatadir):
                     if quit_if_no_data:
                         logging.info("Shuffled data path does not exist, there seems to be no data or not enough data yet, quitting: %s" % curdatadir)
@@ -1551,14 +1574,14 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                     time.sleep(30)
                     continue
 
-                logging.info("Updated training data: " + curdatadir)
-                last_curdatadir = curdatadir
-                train_state['data_snapshot'] = curdatadir
+                tdatadir = os.path.join(curdatadir,"train")
+                vdatadir = os.path.join(curdatadir,"val")
 
                 with open(trainjsonpath) as f:
                     datainfo = json.load(f)
-                    train_state["window_start_data_row_idx"] = datainfo["range"][0]
-                    train_state["total_num_data_rows"] = datainfo["range"][1]
+                    same_shuffle = (trainingdatagenerator is not None and curdatadir == train_state.get('data_snapshot')
+                                    and datainfo["range"] == [train_state.get("window_start_data_row_idx"),
+                                                              train_state.get("total_num_data_rows")])
                     if is_muzero:
                         if datainfo.get("muzero_unroll_steps", 0) < 1 or datainfo.get("muzero_weight_mean", 0) <= 0:
                             raise ValueError("MuZero learner requires a MuZero shuffle snapshot")
@@ -1566,6 +1589,22 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         muzero_snapshot.update(datainfo)
                     elif "muzero_unroll_steps" in datainfo:
                         raise ValueError("AlphaZero learner cannot consume a MuZero snapshot")
+
+                if trainingdatagenerator is not None and not trainingdatagenerator.set_data_dir_if_has_remaining_files(tdatadir):
+                    if quit_if_no_data:
+                        logging.info(f"No new training files found in: {tdatadir}, quitting")
+                        safe_exit(barrier,0)
+                    logging.info(f"No new training files found in: {tdatadir}, waiting 30s and trying again")
+                    time.sleep(30)
+                    continue
+
+                last_curdatadir = curdatadir
+                if same_shuffle:
+                    # The queue now includes any new files, but the shuffle budget still applies.
+                    continue
+                logging.info("Updated training data: " + curdatadir)
+                train_state['data_snapshot'] = curdatadir
+                train_state["window_start_data_row_idx"], train_state["total_num_data_rows"] = datainfo["range"]
 
                 # Fill the buckets
                 if max_train_bucket_per_new_data is not None:
@@ -1594,20 +1633,6 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
 
                 logging.info("Train steps since last reload: %.0f -> 0" % train_state["train_steps_since_last_reload"])
                 train_state["train_steps_since_last_reload"] = 0
-
-                # Load training data files. The generator handles all "which files have been used" and no_repeat_files semantics.
-                tdatadir = os.path.join(curdatadir,"train")
-                loaded_any_data = (True if epoch_files is not None else
-                                   trainingdatagenerator.set_data_dir_if_has_remaining_files(tdatadir))
-                if not loaded_any_data:
-                    if quit_if_no_data:
-                        logging.info(f"No new training files found in: {tdatadir}, quitting")
-                        safe_exit(barrier,0)
-                    logging.info(f"No new training files found in: {tdatadir}, waiting 30s and trying again")
-                    time.sleep(30)
-                    continue
-
-                vdatadir = os.path.join(curdatadir,"val")
 
             # Same directory as before, no new shuffle
             else:
@@ -1732,7 +1757,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
 
     model_norms_only_at_print = trainloop_helpers.get_model_norms_only_at_print()
     logging.info(f"model_norms_only_at_print {model_norms_only_at_print}")
-    training_metrics_fn = trainloop_helpers.make_training_metrics_fn(metrics_obj, no_compile, model_norms_only_at_print)
+    training_metrics_fn = trainloop_helpers.make_training_metrics_fn(
+        metrics_obj, no_compile, model_norms_only_at_print, variable_batch=isinstance(raw_model, MuZeroModel))
     step_norm_tracker = trainloop_helpers.StepNormTracker(optimizer)
     gnorm_watcher = trainloop_helpers.GnormWatcher()
 
@@ -1793,6 +1819,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
 
     while True:
         if world_size == 1 and stopping.requested():
+            if num_epochs_this_instance > 0:
+                break  # The previous epoch already committed this state.
             pause_training('Stop requested')
         if stop_at_samples is not None and train_state['global_step_samples'] >= stop_at_samples:
             break
@@ -1851,7 +1879,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
         if cursor is None:
             lr_right_now, normal_weight_decay_right_now = update_and_return_lr_and_wd(log_if="always")
             maybe_update_brenorm_params()
-            cursor = dict(subepoch=0, epoch_batches=0, files=None, batches=0)
+            cursor = dict(subepoch=0, epoch_batches=0, files=None, batches=0, batch_size=batch_size)
             train_state['epoch_cursor'] = cursor
         else:
             lr_right_now, normal_weight_decay_right_now = train_state['lr_metrics']
@@ -1962,7 +1990,8 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         include_model_norms=not model_norms_only_at_print,
                     )
                 if model_norms_only_at_print and is_print_batch:
-                    metrics.update(metrics_obj.get_model_norm_metrics(raw_model))
+                    norm_snapshot = metrics_obj.get_model_norm_metrics(raw_model)
+                    metrics.update(norm_snapshot)
 
                 # DDP averages loss across instances, so to preserve LR as per-sample lr, we scale by world size.
                 loss = metrics["loss_sum"] * world_size
@@ -1988,17 +2017,6 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                 else:
                     loss.backward()
 
-                if use_adamw or use_muon:
-                    gnorm_cap = 11000.0
-                elif model_config["norm_kind"] == "fixup" or model_config["norm_kind"] == "fixscale" or model_config["norm_kind"] == "fixscaleonenorm":
-                    gnorm_cap = 2500.0
-                elif model_config["norm_kind"] == "bnorm" or model_config["norm_kind"] == "brenorm" or model_config["norm_kind"] == "fixbrenorm":
-                    gnorm_cap = 5500.0
-                else:
-                    assert False
-
-                gnorm_cap *= (1.0 if gnorm_clip_scale is None else gnorm_clip_scale)
-                gnorm_cap *= math.sqrt((batch_size * world_size) / 256.0)
 
                 if gnorm_stats_debug:
                     stats = metrics_obj.get_specific_norms_and_gradient_stats(raw_model)
@@ -2013,14 +2031,13 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                                 if param.grad is not None:
                                     param.grad *= gradscale_constant
 
-                # Loosen gradient clipping as we shift to smaller learning rates
-                gnorm_cap = gnorm_cap / math.sqrt(max(0.0000001,get_effective_lr_scale(train_state)))
-
                 if is_muzero:
                     gnorm_cap = muzero_learner.clip_component_gradients(raw_model, metrics, batch_size,
                         adaptive_optimizer=use_adamw or use_muon, clip_scale=gnorm_clip_scale,
                         lr_scale=get_effective_lr_scale(train_state))
                 else:
+                    gnorm_cap = trainloop_helpers.gradient_norm_cap(model_config["norm_kind"], use_adamw or use_muon,
+                        batch_size * world_size, gnorm_clip_scale, get_effective_lr_scale(train_state))
                     trainloop_helpers.clip_gradients_and_record(ddp_model, gnorm_cap, metrics, batch_size)
 
                 metrics["pslr_batch"] = lr_right_now
@@ -2077,7 +2094,7 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                     if model_norms_only_at_print:
                         trainloop_helpers.set_snapshot_metrics(
                             running_metrics["sums"], running_metrics["weights"], metrics,
-                            [key for key in metrics if key.startswith("norm_") and key.endswith("_batch")],
+                            norm_snapshot.keys(),
                         )
                     if step_norm_tracker.only_at_print:
                         trainloop_helpers.set_snapshot_metrics(
@@ -2264,15 +2281,19 @@ def _main_impl(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes
                         metrics = trainloop_helpers.detensorify_metrics(metrics)
                         accumulate_metrics(val_metric_sums, val_metric_weights, metrics, batch_size, decay=1.0, new_weight=1.0)
                         val_samples += batch_size
-                        if max_val_samples is not None and val_samples > max_val_samples:
+                        if max_val_samples is not None and val_samples >= max_val_samples:
                             break
+                    if val_samples:
                         val_metric_sums["nsamp_train"] = running_metrics["sums"]["nsamp"]
                         val_metric_weights["nsamp_train"] = running_metrics["weights"]["nsamp"]
                         val_metric_sums["wsum_train"] = running_metrics["sums"]["wsum"]
                         val_metric_weights["wsum_train"] = running_metrics["weights"]["wsum"]
                     last_val_metrics["sums"] = dict(val_metric_sums)
                     last_val_metrics["weights"] = dict(val_metric_weights)
-                    log_metrics(val_metric_sums, val_metric_weights, metrics, val_metrics_out)
+                    if val_samples:
+                        log_metrics(val_metric_sums, val_metric_weights, metrics, val_metrics_out)
+                    else:
+                        logging.info('Validation processed zero complete samples')
                     t1 = time.perf_counter()
                     logging.info(f"Validation took {t1-t0} seconds")
                     validation_model.train()
