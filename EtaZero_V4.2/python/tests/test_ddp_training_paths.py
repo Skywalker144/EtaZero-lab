@@ -37,9 +37,10 @@ def _grad_rel(ga, gb):
 
 @pytest.mark.skipif(cuda_count < 1, reason="requires a CUDA device")
 def test_per_block_compiled_trunk_matches_whole_model():
-    from torch.amp import autocast
+    from torch.amp import autocast, GradScaler
     from katago.train import modelconfigs
     from katago.train.model_pytorch import Model
+    from katago.train.trainloop_helpers import configure_model_for_compile
     from benchmark_fresh_model import load_batch
 
     torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 32)
@@ -57,16 +58,20 @@ def test_per_block_compiled_trunk_matches_whole_model():
 
     def run(per_block):
         model = copy.deepcopy(base)
-        model.compile_per_block_trunk = per_block
+        configure_model_for_compile(model, per_block=per_block)
         compiled = torch.compile(model)
+        scaler = GradScaler("cuda")
         for _ in range(2):  # second iteration exercises the steady-state compiled path
             model.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.float16):
                 outs = compiled(batch["binaryInputNCHW"], batch["globalInputNC"])
             flat = [o.float() for heads in outs for o in heads]
             loss = sum(o.square().mean() for o in flat) + 1e-3 * model.attn_logit_penalty_per_sample.mean()
-            loss.backward()
-        grads = {n: p.grad.detach().clone() for n, p in model.named_parameters()}
+            # As in the learner, scale before backprop through fp16 activations.
+            # The mean over the policy map otherwise underflows in backward.
+            scaler.scale(loss).backward()
+        scale = scaler.get_scale()
+        grads = {n: p.grad.detach() / scale for n, p in model.named_parameters()}
         return [o.detach() for o in flat], grads
 
     outs_whole, grads_whole = run(False)
@@ -186,9 +191,23 @@ def _global_rel(outs, refs):
 
 
 @pytest.mark.skipif(cuda_count < 1, reason="requires a CUDA device")
+@pytest.mark.parametrize("use_polar_express", [False, True])
+def test_aurora_normalizes_before_narrowing(use_polar_express):
+    from muon.muon import _aurora_polar
+
+    matrix = torch.tensor([[3., 4.], [-2., 5.], [0., 0.]], device="cuda")
+    for update in (matrix[:2], matrix, matrix.mT):
+        batch = torch.stack((update, update * 2**20, torch.zeros_like(update)))
+        result = _aurora_polar(batch, use_polar_express=use_polar_express)
+        assert result.dtype == torch.bfloat16 and result.isfinite().all()
+        assert result[0].count_nonzero() and torch.equal(result[0], result[1])
+        assert result[2].count_nonzero() == 0
+
+
+@pytest.mark.skipif(cuda_count < 1, reason="requires a CUDA device")
 def test_aurora_polar_accuracy_against_fp32_reference():
     """On real training gradients of every Muon-group matrix, the batched compiled Aurora polar
-    factor is as close to an fp32 computation of the same iteration as the per-parameter eager bf16
+    factor is as close to an fp32 computation of the same iteration as the per-parameter eager
     path is. Plain Muon's Newton-Schulz is measured the same way for comparison. An fp64 spot check
     confirms that fp32 is accurate enough to serve as the reference."""
     from muon.muon import _aurora_polar, _aurora_polar_compiled, zeropower_via_newtonschulz5, zeropower_via_newtonschulz5_compiled
