@@ -56,6 +56,8 @@ def test_native_sampler_unchanged_and_complete_trajectory(raw_data, case):
         for key in ordinary:
             np.testing.assert_array_equal(data[key], ordinary[key], err_msg=key)
         assert 1 <= len(ordinary['globalInputNC']) <= 4
+        side = data['muZeroRootNC'][:, 1] == -1
+        np.testing.assert_array_equal(data['globalTargetsNC'][side, 35], 0)
         offsets = data['muZeroGameOffsets']
         for game, identity in enumerate(data['muZeroGameHash']):
             lo, hi = offsets[game:game+2]
