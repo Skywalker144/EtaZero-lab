@@ -2,14 +2,14 @@
 // is recorded in reference_sources.json and licenses/MiniZero.txt.
 #include "muzerohelpers.h"
 #include <cuda_fp16.h>
-#include <cfloat>
+#include <math_constants.h>
 
 namespace {
 template<class T>
 __global__ void normalize(const T* values, const float* mask, float* output, int channels, int area, bool nhwc) {
   __shared__ float minimum[256], maximum[256];
   const int row = blockIdx.x, lane = threadIdx.x;
-  float lo = FLT_MAX, hi = -FLT_MAX;
+  float lo = CUDART_INF_F, hi = -CUDART_INF_F;
   for(int j = lane; j < channels*area; j += blockDim.x) {
     const int c = j/area, point = j%area;
     if(mask == nullptr || mask[row*area+point] != 0) {
