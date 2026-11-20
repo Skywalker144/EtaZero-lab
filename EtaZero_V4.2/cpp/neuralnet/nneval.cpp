@@ -343,6 +343,7 @@ void NNEvaluator::setDoRandomize(bool b) {
   currentDoRandomize.store(b, std::memory_order_release);
 }
 void NNEvaluator::setDefaultSymmetry(int s) {
+  if(s < 0 || s >= SymmetryHelpers::NUM_SYMMETRIES) throw StringError("Invalid default symmetry");
   if(inputsVersion == 9 && s != 0 && s != 2)
     throw StringError("Xiangqi only supports identity and horizontal reflection");
   currentDefaultSymmetry.store(s, std::memory_order_release);
@@ -550,7 +551,8 @@ void NNEvaluator::maybeWarmupComputeHandle(ComputeHandle* gpuHandle, int serverT
 
   // Empty board of the configured size, default rules/params. Outputs are discarded; we only want
   // the forward passes to trigger graph compilation for every batch size that will be seen.
-  Board board(nnXLen, nnYLen);
+  const int side = std::min(nnXLen, nnYLen);
+  Board board(inputsVersion == 8 ? side : nnXLen, inputsVersion == 8 ? side : nnYLen);
   //Featurize the way this model expects (a no-op under Tromp-Taylorish rules, but robust if the
   //warmup rules ever change).
   BoardHistory history(
@@ -1020,18 +1022,12 @@ void NNPostprocess::value(NNOutput& output, Player nextPlayer, bool suppressNoRe
       double varTimeLeftPreSoftplus = output.varTimeLeft * params.outputScaleMultiplier;
       double shorttermWinlossErrorPreSoftplus = output.shorttermWinlossError * params.outputScaleMultiplier;
 
-      if(suppressNoResult)
-        noResultLogits -= 100000.0;
-
-      // Softmax
-      double maxLogits = std::max(std::max(winLogits,lossLogits),std::max(drawLogits,noResultLogits));
+      double maxLogits = std::max(std::max(winLogits,lossLogits),drawLogits);
+      if(!suppressNoResult) maxLogits = std::max(maxLogits,noResultLogits);
       winProb = exp(winLogits - maxLogits);
       lossProb = exp(lossLogits - maxLogits);
       drawProb = exp(drawLogits - maxLogits);
-      noResultProb = exp(noResultLogits - maxLogits);
-
-      if(suppressNoResult)
-        noResultProb = 0.0;
+      noResultProb = suppressNoResult ? 0.0 : exp(noResultLogits - maxLogits);
 
       double probSum = winProb + drawProb + lossProb + noResultProb;
       winProb /= probSum;
@@ -1060,7 +1056,7 @@ void NNPostprocess::value(NNOutput& output, Player nextPlayer, bool suppressNoRe
         !isfinite(shorttermWinlossError)
       ) {
         cout << "Got nonfinite for nneval value" << endl;
-        cout << winLogits << " " << lossLogits << " " << noResultLogits
+        cout << winLogits << " " << drawLogits << " " << lossLogits << " " << noResultLogits
              << " " << varTimeLeft << " " << shorttermWinlossError
              << endl;
         throw StringError("Got nonfinite for nneval value");
