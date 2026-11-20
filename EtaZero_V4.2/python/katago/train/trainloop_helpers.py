@@ -286,7 +286,7 @@ def get_model_norms_only_at_print() -> bool:
     return env_flag("KATAGO_MODEL_NORMS_ONLY_AT_PRINT", default=True)
 
 
-def make_training_metrics_fn(metrics_obj, no_compile: bool, model_norms_only_at_print: bool):
+def make_training_metrics_fn(metrics_obj, no_compile: bool, model_norms_only_at_print: bool, *, variable_batch=False):
     """Return the (possibly torch.compiled) training metrics/loss function."""
     compile_requested = env_flag("KATAGO_COMPILE_TRAINING_LOSS", default=True)
     compile_training_loss = compile_requested and not no_compile
@@ -300,7 +300,22 @@ def make_training_metrics_fn(metrics_obj, no_compile: bool, model_norms_only_at_
             "so the compiled result structure is fixed"
         )
     logging.info(f"Compiling training loss with mode={get_compile_mode()}")
-    return torch.compile(metrics_obj.metrics_dict_batchwise, mode=get_compile_mode(), dynamic=False)
+    # MuZero selects a different number of live rows at each depth. Let Dynamo
+    # generalize a changing dimension when it first sees another batch size.
+    return torch.compile(metrics_obj.metrics_dict_batchwise, mode=get_compile_mode(), dynamic=None if variable_batch else False)
+
+
+def gradient_norm_cap(kind, adaptive_optimizer, effective_batch, clip_scale, lr_scale):
+    if adaptive_optimizer:
+        base = 11000.
+    elif kind in ("fixup", "fixscale", "fixscaleonenorm"):
+        base = 2500.
+    elif kind in ("bnorm", "brenorm", "fixbrenorm"):
+        base = 5500.
+    else:
+        raise ValueError(f"Unsupported normalization for gradient clipping: {kind}")
+    scale = 1. if clip_scale is None else clip_scale
+    return (base * scale * math.sqrt(effective_batch/256.)) / math.sqrt(max(1e-7, lr_scale))
 
 
 def clip_gradients_and_record(ddp_model, gnorm_cap, metrics, batch_size):
