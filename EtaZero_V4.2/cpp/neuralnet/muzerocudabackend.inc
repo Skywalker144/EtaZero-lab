@@ -29,7 +29,6 @@ struct StateData {
   const float* data() const { return (const float*)allocation->data + offset; }
 };
 
-const void* stateOwner(const State& state) { return state ? state->owner.get() : nullptr; }
 
 struct Evaluator::Impl {
   const int maxBatch, device;
@@ -85,6 +84,7 @@ struct Evaluator::Impl {
   ~Impl() {
     // The worker owns these handles, but state handles can be released on any
     // search thread (or after this evaluator), hence DeviceAllocation's device guard.
+    (void)cudaSetDevice(device);
     if(handle) (void)cudaStreamSynchronize(handle->cudaHandles->stream);
   }
   size_t stateSize() const { return (size_t)(channels+1)*canvas*canvas; }
@@ -129,82 +129,28 @@ struct Evaluator::Impl {
     CUDA_ERR("MuZero auxiliary download",cudaMemcpyAsync(host->auxValueResults,buffers->auxValueBuf,batch*host->singleAuxValueResultBytes,cudaMemcpyDeviceToHost,stream()));
     CUDA_ERR("MuZero output completion",cudaStreamSynchronize(stream()));
     const auto& desc = prediction->modelDesc;
-    const int area = canvas*canvas, actions = gameName == "xiangqi" ? Xiangqi::NUM_ACTIONS : area+(gameName == "go");
-    const int policies = desc.numPolicyChannels;
-    const float scale = desc.postProcessParams.outputScaleMultiplier;
     std::vector<Output> results(batch);
     for(int row = 0; row < batch; row++) {
       auto& result = results[row];
       result.state = std::make_shared<StateData>(StateData{storage,owner,masks[row],row*stateSize()});
-      result.policy.resize(policies*actions);
-      for(int channel = 0; channel < policies; channel++) {
-        if(gameName == "xiangqi") {
-          const int spatialChannels = policies*Xiangqi::NUM_DELTAS;
-          for(int action = 0; action < actions; action++) {
-            const int index = Xiangqi::policyIndex(action,canvas,canvas);
-            const int point = index%area, spatialChannel = channel*Xiangqi::NUM_DELTAS+index/area;
-            const int offset = row*spatialChannels*area +
-              (handle->usingNHWC ? point*spatialChannels+spatialChannel : spatialChannel*area+point);
-            result.policy[channel*actions+action] = host->policyResults[offset]*scale;
-          }
-        }
-        else for(int point = 0; point < area; point++) {
-          const int offset = row*policies*area + (handle->usingNHWC ? point*policies+channel : channel*area+point);
-          // Same static spatial mask as the Python head. Root game legality and
-          // recurrent occupancy are intentionally not part of this boundary.
-          result.policy[channel*actions+point] = (*masks[row])[point] ? host->policyResults[offset]*scale : -5000.0f;
-        }
-        if(gameName == "go") result.policy[channel*actions+area] = host->policyPassResults[row*policies+channel]*scale;
-      }
-      for(int c = 0; c < 4; c++) result.value[c] = host->valueResults[row*4+c]*scale;
-      for(int c = 0; c < 2; c++) result.auxiliary[c] = host->auxValueResults[row*2+c]*scale;
+      unpackPrediction(result,gameName,canvas,desc,*masks[row],row,host->policyResults,host->policyPassResults,
+                       host->valueResults,host->auxValueResults,canvas*canvas,handle->usingNHWC);
     }
     return results;
   }
 };
 
-Evaluator::Evaluator(const std::string& directory, int maxBatch, int device, enabled_t fp16, ConfigParser& cfg, Logger* logger, bool inputsUseNHWC_)
-  : Evaluator(std::make_shared<ModelBundle>(directory),maxBatch,device,fp16,cfg,logger,inputsUseNHWC_) {}
-Evaluator::Evaluator(std::shared_ptr<const ModelBundle> bundle, int maxBatch, int device, enabled_t fp16, ConfigParser& cfg, Logger* logger, bool inputsUseNHWC_)
-{
-  if(!bundle) throw StringError("MuZero model bundle must not be null");
-  impl = std::make_unique<Impl>(std::move(bundle),maxBatch,device,fp16,cfg,logger,inputsUseNHWC_);
-}
-Evaluator::~Evaluator() = default;
-const ModelDesc& Evaluator::representationDesc() const { return impl->representation->modelDesc; }
-const ModelDesc& Evaluator::predictionDesc() const { return impl->prediction->modelDesc; }
-const void* Evaluator::identity() const { return impl->owner.get(); }
-bool Evaluator::isUsingFP16() const { return impl->handle->usingFP16; }
-int Evaluator::posLen() const { return impl->canvas; }
-int Evaluator::latentChannels() const { return impl->channels; }
-const std::string& Evaluator::game() const { return impl->gameName; }
+#include "muzeroevaluator.inc"
 
 std::vector<Output> Evaluator::initial(int batch, const std::vector<float>& spatial,
                                       const std::vector<float>& global, const std::vector<float>& metadata) {
+  CUDA_ERR("MuZero select device",cudaSetDevice(impl->device));
   impl->checkBatch(batch);
   auto* host = impl->rootHost.get();
-  if(spatial.size() != batch*host->singleInputElts || global.size() != batch*host->singleInputGlobalElts ||
-     metadata.size() != batch*host->singleInputMetaElts)
-    throw StringError("MuZero initial observation dimensions differ");
-  const int area = impl->canvas*impl->canvas;
-  std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
-  for(int row = 0; row < batch; row++) {
-    auto mask = std::make_shared<std::vector<uint8_t>>(area);
-    bool nonempty = false;
-    for(int point = 0; point < area; point++) {
-      float value = spatial[row*host->singleInputElts+point];
-      if(value != 0 && value != 1) throw StringError("MuZero observation mask must be binary");
-      if(impl->gameName == "xiangqi" &&
-         (value != 0) != (point%impl->canvas < Xiangqi::WIDTH && point/impl->canvas < Xiangqi::HEIGHT))
-        throw StringError("Xiangqi MuZero observation mask must cover exactly the 9 x 10 board");
-      (*mask)[point] = value != 0; nonempty |= value != 0;
-    }
-    if(!nonempty) throw StringError("MuZero observation mask must be nonempty");
-    masks.push_back(std::move(mask));
-  }
+  auto masks = observationMasks(batch,posLen(),game(),representationDesc(),spatial,global,metadata);
   // The public observation contract is NCHW; adapt only at the source backend
   // boundary, which also handles conversion to the chosen compute layout.
-  const int features = impl->representation->modelDesc.numInputChannels;
+  const int area = posLen()*posLen(), features = representationDesc().numInputChannels;
   if(impl->inputsUseNHWC) {
     for(int row = 0; row < batch; row++)
       for(int point = 0; point < area; point++)
@@ -227,22 +173,16 @@ std::vector<Output> Evaluator::initial(int batch, const std::vector<float>& spat
 }
 
 std::vector<Output> Evaluator::recurrent(const std::vector<State>& states, const std::vector<int>& actions) {
+  CUDA_ERR("MuZero select device",cudaSetDevice(impl->device));
   impl->checkBatch(states.size());
   if(actions.size() != states.size()) throw StringError("MuZero recurrent action count differs");
-  const int batch = states.size(), area = impl->canvas*impl->canvas;
+  const int batch = states.size();
   const bool xiangqi = impl->gameName == "xiangqi";
   std::vector<std::shared_ptr<const std::vector<uint8_t>>> masks;
   for(int row = 0; row < batch; row++) {
     impl->checkState(states[row]);
-    const int action = actions[row];
-    if(action < 0 || action >= (xiangqi ? Xiangqi::NUM_ACTIONS : area+(impl->gameName == "go")) ||
-       (!xiangqi && action < area && !(*states[row]->mask)[action]))
-      throw StringError("MuZero recurrent action is outside the static game domain");
-    if(xiangqi) {
-      const auto& move = Xiangqi::MOVES[action];
-      impl->hostActionSquares[2*row] = move[1]*impl->canvas+move[0];
-      impl->hostActionSquares[2*row+1] = move[3]*impl->canvas+move[2];
-    }
+    const auto squaresForAction = actionSquares(actions[row],posLen(),game(),*states[row]->mask);
+    if(xiangqi) std::copy_n(squaresForAction.data(),2,impl->hostActionSquares.data()+2*row);
     masks.push_back(states[row]->mask);
     impl->hostStates[row] = states[row]->data();
   }
@@ -286,6 +226,7 @@ void Evaluator::warmup() {
 }
 
 std::vector<float> Evaluator::readStateForTesting(const State& state) const {
+  CUDA_ERR("MuZero select device",cudaSetDevice(impl->device));
   impl->checkState(state);
   std::vector<float> result(impl->stateSize());
   CUDA_ERR("MuZero diagnostic state download",cudaMemcpyAsync(result.data(),state->data(),result.size()*sizeof(float),cudaMemcpyDeviceToHost,impl->stream()));
