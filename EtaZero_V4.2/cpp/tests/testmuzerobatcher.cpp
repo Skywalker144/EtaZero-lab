@@ -69,6 +69,9 @@ void Tests::runMuZeroBatcher(const std::string& directory, const std::string& re
   json result;
   rejected([&]() { MuZero::Batcher bad(nullptr,maxBatch,{0},precision,config,nullptr,inputsUseNHWC); });
   rejected([&]() { MuZero::Evaluator bad(std::shared_ptr<const MuZero::ModelBundle>{},maxBatch,0,precision,config,nullptr,inputsUseNHWC); });
+  auto random = std::make_shared<MuZero::ModelBundle>(model->game(),model->posLen());
+  rejected([&]() { MuZero::Batcher bad(random,maxBatch,{0},precision,config); });
+  rejected([&]() { MuZero::Evaluator bad(random,maxBatch,0,precision,config); });
   if(model->hasTransformer()) {
 #ifdef USE_EIGEN_BACKEND
     const auto error = rejected([&]() { MuZero::Batcher bad(model,maxBatch,{0,0},precision,config,nullptr,false); });
