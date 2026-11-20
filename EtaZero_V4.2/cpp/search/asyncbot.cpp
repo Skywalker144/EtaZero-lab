@@ -6,18 +6,17 @@
 
 using namespace std;
 
-static void searchThreadLoop(AsyncBot* asyncBot, Logger* logger) {
+void AsyncBot::searchThreadLoop() {
   try {
-    asyncBot->internalSearchThreadLoop();
-  }
-  catch(const exception& e) {
-    logger->write(string("ERROR: Async bot thread failed: ") + e.what());
-  }
-  catch(const string& e) {
-    logger->write("ERROR: Async bot thread failed: " + e);
+    internalSearchThreadLoop();
   }
   catch(...) {
-    logger->write("ERROR: Async bot thread failed with unexpected throw");
+    std::lock_guard<std::mutex> lock(controlMutex);
+    searchError = std::current_exception();
+    isKilled = true;
+    isRunning = false;
+    isPondering = false;
+    userWaitingForStop.notify_all();
   }
 }
 
@@ -27,18 +26,8 @@ AsyncBot::AsyncBot(
   Logger* l,
   const string& randSeed
 )
-  :search(NULL),
-   controlMutex(),threadWaitingToSearch(),userWaitingForStop(),searchThread(),
-   isRunning(false),isPondering(false),isKilled(false),shouldStopNow(false),
-   queuedSearchId(0),queuedOnMove(),timeControls(),searchFactor(1.0),
-   analyzeCallbackPeriod(-1),
-   analyzeFirstCallbackAfter(-1),
-   analyzeCallback(),
-   searchBegunCallback()
-{
-  search = new Search(params,nnEval,l,randSeed);
-  searchThread = std::thread(searchThreadLoop,this,l);
-}
+  :AsyncBot(new Search(params,nnEval,l,randSeed))
+{}
 
 AsyncBot::AsyncBot(
   const SearchParams& params,
@@ -47,36 +36,26 @@ AsyncBot::AsyncBot(
   Logger* l,
   const string& randSeed
 )
-  :search(NULL),
-   controlMutex(),threadWaitingToSearch(),userWaitingForStop(),searchThread(),
-   isRunning(false),isPondering(false),isKilled(false),shouldStopNow(false),
-   queuedSearchId(0),queuedOnMove(),timeControls(),searchFactor(1.0),
-   analyzeCallbackPeriod(-1),
-   analyzeFirstCallbackAfter(-1),
-   analyzeCallback(),
-   searchBegunCallback()
-{
-  search = new Search(params,nnEval,humanEval,l,randSeed);
-  searchThread = std::thread(searchThreadLoop,this,l);
-}
+  :AsyncBot(new Search(params,nnEval,humanEval,l,randSeed))
+{}
 
 AsyncBot::AsyncBot(const SearchParams& params, MuZero::PositionEvaluator& evaluator, Logger* l, const string& randSeed)
-  :AsyncBot(new Search(params,evaluator,l,randSeed),l)
+  :AsyncBot(new Search(params,evaluator,l,randSeed))
 {}
 
 AsyncBot::AsyncBot(const SearchParams& params, MuZero::PositionEvaluator& evaluator, NNEvaluator* humanEval, Logger* l, const string& randSeed)
-  :AsyncBot(new Search(params,evaluator,humanEval,l,randSeed),l)
+  :AsyncBot(new Search(params,evaluator,humanEval,l,randSeed))
 {}
 
 AsyncBot::AsyncBot(const SearchParams& params, MuZero::PositionEvaluator& evaluator, MuZero::PositionEvaluator& humanEval, Logger* l, const string& randSeed)
-  :AsyncBot(new Search(params,evaluator,humanEval,l,randSeed),l)
+  :AsyncBot(new Search(params,evaluator,humanEval,l,randSeed))
 {}
 
 AsyncBot::AsyncBot(const SearchParams& params, NNEvaluator* evaluator, MuZero::PositionEvaluator& humanEval, Logger* l, const string& randSeed)
-  :AsyncBot(new Search(params,evaluator,humanEval,l,randSeed),l)
+  :AsyncBot(new Search(params,evaluator,humanEval,l,randSeed))
 {}
 
-AsyncBot::AsyncBot(Search* ownedSearch, Logger* l)
+AsyncBot::AsyncBot(Search* ownedSearch)
   :search(ownedSearch),
    controlMutex(),threadWaitingToSearch(),userWaitingForStop(),searchThread(),
    isRunning(false),isPondering(false),isKilled(false),shouldStopNow(false),
@@ -86,14 +65,14 @@ AsyncBot::AsyncBot(Search* ownedSearch, Logger* l)
    analyzeCallback(),
    searchBegunCallback()
 {
-  searchThread = std::thread(searchThreadLoop,this,l);
+  searchThread = std::thread(&AsyncBot::searchThreadLoop,this);
 }
 
 AsyncBot::~AsyncBot() {
-  stopAndWait();
-  testAssert(!isRunning);
   {
-    lock_guard<std::mutex> lock(controlMutex);
+    std::unique_lock<std::mutex> lock(controlMutex);
+    shouldStopNow.store(true);
+    userWaitingForStop.wait(lock,[this]() { return !isRunning; });
     isKilled = true;
   }
   threadWaitingToSearch.notify_all();
@@ -221,6 +200,7 @@ void AsyncBot::genMoveAsync(Player movePla, int searchId, const TimeControls& tc
 
   if(movePla != search->rootPla)
     search->setPlayerAndClearHistory(movePla);
+  search->checkSearchParams(false);
 
   queuedSearchId = searchId;
   queuedOnMove = onMove;
@@ -270,10 +250,7 @@ void AsyncBot::ponder(double sf) {
 
   //Read search-relative state only while idle under the source control lock,
   //and reject the conflict before waking the worker thread.
-  Player searchFor = search->plaThatSearchIsFor;
-  if(searchFor == C_EMPTY) searchFor = getOpp(search->rootPla);
-  if(const char* error = search->searchParams.getGumbelVisitCapError(search->rootPla,searchFor))
-    throw StringError(error);
+  search->checkSearchParams(true);
 
   queuedSearchId = 0;
   queuedOnMove = nullptr;
@@ -304,6 +281,7 @@ void AsyncBot::analyzeAsync(
 
   if(movePla != search->rootPla)
     search->setPlayerAndClearHistory(movePla);
+  search->checkSearchParams(false);
 
   queuedSearchId = 0;
   queuedOnMove = nullptr;
@@ -352,6 +330,7 @@ void AsyncBot::genMoveAsyncAnalyze(
 
   if(movePla != search->rootPla)
     search->setPlayerAndClearHistory(movePla);
+  search->checkSearchParams(false);
 
   queuedSearchId = searchId;
   queuedOnMove = onMove;
@@ -422,13 +401,13 @@ void AsyncBot::stopAndWaitAlreadyLocked(std::unique_lock<std::mutex>& lock) {
 
 void AsyncBot::waitForSearchToEnd() {
   std::unique_lock<std::mutex> lock(controlMutex);
-  while(isRunning)
-    userWaitingForStop.wait(lock);
+  waitForSearchToEndAlreadyLocked(lock);
 }
 
 void AsyncBot::waitForSearchToEndAlreadyLocked(std::unique_lock<std::mutex>& lock) {
   while(isRunning)
     userWaitingForStop.wait(lock);
+  if(searchError) std::rethrow_exception(searchError);
 }
 
 void AsyncBot::internalSearchThreadLoop() {
@@ -480,7 +459,7 @@ void AsyncBot::internalSearchThreadLoop() {
     atomic<bool> callbackLoopShouldStop(false);
     auto callbackLoop = [this,&isSearchBegun,&callbackLoopWaitingForSearchBegun,callbackPeriod,firstCallbackAfter,&analyzeCallbackLocal,&callbackLoopWaiting,&callbackLoopShouldStop]() {
       std::unique_lock<std::mutex> callbackLock(controlMutex);
-      while(!isSearchBegun) {
+      while(!isSearchBegun && !callbackLoopShouldStop.load()) {
         callbackLoopWaitingForSearchBegun.wait(callbackLock);
         if(callbackLoopShouldStop.load())
           return;
@@ -521,30 +500,48 @@ void AsyncBot::internalSearchThreadLoop() {
     };
 
     std::thread callbackLoopThread;
-    if(usingCallbackLoop) {
-      callbackLoopThread = std::thread(callbackLoop);
-    }
+    std::exception_ptr callbackError;
 
     std::function<bool()> shouldStopEarly = [this]() noexcept {
       return shouldStopNow.load(std::memory_order_acquire);
     };
 
-    search->runWholeSearch(&searchBegun,&shouldStopEarly,pondering,tc,searchFactor);
-    Loc moveLoc = search->getChosenMoveLoc();
+    Loc moveLoc = Board::NULL_LOC;
+    std::exception_ptr error;
+    try {
+      if(usingCallbackLoop) {
+        callbackLoopThread = std::thread([&]() {
+          try { callbackLoop(); }
+          catch(...) {
+            callbackError = std::current_exception();
+            shouldStopNow.store(true);
+          }
+        });
+      }
+      search->runWholeSearch(&searchBegun,&shouldStopEarly,pondering,tc,searchFactor);
+      moveLoc = search->getChosenMoveLoc();
+    }
+    catch(...) { error = std::current_exception(); }
 
-    if(usingCallbackLoop) {
+    if(callbackLoopThread.joinable()) {
       lock.lock();
       callbackLoopShouldStop.store(true);
       callbackLoopWaitingForSearchBegun.notify_all();
       callbackLoopWaiting.notify_all();
       lock.unlock();
       callbackLoopThread.join();
+      if(!error) error = callbackError;
     }
 
     lock.lock();
     //Call queuedOnMove under the lock just in case
-    if(queuedOnMove)
-      queuedOnMove(moveLoc,queuedSearchId,search);
+    try {
+      if(queuedOnMove)
+        queuedOnMove(error ? Board::NULL_LOC : moveLoc,queuedSearchId,search);
+    }
+    catch(...) { if(!error) error = std::current_exception(); }
+    searchError = error;
+    if(error) isKilled = true;
     isRunning = false;
     isPondering = false;
     userWaitingForStop.notify_all();

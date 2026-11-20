@@ -137,7 +137,8 @@ class AsyncBot {
     const std::function<void()>& onSearchBegun
   );
 
-  //Wait for the ongoing search to end, if any search is running.
+  //Wait for completion. If search or a callback failed, rethrow its exception.
+  //A failed search delivers NULL_LOC to onMove and retires this worker.
   void waitForSearchToEnd();
 
   //Signal an ongoing genMove or ponder to stop as soon as possible, and wait for the stop to happen.
@@ -151,7 +152,7 @@ class AsyncBot {
 
 
  private:
-  AsyncBot(Search* ownedSearch, Logger* logger);
+  explicit AsyncBot(Search* ownedSearch);
   Search* search;
 
   std::mutex controlMutex;
@@ -159,6 +160,7 @@ class AsyncBot {
   std::condition_variable userWaitingForStop;
   std::thread searchThread;
 
+  std::exception_ptr searchError;
   bool isRunning;
   bool isPondering;
   bool isKilled;
@@ -175,8 +177,7 @@ class AsyncBot {
   void stopAndWaitAlreadyLocked(std::unique_lock<std::mutex>& lock);
   void waitForSearchToEndAlreadyLocked(std::unique_lock<std::mutex>& lock);
 
- public:
-  //Only for internal use
+  void searchThreadLoop();
   void internalSearchThreadLoop();
 };
 
