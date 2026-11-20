@@ -108,6 +108,15 @@ Placement::Forbidden Placement::renjuForbidden(const Board& board, Loc loc) {
   return analyzer.analyze(RenjuPosition(board),Location::getY(loc,board.x_size)*board.x_size + Location::getX(loc,board.x_size));
 }
 
+void Placement::fillRenjuForbidden(const Board& board, float* plane, int rowStride, int pointStride) {
+  const RenjuPosition position(board);
+  for(int y = 0; y < board.y_size; y++) for(int x = 0; x < board.x_size; x++) {
+    int action = y*board.x_size+x;
+    if(position.cells[action] == C_EMPTY && RenjuAnalyzer().analyze(position,action) != Forbidden::NONE)
+      plane[y*rowStride+x*pointStride] = 1.0f;
+  }
+}
+
 bool Placement::hexConnected(const Board& board, Player pla) {
   const int size = board.x_size;
   constexpr int dx[] = {0,1,1,0,-1,-1}, dy[] = {-1,-1,0,1,1,0};
@@ -164,11 +173,7 @@ Placement::Result Placement::resultFromSetup(const Board& board, Rules::Game gam
 Placement::Result Placement::play(Board& board, Loc loc, Player pla, Rules::Game game) {
   assert(game != Rules::Game::GO && board.colors[loc] == C_EMPTY);
   const bool forbidden = game == Rules::Game::RENJU && pla == P_BLACK && renjuForbidden(board,loc) != Forbidden::NONE;
-  // Rebuild without captures. The source utility also supports zero-liberty
-  // groups, preserving Board consistency for generic IO and search diagnostics.
-  board.colors[loc] = pla;
-  board.clearSimpleKoLoc();
-  board.regenChainsFromColors();
+  board.setStoneWithoutCaptures(loc,pla);
   if(forbidden) return {true,P_WHITE};
   if(game == Rules::Game::HEX) {
     if(hexConnected(board,pla)) return {true,pla};
