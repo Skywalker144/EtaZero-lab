@@ -48,7 +48,7 @@ struct Batcher::Impl {
     : model(std::move(model_)), maxBatch(maxBatch_),
       numEffectiveDevices(NeuralNet::getNumEffectiveDevices(config,devices)), gpuIdxByServerThread(devices), usingFP16Mode(fp16), recurrentQueues(devices.size()),
       starting(devices.size()), maxRows(maxBatch_) {
-    if(!model || maxBatch < 1 || devices.empty()) throw StringError("Invalid MuZero batcher configuration");
+    if(!model || model->isRandom() || maxBatch < 1 || devices.empty()) throw StringError("Invalid MuZero batcher configuration");
     counters.rowsByWorker.resize(devices.size());
     threads.reserve(devices.size());
     try {
