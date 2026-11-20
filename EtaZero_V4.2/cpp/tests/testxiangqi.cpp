@@ -76,7 +76,7 @@ void nativeHistory() {
     const Player pla = hist.presumedNextMovePla;
     testAssert(hist.isLegal(board,loc,pla) && !hist.isLegal(board,loc,getOpp(pla)));
     testAssert(hist.makeBoardMoveTolerant(board,loc,pla,true));
-    board.checkConsistency(true);
+    testAssert(board.isEqualForTesting(hist.getXiangqiState().colorBoard(),true,true,true));
     testAssert(board.pos_hash == hist.getRecentBoard(0).pos_hash);
     const auto& pieces = hist.getXiangqiState().pieces();
     for(int y = 0; y < 10; y++) for(int x = 0; x < 9; x++) {
