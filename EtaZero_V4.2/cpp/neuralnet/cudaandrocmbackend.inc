@@ -4149,9 +4149,9 @@ struct PolicyHead {
   const MatMulLayer gpoolToBiasMul;
   const BatchNormLayer p1BN;
   const ConvLayer p2Conv;
-  const MatMulLayer gpoolToPassMul;
-  const MatBiasLayer gpoolToPassBias;
-  const MatMulLayer gpoolToPassMul2;
+  std::unique_ptr<MatMulLayer> gpoolToPassMul;
+  std::unique_ptr<MatBiasLayer> gpoolToPassBias;
+  std::unique_ptr<MatMulLayer> gpoolToPassMul2;
 
   PolicyHead() = delete;
   PolicyHead(const PolicyHead&) = delete;
@@ -4180,11 +4180,13 @@ struct PolicyHead {
     g1BN(cudaHandles,&desc->g1BN,&desc->g1Activation,nnX,nnY,useFP16,useNHWC),
     gpoolToBiasMul(cudaHandles,&desc->gpoolToBiasMul,false),
     p1BN(cudaHandles,&desc->p1BN,&desc->p1Activation,nnX,nnY,false,useNHWC),
-    p2Conv(cudaHandles,manager,&desc->p2Conv,false,useNHWC),
-    gpoolToPassMul(cudaHandles,&desc->gpoolToPassMul,false),
-    gpoolToPassBias(cudaHandles,&desc->gpoolToPassBias,false,desc->passActivation.activation),
-    gpoolToPassMul2(cudaHandles,&desc->gpoolToPassMul2,false)
+    p2Conv(cudaHandles,manager,&desc->p2Conv,false,useNHWC)
   {
+    if(NNModelVersion::hasPassHead(modelVersion)) {
+      gpoolToPassMul = std::make_unique<MatMulLayer>(cudaHandles,&desc->gpoolToPassMul,false);
+      gpoolToPassBias = std::make_unique<MatBiasLayer>(cudaHandles,&desc->gpoolToPassBias,false,desc->passActivation.activation);
+      gpoolToPassMul2 = std::make_unique<MatMulLayer>(cudaHandles,&desc->gpoolToPassMul2,false);
+    }
   }
 
   ~PolicyHead()
@@ -4206,10 +4208,10 @@ struct PolicyHead {
     bytes = std::max(bytes,b);
     b = p2Conv.requiredWorkspaceBytes(cudaHandles,batchSize);
     bytes = std::max(bytes,b);
-    b = gpoolToPassMul.requiredWorkspaceBytes(cudaHandles);
-    bytes = std::max(bytes,b);
-    b = gpoolToPassMul2.requiredWorkspaceBytes(cudaHandles);
-    bytes = std::max(bytes,b);
+    if(gpoolToPassMul) {
+      bytes = std::max(bytes,gpoolToPassMul->requiredWorkspaceBytes(cudaHandles));
+      bytes = std::max(bytes,gpoolToPassMul2->requiredWorkspaceBytes(cudaHandles));
+    }
     b = sizeof(float)*batchSize*g1Channels*nnXLen*nnYLen;
     bytes = std::max(bytes,b);
 
@@ -4236,7 +4238,6 @@ struct PolicyHead {
     SizedBuf<void*> g1Out2(scratch->allocator, scratch->getBufSizeXY(g1Channels));
     SizedBuf<void*> g1Concat(scratch->allocator, scratch->getBufSizeFloat(g1Channels*3));
     SizedBuf<void*> g1Bias(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
-    SizedBuf<void*> p1Pass(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
 
     p1Conv.apply(cudaHandles,scratch,batchSize,false,trunkBuf,p1Out.buf,workspaceBuf,workspaceBytes);
     g1Conv.apply(cudaHandles,scratch,batchSize,false,trunkBuf,g1Out.buf,workspaceBuf,workspaceBytes);
@@ -4290,21 +4291,21 @@ struct PolicyHead {
     p1BN.apply(cudaHandles,batchSize,p1OutBufA,maskFloatBuf,p1OutBufB);
     p2Conv.apply(cudaHandles,scratch,batchSize,false,p1OutBufB,(float*)policyBuf,workspaceBuf,workspaceBytes);
 
-    if(modelVersion == 18 || modelVersion == 19) {
-      // Non-Go models have no pass branch.
-    }
-    else if(modelVersion >= 15) {
-      gpoolToPassMul.apply(cudaHandles,scratch,batchSize,g1Concat.buf,p1Pass.buf,workspaceBuf,workspaceBytes);
-      gpoolToPassBias.apply(cudaHandles,batchSize,p1Pass.buf);
-      gpoolToPassMul2.apply(cudaHandles,scratch,batchSize,p1Pass.buf,policyPassBuf,workspaceBuf,workspaceBytes);
-    }
-    else {
-      gpoolToPassMul.apply(cudaHandles,scratch,batchSize,g1Concat.buf,policyPassBuf,workspaceBuf,workspaceBytes);
+    if(NNModelVersion::hasPassHead(modelVersion)) {
+      if(modelVersion >= 15) {
+        SizedBuf<void*> p1Pass(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
+        gpoolToPassMul->apply(cudaHandles,scratch,batchSize,g1Concat.buf,p1Pass.buf,workspaceBuf,workspaceBytes);
+        gpoolToPassBias->apply(cudaHandles,batchSize,p1Pass.buf);
+        gpoolToPassMul2->apply(cudaHandles,scratch,batchSize,p1Pass.buf,policyPassBuf,workspaceBuf,workspaceBytes);
+      }
+      else {
+        gpoolToPassMul->apply(cudaHandles,scratch,batchSize,g1Concat.buf,policyPassBuf,workspaceBuf,workspaceBytes);
+      }
     }
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
     CudaUtils::debugPrint3D(string("p1 after-gpool-sum"), p1OutBufA, batchSize, p1Channels, nnXLen*nnYLen, usingNHWC, false);
-    CudaUtils::debugPrint2D(string("policypass"), policyPassBuf, batchSize, 1, false);
+    if(NNModelVersion::hasPassHead(modelVersion)) CudaUtils::debugPrint2D(string("policypass"), policyPassBuf, batchSize, 1, false);
     CudaUtils::debugPrint3D(string("policy"), policyBuf, batchSize, p2Channels, nnXLen*nnYLen, usingNHWC, false);
     #endif
 
@@ -4807,8 +4808,9 @@ struct Buffers {
     else
       testAssert(m.policyHead->p2Channels == 1);
 
-    policyPassBufBytes = m.numPolicyChannels * batchFloatBytes;
-    CUDA_ERR("Buffers",cudaMalloc(reinterpret_cast<void**>(&policyPassBuf), policyPassBufBytes));
+    policyPassBufBytes = NNModelVersion::hasPassHead(m.modelVersion) ? m.numPolicyChannels * batchFloatBytes : 0;
+    policyPassBuf = nullptr;
+    if(policyPassBufBytes) CUDA_ERR("Buffers",cudaMalloc(reinterpret_cast<void**>(&policyPassBuf), policyPassBufBytes));
     policyBufBytes = m.numSpatialPolicyChannels * batchXYFloatBytes;
     CUDA_ERR("Buffers",cudaMalloc(reinterpret_cast<void**>(&policyBuf), policyBufBytes));
 
@@ -5447,7 +5449,7 @@ struct InputBuffers {
     userInputBufferBytes = (size_t)m.numInputChannels * maxBatchSize * nnXLen * nnYLen * sizeof(float);
     userInputGlobalBufferBytes = (size_t)m.numInputGlobalChannels * maxBatchSize * sizeof(float);
     userInputMetaBufferBytes = (size_t)m.numInputMetaChannels * maxBatchSize * sizeof(float);
-    policyPassResultBufferBytes = (size_t)maxBatchSize * m.numPolicyChannels * sizeof(float);
+    policyPassResultBufferBytes = NNModelVersion::hasPassHead(m.modelVersion) ? (size_t)maxBatchSize * m.numPolicyChannels * sizeof(float) : 0;
     policyResultBufferBytes = (size_t)maxBatchSize * spatialPolicyChannels * nnXLen * nnYLen * sizeof(float);
     valueResultBufferBytes = (size_t)maxBatchSize * m.numValueChannels * sizeof(float);
     auxValueResultBufferBytes = (size_t)maxBatchSize * m.numAuxValueChannels * sizeof(float);
@@ -5467,7 +5469,7 @@ struct InputBuffers {
       if(m.numInputMetaChannels > 0)
         userInputMetaBuffer = mallocPinned((size_t)m.numInputMetaChannels * maxBatchSize);
 
-      policyPassResults = mallocPinned((size_t)maxBatchSize * m.numPolicyChannels);
+      if(policyPassResultBufferBytes) policyPassResults = mallocPinned((size_t)maxBatchSize * m.numPolicyChannels);
       policyResults = mallocPinned((size_t)maxBatchSize * spatialPolicyChannels * nnXLen * nnYLen);
       valueResults = mallocPinned((size_t)maxBatchSize * m.numValueChannels);
 
@@ -5685,7 +5687,7 @@ void NeuralNet::getOutput(
     assert(output->nnYLen == nnYLen);
     float policyOptimism = (float)inputBufs[row]->policyOptimism;
 
-    const float* policyPassSrcBuf = inputBuffers->policyPassResults + row * numPolicyChannels;
+    const float* policyPassSrcBuf = NNModelVersion::hasPassHead(modelVersion) ? inputBuffers->policyPassResults + row * numPolicyChannels : nullptr;
     const float* policySrcBuf = inputBuffers->policyResults + row * spatialPolicyChannels * nnXLen * nnYLen;
     output->resizePolicy(modelVersion == 19 ? Xiangqi::NUM_ACTIONS : NNPos::MAX_NN_POLICY_SIZE);
     float* policyProbs = output->policyProbs;
