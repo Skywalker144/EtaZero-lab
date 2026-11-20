@@ -1,3 +1,4 @@
+#include "gatekeepertally.h"
 #include "../core/global.h"
 #include "../core/datetime.h"
 #include "../core/fileutils.h"
@@ -69,17 +70,10 @@ namespace {
     int numGameThreads;
     bool isDraining;
 
-    double drawEquivalentWinsForWhite;
     double noResultUtilityForWhite;
 
-    int numGamesTallied;
-    double numBaselineWinPoints;
-    double numCandidateWinPoints;
+    GatekeeperTally tally;
     double requiredCandidateWinProp;
-    int candidateWins = 0;
-    int candidateLosses = 0;
-    int draws = 0;
-    int noResults = 0;
 
     ofstream* sgfOut;
 
@@ -107,18 +101,13 @@ namespace {
        finishedGameQueue(),
        numGameThreads(0),
        isDraining(false),
-       drawEquivalentWinsForWhite(0.5),
        noResultUtilityForWhite(0.0),
-       numGamesTallied(0),
-       numBaselineWinPoints(0.0),
-       numCandidateWinPoints(0.0),
        requiredCandidateWinProp(reqWinProp),
        sgfOut(sOut),
        terminated(false)
     {
       SearchParams baseParams = Setup::loadSingleParams(cfg,Setup::SETUP_FOR_OTHER);
 
-      drawEquivalentWinsForWhite = baseParams.drawEquivalentWinsForWhite;
       noResultUtilityForWhite = baseParams.noResultUtilityForWhite;
 
       //Initialize object for randomly pairing bots. Actually since this is only selfplay, this only
@@ -148,49 +137,29 @@ namespace {
         if(!suc || data == NULL)
           break;
 
-        double whitePoints;
-        double blackPoints;
-        if(data->endHist.isGameFinished && data->endHist.isNoResult) {
-          whitePoints = drawEquivalentWinsForWhite;
-          blackPoints = 1.0 - whitePoints;
-          logger.write("Game " + Global::intToString(numGamesTallied) + ": noresult");
+        BoardHistory& hist = data->endHist;
+        if(!hist.isGameFinished && !hist.rules.isGo())
+          throw StringError("Gatekeeper game reached its move limit without a rule result; candidate remains untested");
+        if(!hist.isGameFinished)
+          hist.endAndScoreGameNow(hist.getRecentBoard(0));
+        if(hist.isNoResult) {
+          logger.write("Game " + Global::intToString(tally.games) + ": noresult");
         }
         else {
-          BoardHistory hist(data->endHist);
-          const Board& endBoard = hist.getRecentBoard(0);
-          //Force game end just in caseif we crossed a move limit
-          if(!hist.isGameFinished && !hist.rules.isGo())
-            throw StringError("Gatekeeper game reached its move limit without a rule result; candidate remains untested");
-          if(!hist.isGameFinished)
-            hist.endAndScoreGameNow(endBoard);
-
           ostringstream oresult;
           WriteSgf::printGameResult(oresult,hist);
           if(hist.winner == P_BLACK) {
-            whitePoints = 0.0;
-            blackPoints = 1.0;
-            logger.write("Game " + Global::intToString(numGamesTallied) + ": winner black " + data->bName + " " + oresult.str());
+            logger.write("Game " + Global::intToString(tally.games) + ": winner black " + data->bName + " " + oresult.str());
           }
           else if(hist.winner == P_WHITE) {
-            whitePoints = 1.0;
-            blackPoints = 0.0;
-            logger.write("Game " + Global::intToString(numGamesTallied) + ": winner white " + data->wName + " " + oresult.str());
+            logger.write("Game " + Global::intToString(tally.games) + ": winner white " + data->wName + " " + oresult.str());
           }
           else {
-            whitePoints = 0.5 * noResultUtilityForWhite + 0.5;
-            blackPoints = 1.0 - whitePoints;
-            logger.write("Game " + Global::intToString(numGamesTallied) + ": draw " + oresult.str());
+            logger.write("Game " + Global::intToString(tally.games) + ": draw " + oresult.str());
           }
         }
 
-        numGamesTallied++;
-        numBaselineWinPoints += (data->bIdx == 0) ? blackPoints : whitePoints;
-        numCandidateWinPoints += (data->bIdx == 1) ? blackPoints : whitePoints;
-        const double candidatePoints = (data->bIdx == 1) ? blackPoints : whitePoints;
-        if(data->endHist.isNoResult) noResults++;
-        else if(candidatePoints > 0.5) candidateWins++;
-        else if(candidatePoints < 0.5) candidateLosses++;
-        else draws++;
+        tally.record(hist,data->bIdx == 1 ? P_BLACK : P_WHITE,noResultUtilityForWhite);
 
         if(sgfOut != NULL) {
           testAssert(data->startHist.moveHistory.size() <= data->endHist.moveHistory.size());
@@ -201,14 +170,14 @@ namespace {
 
         //Terminate games if one side has won enough to guarantee the victory.
         int64_t numTotalGames = matchPairer->getNumGamesTotalToGenerate();
-        int64_t numGamesRemaining = numTotalGames - numGamesTallied;
+        int64_t numGamesRemaining = numTotalGames - tally.games;
         testAssert(numGamesRemaining >= 0);
         if(numGamesRemaining > 0) {
-          if(numCandidateWinPoints >= numTotalGames * requiredCandidateWinProp) {
+          if(tally.candidatePoints >= numTotalGames * requiredCandidateWinProp) {
             logger.write("Candidate has already won enough games, terminating remaning games");
             terminated.store(true);
           }
-          else if(numCandidateWinPoints + numGamesRemaining + 1e-10 < numTotalGames * requiredCandidateWinProp) {
+          else if(tally.candidatePoints + numGamesRemaining + 1e-10 < numTotalGames * requiredCandidateWinProp) {
             logger.write("Candidate has already lost too many games, terminating remaning games");
             terminated.store(true);
           }
@@ -621,20 +590,20 @@ int MainCmds::gatekeeper(const vector<string>& args) {
 
     //Candidate wins ties
     writeResult(resultFile,{{"candidate",netAndStuff->modelNameCandidate},{"baseline",netAndStuff->modelNameBaseline},
-      {"accepted",!(netAndStuff->numCandidateWinPoints + 1e-10 < requiredCandidateWinProp * netAndStuff->numGamesTallied)},
-      {"reason","match"},{"games",netAndStuff->numGamesTallied},
+      {"accepted",!(netAndStuff->tally.candidatePoints + 1e-10 < requiredCandidateWinProp * netAndStuff->tally.games)},
+      {"reason","match"},{"games",netAndStuff->tally.games},
       {"planned_games",netAndStuff->matchPairer->getNumGamesTotalToGenerate()},
-      {"candidate_points",netAndStuff->numCandidateWinPoints},{"baseline_points",netAndStuff->numBaselineWinPoints},
+      {"candidate_points",netAndStuff->tally.candidatePoints},{"baseline_points",netAndStuff->tally.baselinePoints},
       {"required_candidate_win_prop",requiredCandidateWinProp},
-      {"outcomes",{{"win",netAndStuff->candidateWins},{"draw",netAndStuff->draws},
-                   {"loss",netAndStuff->candidateLosses},{"no_result",netAndStuff->noResults}}}});
-    if(netAndStuff->numCandidateWinPoints + 1e-10 < requiredCandidateWinProp * netAndStuff->numGamesTallied) {
+      {"outcomes",{{"win",netAndStuff->tally.wins},{"draw",netAndStuff->tally.draws},
+                   {"loss",netAndStuff->tally.losses},{"no_result",netAndStuff->tally.noResults}}}});
+    if(netAndStuff->tally.candidatePoints + 1e-10 < requiredCandidateWinProp * netAndStuff->tally.games) {
       logger.write(
         Global::strprintf(
           "Candidate lost match, score %.3f to %.3f in %d games, rejecting candidate %s",
-          netAndStuff->numCandidateWinPoints,
-          netAndStuff->numBaselineWinPoints,
-          netAndStuff->numGamesTallied,
+          netAndStuff->tally.candidatePoints,
+          netAndStuff->tally.baselinePoints,
+          netAndStuff->tally.games,
           netAndStuff->modelNameCandidate.c_str()
         )
       );
@@ -652,9 +621,9 @@ int MainCmds::gatekeeper(const vector<string>& args) {
       logger.write(
         Global::strprintf(
           "Candidate won match, score %.3f to %.3f in %d games, accepting candidate %s",
-          netAndStuff->numCandidateWinPoints,
-          netAndStuff->numBaselineWinPoints,
-          netAndStuff->numGamesTallied,
+          netAndStuff->tally.candidatePoints,
+          netAndStuff->tally.baselinePoints,
+          netAndStuff->tally.games,
           netAndStuff->modelNameCandidate.c_str()
         )
       );
