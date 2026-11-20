@@ -599,9 +599,8 @@ void Search::selectBestChildToDescend(
     parentUtility, parentWeightPerVisit, parentUtilityStdevFactor
   );
 
-  SearchPolicyBuffer<bool> posesWithChildBufStorage(getPolicyBufferSize(),true);
-
-  bool* posesWithChildBuf = posesWithChildBufStorage.data();
+  auto& posesWithChildBuf = thread.positionsWithChild;
+  posesWithChildBuf.assign(getPolicyBufferSize(),0);
 
   double exploreScaling;
   if(useHumanSL)
