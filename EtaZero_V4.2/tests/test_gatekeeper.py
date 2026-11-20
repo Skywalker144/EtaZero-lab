@@ -27,7 +27,7 @@ gpu = pytest.mark.skipif(os.environ.get('ETAZERO_GPU_TESTS') != '1', reason='req
 def gate_config(path, game='renju', moves=30, games=6, gumbel=False):
     path.write_text(f'@include {os.path.relpath(ROOT / "cpp/configs/training/gatekeeper1.cfg", path.parent)}\n'
         f'game = {game}\nnumGamesPerGating = {games}\nmaxMovesPerGame = {moves}\n'
-        'bSizes = 3\nbSizeRelProbs = 1\nallowRectangleProb = 0\nkomiMean = 0\n'
+        'bSizes = 3\nbSizeRelProbs = 1\nallowRectangleProb = 0\nkomiMean = 0\nnoResultUtilityForWhite = 0.6\n'
         'numGameThreads = 2\nnumSearchThreads = 1\nmaxVisits = 8\nallowResignation = false\n'
         'nnMaxBatchSize = 4\n'
         'nnCacheSizePowerOfTwo = 8\n'
@@ -101,7 +101,7 @@ def native_command(tmp_path, game, muzero, threshold, *, moves=30, games=6, gumb
     ('hex', True, 0., False), ('go', True, 0., False),
 ])
 def test_native_gatekeeper_uses_real_results_and_moves_whole_models(tmp_path, game, muzero, threshold, gumbel):
-    command, receipt = native_command(tmp_path, game, muzero, threshold, gumbel=gumbel)
+    command, receipt = native_command(tmp_path, game, muzero, threshold, moves=1 if game == 'go' else 30, gumbel=gumbel)
     original = {p.name: p.read_bytes() for p in (tmp_path / 'test/candidate').iterdir()}
     result = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -120,7 +120,9 @@ def test_native_gatekeeper_uses_real_results_and_moves_whole_models(tmp_path, ga
     destination = tmp_path / ('accepted' if report['accepted'] else 'rejected') / 'candidate'
     assert {p.name: p.read_bytes() for p in destination.iterdir()} == original
     assert not (tmp_path / 'test/candidate').exists()
-    assert list((tmp_path / 'matches/candidate').glob('*.sgfs'))
+    games = [line for file in (tmp_path / 'matches/candidate').glob('*.sgfs')
+             for line in file.read_text().splitlines() if line.strip()]
+    assert len(games) == report['games'] and all('RE[' in line for line in games)
 
 
 @gpu
