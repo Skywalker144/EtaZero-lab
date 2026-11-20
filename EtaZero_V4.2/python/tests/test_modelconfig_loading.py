@@ -17,6 +17,8 @@ def test_feature_helpers_do_not_build_named_presets():
     module = fresh_module()
     assert module.get_num_bin_input_features({'version': 18}) == 5
     assert module.get_policy_size({'version': 18}, 7) == 49
+    assert module.get_num_meta_encoder_input_features({'metadata_encoder': None}) == 0
+    assert module.get_num_meta_encoder_input_features({'metadata_encoder': {}}) == 192
     assert 'config_of_name' not in vars(module)
     with pytest.raises(AttributeError):
         module.unknown_attribute
