@@ -233,6 +233,7 @@ def test_source_learner_checkpoint_resume_and_bundle(raw_data, tmp_path, device,
     second = load_checkpoint(train / 'checkpoint.ckpt')
     assert first['train_state']['global_step_samples'] == rows
     assert second['train_state']['global_step_samples'] == 2 * rows
+    assert second['train_state']['train_steps_since_last_reload'] == 2 * rows
     assert second['train_state']['export_cycle_counter'] == 2
     assert second['train_state']['muzero_hidden_gradient_scale'] == .3
     assert first['swa_model']['n_averaged'] == rows // 8
@@ -290,3 +291,92 @@ def test_source_learner_checkpoint_resume_and_bundle(raw_data, tmp_path, device,
                                         auxiliary=torch.cat((misc[:, :1], more[:, :1]), 1)).items():
                     actual = np.array([row[key] for row in rows]).reshape(tensor.shape)
                     np.testing.assert_allclose(actual, tensor.numpy(), rtol=.015, atol=.012, err_msg=name + ':' + key)
+
+
+def test_standalone_stop_resume_and_first_lookahead_norm_snapshot(raw_data, tmp_path):
+    """Interrupt after the first norm print and resume the outstanding standalone epoch."""
+    import signal
+    import time
+    from test_controller_recovery import wait_until
+    device = "cuda" if os.environ.get("ETAZERO_GPU_TESTS") == "1" else "cpu"
+    env = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    if device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    output = shuffle_source(raw_data / "3/mu", tmp_path, steps=2, rows_per_file=1000, files_per_bucket=1)
+    sample = load(next(output.glob("*.npz")))
+    data = tmp_path / "snapshot"
+    for split, count in (("train", 480), ("val", 1)):
+        folder = data / split
+        folder.mkdir(parents=True)
+        ids = np.arange(count) % len(sample["globalInputNC"])
+        np.savez(folder / "data.npz", **{key: value[ids] for key, value in sample.items()})
+        (folder / "data.json").write_text(json.dumps({"num_rows": count}))
+    for split in ("train", "val"):
+        shutil.copyfile(output.with_suffix(".json"), data / (split + ".json"))
+    network = asdict(make_model("renju", pos_len=5).network_config)
+    network["representation"]["norm_kind"] = "bnorm"
+    config = tmp_path / "network.json"
+    config.write_text(json.dumps(network))
+    train = tmp_path / "learner"
+    args = [ROOT / "python/train.py", "-traindir", train, "-datadir", data,
+            "-muzero-config", config, "-batch-size", "4", "-pos-len", "5",
+            "-samples-per-epoch", "480", "-max-epochs-this-instance", "1",
+            "-lookahead-k", "6", "-lookahead-print", "-no-compile",
+            "-no-export", "-no-longterm-checkpoints", "-quit-if-no-data"]
+    if device == "cuda":
+        args.append("-use-fp16")
+    logfile = tmp_path / "paused.log"
+    with logfile.open("w") as stream, subprocess.Popen([sys.executable, *map(str,args)],
+            env=env, stdout=stream, stderr=subprocess.STDOUT) as process:
+        try:
+            deadline = time.monotonic() + 120
+            metrics = train / "metrics_train.json"
+            while not metrics.exists() or not metrics.stat().st_size:
+                assert process.poll() is None and time.monotonic() < deadline, logfile.read_text()[-3000:]
+                time.sleep(.01)
+            process.send_signal(signal.SIGTERM)
+            assert process.wait(timeout=60) == 0, logfile.read_text()[-3000:]
+        finally:
+            if process.poll() is None:
+                process.kill()
+    paused = load_checkpoint(train / "checkpoint.ckpt")
+    assert 100 <= paused["train_state"]["epoch_cursor"]["batches"] < 120
+    smaller_batch = args.copy()
+    smaller_batch[args.index("-batch-size") + 1] = "2"
+    rejected = subprocess.run([sys.executable, *map(str, smaller_batch)], cwd=ROOT, env=env,
+                              capture_output=True, text=True, timeout=60)
+    assert rejected.returncode != 0
+    assert "Unfinished epoch requires the saved single-device batch size" in rejected.stderr
+    for component in ("representation", "dynamics", "prediction"):
+        key = component + "_norm_normal_batch"
+        assert math.isfinite(json.loads(metrics.read_text().splitlines()[0])[key])
+    run_cli(args, tmp_path / "resumed.log", env)
+    final = load_checkpoint(train / "checkpoint.ckpt")
+    assert "epoch_cursor" not in final["train_state"]
+    assert final["train_state"]["global_step_samples"] == 480
+    assert all(math.isfinite(group["weight_decay"]) for group in final["optimizer"]["param_groups"])
+    assert any(not torch.equal(final["model"][k], v) for k,v in paused["model"].items())
+    assert "Validation processed zero complete samples" in (tmp_path / "resumed.log").read_text()
+
+    # A second full epoch on this snapshot would exceed its 720-sample limit.
+    capped_log = tmp_path / "capped.log"
+    capped_args = [*args, "-stop-at-samples", "960", "-max-train-steps-since-last-reload", "720"]
+    with capped_log.open("w") as stream, subprocess.Popen([sys.executable, *map(str, capped_args)],
+            env=env, stdout=stream, stderr=subprocess.STDOUT) as process:
+        try:
+            limit_message = "Too many train steps since last reload"
+            wait_until(lambda: process.poll() is not None or limit_message in capped_log.read_text(), seconds=60)
+            assert limit_message in capped_log.read_text()
+        finally:
+            process.kill()
+    assert load_checkpoint(train / "checkpoint.ckpt")["train_state"]["global_step_samples"] == 480
+
+    # At the clean boundary a new batch size is valid and new files in this directory are eligible.
+    extra = data / "train/extra.npz"
+    np.savez(extra, **{key: value[np.arange(4) % len(value)] for key, value in sample.items()})
+    extra.with_suffix(".json").write_text(json.dumps({"num_rows": 4}))
+    smaller_batch[args.index("-samples-per-epoch") + 1] = "4"
+    run_cli([*smaller_batch, "-no-repeat-files"], tmp_path / "extra.log", env)
+    state = load_checkpoint(train / "checkpoint.ckpt")["train_state"]
+    assert state["global_step_samples"] == state["train_steps_since_last_reload"] == 484
+    assert state["data_files_used"] == [str(data / "train/data.npz"), str(extra)]
