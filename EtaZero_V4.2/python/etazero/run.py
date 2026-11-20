@@ -204,10 +204,12 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
             progress['done'].append(name)
             persist()
 
-    def stage(name, command):
+    def stage(name, command, **attempt_fields):
         if stopping is not None:
             stopping.check()
         attempt = progress['attempts'].get(name, 0) + 1
+        previous_fields = {key: progress[key] for key in attempt_fields if key in progress}
+        progress.update(attempt_fields)
         progress['attempts'][name] = attempt
         progress['running'] = name
         state['phase'] = name
@@ -226,6 +228,9 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
         except BaseException as error:
             if isinstance(error, StopRequested) and not error.started:
                 launched = False
+                for key in attempt_fields:
+                    progress.pop(key)
+                progress.update(previous_fields)
                 if attempt == 1:
                     del progress['attempts'][name]
                 else:
@@ -365,8 +370,6 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
             completed = progress['selfplay_base_games'] + published_games(data) - progress['selfplay_base_hashes']
         if completed < progress['selfplay_target']:
             remaining = progress['selfplay_target'] - completed
-            progress['selfplay_requested'] = remaining
-            progress['selfplay_attempt_target'] = progress['selfplay_target']
             receipt = directory / f'selfplay-{attempt + 1}.json'
             selfplay_config = config.selfplay_config
             if config.native_selfplay is not None:
@@ -377,7 +380,8 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
                 '-result-file', receipt,
                 '-override-config', f'game={config.game},dataBoardLen={config.canvas},switchNetsMidGame=false,'
                 f'useMuZero={str(config.is_muzero).lower()},'
-                f'rootSearchAlgorithm={"gumbel" if config.is_gumbel else "puct"}'])
+                f'rootSearchAlgorithm={"gumbel" if config.is_gumbel else "puct"}'],
+                selfplay_requested=remaining, selfplay_attempt_target=progress['selfplay_target'])
             result = json.loads(receipt.read_text())
             if result['games_requested'] != remaining or not result['completed']:
                 raise RuntimeError('Selfplay was interrupted before its quota completed; published samples were preserved')
