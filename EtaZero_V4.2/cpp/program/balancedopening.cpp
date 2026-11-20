@@ -360,26 +360,27 @@ Result initialize(Board& board, BoardHistory& hist, Player& pla, Rand& rand,
   try {
     stop();
     if(hist.rules.game == Rules::Game::HEX) {
-      if(rand.nextBool(settings.specialOpeningProb)) {
-        Board b = board;
-        BoardHistory h = hist;
-        Player p = pla;
-        initializeHexSpecial(b,h,p,rand,value,stop);
-        stop();
-        board = b; hist = h; pla = p;
-        return Result::APPLIED_SPECIAL;
-      }
-      if(rand.nextBool(settings.completelyRandomOpeningProb)) {
-        Board b = board;
-        BoardHistory h = hist;
-        const double fill = rand.nextExponential() * settings.completelyRandomOpeningFillRateAvg;
-        randomFillHex(b,rand,fill,fill);
-        Player p = rand.nextBool(0.5) ? P_BLACK : P_WHITE;
-        b.regenChainsFromColors();
-        h.clear(b,p,hist.rules,0);
-        stop();
-        board = b; hist = h; pla = p;
-        return Result::APPLIED_RANDOM;
+      const bool special = rand.nextBool(settings.specialOpeningProb);
+      if(special || rand.nextBool(settings.completelyRandomOpeningProb)) {
+        for(;;) {
+          stop();
+          Board b = board;
+          BoardHistory h = hist;
+          Player p = pla;
+          if(special)
+            initializeHexSpecial(b,h,p,rand,value,stop);
+          else {
+            const double fill = rand.nextExponential() * settings.completelyRandomOpeningFillRateAvg;
+            randomFillHex(b,rand,fill,fill);
+            p = rand.nextBool(0.5) ? P_BLACK : P_WHITE;
+            b.regenChainsFromColors();
+            h.clear(b,p,hist.rules,0);
+          }
+          stop();
+          if(h.isGameFinished) continue;
+          board = b; hist = h; pla = p;
+          return special ? Result::APPLIED_SPECIAL : Result::APPLIED_RANDOM;
+        }
       }
       if(!rand.nextBool(settings.probability)) return Result::SKIPPED;
       if(!rand.nextBool(settings.makeOpeningFairRate)) return Result::SKIPPED;
