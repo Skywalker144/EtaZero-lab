@@ -1,5 +1,5 @@
 ## Python Source Code Overview
-The EtaZero V4.1 controller is in `etazero/`; its entrypoints and configuration are documented in [configuration](../docs/configuration.md) and [controller](../docs/controller.md). The native learner and shuffle implementation are shared by the controller and standalone tools.
+The EtaZero V4.2 controller is in `etazero/`; its entrypoints and configuration are documented in [configuration](../docs/configuration.md) and [controller](../docs/controller.md). The native learner and shuffle implementation are shared by the controller and standalone tools.
 
 This is a summary of some of the most notable python files here. Some of the less important or minor scripts are left out, but this covers the most notable ones:
 
