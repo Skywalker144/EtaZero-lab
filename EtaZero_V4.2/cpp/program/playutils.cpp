@@ -600,13 +600,10 @@ void PlayUtils::printGenmoveLog(
   out << "\n";
   out << "Tree:\n";
   if(logSearchInfoForChosenMove && moveLoc != Board::NULL_LOC) {
-    if(search->getRootHist().rules.isXiangqi()) {
-      PrintTreeOptions options = treeOptions;
-      options.branch_ = {moveLoc};
-      options.alsoBranch_ = true;
-      search->printTree(out,search->rootNode,options,perspective);
-    }
-    else search->printTree(out, search->rootNode, treeOptions.alsoBranch(board,{Location::toString(moveLoc,board)}),perspective);
+    PrintTreeOptions options = treeOptions;
+    options.branch_ = {moveLoc};
+    options.alsoBranch_ = true;
+    search->printTree(out,search->rootNode,options,perspective);
   }
   else
     search->printTree(out, search->rootNode, treeOptions,perspective);
