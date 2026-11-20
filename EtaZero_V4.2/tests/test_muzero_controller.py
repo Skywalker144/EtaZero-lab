@@ -59,11 +59,13 @@ cudaUseFP16 = {str(fp16).lower()}
     network = asdict(make_model(game, pos_len=canvas).network_config)
     if heads_only:
         network['prediction'].update(block_kind=[], trunk_num_channels=network['latent_channels'])
+    # Even a one-batch replay window must reach a synchronization point in the SWA publication test.
     config = RunConfig(selfplay_config=str(cfg), game=game, algorithm=algorithm,
         muzero_network=network, muzero_unroll_steps=3,
         publish_weights=weights, canvas=canvas, batch_size=4, bootstrap_games=4, train_steps=2,
         shuffle_rows_per_file=8, shuffle_keep_rows=512, min_rows=64,
-        train_args=('-use-adamw', *(('-use-fp16',) if fp16 else ()), '-lookahead-k', '2', '-swa-period-samples', '8',
+        train_args=('-use-adamw', *(('-use-fp16',) if fp16 else ()), '-lookahead-k', '1' if weights == 'swa' else '2',
+                    '-swa-period-samples', '4' if weights == 'swa' else '8',
                     '-no-longterm-checkpoints', *(() if compiled else ('-no-compile',)))).validate()
     root = tmp_path / 'run'
     bootstrap = run(root, config, 0, binary=binary)
