@@ -29,6 +29,42 @@ def wait_until(predicate, seconds=15):
         time.sleep(.02)
 
 
+@pytest.mark.parametrize("extra", [5, 10])
+def test_interrupt_before_top_up_restores_request_and_game_count(tmp_path, monkeypatch, extra):
+    from dataclasses import replace
+    config = replace(recovery_config(tmp_path, 'alphazero'), min_rows=10 + extra,
+                     bootstrap_game_multiplier=1.)
+    state = dict(completed_rounds=0, active_round=None, accepted_model=None, replay={'rows': 0})
+    monkeypatch.setattr(controller, 'plan_sampling', lambda *_: {'games': 10, 'rows_per_game': 1})
+    games = []
+    interrupted = False
+    monkeypatch.setattr(controller, 'published_games', lambda _: sum(games))
+    monkeypatch.setattr(controller, 'count_rows', lambda _: sum(games))
+
+    def execute(command, log, **kwargs):
+        nonlocal interrupted
+        if command[1] != 'selfplay':
+            raise RuntimeError("reached shuffle")
+        requested = command[command.index('-max-games-total') + 1]
+        if games and not interrupted:
+            interrupted = True
+            raise controller.StopRequested(started=False)
+        games.append(requested)
+        receipt = command[command.index('-result-file') + 1]
+        receipt.write_text(json.dumps(dict(games_requested=requested, completed=True)))
+
+    monkeypatch.setattr(controller, 'execute', execute)
+    with pytest.raises(controller.StopRequested):
+        controller.run_round(tmp_path, config, state, 'native')
+    saved = json.loads((tmp_path / 'state.json').read_text())
+    assert saved['round_progress']['selfplay_requested'] == 10
+    assert saved['round_progress']['selfplay_attempt_target'] == 10
+    with pytest.raises(RuntimeError, match="reached shuffle"):
+        controller.run_round(tmp_path, config, saved, 'native')
+    assert games == [10, extra]
+    assert saved['round_progress']['sampling'] == {'games': sum(games), 'rows': sum(games)}
+
+
 def test_stage_keeps_directory_locked_after_controller_is_killed(tmp_path):
     # The stage is an actual child process, orphaned by SIGKILL of its controller.
     # Completion is controlled by a file so the lock lifetime has no timing race.
