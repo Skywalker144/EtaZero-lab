@@ -56,6 +56,10 @@ struct SearchThread {
   //Tracks whether this thread did something that "should" be counted as a playout
   //for the purpose of playout limits
   bool shouldCountPlayout;
+  // Selection scratch is released for reuse before descending to a child.
+  std::vector<Gumbel::GumbelChild> gumbelChildren;
+  std::vector<double> gumbelScores;
+  std::vector<uint8_t> positionsWithChild;
   Loc gumbelRootMove = Board::NULL_LOC;
   bool gumbelRootFocus = false;
   bool gumbelRootHuman = false;
@@ -173,9 +177,6 @@ struct Search {
   //Precomputed distribution for downweighting child values based on their values
   DistributionTable* valueWeightDistribution;
 
-  //Precomputed Fancymath::normToTApprox values, for a fixed Z
-  double normToTApproxZ;
-  std::vector<double> normToTApproxTable;
 
   //Pattern bonuses are currently only looked up for shapes completed by the player who the search is for.
   //Implicitly these utility adjustments "assume" the opponent likes the negative of our adjustments.
@@ -358,8 +359,7 @@ struct Search {
     double searchFactor
   );
 
-  //Without performing a whole search, recompute the root nn output for any root-level parameters.
-  void maybeRecomputeRootNNOutput();
+  void checkSearchParams(bool pondering) const;
 
   //Expert manual playout-by-playout interface
   void beginSearch(bool pondering);
@@ -402,10 +402,11 @@ struct Search {
 
   // Policy supervision can include unexpanded actions. Keep it separate from child-indexed reports.
   bool getPolicyTargetValues(const SearchNode& node, std::vector<Loc>& locs, std::vector<double>& values) const;
+  void fillGumbelChildren(const SearchNode& node, std::vector<Gumbel::GumbelChild>& result) const;
   std::vector<Gumbel::GumbelChild> getGumbelChildren(const SearchNode& node) const;
   bool runGumbelPlayout(SearchThread& thread, double upperBoundVisitsLeft);
   Loc getGumbelMove(bool allowPending = false) const;
-  Loc getGumbelInteriorMove(const SearchThread& thread, const SearchNode& node) const;
+  Loc getGumbelInteriorMove(SearchThread& thread, const SearchNode& node) const;
 
   //Get the values recorded for the root node, if possible.
   bool getRootValues(ReportedSearchValues& values) const;
@@ -490,7 +491,6 @@ struct Search {
 private:
   static constexpr double POLICY_ILLEGAL_SELECTION_VALUE = -1e50;
   static constexpr double FUTILE_VISITS_PRUNE_VALUE = -1e40;
-  static constexpr double EVALUATING_SELECTION_VALUE_PENALTY = 1e20;
   //Above any other selection value, including the forced 1e20 values used for rootHintLoc and rootDesiredPerChildVisitsCoeff.
   static constexpr double ROOT_FOCUS_SELECTION_VALUE = 1e30;
 
@@ -566,7 +566,6 @@ private:
   // Neural net queries
   // searchnnhelpers.cpp
   //----------------------------------------------------------------------------------------
-  void computeRootNNEvaluation(NNResultBuf& nnResultBuf);
   void checkMuZeroParams(const SearchParams& params) const;
   bool initNodeNNOutput(
     SearchThread& thread, SearchNode& node,
@@ -731,7 +730,6 @@ private:
   //Copy of nnInputParams for querying humanEvaluator, overriding the featurization modes
   //with the human net's own resolution, which may differ from the modes the search is using.
   MiscNNInputParams paramsForHumanEvaluator(const MiscNNInputParams& nnInputParams) const;
-  void computeRootValues(); // Helper for begin search
   void applyVisitCapsForSearch(); // Helper for begin search
   void recursivelyRecomputeStats(SearchNode& node); // Helper for search initialization
   void recursivelyRecordEvalCache(SearchNode& n);

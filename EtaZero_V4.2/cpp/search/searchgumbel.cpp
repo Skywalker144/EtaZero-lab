@@ -5,7 +5,13 @@
 using namespace std;
 
 vector<Gumbel::GumbelChild> Search::getGumbelChildren(const SearchNode& node) const {
-  vector<Gumbel::GumbelChild> result(policySize);
+  vector<Gumbel::GumbelChild> result;
+  fillGumbelChildren(node,result);
+  return result;
+}
+
+void Search::fillGumbelChildren(const SearchNode& node, vector<Gumbel::GumbelChild>& result) const {
+  result.assign(policySize,Gumbel::GumbelChild{});
   const NNOutput* output = node.getNNOutput();
   const float* priors = output == nullptr ? nullptr : output->getPolicyProbsMaybeNoised();
   const bool isRoot = &node == rootNode;
@@ -32,7 +38,6 @@ vector<Gumbel::GumbelChild> Search::getGumbelChildren(const SearchNode& node) co
     entry.q = (node.nextPla == P_WHITE ? 1.0 : -1.0) * child->stats.utilityAvg.load(std::memory_order_acquire);
     entry.pending = child->virtualLosses.load(std::memory_order_acquire);
   }
-  return result;
 }
 
 bool Search::getPolicyTargetValues(const SearchNode& node, vector<Loc>& locs, vector<double>& values) const {
@@ -62,8 +67,9 @@ Loc Search::getGumbelMove(bool allowPending) const {
   return getLoc(pos);
 }
 
-Loc Search::getGumbelInteriorMove(const SearchThread& thread, const SearchNode& node) const {
-  auto children = getGumbelChildren(node);
+Loc Search::getGumbelInteriorMove(SearchThread& thread, const SearchNode& node) const {
+  auto& children = thread.gumbelChildren;
+  fillGumbelChildren(node,children);
   const auto& avoid = thread.pla == P_BLACK ? avoidMoveUntilByLocBlack : avoidMoveUntilByLocWhite;
   if(!avoid.empty()) {
     int depth = muZeroEvaluator ? thread.muZeroDepth : (int)thread.history.moveHistory.size() - (int)rootHistory.moveHistory.size();
@@ -73,7 +79,7 @@ Loc Search::getGumbelInteriorMove(const SearchThread& thread, const SearchNode& 
     }
   }
   double raw = (node.nextPla == P_WHITE ? 1.0 : -1.0) * getUtilityFromNN(*node.getNNOutput());
-  int pos = Gumbel::gumbel_interior_selection(children,raw,searchParams.gumbel);
+  int pos = Gumbel::gumbel_interior_selection(children,raw,searchParams.gumbel,thread.gumbelScores);
   return pos < 0 ? Board::NULL_LOC : getLoc(pos);
 }
 
@@ -93,9 +99,10 @@ bool Search::runGumbelPlayout(SearchThread& thread, double upperBoundVisitsLeft)
       initial = true;
     }
     else {
-      auto children = getGumbelChildren(*rootNode);
+      fillGumbelChildren(*rootNode,thread.gumbelChildren);
       double raw = (rootPla == P_WHITE ? 1.0 : -1.0) * getUtilityFromNN(*rootNode->getNNOutput());
-      action = gumbelRoot->reserve(Gumbel::gumbel_completed_q(children,raw,searchParams.gumbel));
+      Gumbel::fill_completed_q(thread.gumbelChildren,raw,searchParams.gumbel,thread.gumbelScores);
+      action = gumbelRoot->reserve(thread.gumbelScores);
       if(action < 0) return false; // Phase barrier or exhausted budget; outer loop checks stop/time limits.
       thread.gumbelRootMove = getLoc(action);
     }

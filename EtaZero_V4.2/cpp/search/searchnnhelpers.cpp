@@ -6,37 +6,6 @@
 #include "../core/using.h"
 //------------------------
 
-void Search::computeRootNNEvaluation(NNResultBuf& nnResultBuf) {
-  Board board = rootBoard;
-  const BoardHistory& hist = rootHistory;
-  Player pla = rootPla;
-  bool skipCache = false;
-  MiscNNInputParams nnInputParams;
-  nnInputParams.drawEquivalentWinsForWhite = searchParams.drawEquivalentWinsForWhite;
-  nnInputParams.nnPolicyTemperature = searchParams.nnPolicyTemperature;
-  nnInputParams.policyOptimism = searchParams.rootPolicyOptimism;
-  if(searchParams.playoutDoublingAdvantage != 0) {
-    Player playoutDoublingAdvantagePla = getPlayoutDoublingAdvantagePla();
-    nnInputParams.playoutDoublingAdvantage = (
-      getOpp(pla) == playoutDoublingAdvantagePla ? -searchParams.playoutDoublingAdvantage : searchParams.playoutDoublingAdvantage
-    );
-  }
-  if(searchParams.ignorePreRootHistory || searchParams.ignoreAllHistory)
-    nnInputParams.maxHistory = 0;
-  if(muZeroEvaluator) {
-    MuZero::PositionBuffer buffer;
-    nnResultBuf.result = muZeroEvaluator->initial(board,hist,pla,&searchParams.humanSLProfile,
-      nnInputParams,buffer,nonSearchRand,skipCache);
-    nnResultBuf.hasResult = true;
-  }
-  else {
-  nnEvaluator->evaluate(
-    board, hist, pla, &searchParams.humanSLProfile,
-    nnInputParams,
-    nnResultBuf, skipCache);
-  }
-}
-
 MiscNNInputParams Search::paramsForHumanEvaluator(const MiscNNInputParams& nnInputParams) const {
   MiscNNInputParams humanNNInputParams = nnInputParams;
   if(humanMuZeroEvaluator) {
