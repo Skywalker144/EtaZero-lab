@@ -85,12 +85,10 @@ def get_num_meta_encoder_input_features(config_or_meta_encoder_version: Union[Mo
     if isinstance(config_or_meta_encoder_version,int):
         version = config_or_meta_encoder_version
     else:
-        if "metadata_encoder" not in config:
-            version = 0
-        elif "meta_encoder_version" not in config["metadata_encoder"]:
-            version = 1
-        else:
-            version = config["metadata_encoder"]["meta_encoder_version"]
+        metadata_encoder = config_or_meta_encoder_version.get("metadata_encoder")
+        version = 0 if metadata_encoder is None else metadata_encoder.get("meta_encoder_version", 1)
+    if version == 0:
+        return 0
     assert version == 1
     return 192
 
