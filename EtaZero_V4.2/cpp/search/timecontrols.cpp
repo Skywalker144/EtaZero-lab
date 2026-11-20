@@ -182,10 +182,8 @@ static double applyLagBuffer(double time, double lagBuffer) {
 }
 
 void TimeControls::getTime(const Board& board, const BoardHistory& hist, double lagBuffer, double& minTime, double& recommendedTime, double& maxTime) const {
-  (void)hist;
-
   int boardArea = board.x_size * board.y_size;
-  int numStonesOnBoard = board.numStonesOnBoard();
+  double gameProgress = hist.rules.isXiangqi() ? hist.getCurrentTurnNumber() : board.numStonesOnBoard();
 
   //Very crude way to estimate game progress
   double approxTurnsLeftAbsolute;
@@ -200,9 +198,9 @@ void TimeControls::getTime(const Board& board, const BoardHistory& hist, double 
     double minApproxTurnsLeftIncrement = 0.10 * boardArea + 20.0;
     double minApproxTurnsLeftByoYomi = 0.02 * boardArea + 4.0;
 
-    approxTurnsLeftAbsolute = std::max(typicalGameLengthToAllowForAbsolute - numStonesOnBoard, minApproxTurnsLeftAbsolute);
-    approxTurnsLeftIncrement = std::max(typicalGameLengthToAllowForIncrement - numStonesOnBoard, minApproxTurnsLeftIncrement);
-    approxTurnsLeftByoYomi = std::max(typicalGameLengthToAllowForByoYomi - numStonesOnBoard, minApproxTurnsLeftByoYomi);
+    approxTurnsLeftAbsolute = std::max(typicalGameLengthToAllowForAbsolute - gameProgress, minApproxTurnsLeftAbsolute);
+    approxTurnsLeftIncrement = std::max(typicalGameLengthToAllowForIncrement - gameProgress, minApproxTurnsLeftIncrement);
+    approxTurnsLeftByoYomi = std::max(typicalGameLengthToAllowForByoYomi - gameProgress, minApproxTurnsLeftByoYomi);
 
     //Multiply by 0.5 since we only make half the moves
     approxTurnsLeftAbsolute *= 0.5;
