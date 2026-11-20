@@ -60,6 +60,17 @@ def test_published_generations_current_pointer_and_config(tmp_path, algorithm, g
     assert discover_catalog(tmp_path, config=explicit)['runs'][0]['config'] == str(explicit)
 
 
+def test_nested_runs_are_discovered_outside_artifact_directories(tmp_path):
+    root = make_run(tmp_path / 'run')
+    nested = make_run(root / 'variants/new')
+    for path in (root / 'selfplay/000001', root / '.hidden'):
+        write(path / 'config.json', {})
+        write(path / 'state.json', {})
+    catalog = discover_catalog(tmp_path)
+    assert [run['id'] for run in catalog['runs']] == [str(root), str(nested)]
+    assert catalog['errors'] == []
+
+
 def test_empty_and_reused_generations_do_not_invent_metadata(tmp_path):
     root = make_run(tmp_path / 'run')
     last = root / 'rounds/000003/commit.json'
