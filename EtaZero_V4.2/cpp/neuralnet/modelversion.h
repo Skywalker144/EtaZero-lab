@@ -11,6 +11,8 @@ namespace NNModelVersion {
   constexpr int oldestModelVersionImplemented = 3;
   constexpr int oldestInputsVersionImplemented = 3;
 
+  constexpr bool hasPassHead(int modelVersion) { return modelVersion != 18 && modelVersion != 19; }
+
   // Which V* feature version from NNInputs does a given model version consume?
   int getInputsVersion(int modelVersion);
 
