@@ -1,6 +1,6 @@
 # KataGo Parallel Analysis Engine
 
-EtaZero V4.1 does not expose score or ownership predictions. Result values use W/D/L/NR; `winrate` is `0.5 + 0.5 * (W-L)`, whereas `winValue` is W. Requests containing `includeOwnership`, `includeOwnershipStdev`, `includeMovesOwnership`, or `includeMovesOwnershipStdev` are rejected, including `false` values.
+EtaZero V4.2 does not expose score or ownership predictions. Result values use W/D/L/NR; `winrate` is `0.5 + 0.5 * (W-L)`, whereas `winValue` is W. Requests containing `includeOwnership`, `includeOwnershipStdev`, `includeMovesOwnership`, or `includeMovesOwnershipStdev` are rejected, including `false` values.
 
 Models must use this version's four-result heads and match the game and input layout. The filenames below are illustrative compatible exports, not public upstream downloads. `antiMirror` and other removed search parameters are rejected, including when passed through `overrideSettings`.
 
@@ -402,7 +402,7 @@ The response to this query will echo back the same keys passed in, along with a 
 
 ## Human SL Analysis Guide
 
-HumanSL uses a secondary evaluator and optional player-rank metadata. The examples require a model trained for the requested profiles and exported with EtaZero V4.1's four-result heads, game and input layout. A compatible model file is not supplied by these examples. Profile names and interface support alone do not guarantee human-like play or calibrated rank strength.
+HumanSL uses a secondary evaluator and optional player-rank metadata. The examples require a model trained for the requested profiles and exported with EtaZero V4.2's four-result heads, game and input layout. A compatible model file is not supplied by these examples. Profile names and interface support alone do not guarantee human-like play or calibrated rank strength.
 
 See also the notes on "humanSL" and other parameters within the [GTP human 5k example config](../cpp/configs/gtp_human5k_example.cfg). Although this is a GTP config, not an analysis engine config, the inline documentation about how the "humanSL" parameters behave is just as applicable to the analysis engine.
 
