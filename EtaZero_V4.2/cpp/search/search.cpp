@@ -264,8 +264,10 @@ BoardHistoryModes Search::resolveHistoryModes(const SearchParams& params, const 
 
 void Search::evaluatePosition(const Board& board, const BoardHistory& hist, Player pla,
                              const MiscNNInputParams& params, NNResultBuf& buf, bool skipCache, const SGFMetadata* sgfMeta) const {
-  if(muZeroEvaluator)
+  if(muZeroEvaluator) {
     buf.result = muZeroEvaluator->initial(board,hist,pla,sgfMeta,params,realPositionBuffer,*realPositionRand,skipCache);
+    buf.hasResult = true;
+  }
   else
     nnEvaluator->evaluate(board,hist,pla,sgfMeta,params,buf,skipCache);
 }
@@ -304,6 +306,8 @@ void Search::setPosition(Player pla, const Board& board, const BoardHistory& his
   if(history.rules.isXiangqi() && (pla != history.getXiangqiState().nextPlayer() || board.x_size != 9 || board.y_size != 10))
     throw StringError("Xiangqi search requires the rule state's next player and 9x10 board view");
   clearSearch();
+  if(rootHistory.rules.game != history.rules.game || rootBoard.x_size != board.x_size || rootBoard.y_size != board.y_size)
+    rootHintLoc = Board::NULL_LOC;
   if(rootHistory.rules.game != history.rules.game) {
     // Local-pattern value estimates must not carry over between rule variants.
     delete subtreeValueBiasTable;
@@ -673,8 +677,8 @@ void Search::runWholeSearch(
   }
 
   if(searchParams.useGumbel) gumbelBudget = std::max<int64_t>(0,std::min(maxVisits,maxPlayouts)-1);
-  std::exception_ptr gumbelError;
-  std::mutex gumbelErrorMutex;
+  std::exception_ptr searchError;
+  std::mutex searchErrorMutex;
   int capThreads = 0x3fffFFFF;
   if(searchParams.minPlayoutsPerThread > 0.0) {
     int64_t numNewPlayouts = std::min(maxVisits - numNonPlayoutVisits, maxPlayouts);
@@ -703,13 +707,13 @@ void Search::runWholeSearch(
 
   std::function<void(int)> searchLoop = [
     this,&timer,&numPlayoutsShared,numNonPlayoutVisits,&tcMaxTime,&upperBoundVisitsLeftDueToTime,&tc,
-    &hasMaxTime,&hasTc,&gumbelError,&gumbelErrorMutex,
+    &hasMaxTime,&hasTc,&searchError,&searchErrorMutex,
     &shouldStopNow,&shouldStopEarly,maxVisits,maxPlayouts,maxTime,pondering,searchFactor
   ](int threadIdx) {
-    SearchThread* stbuf = new SearchThread(threadIdx,*this);
-
+    std::unique_ptr<SearchThread> stbuf;
     int64_t numPlayouts = numPlayoutsShared.load(std::memory_order_relaxed);
     try {
+      stbuf = std::make_unique<SearchThread>(threadIdx,*this);
       double lastTimeUsedRecomputingTcLimit = 0.0;
       while(true) {
         if(searchParams.useGumbel) {
@@ -775,24 +779,19 @@ void Search::runWholeSearch(
       }
     }
     catch(...) {
-      transferOldNNOutputs(*stbuf);
-      delete stbuf;
-      if(searchParams.useGumbel) {
-        std::lock_guard<std::mutex> lock(gumbelErrorMutex);
-        if(!gumbelError) gumbelError = std::current_exception();
-        shouldStopNow.store(true,std::memory_order_relaxed);
-        return;
-      }
-      throw;
+      if(stbuf) transferOldNNOutputs(*stbuf);
+      std::lock_guard<std::mutex> lock(searchErrorMutex);
+      if(!searchError) searchError = std::current_exception();
+      shouldStopNow.store(true,std::memory_order_relaxed);
+      return;
     }
 
     transferOldNNOutputs(*stbuf);
-    delete stbuf;
   };
 
   double actualSearchStartTime = timer.getSeconds();
   performTaskWithThreads(&searchLoop, capThreads);
-  if(gumbelError) std::rethrow_exception(gumbelError);
+  if(searchError) std::rethrow_exception(searchError);
 
   //If the search did not actually do anything, we need to still make sure to update the root node if it needs
   //such an update (since root params may differ from tree params).
@@ -834,11 +833,8 @@ void Search::checkMuZeroParams(const SearchParams& params) const {
 //If we're being asked to search from a position where the game is over, this is fine. Just keep going, the boardhistory
 //should reasonably tolerate just continuing. We do NOT want to clear history because we could inadvertently make a move
 //that an external ruleset COULD think violated superko.
-void Search::beginSearch(bool pondering) {
+void Search::checkSearchParams(bool pondering) const {
   checkMuZeroParams(searchParams);
-  if(muZeroEvaluator) {
-    clearSearch();
-  }
   if(searchParams.useGumbelNonroot && !searchParams.useGumbel)
     throw StringError("Gumbel nonroot selection requires Gumbel root search");
   if(searchParams.useGumbel) {
@@ -847,13 +843,22 @@ void Search::beginSearch(bool pondering) {
       throw StringError("Gumbel requires graph search disabled");
     if((humanEvaluator != nullptr || humanMuZeroEvaluator != nullptr) && searchParams.humanSLRootExploreProbWeightful > 0)
       throw StringError("Gumbel root weightful HumanSL conflicts with sequential-halving quotas; use root weightless exploration");
-    clearSearch();
   }
   if(searchParams.drawEquivalentWinsForWhite != 0.5)
     throw StringError("EtaZero draw utility is fixed at zero");
   if(rootBoard.x_size > nnXLen || rootBoard.y_size > nnYLen)
     throw StringError("Search got from NNEval nnXLen = " + Global::intToString(nnXLen) +
                       " nnYLen = " + Global::intToString(nnYLen) + " but was asked to search board with larger x or y size");
+
+  Player searchFor = pondering ? plaThatSearchIsFor : rootPla;
+  if(searchFor == C_EMPTY) searchFor = getOpp(rootPla);
+  if(const char* error = searchParams.getGumbelVisitCapError(rootPla,searchFor))
+    throw StringError(error);
+}
+
+void Search::beginSearch(bool pondering) {
+  checkSearchParams(pondering);
+  if(muZeroEvaluator || searchParams.useGumbel) clearSearch();
 
   //Invariant: every setter that installs or rebuilds rootHistory or changes params/nnEvaluator
   //re-stamps this flag, so it should always be consistent by the time a search begins.
@@ -872,9 +877,6 @@ void Search::beginSearch(bool pondering) {
   //If we begin the game with a ponder, then assume that "we" are the opposing side until we see otherwise.
   if(plaThatSearchIsFor == C_EMPTY)
     plaThatSearchIsFor = getOpp(rootPla);
-
-  if(const char* error = searchParams.getGumbelVisitCapError(rootPla,plaThatSearchIsFor))
-    throw StringError(error);
 
   if(plaThatSearchIsForLastSearch != plaThatSearchIsFor) {
     //In the case we are doing playoutDoublingAdvantage without a specific player (so, doing the root player)
@@ -1166,8 +1168,7 @@ void Search::clearOldNNOutputs() {
 }
 void Search::transferOldNNOutputs(SearchThread& thread) {
   std::lock_guard<std::mutex> lock(oldNNOutputsToCleanUpMutex);
-  for(size_t i = 0; i<thread.oldNNOutputsToCleanUp.size(); i++)
-    oldNNOutputsToCleanUp.push_back(thread.oldNNOutputsToCleanUp[i]);
+  oldNNOutputsToCleanUp.insert(oldNNOutputsToCleanUp.end(),thread.oldNNOutputsToCleanUp.begin(),thread.oldNNOutputsToCleanUp.end());
   thread.oldNNOutputsToCleanUp.resize(0);
 }
 
@@ -1490,6 +1491,10 @@ bool Search::playoutDescend(
         }
       }
 
+      if(isRoot && searchParams.useGumbel) {
+        if(!countEdgeVisit) return false;
+        throw StringError("A reserved Gumbel root move is illegal");
+      }
       //Give up on this playout now that we've forced the nn output to be consistent legality of this path.
       //Return TRUE though, so that the parent path we traversed increments its edge visits.
       //We want the search to continue as best it can, so we increment visits so search will still make progress
@@ -1498,6 +1503,10 @@ bool Search::playoutDescend(
     }
 
     if(bestChildIdx <= -1) {
+      if(isRoot && searchParams.useGumbel) {
+        if(!countEdgeVisit) return false;
+        throw StringError("Gumbel root reservation has no selectable child");
+      }
       //This might happen if all moves have been forbidden. The node will just get stuck counting visits without expanding
       //and we won't do any search.
       addCurrentNNOutputAsLeafValue(node,false);
