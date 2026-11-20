@@ -6,6 +6,11 @@
 #include <memory>
 
 namespace MuZero {
+#ifdef USE_OPENCL_BACKEND
+constexpr bool defaultInputsUseNHWC = false;
+#else
+constexpr bool defaultInputsUseNHWC = true;
+#endif
 struct StateData;
 // Immutable backend latent (device memory or CPU). Copies share storage and may outlive the evaluator.
 // A state can only be consumed by the evaluator/model that produced it.
@@ -14,6 +19,7 @@ using State = std::shared_ptr<const StateData>;
 const void* stateOwner(const State& state);
 
 class ModelBundle {
+  static ModelDesc makeRandomDesc(const std::string& game, int canvas);
   struct Impl;
   std::unique_ptr<Impl> impl;
   bool randomEvaluation = false;
@@ -53,9 +59,9 @@ class Evaluator {
   std::unique_ptr<Impl> impl;
 public:
   Evaluator(const std::string& directory, int maxBatch, int device,
-            enabled_t fp16, ConfigParser& config, Logger* logger = nullptr, bool inputsUseNHWC = true);
+            enabled_t fp16, ConfigParser& config, Logger* logger = nullptr, bool inputsUseNHWC = defaultInputsUseNHWC);
   Evaluator(std::shared_ptr<const ModelBundle> bundle, int maxBatch, int device,
-            enabled_t fp16, ConfigParser& config, Logger* logger = nullptr, bool inputsUseNHWC = true);
+            enabled_t fp16, ConfigParser& config, Logger* logger = nullptr, bool inputsUseNHWC = defaultInputsUseNHWC);
   ~Evaluator();
   Evaluator(const Evaluator&) = delete;
   Evaluator& operator=(const Evaluator&) = delete;
