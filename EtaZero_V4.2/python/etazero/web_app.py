@@ -22,6 +22,32 @@ ACTION_FIELDS = {
 }
 
 
+def _session_budget(parameters):
+    for kind, key, unlimited in (('visits', 'maxPlayouts', 2**50), ('total', 'maxVisits', 2**50),
+                                 ('time', 'maxTime', 1e12)):
+        if parameters[key] < unlimited:
+            return dict(budget_type=kind, budget_value=parameters[key])
+    return dict(budget_type='visits', budget_value=500)
+
+
+def _new_game_setup(session, payload, previous):
+    game = session.state
+    rule = payload.get('rules')
+    if game['game'] != 'go':
+        rule = game['game']
+    elif 'sgf' in payload or isinstance(rule, dict):
+        name = game['rulesName']
+        rule = {'TrompTaylor': 'tromp-taylor', 'NewZealand': 'new_zealand',
+                'Japanese': 'japanese', 'Chinese': 'chinese', 'AGA': 'aga'}.get(name, name)
+    setup = dict(model=payload['model'], mode=payload['mode'], human=payload['human'], rules=rule,
+                 size=None if game['game'] == 'xiangqi' else [game['boardXSize'], game['boardYSize']],
+                 ponder=session.parameters.get('ponderingEnabled') in (True, 'true'), **_session_budget(session.parameters))
+    if payload['mode'] == 'manual' and previous:
+        for key in ('budget_type', 'budget_value', 'ponder'):
+            setup[key] = previous[key]
+    return setup
+
+
 class App:
     def __init__(self, discover_catalog, *, binary=None, human_model=None):
         self.discover_catalog = discover_catalog
@@ -197,11 +223,12 @@ class App:
                 with self.condition:
                     if self.closed or token.is_set():
                         return
+                    setup = _new_game_setup(candidate, payload, self.state['ui_setup'])
                     previous, self.session = self.session, candidate
                     self.preparing = None
                     candidate = None
                     self._publish(token=token, **self.session.snapshot(), game_id=uuid4().hex,
-                                  selected_model=payload['_model'], human=payload['human'], mode=payload['mode'], ui_setup=None)
+                                  selected_model=payload['_model'], human=payload['human'], mode=payload['mode'], ui_setup=setup)
                 if previous is not None:
                     previous.close()
             elif operation == 'apply':
@@ -281,7 +308,13 @@ class App:
             elif operation == 'configure':
                 if 'parameters' in payload:
                     self.session.configure(payload['parameters'])
-                self._publish(token=token, **self.session.snapshot(), human=payload['human'], mode=payload['mode'])
+                setup = dict(self.state['ui_setup'], human=payload['human'], mode=payload['mode'])
+                params = payload.get('parameters', {})
+                if params.keys() & {'maxPlayouts', 'maxVisits', 'maxTime'}:
+                    setup.update(_session_budget(self.session.parameters))
+                if 'ponderingEnabled' in params:
+                    setup['ponder'] = self.session.parameters['ponderingEnabled'] in (True, 'true')
+                self._publish(token=token, **self.session.snapshot(), human=payload['human'], mode=payload['mode'], ui_setup=setup)
             elif operation == 'step':
                 self._search(token, play=True)
             elif operation == 'diagnose':
