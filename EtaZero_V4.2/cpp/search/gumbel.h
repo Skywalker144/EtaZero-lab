@@ -16,10 +16,12 @@ struct GumbelChild {
     int64_t visits=0;
     int pending=0;
 };
+void fill_completed_q(const std::vector<GumbelChild>&,double raw_value,const GumbelSettings&,std::vector<double>&);
 std::vector<double> gumbel_completed_q(const std::vector<GumbelChild>&,double raw_value,const GumbelSettings&);
 std::vector<double> gumbel_policy(const std::vector<GumbelChild>&,double raw_value,const GumbelSettings&);
 int gumbel_interior_selection(const std::vector<GumbelChild>&,double raw_value,const GumbelSettings&);
-std::vector<int16_t> quantize_gumbel_policy(const std::vector<double>&);
+
+int gumbel_interior_selection(const std::vector<GumbelChild>&,double raw_value,const GumbelSettings&,std::vector<double>&);
 
 // One root search owns this scheduler. Its caller serializes reserve/commit.
 // Completed counts define Q; reserved counts prevent duplicate/over-budget work.
