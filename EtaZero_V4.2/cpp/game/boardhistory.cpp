@@ -1037,10 +1037,16 @@ void BoardHistory::makeBoardMoveAssumeLegal(Board& board, Loc moveLoc, Player mo
       throw StringError("Xiangqi move after game end or by the wrong player");
     const int action = Xiangqi::locToAction(moveLoc);
     xiangqiState->play(action);
-    board = xiangqiState->colorBoard();
     const auto& move = Xiangqi::MOVES[action];
-    wasEverOccupiedOrPlayed[Location::getLoc(move[0],move[1],board.x_size)] = true;
-    wasEverOccupiedOrPlayed[Location::getLoc(move[2],move[3],board.x_size)] = true;
+    const Board& previous = getRecentBoard(0);
+    if(board.pos_hash != previous.pos_hash)
+      board = previous;
+    const Loc from = Location::getLoc(move[0],move[1],board.x_size);
+    const Loc to = Location::getLoc(move[2],move[3],board.x_size);
+    board.setStoneWithoutCaptures(from,C_EMPTY);
+    board.setStoneWithoutCaptures(to,movePla);
+    wasEverOccupiedOrPlayed[from] = true;
+    wasEverOccupiedOrPlayed[to] = true;
     moveHistory.emplace_back(moveLoc,movePla);
     preventEncoreHistory.push_back(false);
     whiteHasMoved = whiteHasMoved || movePla == P_WHITE;
