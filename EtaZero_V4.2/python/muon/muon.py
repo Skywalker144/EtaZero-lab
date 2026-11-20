@@ -56,7 +56,19 @@ def floored_weight_decay_(w: torch.Tensor, a: float, floor_norm: float):
     w.mul_(scale.to(w.dtype).view(-1, *([1] * (w.dim() - 1))))
 
 
-def zeropower_via_newtonschulz5(G, steps: int):
+def _normalized_polar_input(G, compute_dtype, safety_factor=1.0):
+    # Normalize before narrowing to fp16: the unscaled update (or its norm)
+    # can exceed the fp16 range, while the normalized matrix has norm <= 1.
+    X = G.float() if compute_dtype == torch.float16 else G.to(compute_dtype)
+    if X.size(-2) > X.size(-1):
+        X = X.mT
+    norm = X.norm(dim=(-2, -1), keepdim=True)
+    if safety_factor != 1.0:
+        norm = norm * safety_factor
+    return (X / (norm + 1e-7)).to(compute_dtype)
+
+
+def zeropower_via_newtonschulz5(G, steps: int, *, compute_dtype=torch.bfloat16):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -68,12 +80,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     """
     assert G.ndim >= 2 # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    X = _normalized_polar_input(G, compute_dtype)
     # Perform the NS iterations
     for _ in range(steps):
         A = X @ X.mT
@@ -104,19 +111,14 @@ _POLAR_EXPRESS_COEFFS = [
 ] + [_POLAR_EXPRESS_COEFFS[-1]]
 
 
-def zeropower_via_polar_express(G, steps: int):
+def zeropower_via_polar_express(G, steps: int, *, compute_dtype=torch.bfloat16):
     """
     Polar Express iteration for orthogonalization: same NS5 structure but with per-iteration
     coefficients that are tuned for faster convergence, and a slightly more conservative safety
     factor in the initial normalization.
     """
     assert G.ndim >= 2
-    X = G.bfloat16()
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-
-    # Ensure spectral norm is at most 1, with 1.01 safety factor
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-7)
+    X = _normalized_polar_input(G, compute_dtype, safety_factor=1.01)
     # Per-iteration coefficients, repeating the last entry if more steps than coefficients
     hs = _POLAR_EXPRESS_COEFFS[:steps] + list(
         repeat(_POLAR_EXPRESS_COEFFS[-1], steps - len(_POLAR_EXPRESS_COEFFS))
@@ -138,13 +140,13 @@ def _aurora_polar(update, ns_steps=5, pp_iterations=2, pp_beta=0.5, eps=1e-7, us
     row norms before orthogonalization. For square matrices, falls back to standard polar.
     See https://tilderesearch.com/blog/aurora
     """
+    # Extra mantissa bits matter here: errors in the first polar factor feed
+    # the next row preconditioner. Keep the optimizer's bf16 output format.
+    polar = zeropower_via_polar_express if use_polar_express else zeropower_via_newtonschulz5
     m, n = update.size(-2), update.size(-1)
     if m == n:
         # Square: no leverage freedom to exploit, standard polar.
-        if use_polar_express:
-            return zeropower_via_polar_express(update, steps=ns_steps)
-        else:
-            return zeropower_via_newtonschulz5(update, steps=ns_steps)
+        return polar(update, steps=ns_steps, compute_dtype=torch.float16).bfloat16()
 
     # For wide matrices, transpose to tall, apply, transpose back.
     transposed = m < n
@@ -158,17 +160,14 @@ def _aurora_polar(update, ns_steps=5, pp_iterations=2, pp_beta=0.5, eps=1e-7, us
     D = 1.0 / row_norm
     for k in range(pp_iterations):
         scaled = D * G32
-        if use_polar_express:
-            U = zeropower_via_polar_express(scaled, steps=ns_steps)
-        else:
-            U = zeropower_via_newtonschulz5(scaled, steps=ns_steps)
+        U = polar(scaled, steps=ns_steps, compute_dtype=torch.float16)
         if k < pp_iterations - 1:
             row_sq = U.to(torch.float32).pow(2).sum(dim=-1, keepdim=True).clamp_(min=eps * eps)
             D = D * (target_row_sq / row_sq).pow(pp_beta)
 
     if transposed:
         U = U.mT
-    return U
+    return U.bfloat16()
 
 
 def muon_update(grad, momentum, ns_steps=5, beta=0.95, nesterov=True, adjust_lr_fn="match_rms_adamw",
