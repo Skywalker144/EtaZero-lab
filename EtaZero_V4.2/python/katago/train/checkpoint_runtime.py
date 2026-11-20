@@ -15,6 +15,14 @@ def capture_runtime(train_rng, val_rng, scaler, device):
 
 
 def restore_runtime(state, train_rng, val_rng, scaler, device):
+    required = ('train_rng', 'val_rng', 'python_rng', 'numpy_rng', 'torch_rng', 'cuda_rng', 'scaler')
+    missing = [key for key in required if key not in state]
+    if missing:
+        raise ValueError(f"Full resume is missing learner runtime state: {', '.join(missing)}")
+    if (device.type == 'cuda') != (state['cuda_rng'] is not None):
+        raise ValueError("Full resume requires the checkpoint's device type to restore its CUDA RNG")
+    if (scaler is not None) != (state['scaler'] is not None):
+        raise ValueError("Full resume requires the checkpoint's AMP scaler mode")
     train_rng.bit_generator.state = state['train_rng']
     val_rng.bit_generator.state = state['val_rng']
     random.setstate(state['python_rng'])
