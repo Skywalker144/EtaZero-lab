@@ -8,6 +8,21 @@ import torch
 import torch.nn
 import torch.nn.functional
 
+def policy_loss_scales(version):
+    return (1., 0., 0.) if version <= 11 else (.93, .1, .2)
+
+
+def learner_display_settings(version, batch_size, soft, value, td, main, intermediate):
+    policy, long_opt, short_opt = policy_loss_scales(version)
+    heads = {"": 1. if main is None else main}
+    if intermediate is not None:
+        heads["I"] = intermediate
+    return dict(batch_size=batch_size, heads=heads, loss=dict(
+        p0loss=policy, p1loss=1., p0softloss=soft, p1softloss=soft,
+        p0lopt=long_opt, p0sopt=short_opt, vloss=value,
+        tdvloss1=td[0], tdvloss2=td[1], tdvloss3=td[2], evstloss=1., qwlloss=1.))
+
+
 def cross_entropy(pred_logits, target_probs, dim):
     return -torch.sum(target_probs * torch.nn.functional.log_softmax(pred_logits, dim=dim), dim=dim)
 
@@ -213,12 +228,14 @@ class Metrics:
 
             stats = {}
             def add_norm_and_grad_stats(name):
-                param = params[name]
+                param = params.get(name)
+                if param is None or param.grad is None:
+                    return
                 if name.endswith(".weight"):
                     fanin = param.shape[1]
                 elif name.endswith(".gamma"):
                     fanin = 1
-                elif name.endwith(".beta"):
+                elif name.endswith(".beta"):
                     fanin = 1
                 else:
                     assert False, "unimplemented case to compute stats on parameter"
@@ -413,28 +430,17 @@ class Metrics:
 
         target_futurepos = target_value_nchw[:, 0:2, :, :]
 
+        policy_opt_loss_scale, long_policy_opt_loss_scale, short_policy_opt_loss_scale = policy_loss_scales(raw_model.config["version"])
         predict_q_values = False
         if raw_model.config["version"] <= 11:
             assert raw_model.policy_head.num_policy_outputs == 4
-            policy_opt_loss_scale = 1.000
-            long_policy_opt_loss_scale = 0.0
-            short_policy_opt_loss_scale = 0.0
         elif raw_model.config["version"] <= 15:
             assert raw_model.policy_head.num_policy_outputs == 6
-            policy_opt_loss_scale = 0.930
-            long_policy_opt_loss_scale = 0.100
-            short_policy_opt_loss_scale = 0.200
         elif raw_model.config["version"] <= 16:  # version 16 has predict_q_values implied
             assert raw_model.policy_head.num_policy_outputs == 7
-            policy_opt_loss_scale = 0.930
-            long_policy_opt_loss_scale = 0.100
-            short_policy_opt_loss_scale = 0.200
             predict_q_values = True
         elif raw_model.config["version"] <= 19:
             assert raw_model.policy_head.num_policy_outputs == 6 or raw_model.policy_head.num_policy_outputs == 7
-            policy_opt_loss_scale = 0.930
-            long_policy_opt_loss_scale = 0.100
-            short_policy_opt_loss_scale = 0.200
             predict_q_values = bool(raw_model.config.get("predict_q_values"))
         else:
             raise RuntimeError("unsupported version: " + str(raw_model.config["version"]))
@@ -581,11 +587,9 @@ class Metrics:
             global_weight,
         ).sum()
         if not predict_q_values:
-            target_weight_qvalues = torch.zeros_like(global_weight)
             loss_qvalues_winloss = torch.zeros_like(loss_policy_player)
         else:
             target_qvalue_ncmove = batch["qValueTargetsNCMove"]
-            target_weight_qvalues = torch.zeros_like(global_weight)
             loss_qvalues_winloss = self.loss_qvalues_samplewise(
                 policy_logits[:, 6, :],
                 target_qvalue_ncmove[:, 0, :] / 32000.0,
