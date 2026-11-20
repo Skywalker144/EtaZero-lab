@@ -27,6 +27,10 @@ void checkRenju(int size, int x, int y, std::initializer_list<std::pair<int,int>
   board.regenChainsFromColors();
   Loc loc = point(board,x,y);
   testAssert(Placement::renjuForbidden(board,loc) == expected);
+  std::array<float,Board::MAX_ARR_SIZE> mask{};
+  Placement::fillRenjuForbidden(board,mask.data(),board.x_size,1);
+  testAssert(mask[Location::getY(loc,board.x_size)*board.x_size+Location::getX(loc,board.x_size)] ==
+             (expected != Placement::Forbidden::NONE));
   BoardHistory hist(board,P_BLACK,Rules::forGame(G::RENJU),0,BoardHistoryModes(false,false));
   testAssert(hist.isLegal(board,loc,P_BLACK));
   hist.makeBoardMoveAssumeLegal(board,loc,P_BLACK,NULL);
@@ -431,6 +435,18 @@ void sourceSearch() {
 
 void Tests::runPlacementTests() {
   std::cout << "Running placement game rules, identity, and source PUCT tests" << std::endl;
+  // Compare chain splits, merges and zero-liberty groups against a full rebuild.
+  Board changes(7,7);
+  Board rebuilt(changes);
+  Rand rand("without-captures");
+  for(int i = 0; i < 2000; i++) {
+    Loc loc = point(changes,rand.nextUInt(7),rand.nextUInt(7));
+    Color color = (Color)rand.nextUInt(3);
+    changes.setStoneWithoutCaptures(loc,color);
+    rebuilt.colors[loc] = color;
+    rebuilt.regenChainsFromColors();
+    testAssert(changes.isEqualForTesting(rebuilt,true,true,true));
+  }
   rulesAndTransitions();
   hexAndIdentity();
   placementFeatures();
