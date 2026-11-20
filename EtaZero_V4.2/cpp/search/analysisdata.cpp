@@ -1,4 +1,5 @@
 #include "../search/analysisdata.h"
+#include "../game/xiangqi.h"
 
 #include "../core/test.h"
 
@@ -179,11 +180,15 @@ bool AnalysisData::pvContainsPass() const {
   return false;
 }
 
-void AnalysisData::writePV(std::ostream& out, const Board& board) const {
+void AnalysisData::writePV(std::ostream& out, const Board& board, const Rules& rules) const {
   for(int j = 0; j<pv.size(); j++) {
     if(j > 0)
       out << " ";
-    out << Location::toString(pv[j],board);
+    Loc move = pv[j];
+    if(rules.isXiangqi() && move != Board::NULL_LOC && move != Board::PASS_LOC)
+      out << Xiangqi::actionToString(Xiangqi::locToAction(move));
+    else
+      out << Location::toString(move,board);
   }
 }
 
@@ -203,6 +208,7 @@ void AnalysisData::writePVEdgeVisits(std::ostream& out) const {
 }
 
 int AnalysisData::getPVLenUpToPhaseEnd(const Board& initialBoard, const BoardHistory& initialHist, Player initialPla) const {
+  if(!initialHist.rules.isGo()) return (int)pv.size();
   Board board(initialBoard);
   BoardHistory hist(initialHist);
   Player nextPla = initialPla;
@@ -217,6 +223,10 @@ int AnalysisData::getPVLenUpToPhaseEnd(const Board& initialBoard, const BoardHis
 }
 
 void AnalysisData::writePVUpToPhaseEnd(std::ostream& out, const Board& initialBoard, const BoardHistory& initialHist, Player initialPla) const {
+  if(!initialHist.rules.isGo()) {
+    writePV(out,initialBoard,initialHist.rules);
+    return;
+  }
   Board board(initialBoard);
   BoardHistory hist(initialHist);
   Player nextPla = initialPla;

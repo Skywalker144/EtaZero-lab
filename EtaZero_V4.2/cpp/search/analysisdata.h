@@ -44,7 +44,7 @@ struct AnalysisData {
   AnalysisData& operator=(AnalysisData&& other) noexcept;
 
   bool pvContainsPass() const;
-  void writePV(std::ostream& out, const Board& board) const;
+  void writePV(std::ostream& out, const Board& board, const Rules& rules) const;
   void writePVVisits(std::ostream& out) const;
   void writePVEdgeVisits(std::ostream& out) const;
   void writePVUpToPhaseEnd(std::ostream& out, const Board& initialBoard, const BoardHistory& initialHist, Player initialPla) const;

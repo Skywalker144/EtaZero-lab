@@ -119,6 +119,7 @@ static const vector<string> knownCommands = {
 static nlohmann::json positionJson(const Board& board, const BoardHistory& hist, Player pla, Player perspective, bool includeLegal) {
   nlohmann::json state = {
     {"game",Rules::gameName(hist.rules.game)}, {"rules",hist.rules.toJson()},
+    {"rulesName",hist.rules.isGo() ? hist.rules.toStringNoKomiMaybeNice() : Rules::gameName(hist.rules.game)},
     {"boardXSize",board.x_size}, {"boardYSize",board.y_size},
     {"currentPlayer",PlayerIO::playerToStringShort(pla)},
     {"analysisPerspective",PlayerIO::playerToStringShort(perspective == C_EMPTY ? pla : perspective)},
@@ -158,17 +159,6 @@ static bool tryParseLoc(const string& s, const Board& b, const Rules& rules, Loc
     return true;
   }
   return Location::tryOfString(s,b,loc);
-}
-
-static void writePV(ostream& out, const AnalysisData& data, const Search* search) {
-  if(!search->getRootHist().rules.isXiangqi()) {
-    data.writePV(out,search->getRootBoard());
-    return;
-  }
-  for(size_t i = 0; i < data.pv.size(); i++) {
-    if(i > 0) out << " ";
-    out << search->moveToString(data.pv[i]);
-  }
 }
 
 //Filter out all double newlines, since double newline terminates GTP command responses
@@ -482,18 +472,23 @@ struct GTPEngine {
   }
 
   ~GTPEngine() {
-    stopAndWait();
+    cancelPendingCommands();
+    // AsyncBot's destructor stops and joins the search worker.
     delete bot;
     primaryModel.reset();
     humanModel.reset();
   }
 
-  void stopAndWait() {
+  void cancelPendingCommands() {
     openingStop.store(true);
     if(openingThread.joinable()) openingThread.join();
     // Invalidate any ongoing genmove
     int expectedSearchId = (genmoveExpectedId.load() + 1) & 0x3FFFFFFF;
     genmoveExpectedId.store(expectedSearchId);
+  }
+
+  void stopAndWait() {
+    cancelPendingCommands();
     bot->stopAndWait();
   }
 
@@ -1023,7 +1018,7 @@ struct GTPEngine {
           if(!useMuZero && preventEncore && data.pvContainsPass())
             data.writePVUpToPhaseEnd(cout,board,search->getRootHist(),search->getRootPla());
           else
-            writePV(cout,data,search);
+            data.writePV(cout,board,search->getRootHist().rules);
           if(args.showPVVisits) {
             cout << " pvVisits ";
             if(!useMuZero && preventEncore && data.pvContainsPass())
@@ -1102,7 +1097,7 @@ struct GTPEngine {
           if(!useMuZero && preventEncore && data.pvContainsPass())
             data.writePVUpToPhaseEnd(out,board,search->getRootHist(),search->getRootPla());
           else
-            writePV(out,data,search);
+            data.writePV(out,board,search->getRootHist().rules);
           if(args.showPVVisits) {
             out << " pvVisits ";
             if(!useMuZero && preventEncore && data.pvContainsPass())
@@ -2745,6 +2740,7 @@ int MainCmds::gtp(const vector<string>& args) {
       if(engine->primaryModel != nullptr) {
         nlohmann::json modelInfo;
         modelInfo["name"] = engine->primaryModel->getModelName();
+        modelInfo["isMuZero"] = engine->primaryModel->muZeroEvaluator() != nullptr;
         modelInfo["internalName"] = engine->primaryModel->getInternalModelName();
         modelInfo["maxBatchSize"] = engine->primaryModel->getMaxBatchSize();
         modelInfo["usesHumanSLProfile"] = engine->primaryModel->requiresSGFMetadata();
@@ -2755,6 +2751,7 @@ int MainCmds::gtp(const vector<string>& args) {
       if(engine->humanModel != nullptr) {
         nlohmann::json modelInfo;
         modelInfo["name"] = engine->humanModel->getModelName();
+        modelInfo["isMuZero"] = engine->humanModel->muZeroEvaluator() != nullptr;
         modelInfo["internalName"] = engine->humanModel->getInternalModelName();
         modelInfo["maxBatchSize"] = engine->humanModel->getMaxBatchSize();
         modelInfo["usesHumanSLProfile"] = engine->humanModel->requiresSGFMetadata();
