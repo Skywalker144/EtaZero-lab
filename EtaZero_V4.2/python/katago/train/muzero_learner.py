@@ -176,17 +176,7 @@ def clip_component_gradients(model, metrics, batch_size, *, adaptive_optimizer, 
     norms = []
     excess = []
     for name, component in components(model).items():
-        kind = component.get_norm_kind()
-        if adaptive_optimizer:
-            cap = 11000.0
-        elif kind in ('fixup', 'fixscale', 'fixscaleonenorm'):
-            cap = 2500.0
-        elif kind in ('bnorm', 'brenorm', 'fixbrenorm'):
-            cap = 5500.0
-        else:
-            raise ValueError(f'Unsupported component normalization: {kind}')
-        cap *= (1.0 if clip_scale is None else clip_scale) * math.sqrt(batch_size/256.0)
-        cap /= math.sqrt(max(0.0000001, lr_scale))
+        cap = trainloop_helpers.gradient_norm_cap(component.get_norm_kind(), adaptive_optimizer, batch_size, clip_scale, lr_scale)
         local = {}
         trainloop_helpers.clip_gradients_and_record(component, cap, local, batch_size)
         # PyTorch returns a CPU zero when this component has no gradients (a
