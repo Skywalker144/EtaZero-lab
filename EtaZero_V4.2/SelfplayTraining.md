@@ -1,7 +1,7 @@
 
 ## Standalone Native Selfplay Training
 
-This page describes the inherited native-component workflow. For EtaZero V4.1 synchronous rounds, use [configuration](docs/configuration.md) and [controller](docs/controller.md); their file plans, initialization, timing and recovery rules govern `scripts/run.sh`. The legacy `python/selfplay/*.sh` wrappers assume a standalone KataGo-style Git root (for example, `train.sh` snapshots `$GITROOTDIR/python`), so their commands below are reference workflows, not drop-in launch commands for this nested version directory. Native models must use the current four-result format, and upstream configs containing removed parameters require adaptation.
+This page describes the inherited native-component workflow. For EtaZero V4.2 synchronous rounds, use [configuration](docs/configuration.md) and [controller](docs/controller.md); their file plans, initialization, timing and recovery rules govern `scripts/run.sh`. The legacy `python/selfplay/*.sh` wrappers assume a standalone KataGo-style Git root (for example, `train.sh` snapshots `$GITROOTDIR/python`), so their commands below are reference workflows, not drop-in launch commands for this nested version directory. Native models must use the current four-result format, and upstream configs containing removed parameters require adaptation.
 If you'd also like to run the full self-play loop and train your own neural nets, in addition to probably wanting to [compile KataGo yourself](https://github.com/lightvector/KataGo#compiling-katago), you must have [Python3](https://www.python.org/) and [Pytorch](https://pytorch.org/) installed. You'll also probably need a decent amount of GPU power.
 
 There are 5 things that need to all run to form a closed self-play training loop.
