@@ -11,6 +11,7 @@
 #include "../dataio/homedata.h"
 
 #include <cstring>
+#include <mutex>
 
 using namespace std;
 using namespace OpenCLHelpers;
@@ -4995,6 +4996,14 @@ static OpenCLTuneParams loadFromTunerFile(const string& fileName, Logger* logger
   return loadedParams;
 }
 
+static mutex& tunerFileMutex(const string& fileName) {
+  static mutex mapMutex;
+  static map<string,mutex> fileMutexes;
+  const string path = FileUtils::weaklyCanonical(fileName);
+  lock_guard<mutex> lock(mapMutex);
+  return fileMutexes[path];
+}
+
 OpenCLTuneParams OpenCLTuner::loadOrAutoTune(
   string openCLTunerFile,
   const string& homeDataDirOverride,
@@ -5015,32 +5024,26 @@ OpenCLTuneParams OpenCLTuner::loadOrAutoTune(
     return loadFromTunerFile(openCLTunerFile,logger);
   }
 
-  string dir = OpenCLTuner::defaultDirectory(true,homeDataDirOverride);
-  openCLTunerFile = dir + "/" + OpenCLTuner::defaultFileName(gpuName, nnXLen, nnYLen, modelInfo);
-
-  //Try loading the config for the proper size
-  try {
-    OpenCLTuneParams loadedParams = loadFromTunerFile(openCLTunerFile,logger);
-    return loadedParams;
-  }
-  catch(const StringError& e) {
-    (void)e;
-  };
-
-  //If not re-tuning per board size, then check if the tune config for the full size is there
-  //And set the nnXLen and nnYLen we'll use for tuning to the full size
-  if(!openCLReTunePerBoardSize) {
+  const string dir = OpenCLTuner::defaultDirectory(true,homeDataDirOverride);
+  if(!openCLReTunePerBoardSize && (nnXLen != NNPos::MAX_BOARD_LEN || nnYLen != NNPos::MAX_BOARD_LEN)) {
+    // Prefer an existing board-specific file before tuning at full size.
+    const string boardFile = dir + "/" + OpenCLTuner::defaultFileName(gpuName, nnXLen, nnYLen, modelInfo);
+    lock_guard<mutex> lock(tunerFileMutex(boardFile));
+    try {
+      return loadFromTunerFile(boardFile,logger);
+    }
+    catch(const StringError&) {}
     nnXLen = NNPos::MAX_BOARD_LEN;
     nnYLen = NNPos::MAX_BOARD_LEN;
-    openCLTunerFile = dir + "/" + OpenCLTuner::defaultFileName(gpuName, nnXLen, nnYLen, modelInfo);
-    try {
-      OpenCLTuneParams loadedParams = loadFromTunerFile(openCLTunerFile,logger);
-      return loadedParams;
-    }
-    catch(const StringError& e) {
-      (void)e;
-    };
   }
+
+  openCLTunerFile = dir + "/" + OpenCLTuner::defaultFileName(gpuName, nnXLen, nnYLen, modelInfo);
+  // Workers sharing this output must recheck the cache after any preceding tune.
+  lock_guard<mutex> lock(tunerFileMutex(openCLTunerFile));
+  try {
+    return loadFromTunerFile(openCLTunerFile,logger);
+  }
+  catch(const StringError&) {}
 
   //No configs found at all, so now autotune
   if(logger != NULL) {
