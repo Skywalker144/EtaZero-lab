@@ -205,6 +205,7 @@ void hexSetups() {
       return Value{0.5,0.5};
     };
     testAssert(initialize(board,hist,pla,rand,settings,evaluate,{}) == Result::APPLIED_SPECIAL);
+    testAssert(!hist.isGameFinished);
     testAssert(hist.initialPla == pla && hist.presumedNextMovePla == pla);
     testAssert(hist.moveHistory.empty() && hist.initialTurnNumber == 0);
     testAssert(hist.initialBoard.pos_hash == board.pos_hash && hist.getRecentBoard(0).pos_hash == board.pos_hash);
@@ -249,6 +250,7 @@ void hexSetups() {
   for(int i = 0; i < 100; i++) {
     Board board(9,9); auto hist = history(board,G::HEX); Player pla = P_BLACK;
     testAssert(initialize(board,hist,pla,rand,settings,unavailable,{}) == Result::APPLIED_RANDOM);
+    testAssert(!hist.isGameFinished);
     totalStones += board.numStonesOnBoard();
     whiteStarts += pla == P_WHITE; blackStarts += pla == P_BLACK;
     testAssert(hist.moveHistory.empty() && hist.initialTurnNumber == 0);
