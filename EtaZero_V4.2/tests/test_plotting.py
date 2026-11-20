@@ -47,14 +47,9 @@ def native_selfplay_log(*, games=2, moves=12, rows=10, nn_rows=0, batches=0, hit
 
 
 def learner_header(*, batch=8, version=18, muzero=False, main=None, intermediate=None):
-    config = {'version': version}
-    if muzero:
-        config = {'algorithm': 'muzero', 'network': {'prediction': config}}
-    fields = dict(soft_policy_weight_scale=3., value_loss_scale=.4,
-                  td_value_loss_scales=[.2, .3, .5], main_loss_scale=main,
-                  intermediate_loss_scale=intermediate)
-    return (repr(['train.py', '-batch-size', str(batch)]) + '\n' + repr(config) + '\n' +
-            ''.join(f'{key} {value!r}\n' for key, value in fields.items()) + 'Parameters in model:\n')
+    from katago.train.metrics_pytorch import learner_display_settings
+    record = learner_display_settings(version, batch, 3., .4, [.2, .3, .5], main, intermediate)
+    return 'learner_display ' + json.dumps(record) + '\n'
 
 
 @pytest.mark.parametrize('muzero', [False, True])
@@ -351,8 +346,9 @@ def test_real_observations_and_two_round_plots(tmp_path, monkeypatch, capsys, al
     assert (root / 'training.png').is_file()
     history = plotting.run_history(root)
     assert history[0]['selfplay']['games'] == config.bootstrap_games
-    assert ('nn_rows' in history[0]['selfplay']) == config.is_muzero
+    assert 'nn_rows' not in history[0]['selfplay']  # Both algorithms bootstrap with a random evaluator.
     assert history[1]['train']['loss'] > 0
+    assert history[1]['display_scales']['batch_size'] == config.batch_size
     if config.is_muzero:
         assert history[1]['train']['mu_step_0_loss'] > 0
     # Rendering failures occur after commit and cannot prevent the next model.

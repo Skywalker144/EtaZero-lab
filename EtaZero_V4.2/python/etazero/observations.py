@@ -1,5 +1,4 @@
 """Read native log records verbatim; plotting never loads checkpoints or NPZs."""
-import ast
 import json
 import math
 import re
@@ -16,64 +15,20 @@ OUTCOMES = {
 
 
 def learner_display_scales(directory):
-    """Read effective coefficients and batch size from learner startup logs.
-
-    Do not infer historical settings from today's config or load a checkpoint.
-    A failed startup without a complete header cannot have emitted metrics.
-    """
-    fields = ('soft_policy_weight_scale', 'value_loss_scale', 'td_value_loss_scales',
-              'main_loss_scale', 'intermediate_loss_scale')
+    """Read the structured record emitted after the learner resolves head weights."""
     settings = []
     for path in sorted(directory.glob('train*.log')):
-        header = {}
         try:
             with path.open() as stream:
                 for line in stream:
-                    line = line.strip()
-                    if line == 'Parameters in model:':
+                    if line.startswith('learner_display '):
+                        record = json.loads(line.removeprefix('learner_display '))
+                        if record['batch_size'] <= 0 or not all(math.isfinite(x) for x in
+                                (*record['loss'].values(), *record['heads'].values())):
+                            raise ValueError('invalid learner display settings')
+                        settings.append(record)
                         break
-                    if line.startswith('[') and '-batch-size' in line:
-                        argv = ast.literal_eval(line)
-                        batch = int(argv[argv.index('-batch-size') + 1])
-                        # DDP averages grads of world_size-scaled local losses.
-                        devices = argv[argv.index('-multi-gpus') + 1].split(',') if '-multi-gpus' in argv else [0]
-                        header['batch_size'] = batch * len(devices)
-                    elif line.startswith('{'):
-                        config = ast.literal_eval(line)
-                        if config.get('algorithm') == 'muzero':
-                            config = config['network']['prediction']
-                        if 'version' in config:
-                            header['version'] = config['version']
-                    else:
-                        key, _, value = line.partition(' ')
-                        if key in fields:
-                            header[key] = ast.literal_eval(value)
-            if not all(key in header for key in (*fields, 'version', 'batch_size')):
-                continue
-            version = header['version']
-            if not 0 < version <= 19 or header['batch_size'] <= 0:
-                raise ValueError('invalid model version or batch size')
-            td = header['td_value_loss_scales']
-            if len(td) != 3:
-                raise ValueError('expected three TD coefficients')
-            # Same outer coefficients as Metrics.metrics_dict_batchwise_single_heads_output.
-            # Internal sample/target weights are already in the logged components.
-            scales = dict(p0loss=1. if version <= 11 else .93, p1loss=1.,
-                          p0softloss=header['soft_policy_weight_scale'],
-                          p1softloss=header['soft_policy_weight_scale'],
-                          p0lopt=0. if version <= 11 else .1,
-                          p0sopt=0. if version <= 11 else .2,
-                          vloss=header['value_loss_scale'],
-                          tdvloss1=td[0], tdvloss2=td[1], tdvloss3=td[2],
-                          evstloss=1., qwlloss=1.)
-            main = header['main_loss_scale']
-            heads = {'': 1. if main is None else main}
-            if header['intermediate_loss_scale'] is not None:
-                heads['I'] = header['intermediate_loss_scale']
-            if not all(math.isfinite(value) for value in (*scales.values(), *heads.values())):
-                raise ValueError('nonfinite loss coefficient')
-            settings.append(dict(loss=scales, heads=heads, batch_size=header['batch_size']))
-        except (OSError, ValueError, SyntaxError, KeyError, TypeError, IndexError) as error:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             warnings.warn(f'Cannot read learner display scales at {path}: {error}', RuntimeWarning)
             return {}
     if not settings or any(item != settings[0] for item in settings[1:]):
