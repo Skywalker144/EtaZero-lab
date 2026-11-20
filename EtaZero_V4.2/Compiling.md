@@ -1,5 +1,5 @@
 
-# Compiling EtaZero V4.1
+# Compiling EtaZero V4.2
 The main C++ target uses C++17, and the Xiangqi rules target uses C++20. A compiler supporting both standards and the selected backend is required; C++14 or the old MSVC 2017 requirement is not sufficient for the full current build. See [CMakeLists.txt](cpp/CMakeLists.txt) for the actual target requirements.
 
 From this version directory, the configured CUDA build entrypoint is:
@@ -10,7 +10,7 @@ bash scripts/build.sh
 
 The script enters the `pytorch` Conda environment, resolves CUDA/cuDNN/cuBLAS from that environment and its Python packages, disables distributed contribution, and writes `build/katago`. Build variables and additional CMake arguments are defined in [scripts/build.sh](scripts/build.sh); select a CUDA architecture supported by the target device. This command requires those environment dependencies to be installed.
 
-The backend and platform notes below are inherited from KataGo. Their upstream clone commands build KataGo, not EtaZero V4.1; when configuring this version directly, use this directory's `cpp/` as the CMake source and a separate build directory. Upstream platform/provider test claims are not validation of this fork. Current verified backend scope is in [README](README.md) and [architecture](docs/architecture.md). Public upstream neural nets have an incompatible three-result layout; use compatible exports from this version.
+The backend and platform notes below are inherited from KataGo. Their upstream clone commands build KataGo, not EtaZero V4.2; when configuring this version directly, use this directory's `cpp/` as the CMake source and a separate build directory. Upstream platform/provider test claims are not validation of this fork. Current verified backend scope is in [README](README.md) and [architecture](docs/architecture.md). Public upstream neural nets have an incompatible three-result layout; use compatible exports from this version.
 
 ## Upstream backend and platform reference
 
