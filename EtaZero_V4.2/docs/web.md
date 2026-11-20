@@ -13,11 +13,11 @@ V4 的会话由常驻 `katago gtp` 进程持有，棋规、合法着法、落子
 bash web/webui.sh
 
 # 显式选择 V4，限定模型目录并指定独立推理配置。
-bash web/webui.sh --version EtaZero_V4.1 --models-dir /absolute/path/to/runs \
+bash web/webui.sh --version EtaZero_V4.2 --models-dir /absolute/path/to/runs \
   --config /absolute/path/to/gtp.cfg
 
 # 直接加载原生模型；MuZero 的 --model 指向三组件 bundle 目录。
-bash web/webui.sh --version EtaZero_V4.1 --model /absolute/path/to/model.bin.gz \
+bash web/webui.sh --version EtaZero_V4.2 --model /absolute/path/to/model.bin.gz \
   --config-dir /absolute/path/to/inference-config --no-open
 ```
 
@@ -42,7 +42,7 @@ GTP 是交互推理入口，正式 `match/autoelo` 仍使用独立比赛配置�
 
 根 W/D/L/NR、得分率、访问数、候选及 PV 均来自原生分析 JSON，页面标明来源报告的 B/W 视角；W−L 由相同根 W 和 L 相减。候选表展示原生 `visits`、`edgeVisits`、先验、LCB、效用和 `playSelectionValue`；它们保留各自尺度，选点值不冒充归一化概率或 Gumbel 改进策略。星号只标记原生搜索返回的建议着法。棋盘候选按原生 `order` 取 Top-K，最低访问过滤以根访问数为分母；对称副本保留原生报告含义，不累加成额外搜索量。
 
-策略面板可在来源 `policy` 与次级模型的 `humanPolicy` 之间切换，直接显示原生数组，包括非法动作的负值标记和非围棋被屏蔽的 pass 槽；象棋从唯一的 2086 动作表按起点筛选。当前报告没有 `humanPolicy` 时明确提示缺失，不用主模型策略代替。切换仅改变展示，不触发额外推理、搜索或参数修改，原始 JSON 面板保留整个报告。没有来源字段的搜索时间或 NN 请求数不会补造。象棋逐手移动动画仍待接入。
+策略面板可在来源 `policy` 与次级模型的 `humanPolicy` 之间切换，直接显示原生数组，包括非法动作的负值标记和非围棋被屏蔽的 pass 槽；象棋从唯一的 2086 动作表按起点筛选。当前报告没有 `humanPolicy` 时明确提示缺失，不用主模型策略代替。切换仅改变展示，不触发额外推理、搜索或参数修改，原始 JSON 面板保留整个报告。没有来源字段的搜索时间或 NN 请求数不会补造。象棋棋盘在前进一手时播放移动动画，悔棋与回看较早局面时直接显示目标局面。
 
 “原生网络诊断”独立于搜索报告，通过按钮调用现有 `kata-raw-nn <symmetry> <optimism>` 或 `kata-raw-human-nn <symmetry>`。它支持六棋类的普通／MuZero 主、次级模型，保留原生文本，并由外围 `python/etazero/web_raw_nn.py` 解码展示。诊断始终对当前真实局面执行一次指定对称的原生推理，MuZero 使用 initial；不进行搜索或落子。切换选项和刷新页面不触发推理。缺少次级模型、非法对称或参数由原生入口明确拒绝，不能回退为主模型。终局不请求网络诊断。
 
@@ -101,6 +101,8 @@ Web 在新候选会话中请求建议，并用原生 `play`、`kata-get-state`�
 
 ## SGF 导入与回看
 
+导入后，棋盘尺寸与规则控件跟随原生引擎实际载入的局面，包括矩形棋盘和自定义围棋规则。切换对局模式、刷新页面或切换到支持该局面的模型时，保留棋谱和已载入的历史。
+
 创建棋局时可传入 `sgf` 文本，`sgf_turn` 可选，表示载入多少手之后的局面（0 表示 SGF 初始局面，省略载入全部）。外层只写入临时文件并换算为原生 `loadsgf` 的下一手编号；主变化选择、规则、贴目、setup stones、合法性和完整前史均由来源读取器负责。超过棋谱手数时沿用原生行为载入到末尾。SGF 与尺寸、棋规、贴目、FEN 的创建覆盖互斥，避免导入时无声覆盖用户设置；这些字段应留空，缺省规则仍来自原生配置。
 
 原生 `kata-get-history` 从当前 `BoardHistory.copyToInitial()` 起，使用与 `loadsgf` 相同的 tolerant replay 返回紧凑局面快照。它不改变引擎局面或搜索树，不执行推理，象棋起点保留已有的重复、将军和追捉历史。快照不重复着法列表或合法动作域。该命令读取当前搜索历史；GTP 中人为改变行棋方造成的历史重置仍按来源执行，不能将其等同于任意 GTP 指令序列的完整操作日志。Web 在 SGF 导入后使用它初始化回看，后续逐手沿用正常会话快照。
@@ -111,7 +113,7 @@ SGF 的所有已载入着法都可以回看、悔棋和继续分支，初始 set
 
 `kata-get-state` 是只读的结构化局面查询，不执行神经网络推理，返回：
 
-- `game`、原生 `rules`、实际 `boardXSize`／`boardYSize`、`currentPlayer` 与 `turnNumber`；`analysisPerspective` 是原生配置在该局面解析出的报告视角（B/W），当前方模式随局面行棋方变化。
+- `game`、原生 `rules`、实际 `boardXSize`／`boardYSize`、`currentPlayer` 与 `turnNumber`。`rulesName` 给出可传回引擎的棋规名称或自定义规则串，贴目保存在 `rules` 中。`analysisPerspective` 是原生配置在该局面解析出的报告视角（B/W），当前方模式随局面行棋方变化。
 - `board`：物理棋盘按原生坐标逐行排列，0 为空，1 为先手方，−1 为后手方。落子棋 y=0 对应最高行；象棋 y=0 对应红方底线。
 - `legalMoves`：当前行棋方的完整规则合法动作，使用原生 GTP 坐标；真实终局为空。Renju 仍按规则允许落下禁手并判负，不将其提前伪装为非法着法。
 - `moves`：本 GTP 会话可撤回的着法及执子方。FEN 或 SGF 起点不凭空添加为用户落子；完整规则历史仍保存在引擎内部，不能仅凭当前棋盘或 FEN 重建。
