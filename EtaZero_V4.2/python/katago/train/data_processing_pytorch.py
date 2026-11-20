@@ -11,20 +11,30 @@ import torch.nn.functional
 from ..train import modelconfigs
 from ..game import xiangqi as xq
 
-# Needs to be kept in sync with GLOBAL_TARGET_NUM_CHANNELS in trainingwrite.cpp C++ code among other places.
-# Data format version 2 files (recorded in channel 63 of each row) had only 64 channels; they are zero-padded
-# up to this width when loading, which correctly encodes "not reanalyzed" for the version 3 channels.
-GLOBAL_TARGETS_NC_CHANNELS = 80
+from .target_layout import pad_global_targets_nc
 
-def pad_global_targets_nc(globalTargetsNC: np.ndarray) -> np.ndarray:
-    """Zero-pad older-format globalTargetsNC rows up to the current channel count."""
-    num_channels = globalTargetsNC.shape[1]
-    if num_channels == GLOBAL_TARGETS_NC_CHANNELS:
-        return globalTargetsNC
-    assert num_channels < GLOBAL_TARGETS_NC_CHANNELS, f"globalTargetsNC has {num_channels} channels, more than the expected {GLOBAL_TARGETS_NC_CHANNELS}"
-    padded = np.zeros((globalTargetsNC.shape[0], GLOBAL_TARGETS_NC_CHANNELS), dtype=globalTargetsNC.dtype)
-    padded[:, :num_channels] = globalTargetsNC
-    return padded
+def symmetry_transform(symm, pos_len, xiangqi, placement, hex_rows, mirror_actions):
+    def transform(tensor, policy=False):
+        if xiangqi:
+            if symm % 2 == 0:
+                return tensor
+            if policy:
+                return tensor.index_select(-1, mirror_actions)
+            mirrored = tensor.clone()
+            mirrored[..., :xq.HEIGHT, :xq.WIDTH] = tensor[..., :xq.HEIGHT, :xq.WIDTH].flip(-1)
+            return mirrored
+        if policy:
+            fn = lambda t, sym: apply_symmetry_policy(t, sym, pos_len, has_pass=not placement)
+        else:
+            fn = apply_symmetry
+        transformed = fn(tensor, symm)
+        if placement:
+            hex_transformed = fn(tensor, 2 * (symm % 2))
+            selector = hex_rows.reshape((-1,) + (1,) * (tensor.ndim-1))
+            transformed = torch.where(selector, hex_transformed, transformed)
+        return transformed
+    return transform
+
 
 def prefetch_training_files(npz_files, load_npz_file, prefetch_depth=1):
     """Source ordered file prefetch, shared by ordinary and MuZero readers.
@@ -38,7 +48,7 @@ def prefetch_training_files(npz_files, load_npz_file, prefetch_depth=1):
     with ThreadPoolExecutor(max_workers=prefetch_depth) as executor:
         pending = deque()
         next_index = 0
-        while next_index < len(npz_files) and len(pending) <= prefetch_depth:
+        while next_index < len(npz_files) and len(pending) < prefetch_depth:
             pending.append(executor.submit(load_npz_file, npz_files[next_index]))
             next_index += 1
         while pending:
@@ -175,25 +185,7 @@ def read_npz_training_data(
                 # Hex permits identity and 180 degrees, without exchanging colors.
                 # The same random draw stays uniform on both the 8- and 2-element sets.
                 hex_rows = batch_globalInputNC[:, 6].bool() if placement else None
-                def transform(tensor, policy=False):
-                    if xiangqi:
-                        if symm % 2 == 0:
-                            return tensor
-                        if policy:
-                            return tensor.index_select(-1, mirror_actions)
-                        mirrored = tensor.clone()
-                        mirrored[..., :xq.HEIGHT, :xq.WIDTH] = tensor[..., :xq.HEIGHT, :xq.WIDTH].flip(-1)
-                        return mirrored
-                    if policy:
-                        fn = lambda t, sym: apply_symmetry_policy(t, sym, pos_len, has_pass=not placement)
-                    else:
-                        fn = apply_symmetry
-                    transformed = fn(tensor, symm)
-                    if placement:
-                        hex_transformed = fn(tensor, 2 * (symm % 2))
-                        selector = hex_rows.reshape((-1,) + (1,) * (tensor.ndim-1))
-                        transformed = torch.where(selector, hex_transformed, transformed)
-                    return transformed
+                transform = symmetry_transform(symm, pos_len, xiangqi, placement, hex_rows, mirror_actions)
                 batch_binaryInputNCHW = transform(batch_binaryInputNCHW)
                 batch_policyTargetsNCMove = transform(batch_policyTargetsNCMove, policy=True)
                 batch_valueTargetsNCHW = transform(batch_valueTargetsNCHW)
