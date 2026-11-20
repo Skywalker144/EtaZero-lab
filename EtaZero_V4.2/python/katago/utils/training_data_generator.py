@@ -155,8 +155,9 @@ class TrainingDataGenerator:
         # (On a fresh dir this just becomes a shuffle of the whole list while the rev_remaining is empty)
         queued_set = set(rev_remaining)
         new_queue_files = [f for f in epoch0_train_files if f not in queued_set]
-        random.shuffle(new_queue_files)
-        rev_remaining = self._uniform_interleave(rev_remaining, new_queue_files)
+        if new_queue_files:
+            random.shuffle(new_queue_files)
+            rev_remaining = self._uniform_interleave(rev_remaining, new_queue_files)
 
         # Decide whether this directory can serve anything before mutating any history.
         # An empty epoch0 is fine (the full list cycles), so only a dir with no .npz at all is unservable.
