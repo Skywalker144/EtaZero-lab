@@ -1,6 +1,6 @@
 ## KataGo GTP Extensions
 
-EtaZero V4.1 does not report predicted scores or ownership, or accept ownership analysis options. Standard GTP `final_score` requires a completed, non-resignation rules terminal. `final_status_list` also requires a finished game and reports rule-based status; unfinished positions return an error.
+EtaZero V4.2 does not report predicted scores or ownership, or accept ownership analysis options. Standard GTP `final_score` requires a completed, non-resignation rules terminal. `final_status_list` also requires a finished game and reports rule-based status; unfinished positions return an error.
 
 Models must use this version's W/D/L/NR heads and match the game and input layout. Public upstream three-result models, including `b18c384nbt-humanv0.bin.gz`, cannot be loaded directly. HumanSL commands require a compatible model; the availability of rank profiles does not establish that a model has learned those ranks. Game-specific setup, actions and symmetry limits are described in [Web and native sessions](web.md) and [Xiangqi](xiangqi.md). Removed parameters such as `friendlyPassOk`, `antiMirror` and `genmoveAntiMirror` are rejected.
 
@@ -226,7 +226,7 @@ In addition to a basic set of [GTP commands](https://www.lysator.liu.se/~gunnar/
 
   * `kata-get-models`
      * Returns a JSON array with information about the loaded models (main model and human SL model if available).
-     * Each item in the array is a json object with at least the following keys: `"name", "internalName", "maxBatchSize", "usesHumanSLProfile", "version", "usingFP16"`.
+     * Each model reports `name`, `internalName`, `maxBatchSize`, `usesHumanSLProfile`, `version`, `usingFP16` and the boolean `isMuZero`. The primary model determines whether analysis PVs contain latent actions.
      * This command can be used by controllers to tell if a human SL model is loaded (e.g. one for which `"usesHumanSLProfile"` is true).
 
   * `cputime`, `gomill-cpu_time`
