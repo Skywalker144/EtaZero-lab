@@ -16,7 +16,7 @@ bash scripts/run.sh plot --run-dir /absolute/path/to/run --output-dir /absolute/
 | 展示内容 | 数据来源 |
 |---|---|
 | 训练 loss、梯度和 MuZero 展开分量 | 来源 learner 的 `train/metrics_train.json`，每行一条原生 JSON 记录 |
-| 概览图的 loss 系数、监督头权重与训练 batch size | `rounds/轮次/logs/train*.log` 中实际生效的 learner 启动参数、模型配置和 loss scale 记录 |
+| 概览图的 loss 系数、监督头权重与训练 batch size | `rounds/轮次/logs/train*.log` 中learner 完成参数解析后写入的结构化 `learner_display` JSON 记录 |
 | 验证 loss | 来源 learner 的 `train/metrics_val.json` |
 | 自对弈游戏数、实际搜索手数、推理与缓存计数 | 原生 selfplay 的 `selfplay/轮次/log*.log` 中的 `Final ...` 记录 |
 | 自对弈黑胜、白胜、和棋、NR、截断 | 同一日志的 `Final black wins`／`white wins`／`draws`／`no results`／`truncated games` |
