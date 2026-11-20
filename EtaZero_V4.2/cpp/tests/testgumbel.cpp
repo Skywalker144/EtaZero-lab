@@ -4,6 +4,8 @@
 #include "testgumbelsymmetry.h"
 #include "../game/xiangqi.h"
 #include "../search/gumbel.h"
+#include "../search/asyncbot.h"
+#include "../search/reportedsearchvalues.h"
 #include "../search/searchnode.h"
 #include "../program/play.h"
 #include "../core/test.h"
@@ -305,13 +307,16 @@ void sourceSearch() {
     // lambda 1/2, mixed into a deterministic A choice with proportion 1/4.
     SearchParams params; params.humanSLChosenMoveProp = 0.25; params.humanSLChosenMovePiklLambda = 0.5;
     params.useLcbForSelection = false; params.chosenMoveSubtract = params.chosenMovePrune = 0;
+    params.noResultUtilityForWhite = 0.75;
     Search search(params,nn.get(),human.get(),&logger,"human-pikl-reference");
     Board board(5,5); BoardHistory hist(board,P_BLACK,Rules::getTrompTaylorish(),0,BoardHistoryModes());
-    search.setPosition(P_BLACK,board,hist);
+    search.setPosition(P_WHITE,board,hist);  // The black node acts one ply below the root.
     SearchNode node(P_BLACK,false,0,Hash128()), a(P_WHITE,false,0,Hash128()), b(P_WHITE,false,0,Hash128());
     node.initializeChildren(); node.state.store(SearchNode::STATE_EXPANDED0);
     const Loc first = Location::getLoc(0,0,5), second = Location::getLoc(1,0,5);
     auto output = std::make_shared<NNOutput>();
+    output->whiteWinProb = .375f; output->whiteDrawProb = .25f;
+    output->whiteLossProb = .125f; output->whiteNoResultProb = .25f;
     output->policyProbs[0] = 0.2f; output->policyProbs[1] = 0.8f;
     node.storeNNOutputIfNull(new std::shared_ptr<NNOutput>(output));
     node.storeHumanOutputIfNull(new std::shared_ptr<NNOutput>(output));
@@ -323,8 +328,43 @@ void sourceSearch() {
     b.stats.visits.store(1); b.stats.weightSum.store(1);
     std::vector<Loc> locs; std::vector<double> values;
     testAssert(search.getPlaySelectionValues(node,locs,values,nullptr,0.0,false));
+    ReportedSearchValues raw;
+    testAssert(search.getNodeRawNNValues(node,raw));
+    near(raw.utility,0.25*params.winLossUtilityFactor + 0.25*0.75);
     double expected = 0.75+0.25/(1+4*std::exp(-2.0));
     near(values[0],expected); near(values[1],1-expected);
+  }
+  {
+    SearchParams puct;
+    puct.numThreads = 4;
+    puct.maxVisits = puct.maxPlayouts = 10000;
+    puct.minPlayoutsPerThread = 0;
+    Board board(5,5);
+    BoardHistory hist(board,P_BLACK,Rules::getTrompTaylorish(),0,BoardHistoryModes());
+    Search parallel(puct,nn.get(),&logger,"puct-worker-exception");
+    parallel.setPosition(P_BLACK,board,hist);
+    const auto caller = std::this_thread::get_id();
+    std::function<bool()> failWorker = [&]() {
+      if(std::this_thread::get_id() != caller) throw StringError("worker failure");
+      return false;
+    };
+    bool caught = false;
+    try { parallel.runWholeSearch(P_BLACK,&failWorker); }
+    catch(const StringError& e) { caught = std::string(e.what()) == "worker failure"; }
+    testAssert(caught);
+    for(bool withAnalysis : {false,true}) {
+      AsyncBot bot(puct,nn.get(),&logger,"async-exception");
+      bot.setPosition(P_BLACK,board,hist);
+      auto failBegun = []() { throw StringError("begun failure"); };
+      caught = false;
+      try {
+        if(withAnalysis)
+          bot.genMoveSynchronousAnalyze(P_BLACK,TimeControls(),1.,0.,0.,[](const Search*) {},failBegun);
+        else bot.genMoveSynchronous(P_BLACK,TimeControls(),1.,failBegun);
+      }
+      catch(const StringError& e) { caught = std::string(e.what()) == "begun failure"; }
+      testAssert(caught);
+    }
   }
   human.reset();
   // Budget caps, early stop, time stop and exceptions must drain every in-flight reservation.
