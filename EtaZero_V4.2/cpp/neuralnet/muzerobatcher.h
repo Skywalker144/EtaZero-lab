@@ -18,7 +18,7 @@ class Batcher {
   std::unique_ptr<Impl> impl;
 public:
   Batcher(std::shared_ptr<const ModelBundle> model, int maxBatch, const std::vector<int>& devices,
-          enabled_t fp16, ConfigParser& config, Logger* logger = nullptr, bool inputsUseNHWC = true);
+          enabled_t fp16, ConfigParser& config, Logger* logger = nullptr, bool inputsUseNHWC = defaultInputsUseNHWC);
   ~Batcher();
   Batcher(const Batcher&) = delete;
   Batcher& operator=(const Batcher&) = delete;
