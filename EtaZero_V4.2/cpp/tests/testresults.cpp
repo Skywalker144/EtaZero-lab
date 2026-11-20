@@ -1,6 +1,8 @@
 #include "tests.h"
+#include "../command/gatekeepertally.h"
 #include "testsearchcommon.h"
 #include "../core/test.h"
+#include "../neuralnet/nnpostprocess.h"
 #include "../dataio/trainingwrite.h"
 #include "../search/searchnode.h"
 #include "../search/evalcache.h"
@@ -432,6 +434,37 @@ void searchResults() {
 
 void Tests::runFourResultTests() {
   std::cout << "Running W/D/L/NR targets, terminal search, and cache tests" << std::endl;
+  for(float nr : {1e30f,std::numeric_limits<float>::infinity()}) {
+    NNOutput output;
+    output.whiteWinProb = output.whiteLossProb = output.whiteDrawProb = 0.0f;
+    output.varTimeLeft = output.shorttermWinlossError = 0.0f;
+    output.whiteNoResultProb = nr;
+    NNPostprocess::value(output,P_WHITE,true,18,ModelPostProcessParams());
+    near(output.whiteWinProb,1.0/3);
+    near(output.whiteDrawProb,1.0/3);
+    near(output.whiteLossProb,1.0/3);
+    near(output.whiteNoResultProb,0);
+  }
+  for(Player candidate : {P_WHITE,P_BLACK}) {
+    BoardHistory finished;
+    finished.isGameFinished = true;
+    GatekeeperTally tally;
+    finished.isNoResult = true;
+    tally.record(finished,candidate,0.6);
+    const double nrPoints = candidate == P_WHITE ? 0.8 : 0.2;
+    near(tally.candidatePoints,nrPoints);
+    finished.isNoResult = false;
+    finished.winner = C_EMPTY;
+    tally.record(finished,candidate,0.6);
+    near(tally.candidatePoints,nrPoints + 0.5);
+    for(Player winner : {P_WHITE,P_BLACK}) {
+      finished.winner = winner;
+      tally.record(finished,candidate,0.6);
+    }
+    testAssert(tally.games == 4 && tally.noResults == 1 && tally.draws == 1 && tally.wins == 1 && tally.losses == 1);
+    near(tally.candidatePoints,nrPoints + 1.5);
+    near(tally.baselinePoints,4.0 - tally.candidatePoints);
+  }
   trainingTargets();
   futurePositionTargets();
   excludedSearchOptions();
