@@ -36,7 +36,7 @@ Gumbel 的基础配方来自 [共享搜索配置](../configs/algorithms/gumbel.c
 
 MuZero 两种算法保留 shuffle 输出文件约 8192 行、桶约 65536 行。MuZero 需要连续未来位置，shuffle 会从轨迹构造展开训练样本；增大文件行数会同时增加物化和读取展开字段的内存，不能直接照搬普通 AlphaZero 的文件大小。数据语义见 [MuZero 网络与展开训练](muzero.md)。
 
-`baseline_az` 的目标是按机制语义接近 KataGo，排除 V4 已移除的围棋专用机制，并非与 main18b 完全一致。当前参数以本版本配置及运行保存的解析结果为准。[V4／KataGo／KataGomo 参数表](config-parameter-audit-2026-10-31.md) 是 2026-10-31 的历史快照，不作为 V4.1 当前参数表。网络并非 KataGo 统一指定的默认值；当前配置也不代表棋力或吞吐已调优。`configs/checks/` 保留独立的小规模原生接口检查。
+`baseline_az` 的目标是按机制语义接近 KataGo，排除 V4 已移除的围棋专用机制，并非与 main18b 完全一致。当前参数以本版本配置及运行保存的解析结果为准。[V4／KataGo／KataGomo 参数表](config-parameter-audit-2026-10-31.md) 是 2026-10-31 的历史快照，不作为 V4.2 当前参数表。网络并非 KataGo 统一指定的默认值；当前配置也不代表棋力或吞吐已调优。`configs/checks/` 保留独立的小规模原生接口检查。
 
 ## 文件内分组
 
