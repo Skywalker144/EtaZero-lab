@@ -184,7 +184,7 @@ def prepare_batch(data, mean_weight, rng, model_config, device, *, randomize_sym
     import torch
     from . import modelconfigs
     from .data_processing_pytorch import (
-        apply_history_matrices, build_history_matrices, apply_symmetry, apply_symmetry_policy, apply_xiangqi_history,
+        apply_history_matrices, build_history_matrices, apply_symmetry, symmetry_transform, apply_xiangqi_history,
     )
 
     if not math.isfinite(mean_weight) or mean_weight <= 0:
@@ -254,22 +254,7 @@ def prepare_batch(data, mean_weight, rng, model_config, device, *, randomize_sym
         mirror_actions = np.asarray(xq.action_permutation(mirror=True)) if xiangqi and sym % 2 else None
         mirror_tensor = tensor(mirror_actions) if mirror_actions is not None else None
 
-        def transform(value, policy=False):
-            if xiangqi:
-                if mirror_tensor is None:
-                    return value
-                if policy:
-                    return value.index_select(-1, mirror_tensor)
-                mirrored = value.clone()
-                mirrored[..., :xq.HEIGHT, :xq.WIDTH] = value[..., :xq.HEIGHT, :xq.WIDTH].flip(-1)
-                return mirrored
-            fn = (lambda x, s: apply_symmetry_policy(x, s, w, has_pass)) if policy else apply_symmetry
-            transformed = fn(value, sym)
-            if placement:
-                selector = tensor(hex_rows).reshape((-1,) + (1,)*(value.ndim-1))
-                transformed = torch.where(selector, fn(value, 2*(sym % 2)), transformed)
-            return transformed.contiguous()
-
+        transform = symmetry_transform(sym, w, xiangqi, placement, tensor(hex_rows) if placement else None, mirror_tensor)
         root['binaryInputNCHW'] = transform(root['binaryInputNCHW'])
         for target in targets:
             for key in ('policyTargetsNCMove', 'qValueTargetsNCMove'):
