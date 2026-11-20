@@ -438,8 +438,10 @@ def test_gap_fix_deferred_file_survives_restart(tmp_path, seed):
         "old_train_data_dirs": list(ts["old_train_data_dirs"]),
     }
     random.seed(seed + 99999)
+    rng_before_attach = random.getstate()
     g2 = TrainingDataGenerator(ts2, False)
     g2.set_data_dir_if_has_remaining_files(td)
+    assert random.getstate() == rng_before_attach
 
     # Walk the resumed first pass; the deferred file must appear (not be silently skipped).
     served, seen = [], set()
