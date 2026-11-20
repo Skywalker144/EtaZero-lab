@@ -99,7 +99,7 @@ def test_native_features_joint_targets_and_source_weights(native_data, canvas, e
         for action, value, visits in position['q']:
             q[:, oriented_action(action, player)] = [value * (32000 if player == 2 else -32000), visits]
         np.testing.assert_array_equal(data['qValueTargetsNCMove'][row], q)
-        assert target[35] == (ending == 'truncated')
+        assert target[35] == (ending == 'truncated' and not side)
         assert target[27] == (not disabled and ending == 'terminal')
         assert target[33] == (not disabled)
         future = np.zeros((2, canvas, canvas), dtype=np.int8)

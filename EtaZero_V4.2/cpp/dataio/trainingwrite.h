@@ -321,7 +321,8 @@ struct TrainingWriteBuffers {
     int mode,
     SGFMetadata* sgfMeta,
     Rand& rand,
-    const ReanalysisData& reanalysisData = ReanalysisData()
+    const ReanalysisData& reanalysisData = ReanalysisData(),
+    bool targetsOnly = false
   );
 
   void writeToZipFile(const std::string& fileName, MuZeroWriteBuffers* muZero = nullptr);

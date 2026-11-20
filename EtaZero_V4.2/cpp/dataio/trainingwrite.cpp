@@ -410,7 +410,8 @@ void TrainingWriteBuffers::addRow(
   int mode,
   SGFMetadata* sgfMeta,
   Rand& rand,
-  const ReanalysisData& reanalysisData
+  const ReanalysisData& reanalysisData,
+  bool targetsOnly
 ) {
   static_assert(NNModelVersion::latestInputsVersionImplemented == 9, "");
   const bool xiangqi = hist.rules.isXiangqi();
@@ -422,7 +423,7 @@ void TrainingWriteBuffers::addRow(
   int posArea = dataXLen*dataYLen;
   testAssert(curRows < maxRows);
 
-  {
+  if(!targetsOnly) {
     MiscNNInputParams nnInputParams;
     nnInputParams.drawEquivalentWinsForWhite = drawEquivalentWinsForWhite;
     //Note: this is coordinated with the fact that selfplay does not use this feature on side positions
@@ -1091,7 +1092,7 @@ void TrainingDataWriter::writeGame(const FinishedGameData& data) {
               data.mode,
               NULL,
               rowRand,
-              reanalysisData
+              reanalysisData, fullTrajectory
             );
             if(fullTrajectory) {
               const Move& move = data.endHist.moveHistory[turnIdx];
@@ -1147,7 +1148,7 @@ void TrainingDataWriter::writeGame(const FinishedGameData& data) {
       trajectory->finished ? 1.0f : 0.0f,1.0f,finalRaw,
       trajectory->finished ? &finalBoard : NULL,trajectory->finished ? &finalBoards : NULL,
       false,0,data.drawEquivalentWinsForWhite,data.playoutDoublingAdvantagePla,data.playoutDoublingAdvantage,
-      data.gameHash,data.changedNeuralNets,data.hitTurnLimit,data.numExtraBlack,data.mode,NULL,*muZeroRand
+      data.gameHash,data.changedNeuralNets,data.hitTurnLimit,data.numExtraBlack,data.mode,NULL,*muZeroRand,ReanalysisData(),true
     );
     trajectory->append(*trajectoryRow,-1,1.0f);
   }
@@ -1170,7 +1171,8 @@ void TrainingDataWriter::writeGame(const FinishedGameData& data) {
           whiteQValueTargetsBuf[0] = sp->whiteQValueTargets;
           bool isSidePosition = true;
           int numNeuralNetsBehindLatest = (int)data.changedNeuralNets.size() - sp->numNeuralNetChangesSoFar;
-          float valueTargetWeight = !data.endHist.rules.isGo() && data.hitTurnLimit ? 0.0f : 1.0f;
+          // Side positions carry their own search value, including in truncated games.
+          float valueTargetWeight = 1.0f;
           float tdValueTargetWeight = 1.0f;
 
           writeBuffers->addRow(

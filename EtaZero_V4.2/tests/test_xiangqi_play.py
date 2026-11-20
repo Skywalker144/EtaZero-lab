@@ -64,7 +64,7 @@ def verify_samples(output):
                 np.testing.assert_allclose(data['globalInputNC'][i], globals_, atol=1e-7, rtol=0)
                 np.testing.assert_allclose(target[59], entropy, atol=5e-7, rtol=0)
                 if game['truncated']:
-                    assert target[35] == 1 and target[27] == 0 and target[62] == 0
+                    assert target[35] == (not side) and target[27] == 0 and target[62] == 0
                 elif not side:
                     assert target[35] == 0 and target[62] == 1
                     np.testing.assert_array_equal(target[[0, 70, 1, 2]], [0, 1, 0, 0])
