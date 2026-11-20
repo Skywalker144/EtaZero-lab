@@ -1970,10 +1970,10 @@ struct PolicyHead {
   const MatMulLayer gpoolToBiasMul;
   const BatchNormLayer p1BN;
   const ConvLayer p2Conv;
-  const MatMulLayer gpoolToPassMul;
-  const MatBiasLayer gpoolToPassBias;
-  const ActivationLayer passActivation;
-  const MatMulLayer gpoolToPassMul2;
+  std::unique_ptr<MatMulLayer> gpoolToPassMul;
+  std::unique_ptr<MatBiasLayer> gpoolToPassBias;
+  std::unique_ptr<ActivationLayer> passActivation;
+  std::unique_ptr<MatMulLayer> gpoolToPassMul2;
 
   PolicyHead() = delete;
   PolicyHead(const PolicyHead&) = delete;
@@ -1987,12 +1987,15 @@ struct PolicyHead {
       g1BN(desc.g1BN,desc.g1Activation),
       gpoolToBiasMul(desc.gpoolToBiasMul),
       p1BN(desc.p1BN,desc.p1Activation),
-      p2Conv(desc.p2Conv,nnX,nnY),
-      gpoolToPassMul(desc.gpoolToPassMul),
-      gpoolToPassBias(desc.gpoolToPassBias),
-      passActivation(desc.passActivation),
-      gpoolToPassMul2(desc.gpoolToPassMul2)
-  {}
+      p2Conv(desc.p2Conv,nnX,nnY)
+  {
+    if(NNModelVersion::hasPassHead(modelVersion)) {
+      gpoolToPassMul = std::make_unique<MatMulLayer>(desc.gpoolToPassMul);
+      gpoolToPassBias = std::make_unique<MatBiasLayer>(desc.gpoolToPassBias);
+      passActivation = std::make_unique<ActivationLayer>(desc.passActivation);
+      gpoolToPassMul2 = std::make_unique<MatMulLayer>(desc.gpoolToPassMul2);
+    }
+  }
 
   size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
     size_t maxElts = 0;
@@ -2019,14 +2022,12 @@ struct PolicyHead {
     SizedBuf<float*> g1Out2Buf(scratch->allocator, scratch->getBufSizeXY(g1Conv.outChannels));
     SizedBuf<float*> g1ConcatBuf(scratch->allocator, scratch->getBufSize(g1Conv.outChannels*3));
     SizedBuf<float*> g1BiasBuf(scratch->allocator, scratch->getBufSize(p1Conv.outChannels));
-    SizedBuf<float*> p1PassBuf(scratch->allocator, scratch->getBufSize(p1Conv.outChannels));
     TENSORMAP4 p1Out(p1OutBuf.buf, p1Conv.outChannels, handle->nnXLen, handle->nnYLen, batchSize);
     TENSORMAP4 p1Out2(p1Out2Buf.buf, p1Conv.outChannels, handle->nnXLen, handle->nnYLen, batchSize);
     TENSORMAP4 g1Out(g1OutBuf.buf, g1Conv.outChannels, handle->nnXLen, handle->nnYLen, batchSize);
     TENSORMAP4 g1Out2(g1Out2Buf.buf, g1Conv.outChannels, handle->nnXLen, handle->nnYLen, batchSize);
     TENSORMAP2 g1Concat(g1ConcatBuf.buf, g1Conv.outChannels*3, batchSize);
     TENSORMAP2 g1Bias(g1BiasBuf.buf, p1Conv.outChannels, batchSize);
-    TENSORMAP2 p1Pass(p1PassBuf.buf, p1Conv.outChannels, batchSize);
 
     p1Conv.apply(handle, trunk, &p1Out, convWorkspace, false);
     g1Conv.apply(handle, trunk, &g1Out, convWorkspace, false);
@@ -2037,17 +2038,17 @@ struct PolicyHead {
     p1BN.apply(&p1Out, &p1Out2, mask);
     p2Conv.apply(handle, &p1Out2, policy, convWorkspace, false);
 
-    if(modelVersion == 18 || modelVersion == 19) {
-      // Non-Go policies contain no pass branch.
-    }
-    else if(modelVersion >= 15) {
-      gpoolToPassMul.apply(&g1Concat, &p1Pass);
-      gpoolToPassBias.apply(&p1Pass);
-      passActivation.apply(&p1Pass, &p1Pass);
-      gpoolToPassMul2.apply(&p1Pass, policyPass);
+    if(!NNModelVersion::hasPassHead(modelVersion)) return;
+    if(modelVersion >= 15) {
+      SizedBuf<float*> p1PassBuf(scratch->allocator, scratch->getBufSize(p1Conv.outChannels));
+      TENSORMAP2 p1Pass(p1PassBuf.buf, p1Conv.outChannels, batchSize);
+      gpoolToPassMul->apply(&g1Concat, &p1Pass);
+      gpoolToPassBias->apply(&p1Pass);
+      passActivation->apply(&p1Pass, &p1Pass);
+      gpoolToPassMul2->apply(&p1Pass, policyPass);
     }
     else {
-      gpoolToPassMul.apply(&g1Concat, policyPass);
+      gpoolToPassMul->apply(&g1Concat, policyPass);
     }
   }
 };
@@ -2247,7 +2248,7 @@ struct Buffers {
   ) :
     trunk(desc.trunk.trunkNumChannels, nnXLen, nnYLen, maxBatchSize),
 
-    policyPass(desc.numPolicyChannels, maxBatchSize),
+    policyPass(NNModelVersion::hasPassHead(desc.modelVersion) ? desc.numPolicyChannels : 0, maxBatchSize),
     policy(desc.policyHead.p2Conv.outChannels, nnXLen, nnYLen, maxBatchSize),
 
     value(desc.numValueChannels, maxBatchSize),
@@ -2556,7 +2557,7 @@ void NeuralNet::getOutput(
     assert(output->nnYLen == nnYLen);
     float policyOptimism = (float)inputBufs[row]->policyOptimism;
 
-    const float* policyPassSrcBuf = policyPassData + row * numPolicyChannels;
+    const float* policyPassSrcBuf = NNModelVersion::hasPassHead(modelVersion) ? policyPassData + row * numPolicyChannels : nullptr;
     const float* policySrcBuf = policyData + row * spatialPolicyChannels * nnXLen * nnYLen;
     output->resizePolicy(modelVersion == 19 ? Xiangqi::NUM_ACTIONS : NNPos::MAX_NN_POLICY_SIZE);
     float* policyProbs = output->policyProbs;
