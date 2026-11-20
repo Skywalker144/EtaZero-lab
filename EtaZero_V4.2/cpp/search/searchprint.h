@@ -28,7 +28,6 @@ struct PrintTreeOptions {
   int maxPVDepth_;
   //Print every child at the top of the printed tree, ignoring maxChildrenToShow_ and the minimum visits to show.
   bool showAllRootChildren_;
-  bool printRawNN_;
   bool printSqs_;
   bool printAvgShorttermError_;
   std::vector<Loc> branch_;
@@ -44,7 +43,6 @@ inline PrintTreeOptions::PrintTreeOptions()
    minVisitsPropToExpand_(0.0),
    maxPVDepth_(7),
    showAllRootChildren_(false),
-   printRawNN_(false),
    printSqs_(false),
    printAvgShorttermError_(false),
    branch_(),
