@@ -767,9 +767,8 @@ void NNInputs::fillRowV8(
     setRowBin(rowBin,pos,0,1.0f,posStride,featureStride);
     if(board.colors[loc] == nextPlayer) setRowBin(rowBin,pos,1,1.0f,posStride,featureStride);
     else if(board.colors[loc] == getOpp(nextPlayer)) setRowBin(rowBin,pos,2,1.0f,posStride,featureStride);
-    else if(renju && Placement::renjuForbidden(board,loc) != Placement::Forbidden::NONE)
-      setRowBin(rowBin,pos,nextPlayer == P_BLACK ? 3 : 4,1.0f,posStride,featureStride);
   }
+  if(renju) Placement::fillRenjuForbidden(board,rowBin+(nextPlayer == P_BLACK ? 3 : 4)*featureStride,nnXLen*posStride,posStride);
   rowGlobal[0] = hist.rules.game == Rules::Game::STANDARD;
   rowGlobal[1] = renju;
   rowGlobal[2] = renju ? (nextPlayer == P_BLACK ? -1.0f : 1.0f) : 0.0f;
