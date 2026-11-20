@@ -101,7 +101,7 @@ AlphaZero 与 MuZero 共用此流程。MuZero manifest 和三个组件以整个�
 
 恢复不会保存或重建自对弈进程的内存状态：在途对局、尚未写出的行、fork 队列、搜索树及其 RNG 会丢失，重新启动后产生新对局。已发布行来自已经结束的对局，目标不会被改成虚假的部分对局目标；MuZero shard 保留所引用位置的完整轨迹。同一游戏跨多个 shard 时只计一次。被中断尝试中没有留下任何训练行的游戏无法从 NPZ 计数，可能额外补产；正常完成的原生回执则包含零训练行游戏的额度完成情况。故恢复保证已发布数据可继续使用，不承诺精确重演中断前的自对弈过程或恢复全部 buffered rows。
 
-同步 learner 在完整 epoch 和正常停止边界保存，不逐 batch 写 checkpoint。单设备 learner 收到 SIGINT/SIGTERM 后完成当前 batch 的更新、AMP 跳步、Lookahead/SWA 和游标推进再保存；若已到 epoch 末尾则完成该 epoch 的收尾。异常或强杀退出后，最后一次保存以来的内存更新需要重做。完整 checkpoint 保存模型、optimizer、Lookahead slow 权重与同步计数、SWA 及累计余量、LR/brenorm 更新时钟、本轮文件计划与已消费游标，以及训练／验证 reader RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备 RNG 和 AMP scaler。读取游标恢复时跳过已消费 batch，不重复消耗增强随机数。未完成轮次的 shuffle 快照保留至该轮提交，之后按上述快照回收策略管理。
+同步 learner 在完整 epoch 和正常停止边界保存，不逐 batch 写 checkpoint。单设备 learner 收到 SIGINT/SIGTERM 后完成当前 batch 的更新、AMP 跳步、Lookahead/SWA 和游标推进再保存；若已到 epoch 末尾则完成该 epoch 的收尾。异常或强杀退出后，最后一次保存以来的内存更新需要重做。完整 checkpoint 保存模型、optimizer、Lookahead slow 权重与同步计数、SWA 及累计余量、LR/brenorm 更新时钟、本轮文件计划与已消费游标，以及训练／验证 reader RNG、Python/NumPy/Torch RNG、实际 learner CUDA 设备 RNG 和 AMP scaler。独立 learner 和控制器均凭未完成的 epoch 游标恢复快照，跳过已消费 batch，并继续使用保存的增强随机数状态。单设备完整续训要求相同的优化器、Lookahead 开关、设备类型和 AMP scaler 模式。未完成的 epoch 还要求使用保存游标时的单设备 batch size。完整 epoch 后，独立 learner 会重新核对目录中的训练文件，允许使用新的 batch size；同一目录、同一数据行窗口沿用原训练额度。只有权重的文件可以通过 `-initial-weights` 启动新运行。未完成轮次的 shuffle 快照保留至该轮提交，之后按上述快照回收策略管理。
 
 checkpoint 同时保存原生训练／验证指标日志的字节位置。恢复时将该位置之后的旧记录区间记入 `train/metrics_recovery.jsonl`，绘图排除这些已回退更新的观测，原始日志保留不变。已有 checkpoint 缺少日志位置时，按其已保存样本数筛除此前日志中的超界更新，同样本数的验证记录保守留空。指标与模型恢复分开处理，不从日志恢复 optimizer，也不因丢弃作废指标而扣除已花掉的时间。
 
