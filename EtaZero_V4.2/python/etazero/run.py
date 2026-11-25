@@ -18,6 +18,7 @@ import time
 import uuid
 
 from . import ROOT, __version__
+from .native_inputs import native_inputs
 from .timing import RoundClock, compiler_seconds, committed_timing
 from .replay import count_rows, plan_sampling, plan_training, commit_replay
 from .stopping import StopRequest, StopRequested
@@ -147,9 +148,14 @@ def snapshot_source(destination):
             archive.add(ROOT / name, arcname=name, filter=include)
 
 
+def round_commit_path(root, state):
+    number = state['completed_rounds'] + 1
+    return root / 'rounds' / f'{number:06d}' / 'commit.json'
+
+
 def run_round(root, config, state, binary, lock_fd=None, stopping=None):
     number = state['completed_rounds'] + 1
-    commit_path = root / 'rounds' / f'{number:06d}' / 'commit.json'
+    commit_path = round_commit_path(root, state)
     if commit_path.is_file():
         # A completed round's time/model record is authoritative even when the
         # following state-pointer write was interrupted. Do not time it twice.
@@ -301,7 +307,7 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
             attempt = progress['attempts'].get('gatekeeper', 0) + 1
             matches = gate_dir / 'matches' / str(attempt)
             matches.mkdir(parents=True, exist_ok=True)
-            stage('gatekeeper', [binary, 'gatekeeper', '-config', config.gatekeeper_config,
+            stage('gatekeeper', [binary, 'gatekeeper', '-config', root / 'gatekeeper.resolved.cfg',
                 '-test-models-dir', testing.parent, '-accepted-models-dir', gate_dir / 'accepted',
                 '-rejected-models-dir', gate_dir / 'rejected', '-sgf-output-dir', matches,
                 '-required-candidate-win-prop', config.gatekeeper_required_win_prop,
@@ -371,11 +377,7 @@ def _run_round(root, config, state, binary, lock_fd, progress, persist, stopping
         if completed < progress['selfplay_target']:
             remaining = progress['selfplay_target'] - completed
             receipt = directory / f'selfplay-{attempt + 1}.json'
-            selfplay_config = config.selfplay_config
-            if config.native_selfplay is not None:
-                selfplay_config = root / 'selfplay.resolved.cfg'
-                selfplay_config.write_text(config.native_selfplay)
-            stage('selfplay', [binary, 'selfplay', '-config', selfplay_config,
+            stage('selfplay', [binary, 'selfplay', '-config', root / 'selfplay.resolved.cfg',
                 '-models-dir', models, '-output-dir', output, '-max-games-total', remaining,
                 '-result-file', receipt,
                 '-override-config', f'game={config.game},dataBoardLen={config.canvas},switchNetsMidGame=false,'
@@ -535,6 +537,88 @@ def validate_budget(iterations, max_seconds):
         raise ValueError('max_seconds must be finite and positive')
 
 
+def verify_native_inputs(root, config):
+    inputs = native_inputs(config)
+    for name, content in inputs.items():
+        saved = root / name
+        if not saved.is_file():
+            # Older profile runs saved their complete translated selfplay
+            # input in config.json even before the first native stage.
+            if config.gatekeeper_config is None and config.native_selfplay == content and len(inputs) == 1:
+                saved.write_text(content)
+            else:
+                raise ValueError(f'Missing original native configuration {saved}; use the original source or a new run directory')
+        elif saved.read_text() != content:
+            raise ValueError(f'Native run configuration differs from {saved}')
+
+
+def initialize_run(root, config, binary, weights, inputs):
+    staging = root / '.etazero-initializing'
+    if staging.is_symlink():
+        raise ValueError('A new run requires an empty output directory')
+    ready = staging / 'ready.json'
+    published = json.loads(ready.read_text()) if ready.is_file() else []
+    allowed = {'source.json', 'source.tar.gz', 'config.json', 'initial', 'muzero_network.json',
+               'selfplay.resolved.cfg', 'gatekeeper.resolved.cfg', 'native-includes', 'state.json'}
+    if ready.is_file() and (not isinstance(published, list) or not published or published[-1] != 'state.json' or
+                            not set(published).issubset(allowed)):
+        raise ValueError('Invalid initialization publication record')
+    if any(p.name not in {'.lock', staging.name, *published} for p in root.iterdir()):
+        raise ValueError('A new run requires an empty output directory')
+    origin = None if weights is None else Path(weights).resolve()
+    request_path = staging / 'request.json'
+    if request_path.is_file():
+        request = json.loads(request_path.read_text())
+        if request['config'] != config.serializable() or (origin is not None and str(origin) != request['weights']):
+            raise ValueError('Configuration or initial weights differ from the interrupted initialization')
+        origin = Path(request['weights']) if request['weights'] is not None else None
+    else:
+        if staging.exists() and any(not (p.name.startswith('request.json.tmp.') and p.is_file()) for p in staging.iterdir()):
+            raise ValueError('Unrecognized initialization directory')
+        if origin is not None and not origin.is_file():
+            raise ValueError(f'Initial weights not found: {origin}')
+        staging.mkdir(exist_ok=True)
+        save_json(request_path, {'config': config.serializable(), 'weights': str(origin) if origin is not None else None})
+    files = staging / 'files'
+    if not ready.is_file():
+        if files.exists():
+            shutil.rmtree(files)
+        files.mkdir()
+        for name, text in inputs.items():
+            dest = files / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text)
+        save_json(files / 'config.json', config.serializable())
+        if config.is_muzero:
+            save_json(files / 'muzero_network.json', config.muzero_network)
+        source = json.loads((ROOT / 'reference_sources.json').read_text())
+        revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        snapshot_source(files / 'source.tar.gz')
+        save_json(files / 'source.json', {'etazero_version': __version__, 'repository_commit': revision,
+                                        'source': source, 'binary': str(binary), 'snapshot': 'source.tar.gz',
+                                        'initial_weights': str(origin) if origin is not None else None})
+        if origin is not None:
+            (files / 'initial').mkdir()
+            shutil.copyfile(origin, files / 'initial/weights.ckpt')
+        state = dict(completed_rounds=-1, accepted_model=None, active_round=None, phase='idle', total_samples=0,
+                     replay=dict(rows=0, credit=0.0, history=[]),
+                     wall_seconds=0.0, compile_seconds=0.0, elapsed_seconds=0.0, timing_valid=True,
+                     timing_basis='committed_wall_excluding_compile')
+        save_json(files / 'state.json', state)
+        published = sorted(p.name for p in files.iterdir() if p.name != 'state.json') + ['state.json']
+        save_json(ready, published)
+    for name in published:
+        src, dest = files / name, root / name
+        if src.exists():
+            if dest.exists() or dest.is_symlink():
+                raise ValueError(f'Initialization would overwrite {dest}')
+            src.rename(dest)
+        elif not dest.exists():
+            raise RuntimeError(f'Missing initialization artifact {dest}')
+    shutil.rmtree(staging)
+    return json.loads((root / 'state.json').read_text())
+
+
 def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights=None, inherited_fds=()):
     config.validate()
     validate_budget(iterations, max_seconds)
@@ -549,35 +633,18 @@ def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights
         except BlockingIOError as error:
             raise RuntimeError(f'Another controller is using {root}') from error
         state_path = root / 'state.json'
+        inputs_checked = False
         if state_path.exists():
             if weights is not None:
                 raise ValueError('An existing run owns its initialization; resume without weights')
             state = json.loads(state_path.read_text())
             if json.loads((root / 'config.json').read_text()) != config.serializable():
                 raise ValueError('Run configuration differs from the existing run')
+            staging = root / '.etazero-initializing'
+            if (staging / 'ready.json').is_file() and (staging / 'request.json').is_file():
+                shutil.rmtree(staging)
         else:
-            if any(p.name != '.lock' for p in root.iterdir()):
-                raise ValueError('A new run requires an empty output directory')
-            origin = None if weights is None else Path(weights).resolve()
-            if origin is not None and not origin.is_file():
-                raise ValueError(f'Initial weights not found: {origin}')
-            save_json(root / 'config.json', config.serializable())
-            if config.is_muzero:
-                save_json(root / 'muzero_network.json', config.muzero_network)
-            source = json.loads((ROOT / 'reference_sources.json').read_text())
-            revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
-            snapshot_source(root / 'source.tar.gz')
-            save_json(root / 'source.json', {'etazero_version': __version__, 'repository_commit': revision,
-                                            'source': source, 'binary': str(binary), 'snapshot': 'source.tar.gz',
-                                            'initial_weights': str(origin) if origin is not None else None})
-            if origin is not None:
-                (root / 'initial').mkdir()
-                shutil.copyfile(origin, root / 'initial/weights.ckpt')
-            state = dict(completed_rounds=-1, accepted_model=None, active_round=None, phase='idle', total_samples=0,
-                         replay=dict(rows=0, credit=0.0, history=[]),
-                         wall_seconds=0.0, compile_seconds=0.0, elapsed_seconds=0.0, timing_valid=True,
-                         timing_basis='committed_wall_excluding_compile')
-            save_json(state_path, state)
+            state = initialize_run(root, config, binary, weights, native_inputs(config))
         if not state['timing_valid']:
             print('WARNING: cumulative timing is incomplete; budgets use observed wall time, not equal-time comparison data',
                   file=sys.stderr, flush=True)
@@ -589,6 +656,9 @@ def run(root, config, iterations=None, binary=None, *, max_seconds=None, weights
                 print(f'Time budget reached after round {state["completed_rounds"]}: '
                       f'{state["elapsed_seconds"]:.3f}s >= {max_seconds:.3f}s', flush=True)
                 break
+            if not inputs_checked and not round_commit_path(root, state).is_file():
+                verify_native_inputs(root, config)
+                inputs_checked = True
             run_round(root, config, state, binary, (lock.fileno(), *inherited_fds), stopping=stopping)
             prune_shuffle_snapshots(root, state)
             refresh_plots(root, config)
