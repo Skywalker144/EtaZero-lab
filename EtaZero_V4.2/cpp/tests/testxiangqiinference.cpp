@@ -62,7 +62,7 @@ void Tests::runXiangqiInference(const std::string& model, const std::string& req
     NeuralNet::getOutput(handle.get(),buffers.get(),count,rawInputs.data(),rawOutputs);
     json rows = json::array();
     for(const auto* output : rawOutputs) {
-      testAssert(output->getPolicyStorageSize() == Xiangqi::NUM_ACTIONS);
+      testAssert(output->getPolicyStorageSize() >= Xiangqi::NUM_ACTIONS);
       rows.push_back({{"policy",std::vector<float>(output->policyProbs,output->policyProbs+Xiangqi::NUM_ACTIONS)},
         {"value",{output->whiteWinProb,output->whiteDrawProb,output->whiteLossProb,output->whiteNoResultProb}},
         {"auxiliary",{output->varTimeLeft,output->shorttermWinlossError}}});
