@@ -138,7 +138,7 @@ Go 与落子棋根输入按整个 NN 画布做对称，因此小棋盘和矩形�
 
 输出沿用 `NNOutput` 的白方视角与非法策略值 `-1`。普通 evaluator 和 MuZero 共用 `NNPostprocess` 的策略 softmax、温度、四结果 softmax、variance-time 和短期误差转换；乐观策略先按来源公式混合 logits。representation 需要 metadata 时关闭 policy optimism。NR 按根棋类及 Go 的 ko/scoring 条件屏蔽，保留来源判断；W/L 随当前 latent 执色转换，D/NR 不翻转。原始 MuZero 后端输出已经还原 scale8，因此这里的输出尺度设为 1，不重复乘 8。
 
-根缓存直接使用来源 `NNCacheTable` 与 `NNInputs::getHash`，包含来源温度、PDA、乐观值、历史可见性及 metadata 身份；不另造完整输入哈希或 recurrent 棋盘缓存。每项同时持有预测、设备 latent 与朝向，命中时沿用缓存朝向，不能把它解释为本次请求的另一朝向。`skipCache` 与来源一致，只跳过读取，仍写入新结果；清理或替换项时在锁外释放状态。缓存容量也决定被保留的 latent 显存，不能仅按普通 NNOutput 的主机内存估算。
+根缓存直接使用来源 `NNCacheTable` 与 `NNInputs::getHash`，包含来源温度、PDA、乐观值、历史可见性及 metadata 身份；不另造完整输入哈希或 recurrent 棋盘缓存。每项同时持有预测、设备 latent 与朝向，命中时沿用缓存朝向，不能把它解释为本次请求的另一朝向。`skipCache` 与来源一致，只跳过读取，仍写入新结果；清理或替换项时在锁外释放状态。MuZero 根缓存默认关闭。需要跨搜索复用根时，按设备显存预算设置 `muZeroCacheSizePowerOfTwo`，每个 evaluator 最多缓存 2 的该参数次方个根。`-1` 关闭缓存。`nnCacheSizePowerOfTwo` 单独控制普通模型的缓存。
 
 根多对称按来源方式无放回采样、跳过缓存读取并平均后处理结果。第一个均匀抽取的对称提供后续递归使用的状态；其余预测参与根平均，不平均非线性的 latent，也不把根多对称扩展为每层 ensemble。平均结果使用独立对象，不修改已经写入缓存的单对称输出。
 
