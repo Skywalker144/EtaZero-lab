@@ -596,8 +596,8 @@ struct GTPEngine {
     // maximum buffer can override the requested dimensions, and exact-size
     // evaluators cannot search a smaller board inside that buffer.
     const int expectedConcurrentEvals = std::max(genmoveParams.numThreads, analysisParams.numThreads);
-    auto checkEvaluatorSize = [&](const string& path, const char* label) {
-      const auto options = Setup::readEvaluatorOptions(path,0,cfg,logger,seedRand,expectedConcurrentEvals,
+    auto checkEvaluatorSize = [&](const string& path, const char* label, bool isMuZero) {
+      const auto options = Setup::readEvaluatorOptions(path,isMuZero ? Setup::ModelKind::MuZero : Setup::ModelKind::Board,0,cfg,logger,seedRand,expectedConcurrentEvals,
         nnXLen,nnYLen,Setup::MaxBatchSizeRequest::fromConcurrency(),defaultRequireExactNNLen,
         false,Setup::SETUP_FOR_GTP,true);
       if(!wasDefault && (boardXSize > options.nnXLen || boardYSize > options.nnYLen ||
@@ -606,8 +606,8 @@ struct GTPEngine {
           Global::intToString(options.nnYLen) + (options.requireExactNNLen ? " requires an exact board size" : " is too small for the board"));
       return options;
     };
-    const auto primaryOptions = checkEvaluatorSize(nnModelFile,"Primary");
-    if(!humanModelFile.empty()) checkEvaluatorSize(humanModelFile,"Secondary");
+    const auto primaryOptions = checkEvaluatorSize(nnModelFile,"Primary",useMuZero);
+    if(!humanModelFile.empty()) checkEvaluatorSize(humanModelFile,"Secondary",humanIsMuZero);
 
     //If the neural net is wrongly sized, we need to create or recreate it
     if(primaryModel == nullptr || !(primaryOptions.nnXLen == primaryModel->getNNXLen() &&

@@ -32,6 +32,48 @@ static void signalHandler(int signal)
   }
 }
 
+static json matchStrategies(ConfigParser& cfg) {
+  const auto params = Setup::loadParams(cfg,Setup::SETUP_FOR_MATCH);
+  json strategies = json::array();
+  vector<string> modelFiles;
+  Logger quiet;
+  Rand seed("match-config");
+  // A default canvas can depend on archived hint files. Keep that default
+  // distinct from all valid overrides without loading external resources.
+  const int fromGame = NNPos::MAX_BOARD_LEN + 1;
+  int defaultX = fromGame, defaultY = fromGame;
+  if(cfg.containsAnyKeyContaining("ForNNBuffer") && !cfg.contains("hintPosesDir") && !cfg.contains("startPosesFromSgfDir")) {
+    GameInitializer games(cfg,quiet);
+    defaultX = games.getMaxBoardXSize();
+    defaultY = games.getMaxBoardYSize();
+  }
+  for(size_t i = 0; i < params.size(); i++) {
+    const string suffix = std::to_string(i);
+    const string file = cfg.getString(cfg.firstFoundOrFail({"nnModelFile"+suffix,"nnModelFile"}));
+    const auto seen = std::find(modelFiles.begin(),modelFiles.end(),file);
+    const auto modelIndex = (size_t)(seen-modelFiles.begin());
+    if(seen == modelFiles.end()) modelFiles.push_back(file);
+    const string mz = cfg.firstFoundOrEmpty({"useMuZero"+suffix,"useMuZero"});
+    const bool muzero = !mz.empty() && cfg.getBool(mz);
+    const auto options = Setup::readEvaluatorOptions(file,muzero ? Setup::ModelKind::MuZero : Setup::ModelKind::Board,
+      modelIndex,cfg,quiet,seed,1,defaultX,defaultY,Setup::MaxBatchSizeRequest::requireFromConfig(),false,false,
+      Setup::SETUP_FOR_MATCH,true);
+    json settings = {{"search",params[i].getHash().toString()}};
+    if(!options.debugSkipNeuralNet) settings["precision"] = options.useFP16Mode.toString();
+    // MuZero always checks the configured canvas against its bundle. Every
+    // successful use of that model therefore already has the same dimensions.
+    if(!muzero) {
+      settings["canvas"] = {options.nnXLen == fromGame ? json(nullptr) : json(options.nnXLen),
+                            options.nnYLen == fromGame ? json(nullptr) : json(options.nnYLen)};
+    }
+    auto& patterns = settings["patterns"] = json::array();
+    for(const auto& set: Setup::loadAvoidSgfPatternSets(cfg,(int)i))
+      patterns.push_back({set.utility,set.lambda,set.minTurn,set.maxFiles,set.names,set.dirs});
+    strategies.push_back(std::move(settings));
+  }
+  return strategies;
+}
+
 int MainCmds::match(const vector<string>& args) {
   Board::initHash();
   Rand seedRand;
@@ -43,6 +85,7 @@ int MainCmds::match(const vector<string>& args) {
   string pairJobsFile;
   bool extendPair = false;
   bool printConfig = false;
+  bool printPlayerSettings = false;
   bool externalDispatch = false;
   try {
     KataGoCommandLine cmd("Play different nets against each other with different search settings in a match or tournament.");
@@ -54,6 +97,7 @@ int MainCmds::match(const vector<string>& args) {
     TCLAP::SwitchArg extendPairArg("","extend-pair","Allow increasing a two-bot pair quota while retaining its saved prefix",false);
     TCLAP::SwitchArg printConfigArg("","print-config","Print resolved match configuration as JSON without loading models",false);
 
+    TCLAP::SwitchArg printPlayerSettingsArg("","print-player-settings","Print resolved match configuration and per-player Elo settings without loading models",false);
     TCLAP::SwitchArg externalDispatchArg("","external-dispatch",
       "Report pending game/service IDs on stdout and read execution windows from stdin",false);
     TCLAP::ValueArg<string> pairJobsArg("","pair-jobs","Run extensible pair caches with shared model residency",false,string(),"JSON");
@@ -64,6 +108,7 @@ int MainCmds::match(const vector<string>& args) {
     cmd.add(resultsDirArg);
     cmd.add(extendPairArg);
     cmd.add(printConfigArg);
+    cmd.add(printPlayerSettingsArg);
 
     cmd.setShortUsageArgLimit();
     cmd.addOverrideConfigArg();
@@ -74,7 +119,8 @@ int MainCmds::match(const vector<string>& args) {
     sgfOutputDir = sgfOutputDirArg.getValue();
     resultsDir = resultsDirArg.getValue();
     extendPair = extendPairArg.getValue();
-    printConfig = printConfigArg.getValue();
+    printPlayerSettings = printPlayerSettingsArg.getValue();
+    printConfig = printConfigArg.getValue() || printPlayerSettings;
     externalDispatch = externalDispatchArg.getValue();
     pairJobsFile = pairJobsArg.getValue();
     if(!pairJobsFile.empty() && (!resultsDir.empty() || extendPair || printConfig || !sgfOutputDir.empty()))
@@ -96,6 +142,7 @@ int MainCmds::match(const vector<string>& args) {
     json identity = {{"resolved_config",cfg.getAllKeyVals()},
                      {"extension_config",quotaIndependent.getAllKeyVals()}};
     if(MatchResults::scoresGoMoveLimit(cfg)) identity["go_move_limit_scoring"] = true;
+    if(printPlayerSettings) identity["search_strategies"] = matchStrategies(cfg);
     cout << identity.dump() << endl;
     return 0;
   }
@@ -326,7 +373,8 @@ int MainCmds::match(const vector<string>& args) {
         exact = exact && nx == canvas && ny == canvas;
         nx = ny = canvas;
       }
-      auto options = Setup::readEvaluatorOptions(nnModelFilesByBot[i],localModel,cfg,logger,seedRand,
+      auto options = Setup::readEvaluatorOptions(nnModelFilesByBot[i],
+        useMuZeroByBot[i] ? Setup::ModelKind::MuZero : Setup::ModelKind::Board,localModel,cfg,logger,seedRand,
         expectedConcurrentEvals,nx,ny,Setup::MaxBatchSizeRequest::requireFromConfig(),exact,false,Setup::SETUP_FOR_MATCH,true);
       int index = -1;
       for(size_t j = 0; j < nnModelFiles.size(); j++) {

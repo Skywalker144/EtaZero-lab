@@ -107,7 +107,7 @@ bool Setup::EvaluatorOptions::operator==(const EvaluatorOptions& other) const {
 }
 
 Setup::EvaluatorOptions Setup::readEvaluatorOptions(
-  const string& nnModelFile, size_t index, ConfigParser& cfg, Logger& logger, Rand& seedRand,
+  const string& nnModelFile, ModelKind modelKind, size_t index, ConfigParser& cfg, Logger& logger, Rand& seedRand,
   int expectedConcurrentEvals, int defaultNNXLen, int defaultNNYLen,
   Setup::MaxBatchSizeRequest maxBatchSizeRequest, bool defaultRequireExactNNLen,
   bool disableFP16, Setup::setup_for_t setupFor, bool deferSeed
@@ -292,15 +292,21 @@ Setup::EvaluatorOptions Setup::readEvaluatorOptions(
     + " useFP16 " + options.useFP16Mode.toString()
   );
 
-  options.nnCacheSizePowerOfTwo =
-    cfg.contains("nnCacheSizePowerOfTwo") ? cfg.getInt("nnCacheSizePowerOfTwo", -1, 48) :
-    setupFor == SETUP_FOR_GTP ? 20 :
-    setupFor == SETUP_FOR_BENCHMARK ? 20 :
-    setupFor == SETUP_FOR_BENCHMARKNN ? 16 :
-    setupFor == SETUP_FOR_DISTRIBUTED ? 19 :
-    setupFor == SETUP_FOR_MATCH ? 21 :
-    setupFor == SETUP_FOR_ANALYSIS ? 23 :
-    cfg.getInt("nnCacheSizePowerOfTwo", -1, 48);
+  if(modelKind == ModelKind::MuZero) {
+    options.nnCacheSizePowerOfTwo = cfg.contains("muZeroCacheSizePowerOfTwo") ?
+      cfg.getInt("muZeroCacheSizePowerOfTwo",-1,48) : -1;
+  }
+  else {
+    options.nnCacheSizePowerOfTwo =
+      cfg.contains("nnCacheSizePowerOfTwo") ? cfg.getInt("nnCacheSizePowerOfTwo", -1, 48) :
+      setupFor == SETUP_FOR_GTP ? 20 :
+      setupFor == SETUP_FOR_BENCHMARK ? 20 :
+      setupFor == SETUP_FOR_BENCHMARKNN ? 16 :
+      setupFor == SETUP_FOR_DISTRIBUTED ? 19 :
+      setupFor == SETUP_FOR_MATCH ? 21 :
+      setupFor == SETUP_FOR_ANALYSIS ? 23 :
+      cfg.getInt("nnCacheSizePowerOfTwo", -1, 48);
+  }
 
   options.nnMutexPoolSizePowerOfTwo =
     cfg.contains("nnMutexPoolSizePowerOfTwo") ? cfg.getInt("nnMutexPoolSizePowerOfTwo", -1, 24) :
@@ -401,7 +407,7 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
     const string& nnModelFile = nnModelFiles[i];
     const string& expectedSha256 = expectedSha256s.size() > 0 ? expectedSha256s[i]: "";
 
-    const auto options = readEvaluatorOptions(nnModelFile,i+firstModelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
+    const auto options = readEvaluatorOptions(nnModelFile,ModelKind::Board,i+firstModelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
       defaultNNXLen,defaultNNYLen,maxBatchSizeRequest,defaultRequireExactNNLen,disableFP16,setupFor);
 
     NNEvaluator* nnEval = new NNEvaluator(
@@ -452,7 +458,7 @@ unique_ptr<SelfplayModel> Setup::initializeMuZeroSelfplayModel(
   const vector<int>* gpuIdxByServerThreadOverride, bool disableFP16
 ) {
   const int canvas = model->posLen();
-  auto options = readEvaluatorOptions(model->isRandom() ? "/dev/null" : directory,modelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
+  auto options = readEvaluatorOptions(model->isRandom() ? "/dev/null" : directory,ModelKind::MuZero,modelIndex,cfg,logger,seedRand,expectedConcurrentEvals,
     canvas,canvas,maxBatchSizeRequest,defaultRequireExactNNLen,disableFP16,setupFor);
   if(gpuIdxByServerThreadOverride) options.gpuIdxByServerThread = *gpuIdxByServerThreadOverride;
   if(options.debugSkipNeuralNet && !model->isRandom())
@@ -1159,45 +1165,46 @@ vector<pair<set<string>,set<string>>> Setup::getMutexKeySets() {
   return mutexKeySets;
 }
 
-std::vector<std::unique_ptr<PatternBonusTable>> Setup::loadAvoidSgfPatternBonusTables(ConfigParser& cfg, Logger& logger) {
-  int numBots = 1;
-  if(cfg.contains("numBots"))
-    numBots = cfg.getInt("numBots",1,MAX_BOT_PARAMS_FROM_CFG);
+vector<Setup::AvoidSgfPatternSet> Setup::loadAvoidSgfPatternSets(ConfigParser& cfg, int botIdx) {
+  vector<AvoidSgfPatternSet> sets;
+  if(!cfg.containsAnyKeyContaining("avoidSgf")) return sets;
+  const string idxStr = Global::intToString(botIdx);
+  for(int j = 1; j<100000; j++) {
+    //Indexes different sets of params for different sets of files, to combine into one bot.
+    const string setStr = j == 1 ? string() : Global::intToString(j);
+    const string prefix = "avoidSgf"+setStr;
 
-  std::vector<std::unique_ptr<PatternBonusTable>> tables;
-  for(int i = 0; i<numBots; i++) {
-    //Indexes different bots, such as in a match config
-    const string idxStr = Global::intToString(i);
+    //Tries to find prefix+suffix+optional index
+    //E.g. "avoidSgf"+"PatternUtility"+(optional integer indexing which bot for match)
+    auto contains = [&cfg,&idxStr,&prefix](const string& suffix) {
+      return cfg.containsAny({prefix+suffix+idxStr,prefix+suffix});
+    };
+    auto find = [&cfg,&idxStr,&prefix](const string& suffix) {
+      return cfg.firstFoundOrFail({prefix+suffix+idxStr,prefix+suffix});
+    };
 
-    std::unique_ptr<PatternBonusTable> patternBonusTable = nullptr;
-    for(int j = 1; j<100000; j++) {
-      //Indexes different sets of params for different sets of files, to combine into one bot.
-      const string setStr = j == 1 ? string() : Global::intToString(j);
-      const string prefix = "avoidSgf"+setStr;
-
-      //Tries to find prefix+suffix+optional index
-      //E.g. "avoidSgf"+"PatternUtility"+(optional integer indexing which bot for match)
-      auto contains = [&cfg,&idxStr,&prefix](const string& suffix) {
-        return cfg.containsAny({prefix+suffix+idxStr,prefix+suffix});
-      };
-      auto find = [&cfg,&idxStr,&prefix](const string& suffix) {
-        return cfg.firstFoundOrFail({prefix+suffix+idxStr,prefix+suffix});
-      };
-
-      if(contains("PatternUtility")) {
-        double penalty = cfg.getDouble(find("PatternUtility"),-3.0,3.0);
-        double lambda = contains("PatternLambda") ? cfg.getDouble(find("PatternLambda"),0.0,1.0) : 1.0;
-        int minTurnNumber = contains("PatternMinTurnNumber") ? cfg.getInt(find("PatternMinTurnNumber"),0,1000000) : 0;
-        size_t maxFiles = contains("PatternMaxFiles") ? (size_t)cfg.getInt(find("PatternMaxFiles"),1,1000000) : 1000000;
-        vector<string> allowedPlayerNames = contains("PatternAllowedNames") ? cfg.getStringsNonEmptyTrim(find("PatternAllowedNames")) : vector<string>();
-        vector<string> sgfDirs = cfg.getStrings(find("PatternDirs"));
-        if(patternBonusTable == nullptr)
-          patternBonusTable = std::make_unique<PatternBonusTable>();
-        string logSource = "bot " + idxStr;
-        patternBonusTable->avoidRepeatedSgfMoves(sgfDirs,penalty,lambda,minTurnNumber,maxFiles,allowedPlayerNames,logger,logSource);
-      }
+    if(contains("PatternUtility")) {
+      double penalty = cfg.getDouble(find("PatternUtility"),-3.0,3.0);
+      double lambda = contains("PatternLambda") ? cfg.getDouble(find("PatternLambda"),0.0,1.0) : 1.0;
+      int minTurnNumber = contains("PatternMinTurnNumber") ? cfg.getInt(find("PatternMinTurnNumber"),0,1000000) : 0;
+      size_t maxFiles = contains("PatternMaxFiles") ? (size_t)cfg.getInt(find("PatternMaxFiles"),1,1000000) : 1000000;
+      vector<string> allowedPlayerNames = contains("PatternAllowedNames") ? cfg.getStringsNonEmptyTrim(find("PatternAllowedNames")) : vector<string>();
+      vector<string> sgfDirs = cfg.getStrings(find("PatternDirs"));
+      sets.push_back({penalty,lambda,minTurnNumber,maxFiles,std::move(allowedPlayerNames),std::move(sgfDirs)});
     }
-    tables.push_back(std::move(patternBonusTable));
+  }
+  return sets;
+}
+
+std::vector<std::unique_ptr<PatternBonusTable>> Setup::loadAvoidSgfPatternBonusTables(ConfigParser& cfg, Logger& logger) {
+  int numBots = cfg.contains("numBots") ? cfg.getInt("numBots",1,MAX_BOT_PARAMS_FROM_CFG) : 1;
+  std::vector<std::unique_ptr<PatternBonusTable>> tables(numBots);
+  for(int i = 0; i < numBots; i++) {
+    for(const auto& set : loadAvoidSgfPatternSets(cfg,i)) {
+      if(tables[i] == nullptr) tables[i] = std::make_unique<PatternBonusTable>();
+      tables[i]->avoidRepeatedSgfMoves(set.dirs,set.utility,set.lambda,set.minTurn,set.maxFiles,set.names,logger,
+                                      "bot " + Global::intToString(i));
+    }
   }
   return tables;
 }

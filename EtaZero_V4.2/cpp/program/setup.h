@@ -99,8 +99,10 @@ namespace Setup {
     bool operator==(const EvaluatorOptions& other) const;
   };
 
+  enum class ModelKind { Board, MuZero };
+
   EvaluatorOptions readEvaluatorOptions(
-    const std::string& modelFile, size_t index, ConfigParser& cfg, Logger& logger, Rand& seedRand,
+    const std::string& modelFile, ModelKind modelKind, size_t index, ConfigParser& cfg, Logger& logger, Rand& seedRand,
     int expectedConcurrentEvals, int defaultNNXLen, int defaultNNYLen,
     MaxBatchSizeRequest maxBatchSizeRequest, bool defaultRequireExactNNLen,
     bool disableFP16, setup_for_t setupFor, bool deferSeed = false
@@ -225,6 +227,13 @@ namespace Setup {
   std::vector<std::pair<std::set<std::string>,std::set<std::string>>> getMutexKeySets();
 
   //Load pattern bonus tables that avoid repeating moves that the user supplied in external sgfs
+  struct AvoidSgfPatternSet {
+    double utility, lambda;
+    int minTurn;
+    size_t maxFiles;
+    std::vector<std::string> names, dirs;
+  };
+  std::vector<AvoidSgfPatternSet> loadAvoidSgfPatternSets(ConfigParser& cfg, int botIdx);
   std::vector<std::unique_ptr<PatternBonusTable>> loadAvoidSgfPatternBonusTables(ConfigParser& cfg, Logger& logger);
   //Save patterns to avoid repeating in the future. Returns whether saving was successful or not.
   bool saveAutoPatternBonusData(const std::vector<Sgf::PositionSample>& genmoveSamples, ConfigParser& cfg, Logger& logger, Rand& rand);

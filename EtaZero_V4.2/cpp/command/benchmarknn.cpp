@@ -211,7 +211,7 @@ int MainCmds::benchmarknn(const vector<string>& args) {
     }
     else {
       const int canvas = bundle->posLen();
-      auto options = Setup::readEvaluatorOptions(modelFile,0,cfg,logger,seedRand,maxBatchSize,canvas,canvas,
+      auto options = Setup::readEvaluatorOptions(modelFile,Setup::ModelKind::MuZero,0,cfg,logger,seedRand,maxBatchSize,canvas,canvas,
         Setup::MaxBatchSizeRequest::explicitSize(maxBatchSize),requireExactNNLen,false,Setup::SETUP_FOR_BENCHMARKNN);
       if(options.debugSkipNeuralNet) throw StringError("benchmarknn: MuZero requires a real model");
       if(options.nnXLen != canvas || options.nnYLen != canvas) throw StringError("benchmarknn: MuZero buffer must match model canvas");
