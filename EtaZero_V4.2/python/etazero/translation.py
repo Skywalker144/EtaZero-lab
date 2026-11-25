@@ -1,5 +1,6 @@
 """Translate directory responsibilities to existing native consumers."""
 from copy import deepcopy
+import re
 
 from .profiles import read_sections, settings
 
@@ -49,11 +50,13 @@ def translate_profile(directory, selfplay_path):
     native = sections.get('selfplay', {}).copy()
     if root == 'gumbel':
         native.update(sections.get('gumbel', {}))
-    # These real-board mechanisms cannot be used by latent/fresh-root searches.
+    required = {}
     if family == 'muzero':
-        native.update(useGraphSearch='false', subtreeValueBiasFactor='0', avoidRepeatedPatternUtility='0')
+        required.update(useGraphSearch=False, subtreeValueBiasFactor=0.0, avoidRepeatedPatternUtility=0.0)
     if root == 'gumbel':
-        native.update(useGraphSearch='false', rootSymmetryPruning='false')
+        required.update(useGraphSearch=False, rootSymmetryPruning=False)
+    for key, expected in required.items():
+        native.setdefault(key, 'false' if isinstance(expected, bool) else '0')
     # Environment owns the board domain; don't let a shared Go default leak into Xiangqi.
     for key in ('game', 'dataBoardLen', 'bSizes', 'bSizesXY', 'bSizeRelProbs', 'allowRectangleProb'):
         native.pop(key, None)
@@ -63,6 +66,17 @@ def translate_profile(directory, selfplay_path):
                   switchNetsMidGame='false')
     if game != 'go':
         native.update(komiMean='0', handicapProb='0')
+    for key, expected in required.items():
+        raw = native[key]
+        try:
+            value = (raw or '').split('#', 1)[0].strip()
+            if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+                value = re.sub(r'\\(.)', r'\1', value[1:-1]).strip()
+            valid = value.lower() == 'false' if isinstance(expected, bool) else float(value) == expected
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(f'{selfplay_path}: {values["algorithm"]} selfplay requires {key}={str(expected).lower()}, got {raw}')
     lines = []
     for key, raw in native.items():
         value = (raw or '').split('#', 1)[0].strip()
