@@ -96,3 +96,24 @@ def test_prediction_depth_override(tmp_path, blocks):
         assert prediction['trunk_num_channels'] == config.muzero_network['latent_channels']
     else:
         assert len({name for name, kind in prediction['block_kind']}) == blocks
+
+
+@pytest.mark.parametrize('family,root,key,bad', [
+    ('muzero', 'puct', 'subtreeValueBiasFactor', '.75'),
+    ('muzero', 'gumbel', 'avoidRepeatedPatternUtility', '.13'),
+    ('alphazero', 'gumbel', 'useGraphSearch', 'true'),
+    ('alphazero', 'gumbel', 'rootSymmetryPruning', 'true'),
+    ('muzero', 'puct', 'subtreeValueBiasFactor', 'wrong'),
+    ('muzero', 'puct', 'useGraphSearch', '0'),
+])
+def test_incompatible_selfplay_settings_are_not_silently_disabled(tmp_path, family, root, key, bad):
+    profile(tmp_path, family, root)
+    (tmp_path / 'selfplay.cfg.local').write_text(f'[selfplay]\n{key} = {bad}\n')
+    with pytest.raises(ValueError, match=rf'selfplay.cfg.*{key}'):
+        load_config(tmp_path)
+
+
+def test_quoted_compatible_native_setting_survives_translation(tmp_path):
+    profile(tmp_path, 'muzero', 'gumbel')
+    (tmp_path / 'selfplay.cfg.local').write_text('[selfplay]\nuseGraphSearch = "FaLsE" # native boolean\n')
+    assert 'useGraphSearch = "FaLsE"\n' in load_config(tmp_path).native_selfplay
