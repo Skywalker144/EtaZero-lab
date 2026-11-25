@@ -156,7 +156,7 @@ def test_single_pair_caches_extend_in_batch_and_keep_old_session_records(tmp_pat
 
 def test_autoelo_uses_one_native_process_and_records_actual_command(tmp_path):
     data = history(tmp_path / 'runs/a', [10, 20, 30])
-    config = profile(tmp_path / 'match.cfg')
+    config = profile(tmp_path / 'match.cfg', options='rootSearchAlgorithm0 = gumbel\n')
     output = tmp_path / 'elo'
     first = run_autoelo(output, config, data=data, neighbors=2, games_per_pair=3)
     session = (output / 'latest').resolve()
