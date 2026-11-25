@@ -42,20 +42,29 @@ void Search::fillGumbelChildren(const SearchNode& node, vector<Gumbel::GumbelChi
 
 bool Search::getPolicyTargetValues(const SearchNode& node, vector<Loc>& locs, vector<double>& values) const {
   if(!searchParams.useGumbel) return getPlaySelectionValues(node,locs,values,nullptr,10.0,false);
+  return getGumbelPolicyTargetValues(node,locs,values,nullptr);
+}
+
+bool Search::getGumbelPolicyTargetValues(const SearchNode& node, vector<Loc>& locs, vector<double>& values, double* priorsByPos) const {
   locs.clear(); values.clear();
   const NNOutput* output = node.getNNOutput();
   if(output == nullptr) return false;
   auto children = getGumbelChildren(node);
-  bool any = false;
-  for(const auto& child : children) any = any || child.prior >= 0;
-  if(!any) return false;
-  double raw = (node.nextPla == P_WHITE ? 1.0 : -1.0) * getUtilityFromNN(*output);
-  auto policy = Gumbel::gumbel_policy(children,raw,searchParams.gumbel);
-  for(int pos = 0; pos < policySize; pos++) if(children[pos].prior >= 0) {
-    locs.push_back(getLoc(pos));
-    values.push_back(policy[pos]);
+  const bool visited = std::any_of(children.begin(),children.end(),[](const auto& child) { return child.visits > 0; });
+  vector<double> policy;
+  if(visited) {
+    double raw = (node.nextPla == P_WHITE ? 1.0 : -1.0) * getUtilityFromNN(*output);
+    policy = Gumbel::gumbel_policy(children,raw,searchParams.gumbel);
   }
-  return true;
+  for(int pos = 0; pos < policySize; pos++) {
+    const double prior = children[pos].prior;
+    if(priorsByPos) priorsByPos[pos] = prior;
+    if(prior >= 0) {
+      locs.push_back(getLoc(pos));
+      values.push_back(visited ? policy[pos] : prior);
+    }
+  }
+  return !locs.empty();
 }
 
 Loc Search::getGumbelMove(bool allowPending) const {

@@ -402,6 +402,7 @@ struct Search {
 
   // Policy supervision can include unexpanded actions. Keep it separate from child-indexed reports.
   bool getPolicyTargetValues(const SearchNode& node, std::vector<Loc>& locs, std::vector<double>& values) const;
+  bool getGumbelPolicyTargetValues(const SearchNode& node, std::vector<Loc>& locs, std::vector<double>& values, double* priorsByPos) const;
   void fillGumbelChildren(const SearchNode& node, std::vector<Gumbel::GumbelChild>& result) const;
   std::vector<Gumbel::GumbelChild> getGumbelChildren(const SearchNode& node) const;
   bool runGumbelPlayout(SearchThread& thread, double upperBoundVisitsLeft);
