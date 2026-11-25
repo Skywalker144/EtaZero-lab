@@ -709,34 +709,34 @@ bool Search::getPolicySurpriseAndEntropy(double& surpriseRet, double& searchEntr
   double* lcbBuf = lcbBufStorage.data();
   SearchPolicyBuffer<double> radiusBufStorage(getPolicyBufferSize());
   double* radiusBuf = radiusBufStorage.data();
-  bool suc = searchParams.useGumbel ? getPolicyTargetValues(*node,locs,playSelectionValues) : getPlaySelectionValues(
-    *node,locs,playSelectionValues,NULL,1.0,allowDirectPolicyMoves,alwaysComputeLcb,false,lcbBuf,radiusBuf
-  );
-  if(!suc)
-    return false;
-
-  SearchPolicyBuffer<float> policyProbsFromNNBufStorage(getPolicyBufferSize());
-
-  float* policyProbsFromNNBuf = policyProbsFromNNBufStorage.data();
-  {
-    const float* policyProbsFromNN = nnOutput->getPolicyProbsMaybeNoised();
-    std::copy(policyProbsFromNN, policyProbsFromNN+getPolicyBufferSize(), policyProbsFromNNBuf);
+  SearchPolicyBuffer<double> priorStorage(policySize);
+  double* prior = priorStorage.data();
+  if(searchParams.useGumbel) {
+    if(!getGumbelPolicyTargetValues(*node,locs,playSelectionValues,prior)) return false;
+  }
+  else {
+    if(!getPlaySelectionValues(*node,locs,playSelectionValues,NULL,1.0,allowDirectPolicyMoves,alwaysComputeLcb,false,lcbBuf,radiusBuf))
+      return false;
+    const float* policy = nnOutput->getPolicyProbsMaybeNoised();
+    std::copy(policy,policy+policySize,prior);
   }
 
   double sumPlaySelectionValues = 0.0;
   // A latent node collected as a real side position has a real-root action
   // mask. Apply it only to the extracted supervision, never to latent search.
-  if(policyMask) {
+  if(policyMask || searchParams.useGumbel) {
     double policyMass = 0.0;
-    for(int pos = 0; pos < getPolicyBufferSize(); pos++) {
-      if(!policyMask[pos]) policyProbsFromNNBuf[pos] = -1.0f;
-      else if(policyProbsFromNNBuf[pos] > 0.0f) policyMass += policyProbsFromNNBuf[pos];
+    for(int pos = 0; pos < policySize; pos++) {
+      if(policyMask && !policyMask[pos]) prior[pos] = -1.0;
+      else if(prior[pos] > 0.0) policyMass += prior[pos];
     }
     if(policyMass <= 0.0) return false;
-    for(int pos = 0; pos < getPolicyBufferSize(); pos++)
-      if(policyProbsFromNNBuf[pos] > 0.0f) policyProbsFromNNBuf[pos] /= policyMass;
-    for(size_t i = 0; i < playSelectionValues.size(); i++)
-      if(!policyMask[getPos(locs[i])]) playSelectionValues[i] = 0.0;
+    for(int pos = 0; pos < policySize; pos++)
+      if(prior[pos] > 0.0) prior[pos] /= policyMass;
+    if(policyMask) {
+      for(size_t i = 0; i < playSelectionValues.size(); i++)
+        if(!policyMask[getPos(locs[i])]) playSelectionValues[i] = 0.0;
+    }
   }
   for(size_t i = 0; i < playSelectionValues.size(); i++)
     sumPlaySelectionValues += playSelectionValues[i];
@@ -746,7 +746,7 @@ bool Search::getPolicySurpriseAndEntropy(double& surpriseRet, double& searchEntr
   double searchEntropy = 0.0;
   for(size_t i = 0; i < playSelectionValues.size(); i++) {
     int pos = getPos(locs[i]);
-    double policy = std::max((double)policyProbsFromNNBuf[pos],1e-100);
+    double policy = std::max(prior[pos],1e-100);
     double target = playSelectionValues[i] / sumPlaySelectionValues;
     if(target > 1e-100) {
       double logTarget = log(target);
@@ -757,8 +757,8 @@ bool Search::getPolicySurpriseAndEntropy(double& surpriseRet, double& searchEntr
   }
 
   double policyEntropy = 0.0;
-  for(int pos = 0; pos<getPolicyBufferSize(); pos++) {
-    double policy = policyProbsFromNNBuf[pos];
+  for(int pos = 0; pos<policySize; pos++) {
+    double policy = prior[pos];
     if(policy > 1e-100) {
       policyEntropy += -policy * log(policy);
     }
