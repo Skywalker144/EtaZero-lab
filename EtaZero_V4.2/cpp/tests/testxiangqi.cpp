@@ -191,14 +191,23 @@ void outputStorage() {
     output->policyProbs[7] = -1;
     return output;
   };
-  for(int count : {NNPos::MAX_NN_POLICY_SIZE, Xiangqi::NUM_ACTIONS}) {
-    auto first = makeOutput(count);
+  auto jointOutput = makeOutput(std::max(Xiangqi::NUM_ACTIONS,NNPos::MAX_NN_POLICY_SIZE)+1);
+  std::fill_n(jointOutput->policyProbs,jointOutput->getPolicyStorageSize(),-1.0f);
+  jointOutput->policyProbs[Xiangqi::NUM_ACTIONS-1] = 1.0f;
+  std::ostringstream printed;
+  jointOutput->debugPrint(printed,State().colorBoard(),Rules::Game::XIANGQI);
+  testAssert(printed.str().find(Xiangqi::actionToString(Xiangqi::NUM_ACTIONS-1)+" 1000") != std::string::npos);
+  testAssert(printed.str().find("Pass") == std::string::npos);
+  for(int requestedSize : {NNPos::MAX_NN_POLICY_SIZE, Xiangqi::NUM_ACTIONS}) {
+    auto first = makeOutput(requestedSize);
+    const int count = first->getPolicyStorageSize();
+    testAssert(count >= requestedSize);
     first->noisedPolicyProbs = new float[count];
     for(int a = 0; a < count; a++) first->noisedPolicyProbs[a] = (float)(a+1);
     auto copied = std::make_shared<NNOutput>(*first);
     testAssert(copied->policyProbs != first->policyProbs && copied->noisedPolicyProbs != first->noisedPolicyProbs);
     NNOutput assigned;
-    assigned.resizePolicy(count == Xiangqi::NUM_ACTIONS ? NNPos::MAX_NN_POLICY_SIZE : Xiangqi::NUM_ACTIONS);
+    assigned.resizePolicy(requestedSize == Xiangqi::NUM_ACTIONS ? NNPos::MAX_NN_POLICY_SIZE : Xiangqi::NUM_ACTIONS);
     assigned = *copied;
     assigned = assigned;
     for(int a = 0; a < count; a++) {
@@ -296,7 +305,7 @@ void nativeSearch() {
       testAssert(log.str().find(Xiangqi::actionToString(Xiangqi::locToAction(chosen))) != std::string::npos);
     }
     const auto* root = search.getRootNode();
-    testAssert(root->getNNOutput()->getPolicyStorageSize() == Xiangqi::NUM_ACTIONS);
+    testAssert(root->getNNOutput()->getPolicyStorageSize() >= Xiangqi::NUM_ACTIONS);
     testAssert(search.getRootVisits() >= 96 && search.getRootVisits() <= 96+threads);
     testAssert(root->stats.noResultValueAvg.load() == 0);
     testAssert(search.rootSymmetries.size() == (gumbel ? 1 : 2));
@@ -403,7 +412,7 @@ void secondaryHumanSearch() {
       }
       const SearchNode* root = search.getRootNode();
       const NNOutput* output = root->getHumanOutput();
-      testAssert(output != nullptr && output->getPolicyStorageSize() == Xiangqi::NUM_ACTIONS);
+      testAssert(output != nullptr && output->getPolicyStorageSize() >= Xiangqi::NUM_ACTIONS);
       std::vector<Loc> locs;
       std::vector<double> values;
       testAssert(search.getPlaySelectionValues(locs,values,1.0));
@@ -520,7 +529,7 @@ void evaluatorInputsAndCache() {
     rejected = false;
     try { evaluator.evaluate(board,history,state.nextPlayer(),params,buf,false); } catch(const StringError&) { rejected = true; }
     testAssert(rejected);
-    testAssert(result->getPolicyStorageSize() == Xiangqi::NUM_ACTIONS);
+    testAssert(result->getPolicyStorageSize() >= Xiangqi::NUM_ACTIONS);
     testAssert(result->whiteNoResultProb == 0);
     double sum = 0;
     for(int action = 0; action < Xiangqi::NUM_ACTIONS; action++) {
