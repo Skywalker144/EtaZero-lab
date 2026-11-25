@@ -90,7 +90,7 @@ Loc PlayUtils::chooseRandomPolicyMove(
   int nnXLen = nnOutput->nnXLen;
   int nnYLen = nnOutput->nnYLen;
   int numLegalMoves = 0;
-  int policySize = nnOutput->getPolicyStorageSize();
+  const int policySize = hist.rules.isXiangqi() ? Xiangqi::NUM_ACTIONS : NNPos::getPolicySize(nnXLen,nnYLen);
   SearchPolicyBuffer<double> relProbStorage(policySize);
   SearchPolicyBuffer<Loc> locStorage(policySize);
   double* relProbs = relProbStorage.data();
