@@ -2053,6 +2053,9 @@ FinishedGameData* Play::runGame(
           sumValueSurprisePropValue += valueSurprisePropValueOfTurn(i);
         }
 
+        // With no improved-policy mass to redistribute, keep Gumbel's base sampling weight.
+        const double policySurpriseDataWeight = botB->searchParams.useGumbel && sumPolicySurprisePropValue < 1e-10 ?
+          0.0 : playSettings.policySurpriseDataWeight;
         //Just in case, avoid div by 0
         sumPolicySurprisePropValue = std::max(sumPolicySurprisePropValue,1e-10);
         sumValueSurprisePropValue = std::max(sumValueSurprisePropValue,1e-10);
@@ -2064,8 +2067,8 @@ FinishedGameData* Play::runGame(
           double policySurprisePropValue = policySurprisePropValueOfTurn(i);
           double valueSurprisePropValue = valueSurprisePropValueOfTurn(i);
           double newValue =
-            (1.0-playSettings.policySurpriseDataWeight-valueSurpriseDataWeight) * targetWeight
-            + playSettings.policySurpriseDataWeight * policySurprisePropValue * sumWeights / sumPolicySurprisePropValue
+            (1.0-policySurpriseDataWeight-valueSurpriseDataWeight) * targetWeight
+            + policySurpriseDataWeight * policySurprisePropValue * sumWeights / sumPolicySurprisePropValue
             + valueSurpriseDataWeight * valueSurprisePropValue * sumWeights / sumValueSurprisePropValue;
           gameData->targetWeightByTurn[i] = (float)(newValue);
         }
