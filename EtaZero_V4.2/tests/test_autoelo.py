@@ -42,6 +42,85 @@ def test_source_parser_includes_and_budget_independent_pair_identity(tmp_path):
     assert first['anchor'] in {p['id'] for p in pinned['players']}
 
 
+def test_pair_local_settings_follow_the_rated_player(tmp_path):
+    gate_config(tmp_path / 'common.cfg')
+    config = tmp_path / 'match.cfg'
+    config.write_text('@include common.cfg\nmaxVisits0 = 16\nmaxVisits1 = 256\n')
+    output = tmp_path / 'elo'
+    data = history(tmp_path / 'runs/a', [10, 20])
+    assert len(autoelo.run_autoelo(output, config, data=data, dry_run=True)['pairs']) == 1
+    history(data, [10, 20, 30])
+    for dry_run in (True, False):
+        with pytest.raises(ValueError, match='a:00000002.*different search settings'):
+            autoelo.run_autoelo(output, config, data=data, dry_run=dry_run)
+    assert not (output / 'sessions').exists()
+    config.write_text('@include common.cfg\nmaxVisits0 = 08\n')
+    plan = autoelo.run_autoelo(output, config, data=data, dry_run=True)
+    assert len(plan['pairs']) == 2
+    for pair in plan['pairs']:
+        pair.pop('search_strategies')
+        pair['conditions'] += 'maxVisits1 = 256\n'
+    session = tmp_path / 'old-session'
+    session.mkdir()
+    save_json(session / 'plan.json', plan)
+    config.unlink()
+    with pytest.raises(ValueError, match='a:00000002.*different search settings'):
+        autoelo.run_autoelo(session, fit_only=True)
+
+
+def test_saved_settings_checked_even_if_player_keeps_same_slot(tmp_path):
+    data = history(tmp_path / 'runs/a', [10, 20, 30])
+    config = gate_config(tmp_path / 'match.cfg')
+    plan = autoelo.run_autoelo(tmp_path / 'elo', config, data=data, neighbors=2, dry_run=True)
+    # Simulate a profile edit between two resolutions in a fixed-slot schedule.
+    plan['pairs'] = [pair for pair in plan['pairs'] if pair['players'][0] == plan['anchor']]
+    assert len(plan['pairs']) == 2
+    config.write_text(config.read_text().replace('maxVisits = 8', 'maxVisits = 9'))
+    changed = autoelo.run_autoelo(tmp_path / 'elo', config, data=data, neighbors=2, dry_run=True)
+    plan['pairs'][1]['search_strategies'] = changed['pairs'][1]['search_strategies']
+    session = tmp_path / 'saved'
+    session.mkdir()
+    save_json(session / 'plan.json', plan)
+    with pytest.raises(ValueError, match='a:00000001.*different search settings'):
+        autoelo.run_autoelo(session, fit_only=True, binary='/missing')
+
+
+def test_archived_settings_preserve_literal_tabs_in_sgf_paths(tmp_path):
+    data = history(tmp_path / 'runs/a', [10, 20, 30])
+    config = gate_config(tmp_path / 'match.cfg')
+    plan = autoelo.run_autoelo(tmp_path / 'elo', config, data=data, dry_run=True)
+    # Old plans store literal decoded values, including a tab or a hash sign.
+    for pair, directory in zip(plan['pairs'], ['a\tb # patterns', 'atb # patterns'], strict=True):
+        pair.pop('search_strategies')
+        pair['conditions'] += f'avoidSgfPatternUtility = -1\navoidSgfPatternDirs = {directory}\n'
+    session = tmp_path / 'old'
+    session.mkdir()
+    save_json(session / 'plan.json', plan)
+    config.unlink()
+    with pytest.raises(ValueError, match='a:00000002.*different search settings'):
+        autoelo.run_autoelo(session, fit_only=True)
+
+
+@pytest.mark.parametrize(('overrides', 'conflict'), [
+    ('useFP16-0 = true\nuseFP16-1 = false\n', True),
+    ('avoidSgfPatternUtility0 = -1\navoidSgfPatternDirs0 = "missing # patterns"\n', True),
+    ('maxBoardSizeForNNBuffer0 = 4\n', True),
+    ('maxBoardSizeForNNBuffer0 = 3\nnnRandSeed0 = a\nnnRandSeed1 = b\n'
+     'gpuToUseModel0 = 0\ngpuToUseModel1 = 1\n', False),
+])
+def test_autoelo_resolves_settings_without_loading_model_or_sgf(tmp_path, overrides, conflict):
+    data = history(tmp_path / 'runs/a', [10, 20, 30])
+    gate_config(tmp_path / 'base.cfg')
+    config = tmp_path / 'match.cfg'
+    config.write_text('@include base.cfg\n' + overrides)
+    if conflict:
+        with pytest.raises(ValueError, match='a:00000002.*different search settings'):
+            autoelo.run_autoelo(tmp_path / 'elo', config, data=data, dry_run=True)
+    else:
+        plan = autoelo.run_autoelo(tmp_path / 'elo', config, data=data, dry_run=True)
+        assert len(plan['pairs']) == 2
+
+
 @pytest.mark.parametrize('option', [dict(games_per_pair=0), dict(neighbors=True), dict(sample_seconds=float('nan')),
     dict(final_cross='true'), dict(prior_games=-1), dict(first_player_advantage='false')])
 def test_experiment_rejects_bad_evaluation_before_training(tmp_path, option):
