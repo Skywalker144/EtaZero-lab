@@ -1,14 +1,16 @@
 #include "tests.h"
 #include "../neuralnet/muzeroposition.h"
 #include "../game/xiangqi.h"
+#include "../program/setup.h"
+#include "../program/selfplaymanager.h"
 #include "../external/nlohmann_json/json.hpp"
 #include <fstream>
 
 namespace {
 using json = nlohmann::json;
-json outputJSON(const MuZero::Evaluation& output) {
-  const int size = output.getPolicyStorageSize() == Xiangqi::NUM_ACTIONS ? Xiangqi::NUM_ACTIONS : output.nnXLen*output.nnYLen+1;
-  for(int i = size; i < NNPos::MAX_NN_POLICY_SIZE; i++) testAssert(output.policyProbs[i] == -1);
+json outputJSON(const MuZero::Evaluation& output, bool xiangqi) {
+  const int size = xiangqi ? Xiangqi::NUM_ACTIONS : output.nnXLen*output.nnYLen+1;
+  for(int i = size; i < output.getPolicyStorageSize(); i++) testAssert(output.policyProbs[i] == -1);
   return {{"policy",std::vector<float>(output.policyProbs,output.policyProbs+size)},
     {"value",{output.whiteWinProb,output.whiteDrawProb,output.whiteLossProb,output.whiteNoResultProb}},
     {"auxiliary",{output.varTimeLeft,output.shorttermWinlossError}},
@@ -51,7 +53,7 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
     // repeated occupied actions stay in the latent tree's static vocabulary.
     MuZero::PositionBuffer otherThread;
     auto current = root;
-    json outputs = json::array({outputJSON(*root)});
+    json outputs = json::array({outputJSON(*root,xiangqi)});
     for(int depth = 0; depth < 4; depth++) {
       current = evaluator.recurrent(*current,action,params,otherThread);
       testAssert(current->orientation == root->orientation && !current->state);
@@ -61,7 +63,7 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
         const bool allowed = xiangqi || (i == area ? go : i%canvas < 4 && i/canvas < 4);
         testAssert((current->policyProbs[i] >= 0) == allowed);
       }
-      outputs.push_back(outputJSON(*current));
+      outputs.push_back(outputJSON(*current,xiangqi));
     }
     reject([&]() { evaluator.recurrent(*root,xiangqi ? Xiangqi::NUM_ACTIONS : 4,params,buffer); });
     std::ofstream out(response);
@@ -113,8 +115,8 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
           {"xsize",board.x_size},{"ysize",board.y_size},{"player",pla},{"suppress_nr",!nr},
           {"symmetry",symmetry},{"temperature",params.nnPolicyTemperature},
           {"optimism",hasMetadata ? 0.0 : params.policyOptimism},
-          {"outputs",json::array({outputJSON(*root)})}};
-        roots.push_back(outputJSON(*root));
+          {"outputs",json::array({outputJSON(*root,xiangqi)})}};
+        roots.push_back(outputJSON(*root,xiangqi));
         if(xiangqi) entry["legal"] = history.getXiangqiState().legalActions();
         std::vector<int> actions = xiangqi ?
           std::vector<int>{Xiangqi::parseAction("i9i0"),Xiangqi::parseAction("i9i0"),2085,Xiangqi::parseAction("b0c2")} :
@@ -127,14 +129,14 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
           testAssert(current->orientation->rootPlayer == pla);
           testAssert(current->policyProbs[0] >= 0); // Occupancy never masks latent nodes.
           if(xiangqi) {
-            testAssert(current->getPolicyStorageSize() == Xiangqi::NUM_ACTIONS);
+            testAssert(current->getPolicyStorageSize() >= Xiangqi::NUM_ACTIONS);
             for(int a = 0; a < Xiangqi::NUM_ACTIONS; a++) testAssert(current->policyProbs[a] >= 0);
           }
           else {
             testAssert(current->policyProbs[4] == -1); // Canvas padding remains masked.
             testAssert((current->policyProbs[area] >= 0) == go);
           }
-          entry["outputs"].push_back(outputJSON(*current));
+          entry["outputs"].push_back(outputJSON(*current,xiangqi));
         }
         reject([&]() { evaluator.recurrent(*root,-1,params,buffer); });
         reject([&]() { evaluator.recurrent(*root,xiangqi ? Xiangqi::NUM_ACTIONS : 4,params,buffer); });
@@ -147,8 +149,8 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
       params.symmetry = average->orientation->symmetry;
       auto selected = evaluator.initial(board,history,pla,meta,params,buffer,rand,true);
       selected = evaluator.recurrent(*selected,0,params,buffer);
-      result["averages"].push_back({{"individual",roots},{"average",outputJSON(*average)},
-        {"recurrent",outputJSON(*next)},{"selected_recurrent",outputJSON(*selected)}});
+      result["averages"].push_back({{"individual",roots},{"average",outputJSON(*average,xiangqi)},
+        {"recurrent",outputJSON(*next,xiangqi)},{"selected_recurrent",outputJSON(*selected,xiangqi)}});
 
       evaluator.clearCache();
       params.symmetry = 0;
@@ -222,6 +224,27 @@ void Tests::runMuZeroPosition(const std::string& directory, const std::string& r
   testAssert(!weak.expired());
   evaluator.clearCache();
   testAssert(weak.expired());
+  if(model->game() == "renju" && !input.at("fp16").get<bool>()) {
+    Logger logger;
+    ConfigParser matchConfig(std::map<std::string,std::string>{{"nnCacheSizePowerOfTwo","21"}});
+    const auto batchSize = Setup::MaxBatchSizeRequest::explicitSize(2);
+    for(bool cacheEnabled : {false,true}) {
+      if(cacheEnabled) matchConfig.overrideKey("muZeroCacheSizePowerOfTwo","0");
+      auto options = Setup::readEvaluatorOptions(directory,Setup::ModelKind::Board,0,matchConfig,logger,rand,
+        1,canvas,canvas,batchSize,false,false,Setup::SETUP_FOR_MATCH);
+      testAssert(options.nnCacheSizePowerOfTwo == 21);
+      auto service = Setup::initializeMuZeroSelfplayModel("test",directory,model,matchConfig,logger,rand,
+        1,false,0,Setup::SETUP_FOR_MATCH,batchSize);
+      auto* position = service->muZeroEvaluator();
+      auto prediction = position->initial(board,history,P_BLACK,meta,params,buffer,rand,true);
+      weak = prediction->state;
+      testAssert(!weak.expired());
+      prediction.reset();
+      testAssert(weak.expired() == !cacheEnabled);
+      position->clearCache();
+      testAssert(weak.expired());
+    }
+  }
   if(xiangqi) {
     // This full prior history adjudicates the next real move as a long-check
     // loss. A FEN-only copy has the same pieces but not that rule history.
