@@ -48,11 +48,41 @@ def resolved_pair(config, overlay, binary):
         stream.write(overlay)
         stream.flush()
         command = [str(binary), 'match', '-config', str(config), '-config',
-                   os.path.relpath(stream.name, config.parent), '-print-config']
+                   os.path.relpath(stream.name, config.parent), '-print-player-settings']
         result = subprocess.run(command, cwd=config.parent, capture_output=True, text=True)
     if result.returncode:
         raise ValueError(f'Native match config failed to parse: {result.stderr or result.stdout}')
     return dict(working_directory=str(config.parent), **json.loads(result.stdout))
+
+
+def check_player_strategies(pairs, players, *, binary=None):
+    models = {player['id']: player['model'] for player in players}
+    slots = {}
+    for pair in pairs:
+        left, right = pair['players']
+        # Within each native pair identical weight paths share model index zero.
+        slots.setdefault(left, set()).add((0, 0))
+        slots.setdefault(right, set()).add((1, int(models[left] != models[right])))
+    by_player = {}
+    for pair in pairs:
+        strategies = pair.get('search_strategies')
+        if strategies is None:
+            if not any(len(slots[player]) > 1 for player in pair['players']):
+                continue
+            # Prior sessions store ConfigParser's resolved key/value listing.
+            # Requote its literal values for the native parser; source includes,
+            # model weights and the original resource directory are unnecessary.
+            values = [line.split(' = ', 1) for line in pair['conditions'].rstrip('\n').split('\n')]
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.cfg') as saved:
+                for key, value in values:
+                    quoted = value.replace('\\', '\\\\').replace('"', '\\"')
+                    saved.write(f'{key} = "{quoted}"\n')
+                saved.flush()
+                strategies = resolved_pair(Path(saved.name), '', binary or ROOT / 'build/katago')['search_strategies']
+        for player, strategy in zip(pair['players'], strategies, strict=True):
+            if by_player.setdefault(player, strategy) != strategy:
+                raise ValueError(f'Autoelo player {player} has different search settings in its pair-local bot slots; '
+                                 'use a consistent search profile for that player')
 
 
 def autoelo_plan(base, data, config, *, binary=None, arms=None, **selection):
@@ -78,10 +108,12 @@ def autoelo_plan(base, data, config, *, binary=None, arms=None, **selection):
         pair_plan = dict(players=[indexed[name] for name in pair], pairs=[pair],
                          games_per_pair=plan['games_per_pair'])
         resolved = resolved_pair(config, match_overlay(pair_plan), binary)
+        strategies = resolved.pop('search_strategies')
         # Counts only select a prefix. All other actual native settings, model
         # paths and the resource cwd distinguish independently reusable games.
         key = identity({k: v for k, v in resolved.items() if k != 'resolved_config'})
-        pairs.append(dict(players=pair, cache_key=key, conditions=resolved['extension_config']))
+        pairs.append(dict(players=pair, cache_key=key, conditions=resolved['extension_config'], search_strategies=strategies))
+    check_player_strategies(pairs, plan['players'])
     plan.update(pairs=pairs, config=str(config), anchor_record=record)
     return plan
 
@@ -105,9 +137,10 @@ def collect_games(session, plan):
     return dict(bots=[dict(name=p['id'], model=p['model']) for p in players]), games
 
 
-def fit_autoelo(session, *, prior_games=2., first_player_advantage=False):
+def fit_autoelo(session, *, binary=None, prior_games=2., first_player_advantage=False):
     session = Path(session).resolve()
     plan = json.loads((session / 'plan.json').read_text())
+    check_player_strategies(plan['pairs'], plan['players'], binary=binary)
     native, games = collect_games(session, plan)
     result = estimate(native, games, prior_games=prior_games, first_player_advantage=first_player_advantage,
                       anchor=plan['anchor'])
@@ -145,7 +178,7 @@ def run_autoelo(output, config=None, *, data=None, binary=None, arms=None, fit_o
             raise ValueError('Autoelo fit-only uses a saved session without new inputs or selection')
         with (base / '.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fit_autoelo(base, prior_games=prior_games, first_player_advantage=first_player_advantage)
+            return fit_autoelo(base, binary=binary, prior_games=prior_games, first_player_advantage=first_player_advantage)
     if data is None or config is None:
         raise ValueError('Autoelo requires data and an independent match config')
     capacity = 2 if max_loaded_models is None else max_loaded_models

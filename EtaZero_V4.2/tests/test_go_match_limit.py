@@ -81,6 +81,7 @@ def test_autoelo_new_cache_identity_and_batch_truncation_statistics(tmp_path):
         resolved = autoelo.resolved_pair(config, autoelo.match_overlay(dict(
             players=players, pairs=[pair['players']], games_per_pair=2)), ROOT / 'build/katago')
         assert resolved.pop('go_move_limit_scoring') is True
+        resolved.pop('search_strategies')
         old_key = autoelo.identity({k: v for k, v in resolved.items() if k != 'resolved_config'})
         assert old_key != pair['cache_key']
     ratings = autoelo.run_autoelo(output, config, data=data, games_per_pair=2)
