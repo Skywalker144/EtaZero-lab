@@ -48,6 +48,29 @@ def test_native_gumbel_dense_targets_and_budget(tmp_path, game, threads, interio
     assert dense_unvisited > 0
 
 
+@pytest.mark.parametrize('nn_seed', [1, 3])
+def test_unvisited_gumbel_prior_preserves_sampling_weight(tmp_path, nn_seed):
+    gumbel_config(tmp_path / 'base.cfg', 'freestyle', budget=1)
+    cfg = tmp_path / 'selfplay.cfg'
+    cfg.write_text(f'@include base.cfg\nnnRandSeed = {nn_seed}\nnumGameThreads = 1\nnumNNServerThreadsPerModel = 1\n'
+                   'nnRandomize = false\nrootNoiseEnabled = false\nbalanceOpeningProb = 0\nmaxMovesPerGame = 1\n'
+                   'policySurpriseDataWeight = 1\nvalueSurpriseDataWeight = 0\n')
+    result = subprocess.run([str(ROOT / 'build/katago'), 'selfplay', '-config', str(cfg),
+                             '-models-dir', str(tmp_path / 'models'), '-output-dir', str(tmp_path / 'data'),
+                             '-max-games-total', '4'], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = []
+    for path in (tmp_path / 'data/random/tdata').glob('*.npz'):
+        with np.load(path) as shard:
+            rows.extend(shard['globalTargetsNC'])
+            assert (shard['qValueTargetsNCMove'][:, 1] == 0).all()
+            assert (np.count_nonzero(shard['policyTargetsNCMove'][:, 0], axis=1) > 1).all()
+    assert len(rows) == 4
+    targets = np.stack(rows)
+    assert (targets[:, 30] == 0).all()
+    np.testing.assert_array_equal(targets[:, 31], targets[:, 32])
+
+
 @pytest.mark.parametrize('root,interior,message', [
     ('puct', 'gumbel', 'requires rootSearchAlgorithm=gumbel'),
     ('gumbel', 'unknown', 'Unknown nonrootSearchAlgorithm'),
@@ -70,7 +93,7 @@ def test_gumbel_two_round_cuda_training(tmp_path):
     config = RunConfig(selfplay_config=str(cfg), model_kind='b2c16-fson-mish', game='renju',
                        algorithm='gumbel_alphazero', canvas=5, batch_size=8, bootstrap_games=4,
                        train_steps=2, shuffle_rows_per_file=8, shuffle_keep_rows=1024,
-                       shuffle_args=('-min-rows','1'),
+                       min_rows=48,
                        train_args=('-no-compile','-use-fp16','-no-longterm-checkpoints')).validate()
     directory = tmp_path / 'run'
     state = run(directory, config, 2)
