@@ -32,7 +32,7 @@ Hex 的 `chosenMoveTemperatureHalflife=15`，象棋为 40；实际半衰期为�
 
 所有算法的根多对称采样上限统一继承 `rootNumSymmetriesToSample=4`；实际数量是 `min(4, 该棋类支持的对称数)`。围棋／五子棋取 4，Hex／象棋取 2。MuZero 平均多对称的根预测输出，后续 latent 搜索保留其中一个采样朝向，不对 latent 张量直接求平均。
 
-Gumbel 的基础配方来自 [共享搜索配置](../configs/algorithms/gumbel.cfg)：访问预算包含一次根初始化，余量用于动作访问；该基础配方关闭 cheap search、reduce visits、LCB 和 forced playouts。棋类配置可在后续 include 中覆盖预算与 cheap search，尤其不能把基础配方的访问数和 cheap search 开关当作 Hex、象棋入口的最终值。请查看各入口解析后的 `selfplay.resolved.cfg`。`rootNoiseEnabled=true` 在这里启用 Gumbel 噪声，不添加 Dirichlet 噪声。cheap search 与非对称搜索预算还可能改变实际访问数，配置的 `maxVisits` 不等于每步固定的动作访问数。算法组合边界见 [Gumbel 搜索](gumbel.md)。
+Gumbel 的基础配方来自 [共享搜索配置](../configs/algorithms/gumbel.cfg)：访问预算包含一次根初始化，余量用于动作访问；该基础配方关闭 cheap search、reduce visits、LCB 和 forced playouts。棋类配置可在后续 include 中覆盖预算与 cheap search，尤其不能把基础配方的访问数和 cheap search 开关当作 Hex、象棋入口的最终值。请查看各入口解析后的 `selfplay.resolved.cfg`。目录配置会拒绝与路线冲突的显式设置，例如 MuZero 的非零 SVB 或 Gumbel 自对弈的图搜索。`rootNoiseEnabled=true` 在这里启用 Gumbel 噪声，不添加 Dirichlet 噪声。cheap search 与非对称搜索预算还可能改变实际访问数，配置的 `maxVisits` 不等于每步固定的动作访问数。算法组合边界见 [Gumbel 搜索](gumbel.md)。
 
 MuZero 两种算法保留 shuffle 输出文件约 8192 行、桶约 65536 行。MuZero 需要连续未来位置，shuffle 会从轨迹构造展开训练样本；增大文件行数会同时增加物化和读取展开字段的内存，不能直接照搬普通 AlphaZero 的文件大小。数据语义见 [MuZero 网络与展开训练](muzero.md)。
 
@@ -104,7 +104,7 @@ unroll_steps = 3
 
 `game` 和 `canvas` 只在 `env.cfg` 填写；模型和 unroll 只在 `net.cfg` 填写；算法只在 `selfplay.cfg` 填写。新配置目录不能再在 run/train/shuffle 中重复设置这些内容，避免两个配置源互相覆盖。
 
-转换后普通网络使用原生 `-model-kind`，MuZero 使用 `-muzero-config`；训练画布转为 `-pos-len`，展开长度转为 shuffler 的 `-muzero-unroll-steps`。搜索、自对弈和环境中的原生字段生成运行目录内的 `selfplay.resolved.cfg`，可直接查看实际引擎输入；解析后的全部调度设置保存在 `config.json`，`--dry-run` 也能查看。
+转换后普通网络使用原生 `-model-kind`，MuZero 使用 `-muzero-config`；训练画布转为 `-pos-len`，展开长度转为 shuffler 的 `-muzero-unroll-steps`。搜索、自对弈和环境中的原生字段生成运行目录内的 `selfplay.resolved.cfg`，可直接查看实际引擎输入；解析后的全部调度设置保存在 `config.json`，`--dry-run` 也能查看。直接提供原生配置时，控制器也保存 selfplay 和可选的 `gatekeeper.resolved.cfg`，并保留其相对 include 的内容。每轮使用运行目录中的副本，续训时核对当前输入与保存内容。缺少原生配置证据的历史运行应使用当时源码续训，或另建运行目录。
 
 必要的算法适配由转换层统一处理：MuZero 关闭真实棋盘 graph、SVB 和局部重复模式；Gumbel 关闭 graph 和训练根对称剪枝；非围棋不使用贴目或让子；逐轮运行固定输入模型。修改这些能力应修改对应实现，不能靠冲突配置重新启用。原生字段的数值范围由实际消费者检查。
 
