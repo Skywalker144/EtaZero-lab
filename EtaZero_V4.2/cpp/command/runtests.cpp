@@ -44,6 +44,11 @@ int MainCmds::runtests(const vector<string>& args) {
     Tests::runPlacementPatternTests(args[2]);
     return 0;
   }
+  if(args.size() == 2 && args[1] == "-xiangqi") {
+    Board::initHash();
+    Tests::runXiangqiTests();
+    return 0;
+  }
   if(args.size() == 3 && args[1] == "-xiangqi-patterns") {
     Tests::runXiangqiPatternTests(args[2]);
     return 0;
