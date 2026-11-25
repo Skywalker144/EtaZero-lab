@@ -267,7 +267,7 @@ NNOutput::~NNOutput() {
 }
 
 
-void NNOutput::debugPrint(ostream& out, const Board& board) const {
+void NNOutput::debugPrint(ostream& out, const Board& board, Rules::Game game) const {
   out << "Win " << Global::strprintf("%.2fc",whiteWinProb*100) << endl;
   out << "Loss " << Global::strprintf("%.2fc",whiteLossProb*100) << endl;
   out << "Draw " << Global::strprintf("%.2fc",whiteDrawProb*100) << endl;
@@ -277,7 +277,7 @@ void NNOutput::debugPrint(ostream& out, const Board& board) const {
   out << "OptimismUsed " << Global::strprintf("%.2f",policyOptimismUsed) << endl;
 
   out << "Policy" << endl;
-  if(getPolicyStorageSize() == Xiangqi::NUM_ACTIONS) {
+  if(game == Rules::Game::XIANGQI) {
     for(int action = 0; action < Xiangqi::NUM_ACTIONS; action++) if(policyProbs[action] >= 0)
       out << Xiangqi::actionToString(action) << " " << Global::strprintf("%4d",(int)round(policyProbs[action]*1000)) << endl;
     return;

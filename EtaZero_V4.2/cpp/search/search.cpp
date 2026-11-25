@@ -1463,7 +1463,7 @@ bool Search::playoutDescend(
         if(thread.illegalMoveHashes.find(nnHash) == thread.illegalMoveHashes.end()) {
           logger->write("WARNING: Chosen move not legal so about to regenerate nn output, nnhash=" + nnHash.toString());
           ostringstream out;
-          nnOutput->debugPrint(out,thread.board);
+          nnOutput->debugPrint(out,thread.board,thread.history.rules.game);
           debugPrintChildrenSummary(out,node,nnOutput);
           logger->write(out.str());
         }
@@ -1485,7 +1485,7 @@ bool Search::playoutDescend(
           thread.history.printDebugInfo(out,thread.board);
           out << bestChildIdx << endl;
           out << moveToString(bestChildMoveLoc) << endl;
-          nnOutput->debugPrint(out,thread.board);
+          nnOutput->debugPrint(out,thread.board,thread.history.rules.game);
           debugPrintChildrenSummary(out,node,nnOutput);
           logger->write(out.str());
         }

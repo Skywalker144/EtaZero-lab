@@ -196,7 +196,7 @@ struct NNOutput {
 
   inline float* getPolicyProbsMaybeNoised() { return noisedPolicyProbs != NULL ? noisedPolicyProbs : policyProbs; }
   inline const float* getPolicyProbsMaybeNoised() const { return noisedPolicyProbs != NULL ? noisedPolicyProbs : policyProbs; }
-  void debugPrint(std::ostream& out, const Board& board) const;
+  void debugPrint(std::ostream& out, const Board& board, Rules::Game game = Rules::Game::GO) const;
   inline int getPos(Loc loc, const Board& board) const { return NNPos::locToPos(loc, board.x_size, nnXLen, nnYLen ); }
 
  private:

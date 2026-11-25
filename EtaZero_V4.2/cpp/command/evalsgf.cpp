@@ -399,7 +399,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
       cout << "Rules: " << hist.rules << endl;
       cout << "Encore phase " << hist.encorePhase << endl;
       printPosition(cout,board,hist);
-      buf.result->debugPrint(cout,board);
+      buf.result->debugPrint(cout,board,hist.rules.game);
 
       if(humanModel) {
         //Featurize per the human model's own resolution, which may differ from the main model's.
@@ -408,7 +408,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         humanNNInputParams.passAliveSuicideRulesOverride = modes.alwaysComputePassAliveUnderSuicideRules ? 1 : 0;
         humanNNInputParams.excludeTerritoryAdjAtariOverride = modes.excludeTerritoryAdjacentToAtari ? 1 : 0;
         evaluate(*humanModel,humanNNInputParams,buf);
-        buf.result->debugPrint(cout,board);
+        buf.result->debugPrint(cout,board,hist.rules.game);
       }
       continue;
     }
@@ -732,7 +732,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
 
       NNResultBuf buf;
       evaluate(*primaryModel,nnInputParams,buf);
-      buf.result->debugPrint(cout,board);
+      buf.result->debugPrint(cout,board,hist.rules.game);
     }
 
   }
