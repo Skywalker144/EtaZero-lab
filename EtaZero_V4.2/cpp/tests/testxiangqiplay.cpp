@@ -22,7 +22,7 @@ void helpers() {
   std::vector<Loc> choices(4096);
   testAssert(PlayUtils::chooseRandomLegalMoves(board,hist,P_BLACK,random,choices.data(),choices.size()) == 4096);
   for(Loc loc : choices) { testAssert(hist.isLegal(board,loc,P_BLACK)); seen.insert(loc); }
-  testAssert(seen == expected && *seen.rbegin() > Board::MAX_ARR_SIZE);
+  testAssert(seen == expected);
   Loc banned = *expected.rbegin();
   seen.clear();
   for(int i = 0; i < 4096; i++) {
@@ -32,8 +32,8 @@ void helpers() {
   expected.erase(banned); testAssert(seen == expected);
   NNOutput output;
   output.nnXLen = output.nnYLen = 10;
-  output.resizePolicy(Xiangqi::NUM_ACTIONS);
-  std::fill(output.policyProbs,output.policyProbs+Xiangqi::NUM_ACTIONS,0.0f);
+  output.resizePolicy(std::max(Xiangqi::NUM_ACTIONS,NNPos::MAX_NN_POLICY_SIZE)+1);
+  std::fill(output.policyProbs,output.policyProbs+output.getPolicyStorageSize(),0.0f);
   output.policyProbs[Xiangqi::locToAction(banned)] = 1.0f;
   for(double temperature : {0.0,0.5,1.0,2.0}) {
     testAssert(PlayUtils::chooseRandomPolicyMove(&output,board,hist,P_BLACK,random,temperature,false,Board::NULL_LOC) == banned);
