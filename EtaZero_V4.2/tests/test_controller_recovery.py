@@ -267,3 +267,65 @@ def test_native_interruption_receipt_does_not_claim_quota_completed(tmp_path):
                 process.kill()
                 process.wait(timeout=10)
     assert json.loads(receipt.read_text()) == {'games_requested': 1000000, 'completed': False}
+
+
+@pytest.mark.parametrize('role', ['selfplay', 'gatekeeper'])
+def test_rounds_use_frozen_native_inputs_and_resume_detects_nested_change(tmp_path, monkeypatch, role):
+    from dataclasses import replace
+    config = recovery_config(tmp_path, 'alphazero')
+    raw = tmp_path / f'{role}-raw.cfg'
+    nested = tmp_path / 'subdir'
+    nested.mkdir()
+    included = nested / 'internal settings.cfg'
+    included.write_text('maxVisits = 12\nlabel = "quoted # value"\n')
+    (nested / 'second.cfg').write_text('@include = "internal settings.cfg" # relative path\nmaxVisits = 15\n')
+    raw.write_text('@include subdir/second.cfg\nnumSearchThreads = 1\n')
+    config = replace(config, **{f'{role}_config': str(raw)})
+    root = tmp_path / 'run'
+    monkeypatch.setattr(controller, 'snapshot_source', lambda p: p.touch())
+    with pytest.raises(RuntimeError, match='Source stage exited'):
+        controller.run(root, config, 0, binary='/bin/false')
+    frozen = root / f'{role}.resolved.cfg'
+    binary = ROOT / 'build/katago'
+    if binary.is_file():
+        def parsed(path):
+            output = subprocess.check_output([binary, 'match', '-config', path, '-print-config'], text=True)
+            return json.loads(output)['resolved_config']
+        assert parsed(raw) == parsed(frozen)
+    included.write_text('maxVisits = 12\nlabel = "next value"\n')
+    if binary.is_file():
+        assert parsed(raw) != parsed(frozen)
+    with pytest.raises(ValueError, match='Native run configuration differs'):
+        controller.run(root, config, 0, binary='/bin/false')
+    assert json.loads((root / 'state.json').read_text())['round_progress']['attempts'] == {'selfplay': 1}
+
+
+@pytest.mark.parametrize('failure', ['archive', 'publish'])
+def test_interrupted_creation_resumes_with_its_original_weights(tmp_path, monkeypatch, failure):
+    config = recovery_config(tmp_path, 'alphazero')
+    root = tmp_path / 'run'
+    weights = tmp_path / 'initial.ckpt'
+    weights.write_bytes(b'original-checkpoint')
+    def archive(path):
+        path.write_bytes(b'incomplete')
+        if failure == 'archive':
+            raise KeyboardInterrupt
+    def rename(path, target):
+        if failure == 'publish' and target == root / 'state.json':
+            raise KeyboardInterrupt
+        return original_rename(path, target)
+    original_rename = Path.rename
+    with monkeypatch.context() as first:
+        first.setattr(controller, 'snapshot_source', archive)
+        first.setattr(Path, 'rename', rename)
+        with pytest.raises(KeyboardInterrupt):
+            controller.run(root, config, 0, binary='/bin/false', weights=weights)
+    assert not (root / 'state.json').exists()
+    monkeypatch.setattr(controller, 'snapshot_source', lambda path: path.write_bytes(b'archive'))
+    if failure == 'publish':
+        weights.unlink()  # Fully prepared weights have already been published.
+    with pytest.raises(RuntimeError, match='Source stage exited'):
+        controller.run(root, config, 0, binary='/bin/false')
+    assert (root / 'initial/weights.ckpt').read_bytes() == b'original-checkpoint'
+    assert (root / 'state.json').is_file() and not (root / '.etazero-initializing').exists()
+    assert json.loads((root / 'source.json').read_text())['initial_weights'] == str(weights)
